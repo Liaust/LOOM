@@ -242,13 +242,13 @@ func cleanupGapLock(t *testing.T, attempt int) {
 
 func cleanupFixture(t *testing.T, legacy bool) (Config, string, string) {
 	t.Helper()
-	// Test scratch stays below the repository's private acceptance directory,
-	// so world-writable /tmp ancestors cannot weaken the product custody gate.
-	cwd, err := os.Getwd()
+	// The checkout may inherit shared CI workspace ACLs. Use private home
+	// scratch, not that checkout or world-writable /tmp; custody checks stay on.
+	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatal(err)
 	}
-	scratch := filepath.Join(cwd, ".loom-acceptance")
+	scratch := filepath.Join(home, ".loom-acceptance")
 	if err = os.MkdirAll(scratch, 0700); err != nil {
 		t.Fatal(err)
 	}

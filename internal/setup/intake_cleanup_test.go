@@ -89,7 +89,8 @@ func TestRetiredIntakeCleanupRefusesChangedOrNewlyNonEmptyTargets(t *testing.T) 
 	plan.PlanHash = HashPlan(plan)
 
 	changed := filepath.Join(boxRoot, box.DefaultLaneDirName)
-	if err := os.Remove(changed); err != nil {
+	// Keep the original inode alive so replacement cannot reuse its identity.
+	if err := os.Rename(changed, changed+"-original"); err != nil {
 		t.Fatalf("replace planned directory: %v", err)
 	}
 	if err := os.Mkdir(changed, 0o755); err != nil {

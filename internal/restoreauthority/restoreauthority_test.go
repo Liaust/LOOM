@@ -567,8 +567,15 @@ func TestRestoreAuthorityProtocolAndPayloadBoundsFailBeforeExecution(t *testing.
 			DumpSHA256: valid.DumpSHA256, Dump: bytes.NewReader(append(append([]byte(nil), payload...), 'x')),
 		})
 		var authorityErr *AuthorityError
-		if err == nil || !errors.As(err, &authorityErr) || authorityErr.Stage != FailureStageRequest || authorityErr.Code != ErrorProtocolInvalid || result.FailureStage != FailureStageRequest || result.ErrorCode != ErrorProtocolInvalid {
+		if err == nil || !errors.As(err, &authorityErr) {
 			t.Fatalf("client trailing input error=%v", err)
+		}
+		protocolRefusal := authorityErr.Stage == FailureStageRequest && authorityErr.Code == ErrorProtocolInvalid
+		// Linux may reset a Unix stream closed with the rejected trailer unread.
+		// Accept only that specific transport failure, never successful execution.
+		resetRefusal := runtime.GOOS == "linux" && authorityErr.Stage == FailureStageReceive && authorityErr.Code == ErrorClientResponseInvalid && errors.Is(err, syscall.ECONNRESET)
+		if (!protocolRefusal && !resetRefusal) || result.Status != "failed" || result.FailureStage != authorityErr.Stage || result.ErrorCode != authorityErr.Code {
+			t.Fatalf("client trailing input result=%+v error=%v", result, err)
 		}
 	})
 	if commands := fixture.executor.snapshot(); len(commands) != 0 {

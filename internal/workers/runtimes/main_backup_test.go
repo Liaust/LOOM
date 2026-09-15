@@ -778,8 +778,8 @@ func TestCopyImportsSharedStoreRepeatRequiresSnapshotReserveBeforeMutation(t *te
 
 func TestCopyImportsSharedStoreChecksAggregateCapacityBeforeAnyWrite(t *testing.T) {
 	source := t.TempDir()
-	for _, name := range []string{"one.bin", "two.bin"} {
-		if err := os.WriteFile(filepath.Join(source, name), []byte("12345678"), 0o640); err != nil {
+	for name, content := range map[string]string{"one.bin": "12345678", "two.bin": "87654321"} {
+		if err := os.WriteFile(filepath.Join(source, name), []byte(content), 0o640); err != nil {
 			t.Fatal(err)
 		}
 	}
