@@ -242,14 +242,20 @@ func cleanupGapLock(t *testing.T, attempt int) {
 
 func cleanupFixture(t *testing.T, legacy bool) (Config, string, string) {
 	t.Helper()
-	// The checkout may inherit shared CI workspace ACLs. Use private home
-	// scratch, not that checkout or world-writable /tmp; custody checks stay on.
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
+	// Shared CI ancestors may carry writable default ACLs. Such runners must
+	// supply a private fixture root; production custody checks remain enabled.
+	scratch := os.Getenv("LOOM_TEST_RESTORE_CLEANUP_ROOT")
+	if scratch == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		scratch = filepath.Join(home, ".loom-acceptance")
 	}
-	scratch := filepath.Join(home, ".loom-acceptance")
-	if err = os.MkdirAll(scratch, 0700); err != nil {
+	if !filepath.IsAbs(scratch) {
+		t.Fatal("LOOM_TEST_RESTORE_CLEANUP_ROOT must be absolute")
+	}
+	if err := os.MkdirAll(scratch, 0700); err != nil {
 		t.Fatal(err)
 	}
 	base, err := os.MkdirTemp(scratch, "restore-cleanup-")

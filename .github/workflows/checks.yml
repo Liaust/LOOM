@@ -11,15 +11,25 @@ jobs:
   go:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      LOOM_TEST_RESTORE_CLEANUP_ROOT: /var/lib/loom-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
           cache: true
+      - name: Prepare private cleanup fixture root
+        id: cleanup_root
+        # The hosted runner's /home has a writable default ACL. Do not weaken
+        # runtime custody validation or modify that shared ancestor.
+        run: sudo install -d -o "$(id -u)" -g "$(id -g)" -m 0700 "$LOOM_TEST_RESTORE_CLEANUP_ROOT"
       - run: go build ./cmd/...
       - run: go test ./internal/cloudstorage -run '^TestRestoreCleanupLinuxFixtureAuthority$' -v
       - run: go test ./...
       - run: go vet ./...
       - run: go run ./cmd/loom --json docs --docs-dir docs status
       - run: go run ./cmd/loom agent pack validate --pack-dir ai-loom-pack
+      - name: Remove empty fixture root
+        if: always() && steps.cleanup_root.outcome == 'success'
+        run: rmdir "$LOOM_TEST_RESTORE_CLEANUP_ROOT"
