@@ -29,6 +29,30 @@ func cleanupLinuxFixtureACL(t *testing.T, path, name string, raw []byte) {
 		t.Fatal(err)
 	}
 }
+
+func TestRestoreCleanupLinuxFixtureAuthority(t *testing.T) {
+	cfg, _, _ := cleanupFixture(t, true)
+	for path := cfg.StateDir; ; path = filepath.Dir(path) {
+		fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, authorityErr := cleanupDirectory(fd, false)
+		if authorityErr != nil {
+			var st unix.Stat_t
+			_ = unix.Fstat(fd, &st)
+			access, _, accessErr := cleanupLinuxReadACL(fd, "system.posix_acl_access")
+			defaults, _, defaultErr := cleanupLinuxReadACL(fd, "system.posix_acl_default")
+			_ = unix.Close(fd)
+			t.Fatalf("fixture ancestor %s uid=%d mode=%o: %v; access=%x (%v), default=%x (%v)", path, st.Uid, st.Mode, authorityErr, access, accessErr, defaults, defaultErr)
+		}
+		_ = unix.Close(fd)
+		if path == filepath.Dir(path) {
+			break
+		}
+	}
+}
+
 func TestRestoreCleanupLinuxRetainedACLs(t *testing.T) {
 	cfg, attempt, root := cleanupFixture(t, true)
 	readDir := cleanupACLTestGrant(7, 5, 5, 5, 0)
