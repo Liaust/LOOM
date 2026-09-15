@@ -30,6 +30,14 @@ func cleanupLinuxFixtureACL(t *testing.T, path, name string, raw []byte) {
 	}
 }
 
+func cleanupLinuxFixtureGrant(owner, named, group, mask, other uint16) []byte {
+	uid := uint32(1001)
+	if uid == uint32(os.Geteuid()) {
+		uid = 1002
+	}
+	return cleanupACLTestBytes(cleanupACLTestEntry{1, owner, 0xffffffff}, cleanupACLTestEntry{2, named, uid}, cleanupACLTestEntry{4, group, 0xffffffff}, cleanupACLTestEntry{16, mask, 0xffffffff}, cleanupACLTestEntry{32, other, 0xffffffff})
+}
+
 func TestRestoreCleanupLinuxFixtureAuthority(t *testing.T) {
 	cfg, _, _ := cleanupFixture(t, true)
 	for path := cfg.StateDir; ; path = filepath.Dir(path) {
@@ -55,15 +63,15 @@ func TestRestoreCleanupLinuxFixtureAuthority(t *testing.T) {
 
 func TestRestoreCleanupLinuxRetainedACLs(t *testing.T) {
 	cfg, attempt, root := cleanupFixture(t, true)
-	readDir := cleanupACLTestGrant(7, 5, 5, 5, 0)
+	readDir := cleanupLinuxFixtureGrant(7, 5, 5, 5, 0)
 	for _, path := range []string{root, filepath.Join(root, "backup"), filepath.Join(root, "backup/sub"), filepath.Join(root, "backup/.loom-direct-archive")} {
 		cleanupLinuxFixtureACL(t, path, "system.posix_acl_access", readDir)
 		cleanupLinuxFixtureACL(t, path, "system.posix_acl_default", readDir)
 	}
 	manifest := filepath.Join(root, "backup/.loom-direct-archive/manifest.json")
 	payload := filepath.Join(root, "backup/a")
-	cleanupLinuxFixtureACL(t, manifest, "system.posix_acl_access", cleanupACLTestGrant(6, 5, 5, 5, 0))
-	cleanupLinuxFixtureACL(t, payload, "system.posix_acl_access", cleanupACLTestGrant(6, 7, 7, 7, 4))
+	cleanupLinuxFixtureACL(t, manifest, "system.posix_acl_access", cleanupLinuxFixtureGrant(6, 5, 5, 5, 0))
+	cleanupLinuxFixtureACL(t, payload, "system.posix_acl_access", cleanupLinuxFixtureGrant(6, 7, 7, 7, 4))
 	var fds []int
 	var before []unix.Stat_t
 	var acls [][]byte
@@ -142,25 +150,25 @@ func TestRestoreCleanupLinuxACLAuthority(t *testing.T) {
 			cfg, attempt, root := cleanupFixture(t, false)
 			dir := filepath.Join(root, "backup")
 			manifest := filepath.Join(dir, ".loom-direct-archive/manifest.json")
-			safe := cleanupACLTestGrant(7, 5, 5, 5, 0)
+			safe := cleanupLinuxFixtureGrant(7, 5, 5, 5, 0)
 			cleanupLinuxFixtureACL(t, dir, "system.posix_acl_access", safe)
 			cleanupLinuxFixtureACL(t, dir, "system.posix_acl_default", safe)
 			mutate := func() {
 				switch kind {
 				case "masked_raw_write":
-					cleanupLinuxFixtureACL(t, dir, "system.posix_acl_access", cleanupACLTestGrant(7, 7, 7, 5, 0))
+					cleanupLinuxFixtureACL(t, dir, "system.posix_acl_access", cleanupLinuxFixtureGrant(7, 7, 7, 5, 0))
 				case "mask_without_grant":
-					cleanupLinuxFixtureACL(t, dir, "system.posix_acl_access", cleanupACLTestGrant(7, 5, 5, 7, 0))
+					cleanupLinuxFixtureACL(t, dir, "system.posix_acl_access", cleanupLinuxFixtureGrant(7, 5, 5, 7, 0))
 				case "access_write", "directory_mutation":
-					cleanupLinuxFixtureACL(t, dir, "system.posix_acl_access", cleanupACLTestGrant(7, 7, 5, 7, 0))
+					cleanupLinuxFixtureACL(t, dir, "system.posix_acl_access", cleanupLinuxFixtureGrant(7, 7, 5, 7, 0))
 				case "default_write":
-					cleanupLinuxFixtureACL(t, dir, "system.posix_acl_default", cleanupACLTestGrant(7, 7, 5, 7, 0))
+					cleanupLinuxFixtureACL(t, dir, "system.posix_acl_default", cleanupLinuxFixtureGrant(7, 7, 5, 7, 0))
 				case "other_write":
-					cleanupLinuxFixtureACL(t, dir, "system.posix_acl_access", cleanupACLTestGrant(7, 0, 0, 0, 2))
+					cleanupLinuxFixtureACL(t, dir, "system.posix_acl_access", cleanupLinuxFixtureGrant(7, 0, 0, 0, 2))
 				case "manifest_write", "manifest_mutation":
-					cleanupLinuxFixtureACL(t, manifest, "system.posix_acl_access", cleanupACLTestGrant(6, 7, 5, 7, 0))
+					cleanupLinuxFixtureACL(t, manifest, "system.posix_acl_access", cleanupLinuxFixtureGrant(6, 7, 5, 7, 0))
 				case "manifest_masked_write":
-					cleanupLinuxFixtureACL(t, manifest, "system.posix_acl_access", cleanupACLTestGrant(6, 7, 7, 5, 0))
+					cleanupLinuxFixtureACL(t, manifest, "system.posix_acl_access", cleanupLinuxFixtureGrant(6, 7, 7, 5, 0))
 				case "foreign_owner":
 					if os.Geteuid() != 0 {
 						t.Skip("root-owned disposable fixture required for chown refusal")
@@ -224,8 +232,8 @@ func TestRestoreCleanupLinuxForeignContentWriter(t *testing.T) {
 	}
 	cfg, attempt, root := cleanupFixture(t, false)
 	dir := filepath.Join(root, "backup")
-	cleanupLinuxFixtureACL(t, dir, "system.posix_acl_access", cleanupACLTestGrant(7, 5, 5, 5, 0))
-	cleanupLinuxFixtureACL(t, filepath.Join(dir, "a"), "system.posix_acl_access", cleanupACLTestGrant(6, 7, 7, 7, 4))
+	cleanupLinuxFixtureACL(t, dir, "system.posix_acl_access", cleanupLinuxFixtureGrant(7, 5, 5, 5, 0))
+	cleanupLinuxFixtureACL(t, filepath.Join(dir, "a"), "system.posix_acl_access", cleanupLinuxFixtureGrant(6, 7, 7, 7, 4))
 	plan, err := planRestoreCleanup(context.Background(), cfg, attempt)
 	if err != nil {
 		t.Fatal(err)

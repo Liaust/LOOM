@@ -32,4 +32,4 @@ jobs:
       - run: go run ./cmd/loom agent pack validate --pack-dir ai-loom-pack
       - name: Remove empty fixture root
         if: always() && steps.cleanup_root.outcome == 'success'
-        run: rmdir "$LOOM_TEST_RESTORE_CLEANUP_ROOT"
+        run: sudo rmdir "$LOOM_TEST_RESTORE_CLEANUP_ROOT"
