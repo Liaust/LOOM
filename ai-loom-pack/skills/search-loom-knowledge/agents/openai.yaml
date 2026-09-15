@@ -1,0 +1,4 @@
+interface:
+  display_name: "Search LOOM Knowledge"
+  short_description: "Find source passages and qualified decisions"
+  default_prompt: "Use $search-loom-knowledge to find and exact-load relevant LOOM knowledge with its source and posture."

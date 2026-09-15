@@ -1,0 +1,15 @@
+{
+  "schema_version": "declaration.fixture.v0.5",
+  "snapshots": {
+    "endpoint:webdav.private": {
+      "kind": "fixture-endpoint",
+      "revision": "1",
+      "planned_owner": "E1/E2"
+    },
+    "credential:webdav.auth": {
+      "kind": "fixture-credential-reference",
+      "revision": "1",
+      "planned_owner": "E1/E2 credential delivery"
+    }
+  }
+}

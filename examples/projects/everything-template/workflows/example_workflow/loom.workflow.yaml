@@ -1,0 +1,61 @@
+kind: loom.workflow
+schema_version: workflow.contract.v0.3.1
+
+workflow:
+  id: example_workflow
+  name: Example Workflow
+  description: Minimal scaffolded executable workflow package.
+  status: active
+  version: 0.1.0
+
+implementation:
+  kind: workflow
+
+entrypoint:
+  command:
+    - ./run.sh
+
+runtime:
+  shell: bash
+
+execution:
+  timeout_seconds: 60
+  network: false
+  filesystem:
+    mode: read_only
+
+expose:
+  enabled: true
+  provider: project
+  endpoint: example_workflow
+  display_name: Example Workflow
+  description: Minimal scaffolded workflow capability.
+
+capability:
+  class_namespace: project.workflow
+  class_name: example_workflow
+  form: job
+  risk_level: medium
+  execution_authorization_level: 2
+  requires_approval: false
+  side_effects: []
+  input_schema:
+    type: object
+  output_schema:
+    type: object
+
+inputs:
+  schema:
+    type: object
+outputs:
+  schema:
+    type: object
+
+artifacts: []
+usage_documents:
+  - path: README.md
+    target: endpoint
+
+steps: []
+metadata:
+  scaffolded_by: loom

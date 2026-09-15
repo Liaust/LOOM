@@ -1,0 +1,32 @@
+kind: loom.module_project
+schema_version: module_project.contract.v0.3
+
+module:
+  manifest: module.json
+  status: draft
+
+project:
+  owned_by_project: true
+  expose_in_project_portal: true
+
+registration:
+  register: true
+
+install:
+  plan: explicit_only
+  target_node: main
+  scope: system
+  install_after_register: false
+  enable_after_install: false
+
+exposure:
+  plan: explicit_only
+  expose_after_enable: false
+  capabilities: []
+
+validation:
+  require_usage_docs: false
+  require_backup_hooks_for_stateful_storage: true
+
+metadata:
+  scaffolded_by: loom

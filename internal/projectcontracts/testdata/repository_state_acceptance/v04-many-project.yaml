@@ -1,0 +1,12 @@
+kind: loom.project
+schema_version: project.contract.v0.4
+
+project:
+  id: project_01ARZ3NDEKTSV4RRFFQ69G5FAY
+  slug: slice5-many
+  name: Slice 5 Many Repositories
+  owner_node: main
+  status: active
+
+facets:
+  repos: true

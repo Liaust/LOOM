@@ -1,0 +1,8 @@
+{
+  "schema_version": "storage.workspace_archive_adversarial_fixture.v1",
+  "scenario": "symlink_escape",
+  "expected_finding": "symlink_escape",
+  "mutation": {
+    "symlink_target": "../../../outside"
+  }
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fixture Skill"
+  short_description: "Run the fixture workflow"
+  default_prompt: "Use $fixture-skill to run the fixture workflow."

@@ -1,0 +1,6 @@
+dataset:
+  key: {{printf "%q" .DatasetKey}}
+  title: {{printf "%q" .Title}}
+created_at: {{printf "%q" .CreatedAt}}
+updated_at: {{printf "%q" .UpdatedAt}}
+sources: []

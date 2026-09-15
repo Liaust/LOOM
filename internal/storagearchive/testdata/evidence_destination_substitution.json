@@ -1,0 +1,8 @@
+{
+  "schema_version": "storage.workspace_archive_adversarial_fixture.v1",
+  "scenario": "destination_substitution",
+  "expected_finding": "destination_substitution",
+  "mutation": {
+    "inode_delta": 1
+  }
+}

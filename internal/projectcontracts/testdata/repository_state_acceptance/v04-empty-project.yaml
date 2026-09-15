@@ -1,0 +1,12 @@
+kind: loom.project
+schema_version: project.contract.v0.4
+
+project:
+  id: project_01ARZ3NDEKTSV4RRFFQ69G5FAW
+  slug: slice5-empty
+  name: Slice 5 Empty Membership
+  owner_node: main
+  status: active
+
+facets:
+  repos: true

@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "scope": "Pinned upstream source, artifact and compatibility metadata; installation and permissions are configured separately.",
+  "observed_at": "2026-09-10",
+  "hermes": {
+    "revision": "29112bef099274229cadff79cdff7bf7b99c4b77",
+    "version": "0.21.0",
+    "source_url": "https://github.com/NousResearch/hermes-agent/tree/29112bef099274229cadff79cdff7bf7b99c4b77",
+    "nar_hash": "sha256-Ii9xP2fKUpvCcwWZuxJ0g3CZ+IL2UZH14pUNvBfdclc=",
+    "license": "MIT",
+    "file_sha256": {
+      "tools/computer_use/cua_backend.py": "a2b20e11183851550b37c9bb0d1a4bc260a52b889eb754e893ed4a2dd7ddb664",
+      "tools/computer_use/tool.py": "5cae0aec89c567e26ee4f0641f2471bbc132405cf55a2882bad88818ed029c75",
+      "tools/computer_use/backend.py": "e12d12639ec7ef05361ec32f793709f82090d04d03ac814b44c45c88e02ce195",
+      "tools/computer_use/schema.py": "95a98578b4c52979f5c2b16795694c89928bddd1783d414eebe1cc6dadcc1424",
+      "tools/computer_use_tool.py": "7132cc9ad6daf8b320f6294294f3e00694ad1141f1d5ef0548ba34fa5be119f2",
+      "tools/browser_tool.py": "3a9b3bf67bc790e692463ccd06d4687eaf1cdc482a17d359460aeda1bac77cbb",
+      "LICENSE": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6",
+      "uv.lock": "383cd8f98ec23dc3fe4cf63759ec73be5a869cc953f068b4e79ec4e8ed00287d"
+    },
+    "minimum_cua_version": "0.20.0",
+    "python_version": "3.12.13",
+    "dependencies": {
+      "mcp": "2.0.0",
+      "pydantic": "2.13.4",
+      "anyio": "4.12.1",
+      "Pillow": "12.3.0",
+      "httpx": "0.28.1"
+    }
+  },
+  "cua": {
+    "version": "0.26.1",
+    "tag": "cua-driver-rs-v0.26.1",
+    "revision": "cc54254464c0c9aebfd6547fe7e4a0ceaf0456d7",
+    "source_url": "https://github.com/trycua/cua/tree/cc54254464c0c9aebfd6547fe7e4a0ceaf0456d7",
+    "release_url": "https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.26.1",
+    "release_published_at": "2026-09-10T12:15:53Z",
+    "license": "MIT",
+    "file_sha256": {
+      "LICENSE.md": "c0779290c1d4783169aa3dbfb55feb505e563ef8a004bbf55298ceffcfbda8d9",
+      "libs/cua-driver/contract/manifest.json": "698880b2aebd9859620dec7061f700cd1b0e14990ec05c7b385792bf6da980d4",
+      "libs/cua-driver/compat-fixtures/mcp.json": "5579eb51178f08c69fbb6b28a63a59f253a600858505ea80f5df94c105c387cb",
+      "libs/cua-driver/rust/crates/cua-driver/src/cli.rs": "10a38e1769b8ee22346c70be5d5c459cac4f0db7db0ef23e566d881f12e6a9e2",
+      "libs/cua-driver/rust/crates/cua-driver/src/main.rs": "e8768aac8cedd93b53179768e65f7a97758456dd25b332dac514bc9d40c12fa2",
+      "libs/cua-driver/rust/crates/platform-macos/src/tools/click.rs": "abed26812bc9ebd4c58b861d4ce7d8cc9f7e184c90e7a81365f54a7b82c35bdd",
+      "libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs": "1062f014eb04ebe02795afafce2c2efdcc448b59062172b25eb51be8cb213a11",
+      "libs/cua-driver/rust/crates/platform-macos/src/tools/set_value.rs": "b747607c679941b4dde14597d984de8b00b737ccdb69eebe852ca046b00db7f4",
+      "libs/cua-driver/rust/crates/platform-macos/src/browser/platform.rs": "e8da1bf0a6e1b2c672ce2277fc28bfd8dd1e6f75a422dd9d7d1051f6ef78c17c",
+      "libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs": "b3977b0167b869624e63fc5cf6aea6cbd4cb757999107e3e550367d748a3431a",
+      "libs/cua-driver/rust/crates/cua-driver-core/src/protocol.rs": "40afda03cd81a40ed821361e9e86d3c43ba6664f9a8c44437081499947d72752",
+      "libs/cua-driver/rust/crates/cua-driver-core/src/tool_args.rs": "07f2b7d5072ed7ab3b2ddaad42f99857512ca2ac7063ba08f128de3b8b31094a"
+    },
+    "artifact": {
+      "name": "cua-driver-rs-0.26.1-darwin-arm64.tar.gz",
+      "url": "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.26.1/cua-driver-rs-0.26.1-darwin-arm64.tar.gz",
+      "asset_id": 554950439,
+      "size_bytes": 68476207,
+      "published_sha256": "41333e2367a52dbfee27bbd44187ed1bbfe497a6aa66d5463c6bd05dd6e01500",
+      "observed_sha256": "41333e2367a52dbfee27bbd44187ed1bbfe497a6aa66d5463c6bd05dd6e01500",
+      "release_manifest_sha256": "2fcfe18ac53496bac5b813855578950dc090ea6e96249401c3905f8cc022f6c4"
+    },
+    "bundle": {
+      "id": "com.trycua.driver",
+      "version": "0.26.1",
+      "minimum_macos": "13.0",
+      "architectures": [
+        "x86_64",
+        "arm64"
+      ],
+      "inspection": "Static extraction only; artifact label arm64 contains universal app",
+      "signing": {
+        "authority": "Developer ID Application: Cua AI, Inc. (YCK386LBJ7)",
+        "team_id": "YCK386LBJ7",
+        "hardened_runtime": true,
+        "codesign_verify_deep_strict": "passed",
+        "displayed_cdhash": "8084d02233ae6121138ce3986a6ad3320c4c20ba",
+        "notarization_ticket": "codesign reports stapled",
+        "gatekeeper_assessment": "unobserved",
+        "installed_TCC_and_GUI_runtime": "unobserved"
+      }
+    },
+    "schema": {
+      "cli_manifest_version": "1",
+      "tools_list_schema_version": "1",
+      "capability_version": "1",
+      "mcp_protocol_version": "2025-06-18",
+      "portable_contract_version": "0.8.0",
+      "runtime_manifest_and_tools_list": "unobserved; driver was not executed",
+      "fixture_posture": "Synthetic selected projection of CLI/platform-Mac source; portable contract is not the legacy live tool schema"
+    }
+  },
+  "peekaboo_fallback": {
+    "version": "4.3.3",
+    "revision": "46d7586c7f0e08bc24f9c1865d8f58b234a198bf",
+    "url": "https://github.com/openclaw/Peekaboo/tree/46d7586c7f0e08bc24f9c1865d8f58b234a198bf",
+    "license": "MIT",
+    "minimum_macos": "15.0",
+    "signing_and_transport_test": "unobserved; source/release comparison only"
+  }
+}

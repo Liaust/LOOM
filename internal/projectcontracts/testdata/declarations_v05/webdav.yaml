@@ -1,0 +1,30 @@
+# Synthetic persistent WebDAV example; references resolve later, never secrets.
+kind: loom.project
+schema_version: project.contract.v0.5
+project:
+  id: project_01ARZ3NDEKTSV4RRFFQ69G5FAV
+  slug: webdav-pilot
+  name: WebDAV pilot
+  owner_node: main
+resources:
+  code:
+    kind: repository
+    repository: {path: repos/webdav, role: primary}
+  reading: # Optional: removing this entry removes knowledge intent only.
+    kind: knowledge
+    knowledge: {path: material, category: docs}
+  retained:
+    kind: protection
+    protection: {policy_ref: .loom/policies/backup.yaml}
+  webdav:
+    kind: application
+    application:
+      repository: code
+      manifest: .loom/applications/webdav.yaml
+      data:
+        library:
+          path: data/library
+          capacity: {planned_bytes: 10737418240}
+          protection: retained
+      endpoint: {exposure: private, endpoint_ref: webdav.private}
+      credentials: [webdav.auth]

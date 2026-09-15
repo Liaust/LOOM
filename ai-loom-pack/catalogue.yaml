@@ -1,0 +1,204 @@
+schema_version: loom.ai_skill_catalogue.v1
+pack: ai-loom-pack
+version: 0.6.4
+roles:
+  - project-agent
+  - morathustra
+  - mina
+  - archivist
+  - loom-runtime-agent
+  - loom-developer
+visibility_classes:
+  - shared_core
+  - shared_development
+  - morathustra_operations
+  - archivist_operations
+  - shared_provenance
+safety_classes:
+  - inspect
+  - plan
+  - safe-run
+  - sensitive
+invariants:
+  - id: external-not-runtime
+    rule: Native harness deployment or use of a skill never creates a LOOM actor, access session, work context, or authorization grant.
+  - id: project-local-baseline
+    rule: Project agents enter through the standard root AGENTS.md and read project-specific guidance only under .loom/agents/.
+  - id: source-before-view
+    rule: Agents edit canonical sources and never mutate generated loom-storage views.
+  - id: authority-is-external
+    rule: Skills provide instructions and never grant execution authority.
+  - id: orca-owns-lifecycle
+    rule: Orca owns interactive repositories, worktrees, terminals, and task lifecycle; LOOM owns worker/service policy and Hermes supplies its harness sessions.
+  - id: proton-owns-values
+    rule: Proton Pass owns credential values; the current project contract stores logical env/file bindings, while direct pass:// bindings remain deferred.
+  - id: no-secret-retention
+    rule: Secrets never enter Git, .loom files, LOOM Notes, Basecamp, handoffs, logs, or agent memory.
+  - id: provenance-is-sole-semantic-ledger
+    rule: Archivist workspace files hold instructions and bounded evidence only; qualified semantic state remains in LOOM Provenance.
+  - id: morathustra-single-soul
+    rule: Hermes is Morathustra's harness; .hermes/SOUL.md is the sole personality source and project workers never inherit it.
+  - id: mina-single-soul
+    rule: MINA uses one .hermes/SOUL.md per profile; her personality never grants authority or passes to project workers. Explicit template selection does not activate a runtime or named account.
+  - id: hermes-skills-have-separate-owners
+    rule: Hermes native and created skills stay in .hermes/skills; MINA maintains them without a per-write approval queue. Legacy profile defaults remain unchanged. skills/installed is LOOM-managed and read-only, exposed through skills.external_dirs.
+  - id: conversation-is-not-semantic-truth
+    rule: Hermes supplies conversational continuity; LOOM Provenance remains the qualified semantic ledger and sources remain authoritative.
+  - id: archivist-is-manual-only
+    rule: Archivist uses supported read-only Objects and Notes retrieval, keeps control actions on LOOM provenance, project, and worker surfaces, and never creates recurring execution or a parallel lifecycle registry.
+skills:
+  - name: search-loom-knowledge
+    version: 0.1.0
+    status: candidate
+    visibility: shared_core
+    intended_roles: [project-agent, morathustra, mina, loom-developer]
+    positive_triggers:
+      - Find and exact-load source wording, qualified decisions, or semantic repository context.
+      - Distinguish Notes sources, Objects custody, and Provenance lifecycle state.
+    negative_triggers:
+      - Research how a LOOM command is documented.
+      - Register or reconcile claims, or run an Archivist worker.
+    safety_class: inspect
+    references: [references/exact-citations.md]
+    overlaps: [search-loom-docs, use-loom-provenance]
+    evaluation: {scenarios: 0, status: not-run}
+    history:
+      - {version: 0.1.0, status: candidate, change: Repair actual MINA search routing and exact citation discovery without adding worker authority.}
+  - name: search-loom-docs
+    version: 0.1.0
+    status: candidate
+    visibility: shared_core
+    intended_roles: [project-agent, morathustra, mina, loom-developer]
+    positive_triggers:
+      - Find the authoritative LOOM documentation for a command or workflow.
+      - Determine whether described LOOM behavior is current, deferred, or historical.
+    negative_triggers:
+      - Perform a project lifecycle mutation.
+      - Diagnose a live multi-node incident.
+    safety_class: inspect
+    references: [references/docs-workflow.md]
+    overlaps: [manage-loom-projects, investigate-loom-incidents]
+    evaluation: {scenarios: 0, status: not-run}
+    history:
+      - {version: 0.1.0, status: candidate, change: Initial complete candidate authored for cold-context evaluation.}
+  - name: manage-loom-projects
+    version: 0.1.0
+    status: candidate
+    visibility: shared_core
+    intended_roles: [project-agent, morathustra, mina, loom-developer]
+    positive_triggers:
+      - Scaffold, validate, plan, register, activate, diagnose, archive, or hand off a LOOM project.
+      - Manage project contracts and facets within one project lifecycle.
+    negative_triggers:
+      - Operate Box storage outside a project.
+      - Create or manage an Orca worktree or task session.
+    safety_class: safe-run
+    references: [references/project-commands.md]
+    overlaps: [search-loom-docs, orchestrate-loom-work]
+    evaluation: {scenarios: 0, status: not-run}
+    history:
+      - {version: 0.1.0, status: candidate, change: Initial complete candidate authored for cold-context evaluation.}
+  - name: operate-loom-storage
+    version: 0.1.0
+    status: candidate
+    visibility: morathustra_operations
+    intended_roles: [morathustra, mina]
+    positive_triggers:
+      - Inspect or operate Box, Lane, Dropzone, storage, backup, or cloud workflows.
+      - Verify custody and safe-view differences before deleting source data.
+    negative_triggers:
+      - Rebuild a node or inspect service health only.
+      - Edit a generated storage view.
+    safety_class: sensitive
+    references: [references/storage-commands.md]
+    overlaps: [operate-loom-nodes, investigate-loom-incidents]
+    evaluation: {scenarios: 0, status: not-run}
+    history:
+      - {version: 0.1.0, status: candidate, change: Initial complete candidate authored for cold-context evaluation.}
+  - name: operate-loom-nodes
+    version: 0.1.0
+    status: candidate
+    visibility: morathustra_operations
+    intended_roles: [morathustra, mina]
+    positive_triggers:
+      - Inspect nodes, network, services, jobs, workers, capabilities, or runtime health.
+      - Plan a bounded node operation while respecting rebuild and production gates.
+    negative_triggers:
+      - Manage a single project contract.
+      - Move files through Lane without a node-health question.
+    safety_class: sensitive
+    references: [references/node-commands.md]
+    overlaps: [operate-loom-storage, investigate-loom-incidents]
+    evaluation: {scenarios: 0, status: not-run}
+    history:
+      - {version: 0.1.0, status: candidate, change: Initial complete candidate authored for cold-context evaluation.}
+  - name: investigate-loom-incidents
+    version: 0.1.0
+    status: candidate
+    visibility: morathustra_operations
+    intended_roles: [morathustra, mina]
+    positive_triggers:
+      - Investigate ambiguous degraded or failed LOOM behavior with evidence and a timeline.
+      - Classify and hand off a project, configuration, data, environment, or LOOM-core defect.
+    negative_triggers:
+      - Perform routine healthy-state inspection.
+      - Implement a project feature.
+    safety_class: sensitive
+    references: [references/handoff.md]
+    overlaps: [operate-loom-storage, operate-loom-nodes, orchestrate-loom-work]
+    evaluation: {scenarios: 0, status: not-run}
+    history:
+      - {version: 0.1.0, status: candidate, change: Initial complete candidate authored for cold-context evaluation.}
+  - name: orchestrate-loom-work
+    version: 0.2.0
+    status: candidate
+    visibility: morathustra_operations
+    intended_roles: [morathustra, mina]
+    positive_triggers:
+      - Inventory cross-project work, map dependencies, route tasks, and prepare narrow handoffs.
+      - Decide whether work belongs with a project agent or the LOOM repository developer.
+    negative_triggers:
+      - Own routine feature implementation from the broad named-agent workspace.
+      - Create an Orca task or worktree using a competing LOOM registry.
+    safety_class: plan
+    references: [references/routing.md]
+    overlaps: [manage-loom-projects, investigate-loom-incidents]
+    evaluation: {scenarios: 0, status: not-run}
+    history:
+      - {version: 0.2.0, status: candidate, change: Route Hermes conversational context and single-SOUL boundaries without passing private identity to project workers.}
+      - {version: 0.1.0, status: candidate, change: Initial complete candidate authored for cold-context evaluation.}
+  - name: use-proton-pass
+    version: 0.1.0
+    status: candidate
+    visibility: shared_core
+    intended_roles: [project-agent, morathustra, mina, loom-developer]
+    positive_triggers:
+      - Use an approved Proton Pass credential for a bounded non-interactive command.
+      - Record or inspect a non-secret ID-based pass:// credential reference.
+    negative_triggers:
+      - Print a secret value for an interactive agent tool.
+      - Create, rotate, delete, or broaden credential authority without approval.
+    safety_class: sensitive
+    references: [references/proton-pass.md]
+    overlaps: [manage-loom-projects, operate-loom-nodes]
+    evaluation: {scenarios: 0, status: not-run}
+    history:
+      - {version: 0.1.0, status: candidate, change: Initial complete candidate authored for cold-context evaluation.}
+  - name: use-loom-provenance
+    version: 0.2.0
+    status: candidate
+    visibility: shared_provenance
+    intended_roles: [project-agent, morathustra, mina, archivist, loom-runtime-agent, loom-developer]
+    positive_triggers:
+      - Find qualified current semantic state, a repository implied by user context, or an unresolved provenance case.
+      - Capture a durable source-backed decision, preference, correction or outcome as a pending candidate; inspect related evidence or conflicts.
+    negative_triggers:
+      - Retrieve source wording from Notes or inspect only technical object, project, node, storage, or credential state.
+      - Run the Archivist, enable a schedule, access a database directly, or bypass the supported provenance lifecycle service.
+    safety_class: sensitive
+    references: [references/retrieval-routing.md, references/registration.md, references/reconciliation.md]
+    overlaps: [search-loom-docs, manage-loom-projects, orchestrate-loom-work]
+    evaluation: {scenarios: 0, status: not-run}
+    history:
+      - {version: 0.1.0, status: candidate, change: Initial manual-only Archivist retrieval and reconciliation guidance.}
+      - {version: 0.2.0, status: candidate, change: Shared Main retrieval and pending capture; worker controls stay in Archivist protocols.}

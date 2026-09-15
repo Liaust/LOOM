@@ -1,0 +1,21 @@
+schema_version: loom.ai_skill_catalogue.v1
+pack: fixture-pack
+version: 1.0.0
+roles: [project-agent, morathustra]
+visibility_classes: [shared_core, morathustra_operations]
+safety_classes: [inspect]
+invariants:
+  - {id: authority, rule: Skills do not grant authority.}
+skills:
+  - name: fixture-skill
+    version: 1.0.0
+    status: accepted
+    visibility: shared_core
+    intended_roles: [project-agent, morathustra]
+    positive_triggers: [Use the fixture workflow.]
+    negative_triggers: [Do unrelated work.]
+    safety_class: inspect
+    references: [references/commands.md]
+    overlaps: []
+    evaluation: {scenarios: 12, status: passed}
+    history: []

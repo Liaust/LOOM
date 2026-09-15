@@ -1,0 +1,11 @@
+kind: loom.project_backup_policy
+schema_version: backup.policy.v0.3
+backup:
+  enabled: true
+  defaults:
+    max_batch_bytes: 33554432
+  roots:
+    - key: webdav_library
+      path: data/library
+      mode: incremental_raw
+      max_file_bytes: 16777216

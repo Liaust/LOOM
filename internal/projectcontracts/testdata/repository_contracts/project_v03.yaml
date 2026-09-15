@@ -1,0 +1,11 @@
+kind: loom.project
+schema_version: project.contract.v0.3
+
+project:
+  slug: repository-contract-smoke
+  name: Repository Contract Smoke
+  owner_node: main
+  status: active
+
+facets:
+  repos: true

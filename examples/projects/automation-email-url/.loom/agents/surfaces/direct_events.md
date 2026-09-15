@@ -1,0 +1,11 @@
+# direct_events Surface Guidance
+
+<!-- loom-managed: project-surface-guidance/v1 -->
+
+This guidance applies to the `direct_events` facet of Automation Email URL.
+
+- Keep authored paths project-relative.
+- Treat source files and contracts as authoritative over backend projections.
+- Preserve package-local manifests beside their code, fixtures, and examples.
+- Never store secret values in the project.
+- Run `loom project validate .` after contract changes.

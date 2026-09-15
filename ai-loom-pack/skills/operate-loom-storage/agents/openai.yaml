@@ -1,0 +1,4 @@
+interface:
+  display_name: "Operate LOOM Storage"
+  short_description: "Inspect and protect LOOM user storage"
+  default_prompt: "Use $operate-loom-storage to inspect and safely plan this LOOM storage operation."

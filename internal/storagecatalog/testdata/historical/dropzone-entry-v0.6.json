@@ -1,0 +1,43 @@
+{
+  "entry": {
+    "storage_entry_id": "storage_entry_historical",
+    "storage_class": "dropzone_custody",
+    "source_area": "dropzone",
+    "origin_node_key": "macbook",
+    "dropzone_transfer_id": "drop_historical_transfer",
+    "logical_path": "2026-06-05/Research/report.pdf",
+    "original_source_path": "Research/report.pdf",
+    "checksum_algorithm": "sha256",
+    "checksum_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "size_bytes": 128,
+    "file_class": "document",
+    "processing_state": "backup_only",
+    "availability_state": "available",
+    "retention_state": "none",
+    "metadata": {
+      "schema_version": "storage.dropzone_custody.metadata.v0.6",
+      "source": "dropzone.receiver",
+      "transfer_id": "drop_historical_transfer",
+      "relative_dropzone_path": "Research/report.pdf",
+      "accepted_at": "2026-06-05T12:02:00Z"
+    },
+    "created_at": "2026-06-05T12:02:00Z",
+    "updated_at": "2026-06-05T12:02:00Z"
+  },
+  "physical_refs": [{
+    "storage_physical_ref_id": "storage_physical_ref_historical",
+    "storage_entry_id": "storage_entry_historical",
+    "ref_kind": "dropzone_file",
+    "uri": "/srv/loom/box/.loom/storage/dropzone/macbook/2026-06-05/drop_historical_transfer/report.pdf",
+    "node_key": "main",
+    "content_address": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "status": "available",
+    "metadata": {
+      "schema_version": "storage.dropzone_physical_ref.metadata.v0.6",
+      "source": "dropzone.receiver",
+      "transfer_id": "drop_historical_transfer"
+    },
+    "created_at": "2026-06-05T12:02:00Z",
+    "updated_at": "2026-06-05T12:02:00Z"
+  }]
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": "loom.backupstrategy.invariant_a.v1",
+  "hard_link_generations": 30,
+  "hard_link_object_bytes": 4194304,
+  "sparse_logical_bytes": 67108864,
+  "scenarios": [
+    "hard_linked_generations",
+    "same_content_distinct_inodes",
+    "sparse_file",
+    "symlink_or_path_escape",
+    "unknown_top_level_entry",
+    "active_staging",
+    "inventory_digest_change"
+  ]
+}

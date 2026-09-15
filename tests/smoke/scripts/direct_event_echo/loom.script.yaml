@@ -1,0 +1,34 @@
+kind: loom.script
+id: direct_event_echo
+name: Direct Event Echo
+version: "1.0.0"
+description: Echo direct-event smoke payload fields without network access.
+entrypoint:
+  command:
+    - sh
+    - direct_event_echo.sh
+runtime:
+  kind: shell
+  requires:
+    - sh
+    - sed
+    - grep
+execution:
+  timeout_seconds: 30
+  network: false
+  filesystem:
+    workdir: controlled
+inputs:
+  input:
+    required: false
+    description: Direct-event mapped input payload.
+outputs:
+  message_id:
+    type: string
+    description: Direct-event message ID.
+  url:
+    type: string
+    description: Direct-event URL.
+artifacts: []
+metadata:
+  smoke_slice: "v0.2-07"

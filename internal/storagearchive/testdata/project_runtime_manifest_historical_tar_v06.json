@@ -1,0 +1,40 @@
+{
+  "schema_version": "storage.project_runtime_archive_manifest.v0.6",
+  "project_runtime_archive_id": "project_runtime_archive_historical_test",
+  "project_id": "project_historical",
+  "project_slug": "historical-project",
+  "project_name": "Historical Project",
+  "registration_id": "project_contract_registration_historical",
+  "registration_revision": 6,
+  "source_kind": "local_project_root",
+  "source_ref": "/srv/loom/box/Projects/historical-project",
+  "target_path": "main/Archive/Projects/historical-project",
+  "filesystem_snapshot_path": "/var/lib/loom/storage-archive/runtime-manifests/historical-project/project_runtime_archive_historical_test.tar",
+  "reason": "historical v0.6 fixture",
+  "runtime_ownership_rule": "Project archive moves storage custody only. Runtime ownership and capability URLs are not migrated unless migrate-runtime is explicitly applied.",
+  "successor_policy": {
+    "status": "not_migrated",
+    "runtime_migration_required": true,
+    "historical_runtime_disposition": "preserve_disabled_inspectable",
+    "future_successor_metadata_key": "successor_runtime",
+    "future_deprecation_metadata_key": "deprecated_by_project_runtime_archive"
+  },
+  "generated_at": "2026-06-05T10:30:00Z",
+  "scripts": [
+    {
+      "kind": "script",
+      "key": "historical-script",
+      "status": "deactivated",
+      "address": "main@historical-project.historical-script"
+    }
+  ],
+  "deactivation_actions": [
+    {
+      "facet": "scripts",
+      "kind": "script",
+      "key": "historical-script",
+      "status": "disabled",
+      "summary": "Historical runtime was disabled."
+    }
+  ]
+}

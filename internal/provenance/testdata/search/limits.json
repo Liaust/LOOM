@@ -1,0 +1,52 @@
+{
+  "schema_version": "loom.provenance_search_limits.v1",
+  "result_limits": {
+    "default_total": 8,
+    "maximum_requested_total": 25,
+    "maximum_per_collection": 8,
+    "maximum_repository_cards": 8,
+    "stable_ordering_required": true
+  },
+  "context_limits": {
+    "unit": "unicode_code_points",
+    "maximum_match_explanation": 280,
+    "maximum_compact_result": 800,
+    "maximum_compact_response": 6000,
+    "maximum_repository_accepted_context_items": 4,
+    "exact_get_maximum_sources": 16,
+    "exact_get_maximum_relationships": 16,
+    "exact_get_maximum_lifecycle_events": 32,
+    "exact_get_maximum_qualifications": 16,
+    "truncation_marker_required": true
+  },
+  "latency_measurement": {
+    "environment": "disposable_local_in_process_corpus",
+    "clock": "monotonic",
+    "fixture_scope": "all_contract_queries",
+    "warmup_iterations_per_query": 5,
+    "measured_iterations_per_query": 50,
+    "independent_process_runs": 3,
+    "measure_from": "validated_request_before_query_normalization",
+    "measure_until": "compact_response_encoding_complete",
+    "included_steps": [
+      "query_normalization",
+      "collection_retrieval",
+      "ranking",
+      "stable_ordering",
+      "compact_projection",
+      "response_encoding"
+    ],
+    "excluded_steps": [
+      "fixture_load",
+      "process_startup",
+      "database_setup",
+      "network_transport",
+      "exact_get_follow_up"
+    ],
+    "reported_statistics": ["sample_count", "p50_milliseconds", "p95_milliseconds", "maximum_milliseconds"],
+    "aggregation_rule": "report_each_query_and_the_worst_p95_across_three_independent_process_runs",
+    "local_p95_budget_milliseconds": 100,
+    "per_query_timeout_milliseconds": 1000,
+    "mutation_policy": "read_only_frozen_corpus_reset_before_each_process_run"
+  }
+}

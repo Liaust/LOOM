@@ -1,0 +1,32 @@
+kind: loom.repos
+schema_version: repos.contract.v0.4
+
+repos:
+  status: active
+  defaults:
+    sync: true
+    backup: false
+    index: true
+    include:
+      - "**/*.go"
+      - "go.mod"
+    exclude:
+      - "vendor/**"
+  watch_roots:
+    - key: source
+      path: source
+      display_name: Source Trees
+      backup: false
+      exclude:
+        - "vendor/**"
+        - "tmp/**"
+  members:
+    - id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAA
+      key: backend
+      path: source/backend
+      role: component
+      state_root: .repo
+    - id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAB
+      key: shared-library
+      path: source/shared-library
+      role: reference

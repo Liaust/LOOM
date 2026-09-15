@@ -1,0 +1,3 @@
+endpoint: ping
+display_name: Ping
+description: Minimal connector capability declaration.

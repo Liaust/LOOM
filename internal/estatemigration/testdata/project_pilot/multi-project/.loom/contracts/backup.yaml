@@ -1,0 +1,21 @@
+kind: loom.project_backup_policy
+schema_version: backup.policy.v0.3
+
+backup:
+  enabled: true
+  defaults:
+    safe_root: project
+    mode: incremental_raw
+    max_file_bytes: 16777216
+    max_batch_bytes: 268435456
+    max_pending_items: 10000
+    max_pending_bytes: 1073741824
+    include_deletion_markers: true
+    on_limit: degrade_and_require_manual_action
+  roots:
+    - key: repositories
+      path: repos
+      include:
+        - "**/*"
+      exclude:
+        - "**/node_modules/**"

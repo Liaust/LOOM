@@ -1,0 +1,28 @@
+kind: loom.script
+id: ping
+name: Connector Ping
+version: 0.1.0
+description: Minimal script package backing the example connector ping endpoint.
+
+entrypoint:
+  command:
+    - ./run.sh
+
+runtime:
+  shell: bash
+
+inputs: {}
+outputs: {}
+
+execution:
+  timeout_seconds: 30
+  network: false
+  filesystem:
+    mode: read_only
+
+artifacts: []
+usage_documents:
+  - path: README.md
+metadata:
+  scaffolded_by: loom
+  connector_endpoint: ping

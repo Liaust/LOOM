@@ -1,0 +1,129 @@
+cases:
+  - name: valid_primary_owner
+    state_root_present: true
+    schema_version: repo.state.v1
+    manifest_repository_id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    manifest_owner_project_id: project_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    manifest_owner_project_slug: atlas
+    manifest_role: primary
+    owner_resolved: true
+    authoritative_repository_id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    authoritative_owner_project_id: project_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    authoritative_owner_project_slug: atlas
+    authoritative_owner_role: primary
+    authoritative_state_root: .repo
+    viewed_membership_role: primary
+    expected: valid
+  - name: valid_reference_view_uses_canonical_owner
+    state_root_present: true
+    schema_version: repo.state.v1
+    manifest_repository_id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    manifest_owner_project_id: project_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    manifest_owner_project_slug: atlas
+    manifest_role: component
+    owner_resolved: true
+    authoritative_repository_id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    authoritative_owner_project_id: project_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    authoritative_owner_project_slug: atlas
+    authoritative_owner_role: component
+    authoritative_state_root: ""
+    viewed_membership_role: reference
+    expected: valid
+  - name: absent_state_root
+    state_root_present: false
+    expected: not_enabled
+  - name: malformed_envelope_precedes_version
+    state_root_present: true
+    envelope_malformed: true
+    schema_version: repo.state.v999
+    expected: malformed
+  - name: stale_version
+    state_root_present: true
+    schema_version: repo.state.v2
+    expected: stale_version
+  - name: unsupported_version_precedes_body_validation
+    state_root_present: true
+    schema_version: repo.state.v2
+    body_malformed: true
+    expected: stale_version
+  - name: malformed_supported_body
+    state_root_present: true
+    schema_version: repo.state.v1
+    body_malformed: true
+    expected: malformed
+  - name: unresolved_reference_owner
+    state_root_present: true
+    schema_version: repo.state.v1
+    owner_resolved: false
+    viewed_membership_role: reference
+    expected: membership_unresolved
+  - name: repository_id_mismatch_precedes_owner
+    state_root_present: true
+    schema_version: repo.state.v1
+    manifest_repository_id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAA
+    manifest_owner_project_id: project_01ARZ3NDEKTSV4RRFFQ69G5FAA
+    manifest_owner_project_slug: wrong
+    manifest_role: primary
+    owner_resolved: true
+    authoritative_repository_id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    authoritative_owner_project_id: project_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    authoritative_owner_project_slug: atlas
+    authoritative_owner_role: component
+    authoritative_state_root: .repo
+    expected: mismatched_repository
+  - name: owner_id_mismatch
+    state_root_present: true
+    schema_version: repo.state.v1
+    manifest_repository_id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    manifest_owner_project_id: project_01ARZ3NDEKTSV4RRFFQ69G5FAA
+    manifest_owner_project_slug: atlas
+    manifest_role: component
+    owner_resolved: true
+    authoritative_repository_id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    authoritative_owner_project_id: project_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    authoritative_owner_project_slug: atlas
+    authoritative_owner_role: component
+    authoritative_state_root: .repo
+    expected: mismatched_owner
+  - name: owner_slug_mismatch_even_when_id_matches
+    state_root_present: true
+    schema_version: repo.state.v1
+    manifest_repository_id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    manifest_owner_project_id: project_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    manifest_owner_project_slug: atlas-old
+    manifest_role: component
+    owner_resolved: true
+    authoritative_repository_id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    authoritative_owner_project_id: project_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    authoritative_owner_project_slug: atlas
+    authoritative_owner_role: component
+    authoritative_state_root: .repo
+    expected: mismatched_owner
+  - name: owner_role_mismatch
+    state_root_present: true
+    schema_version: repo.state.v1
+    manifest_repository_id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    manifest_owner_project_id: project_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    manifest_owner_project_slug: atlas
+    manifest_role: primary
+    owner_resolved: true
+    authoritative_repository_id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    authoritative_owner_project_id: project_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    authoritative_owner_project_slug: atlas
+    authoritative_owner_role: component
+    authoritative_state_root: .repo
+    expected: mismatched_membership
+  - name: state_root_mismatch
+    state_root_present: true
+    schema_version: repo.state.v1
+    manifest_repository_id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    manifest_owner_project_id: project_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    manifest_owner_project_slug: atlas
+    manifest_role: component
+    owner_resolved: true
+    authoritative_repository_id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    authoritative_owner_project_id: project_01ARZ3NDEKTSV4RRFFQ69G5FAV
+    authoritative_owner_project_slug: atlas
+    authoritative_owner_role: component
+    authoritative_state_root: .project
+    expected: mismatched_membership

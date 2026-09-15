@@ -1,0 +1,12 @@
+kind: loom.repos
+schema_version: repos.contract.v0.4
+repos:
+  members:
+    - id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAV
+      key: api
+      path: api
+      role: primary
+    - id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAW
+      key: shared
+      path: shared
+      role: reference

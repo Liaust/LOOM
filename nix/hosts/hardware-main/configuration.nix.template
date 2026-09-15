@@ -1,0 +1,28 @@
+{ lib, ... }:
+
+{
+  imports = [
+    ./hardware-configuration.nix
+    ../../profiles/main-hardware-desktop.nix
+    ./wireguard-main-staging.nix
+  ];
+
+  networking.hostName = "loom-hardware";
+
+  boot.loader.systemd-boot.enable = lib.mkDefault true;
+  boot.loader.efi.canTouchEfiVariables = lib.mkDefault true;
+
+  users.users.loomadmin = {
+    isNormalUser = true;
+    extraGroups = [ "wheel" ];
+    openssh.authorizedKeys.keys = [
+    ];
+  };
+
+  # Bring-up setting. Change back to true after remote access and rebuilds are
+  # stable enough that sudo prompts are acceptable.
+  security.sudo.wheelNeedsPassword = lib.mkForce false;
+
+  system.stateVersion = "25.11";
+}
+

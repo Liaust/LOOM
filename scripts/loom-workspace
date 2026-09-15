@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HOST="${LOOM_WORKSPACE_HOST:-loom-workspace}"
+REMOTE_DIR="${LOOM_WORKSPACE_REMOTE_DIR:-/home/loomworkspace/loom/current}"
+
+usage() {
+  cat <<USAGE
+Usage: scripts/loom-workspace <command> [args]
+
+Commands:
+  ssh [args...]              Open SSH to the workspace VM.
+  sync                       Rsync this checkout to the workspace VM.
+  run -- <args...>           Run loom-node-agent from the remote checkout.
+  node-agent-smoke           Run the Slice 10 Part 2 node-agent smoke test.
+  v0-5-workspace-smoke       Run the v0.5 workspace SSH installer smoke test.
+  v0-5-hardware-smoke        Run the v0.5 simulated hardware SSH installer smoke test.
+
+Environment:
+  LOOM_WORKSPACE_HOST        SSH host alias. Default: loom-workspace
+  LOOM_WORKSPACE_REMOTE_DIR  Remote checkout path. Default: /home/loomworkspace/loom/current
+USAGE
+}
+
+remote_quote_args() {
+  local quoted=()
+  local arg
+  for arg in "$@"; do
+    printf -v arg "%q" "$arg"
+    quoted+=("$arg")
+  done
+  printf '%s ' "${quoted[@]}"
+}
+
+ssh_remote() {
+  ssh "$HOST" "$@"
+}
+
+cmd_sync() {
+  ssh_remote "mkdir -p '$REMOTE_DIR'"
+  rsync -az --delete \
+    --exclude '.git/' \
+    --exclude 'result' \
+    --exclude '.direnv/' \
+    --exclude 'tmp/' \
+    "$ROOT_DIR/" "$HOST:$REMOTE_DIR/"
+}
+
+cmd_run() {
+  if [[ "${1:-}" == "--" ]]; then
+    shift
+  fi
+  local args
+  args="$(remote_quote_args "$@")"
+  ssh_remote "cd '$REMOTE_DIR' && nix --extra-experimental-features 'nix-command flakes' run .#loom-node-agent -- ${args}"
+}
+
+cmd_node_agent_smoke() {
+  "$ROOT_DIR/tests/smoke/slice_10_part_2_node_agent_heartbeat.sh"
+}
+
+cmd_v0_5_workspace_smoke() {
+  LOOM_WORKSPACE_HOST="$HOST" LOOM_WORKSPACE_REMOTE_DIR="$REMOTE_DIR" "$ROOT_DIR/tests/smoke/v0_5_workspace_installer.sh"
+}
+
+cmd_v0_5_hardware_smoke() {
+  LOOM_WORKSPACE_HOST="$HOST" LOOM_WORKSPACE_REMOTE_DIR="$REMOTE_DIR" "$ROOT_DIR/tests/smoke/v0_5_hardware_installer.sh"
+}
+
+main() {
+  local command="${1:-}"
+  if [[ -n "$command" ]]; then
+    shift
+  fi
+  case "$command" in
+    ssh)
+      ssh "$HOST" "$@"
+      ;;
+    sync)
+      cmd_sync
+      ;;
+    run)
+      cmd_run "$@"
+      ;;
+    node-agent-smoke)
+      cmd_node_agent_smoke
+      ;;
+    v0-5-workspace-smoke)
+      cmd_v0_5_workspace_smoke
+      ;;
+    v0-5-hardware-smoke)
+      cmd_v0_5_hardware_smoke
+      ;;
+    ""|-h|--help|help)
+      usage
+      ;;
+    *)
+      echo "Unknown command: $command" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"

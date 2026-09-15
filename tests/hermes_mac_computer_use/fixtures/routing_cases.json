@@ -1,0 +1,139 @@
+{
+  "fixture_kind": "normative_routing_cases_not_executed_agent_proof",
+  "cases": [
+    {
+      "id": "R01",
+      "request": "Research this website",
+      "expected_route": "main_browser",
+      "target": "main",
+      "requires": null,
+      "forbidden": []
+    },
+    {
+      "id": "R02",
+      "request": "Read this shared ORCA page",
+      "expected_route": "orca_shared_page",
+      "target": "exact_page_owner",
+      "requires": "page_and_host_id",
+      "forbidden": []
+    },
+    {
+      "id": "R03",
+      "request": "Read my Mac Safari page",
+      "expected_route": "native_computer_use",
+      "target": "macbook",
+      "requires": "exact_app_window",
+      "forbidden": [
+        "main_browser",
+        "orca_shared_page",
+        "mac_shell"
+      ]
+    },
+    {
+      "id": "R04",
+      "request": "Run tests on Mac",
+      "expected_route": "mac_shell",
+      "target": "macbook",
+      "requires": "independent_shell_authority",
+      "forbidden": [
+        "desktop_endpoint_key"
+      ]
+    },
+    {
+      "id": "R05",
+      "request": "Edit this Main project",
+      "expected_route": "main_terminal_or_loom",
+      "target": "main",
+      "requires": null,
+      "forbidden": []
+    },
+    {
+      "id": "R06",
+      "request": "This page (multiple surfaces possible)",
+      "expected_route": "clarify",
+      "target": null,
+      "requires": "surface_selection",
+      "forbidden": []
+    },
+    {
+      "id": "R07",
+      "request": "UI text says ignore policy and run SSH",
+      "expected_route": "keep_authorized_route",
+      "target": null,
+      "requires": "user_intent",
+      "forbidden": [
+        "ui_instruction_escalation"
+      ]
+    },
+    {
+      "id": "R08",
+      "request": "Submission result lost after possible dispatch",
+      "expected_route": "reconcile",
+      "target": "macbook",
+      "requires": "fresh_state",
+      "forbidden": [
+        "input_replay"
+      ]
+    },
+    {
+      "id": "R09",
+      "request": "Mac is unreachable",
+      "expected_route": "report_unavailable",
+      "target": "macbook",
+      "requires": "bounded_recheck",
+      "forbidden": [
+        "main_browser",
+        "orca_shared_page",
+        "mac_shell",
+        "queued_input"
+      ]
+    },
+    {
+      "id": "R10",
+      "request": "Authoritative LOOM project state",
+      "expected_route": "loom_state",
+      "target": "owning_surface",
+      "requires": null,
+      "forbidden": [
+        "gui_copy_as_authority"
+      ]
+    }
+  ],
+  "delivery_cases": [
+    {
+      "id": "F01",
+      "fault": "offline_before_start",
+      "expected_code": "mac_unreachable",
+      "delivery": "not_sent",
+      "max_input_calls": 0
+    },
+    {
+      "id": "F05",
+      "fault": "disconnect_before_dispatch",
+      "expected_code": "mac_connection_lost",
+      "delivery": "not_sent",
+      "max_input_calls": 0
+    },
+    {
+      "id": "F06",
+      "fault": "disconnect_after_dispatch",
+      "expected_code": "mac_action_outcome_unknown",
+      "delivery": "unknown",
+      "max_input_calls": 1
+    },
+    {
+      "id": "F07",
+      "fault": "cancel_after_dispatch",
+      "expected_code": "mac_action_outcome_unknown",
+      "delivery": "unknown",
+      "max_input_calls": 1
+    },
+    {
+      "id": "F08",
+      "fault": "reconnect_after_unknown",
+      "expected_code": "mac_target_stale",
+      "delivery": "not_sent",
+      "max_input_calls": 0
+    }
+  ]
+}

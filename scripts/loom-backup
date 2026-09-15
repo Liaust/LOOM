@@ -1,0 +1,332 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HOST="${LOOM_BACKUP_HOST:-${LOOM_MAIN_HOST:-${LOOM_DEV_HOST:-loom-dev}}}"
+VPS_HOST="${LOOM_VPS_HOST:-loom-vps}"
+BACKUP_ROOT="${LOOM_BACKUP_ROOT:-$HOME/loom-backups/loom-main}"
+DATABASE="${LOOM_BACKUP_DATABASE:-loom_main}"
+OBJECT_STORE_PATH="${LOOM_BACKUP_OBJECT_STORE_PATH:-/var/lib/loom/object-store}"
+PRIVATE_BACKUPS_PATH="${LOOM_BACKUP_PRIVATE_BACKUPS_PATH:-/var/lib/loom/private-backups}"
+RESTORE_DRILL_HOST="${LOOM_BACKUP_RESTORE_DRILL_HOST:-$HOST}"
+RESTORE_DRILL_DATABASE="${LOOM_BACKUP_RESTORE_DRILL_DATABASE:-}"
+KEEP_RESTORE_DRILL="${LOOM_BACKUP_KEEP_RESTORE_DRILL:-0}"
+
+usage() {
+  cat <<EOF
+Usage: scripts/loom-backup <command> [args]
+
+Commands:
+  create              Create a main-node backup and print the backup directory.
+  verify <backup-dir> Verify a backup directory without restoring it.
+  restore-drill <backup-dir>
+                      Restore a backup into a temporary database and verify core state.
+
+Environment:
+  LOOM_BACKUP_HOST                  SSH target to back up. Default: loom-dev
+  LOOM_BACKUP_ROOT                  Local backup root. Default: \$HOME/loom-backups/loom-main
+  LOOM_BACKUP_DATABASE              PostgreSQL database. Default: loom_main
+  LOOM_BACKUP_OBJECT_STORE_PATH     Remote object-store path. Default: /var/lib/loom/object-store
+  LOOM_BACKUP_PRIVATE_BACKUPS_PATH  Remote private backups path. Default: /var/lib/loom/private-backups
+  LOOM_BACKUP_RESTORE_DRILL_HOST    SSH target for restore drill. Default: LOOM_BACKUP_HOST
+  LOOM_BACKUP_RESTORE_DRILL_DATABASE
+                                    Optional temporary restore drill database name.
+  LOOM_BACKUP_KEEP_RESTORE_DRILL    Keep temporary restore database when set to 1.
+  LOOM_VPS_HOST                     VPS SSH target to reject as backup source. Default: loom-vps
+
+Note:
+  The first-class operator surface is now 'loom backup ...'. This script remains
+  a trusted-machine SSH helper for cases where the local daemon command is not
+  the right transport.
+EOF
+}
+
+fail() {
+  printf 'loom-backup: %s\n' "$*" >&2
+  exit 1
+}
+
+log() {
+  printf '[backup] %s\n' "$*" >&2
+}
+
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    fail "missing required local command: $1"
+  fi
+}
+
+remote() {
+  ssh -o BatchMode=yes "$HOST" "$@"
+}
+
+drill_remote() {
+  ssh -o BatchMode=yes "$RESTORE_DRILL_HOST" "$@"
+}
+
+refuse_vps_source() {
+  if [[ "$HOST" == "$VPS_HOST" || "$HOST" == *vps* ]]; then
+    fail "refusing to back up VPS host '$HOST'; the VPS must not hold LOOM state"
+  fi
+}
+
+refuse_vps_restore_target() {
+  if [[ "$RESTORE_DRILL_HOST" == "$VPS_HOST" || "$RESTORE_DRILL_HOST" == *vps* ]]; then
+    fail "refusing to restore-drill on VPS host '$RESTORE_DRILL_HOST'; use a dev/main drill target"
+  fi
+}
+
+json_value() {
+  local query="$1"
+  jq -r "$query"
+}
+
+cmd_create() {
+  refuse_vps_source
+  require_command ssh
+  require_command rsync
+  require_command jq
+
+  local timestamp backup_dir health_json hostname node_id environment version current_migration latest_migration
+  timestamp="$(date -u '+%Y%m%dT%H%M%SZ')"
+  backup_dir="$BACKUP_ROOT/$timestamp"
+
+  if [[ -e "$backup_dir" ]]; then
+    fail "backup directory already exists: $backup_dir"
+  fi
+
+  log "source host: $HOST"
+  log "backup dir: $backup_dir"
+
+  mkdir -p "$backup_dir/object-store" "$backup_dir/private-backups"
+
+  remote 'command -v loom >/dev/null && command -v pg_dump >/dev/null && command -v rsync >/dev/null'
+  remote "test -d '$OBJECT_STORE_PATH' && test -d '$PRIVATE_BACKUPS_PATH'"
+
+  health_json="$(remote 'loom health --json')"
+  printf '%s\n' "$health_json" > "$backup_dir/health.json"
+
+  node_id="$(printf '%s\n' "$health_json" | json_value '.data.node.id // ""')"
+  environment="$(printf '%s\n' "$health_json" | json_value '.data.environment // ""')"
+  version="$(printf '%s\n' "$health_json" | json_value '.data.version // ""')"
+  current_migration="$(printf '%s\n' "$health_json" | json_value '.data.checks.migrations.current_version // empty')"
+  latest_migration="$(printf '%s\n' "$health_json" | json_value '.data.checks.migrations.latest_version // empty')"
+  hostname="$(remote 'hostname')"
+
+  log "dumping PostgreSQL database"
+  remote "sudo -u loom pg_dump -Fc -d '$DATABASE'" > "$backup_dir/$DATABASE.dump"
+
+  log "copying object store"
+  rsync -rlt --delete --rsync-path="sudo rsync" \
+    "$HOST:$OBJECT_STORE_PATH/" "$backup_dir/object-store/"
+
+  log "copying private raw backups"
+  rsync -rlt --delete --rsync-path="sudo rsync" \
+    "$HOST:$PRIVATE_BACKUPS_PATH/" "$backup_dir/private-backups/"
+
+  jq -n \
+    --arg created_at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    --arg backup_kind "loom_main_state" \
+    --arg source_ssh_host "$HOST" \
+    --arg source_hostname "$hostname" \
+    --arg source_node_id "$node_id" \
+    --arg source_environment "$environment" \
+    --arg loom_version "$version" \
+    --arg database "$DATABASE" \
+    --arg object_store_path "$OBJECT_STORE_PATH" \
+    --arg private_backups_path "$PRIVATE_BACKUPS_PATH" \
+    --arg current_migration "$current_migration" \
+    --arg latest_migration "$latest_migration" \
+    '{
+      schema: "loom.backup.manifest.v0.5.1",
+      backup_kind: $backup_kind,
+      created_at: $created_at,
+      source: {
+        ssh_host: $source_ssh_host,
+        hostname: $source_hostname,
+        node_id: $source_node_id,
+        environment: $source_environment,
+        is_vps: false
+      },
+      loom: {
+        version: $loom_version,
+        current_migration: ($current_migration | tonumber? // null),
+        latest_migration: ($latest_migration | tonumber? // null)
+      },
+      database: {
+        name: $database,
+        dump_file: ($database + ".dump"),
+        format: "pg_dump_custom"
+      },
+      paths: {
+        object_store: "object-store",
+        private_backups: "private-backups",
+        remote_object_store: $object_store_path,
+        remote_private_backups: $private_backups_path
+      },
+      retention: {
+        mode: "script_unmanaged"
+      },
+      exclusions: [
+        "wireguard_private_keys",
+        "ssh_private_keys",
+        "node_credential_tokens",
+        "enrollment_tokens",
+        "environment_secret_files",
+        "raw_loom_db_url"
+      ]
+    }' > "$backup_dir/manifest.json"
+
+  cmd_verify "$backup_dir" >/dev/null
+  log "backup verified"
+  printf '%s\n' "$backup_dir"
+}
+
+cmd_verify() {
+  require_command jq
+
+  local backup_dir="${1:-}"
+  [[ -n "$backup_dir" ]] || fail "verify requires a backup directory"
+  [[ -d "$backup_dir" ]] || fail "backup directory does not exist: $backup_dir"
+  [[ -f "$backup_dir/manifest.json" ]] || fail "missing manifest.json"
+  [[ -f "$backup_dir/health.json" ]] || fail "missing health.json"
+
+  jq -e '.schema == "loom.backup.manifest.v0.1" or .schema == "loom.backup.manifest.v0.2" or .schema == "loom.backup.manifest.v0.5.1"' "$backup_dir/manifest.json" >/dev/null || fail "invalid backup manifest schema"
+  jq -e '.source.is_vps == false and (.source.ssh_host | test("vps") | not)' "$backup_dir/manifest.json" >/dev/null || fail "backup source must not be the VPS"
+  jq -e '.loom.current_migration != null and .loom.latest_migration != null' "$backup_dir/manifest.json" >/dev/null || fail "manifest is missing migration metadata"
+
+  local dump_file
+  dump_file="$(jq -r '.database.dump_file' "$backup_dir/manifest.json")"
+  [[ -n "$dump_file" && "$dump_file" != "null" ]] || fail "manifest is missing database dump file"
+  [[ -s "$backup_dir/$dump_file" ]] || fail "database dump is missing or empty: $backup_dir/$dump_file"
+
+  [[ -d "$backup_dir/object-store" ]] || fail "missing object-store directory"
+  [[ -d "$backup_dir/private-backups" ]] || fail "missing private-backups directory"
+
+  jq -e '.ok == true and .data.status == "ok"' "$backup_dir/health.json" >/dev/null || fail "stored health report is not ok"
+
+  printf 'backup ok: %s\n' "$backup_dir"
+}
+
+cleanup_restore_drill_database() {
+  local drill_db="$1"
+
+  if [[ "$KEEP_RESTORE_DRILL" == "1" ]]; then
+    log "keeping restore drill database: $RESTORE_DRILL_HOST/$drill_db"
+    return 0
+  fi
+  drill_remote "sudo -u postgres dropdb --if-exists '$drill_db'"
+}
+
+validate_restore_drill_database() {
+  local drill_db="$1"
+
+  [[ "$drill_db" == loom_restore_drill_* ]] || fail "restore drill database must start with loom_restore_drill_: $drill_db"
+  [[ "$drill_db" =~ ^[a-zA-Z0-9_]+$ ]] || fail "restore drill database contains unsafe characters: $drill_db"
+  [[ "$drill_db" != "$DATABASE" && "$drill_db" != "loom_main" ]] || fail "refusing to use active database as restore drill target: $drill_db"
+}
+
+cmd_restore_drill() {
+  refuse_vps_restore_target
+  require_command jq
+  require_command ssh
+
+  local backup_dir="${1:-}"
+  [[ -n "$backup_dir" ]] || fail "restore-drill requires a backup directory"
+
+  cmd_verify "$backup_dir" >/dev/null
+
+  local dump_file dump_path drill_db restore_summary
+  dump_file="$(jq -r '.database.dump_file' "$backup_dir/manifest.json")"
+  dump_path="$backup_dir/$dump_file"
+  [[ -s "$dump_path" ]] || fail "database dump is missing or empty: $dump_path"
+  [[ -d "$backup_dir/$(jq -r '.paths.object_store' "$backup_dir/manifest.json")" ]] || fail "object-store snapshot is missing"
+  [[ -d "$backup_dir/$(jq -r '.paths.private_backups' "$backup_dir/manifest.json")" ]] || fail "private-backups snapshot is missing"
+
+  if [[ -n "$RESTORE_DRILL_DATABASE" ]]; then
+    drill_db="$RESTORE_DRILL_DATABASE"
+  else
+    drill_db="loom_restore_drill_$(date -u '+%Y%m%d%H%M%S')_$RANDOM"
+  fi
+  validate_restore_drill_database "$drill_db"
+
+  log "restore drill host: $RESTORE_DRILL_HOST"
+  log "restore drill database: $drill_db"
+
+  drill_remote 'command -v createdb >/dev/null && command -v dropdb >/dev/null && command -v pg_restore >/dev/null && command -v psql >/dev/null'
+
+  if ! drill_remote "sudo -u postgres createdb -O loom '$drill_db'"; then
+    fail "could not create restore drill database: $RESTORE_DRILL_HOST/$drill_db"
+  fi
+
+  if ! drill_remote "sudo -u loom pg_restore --no-owner --no-acl -d '$drill_db'" < "$dump_path"; then
+    cleanup_restore_drill_database "$drill_db" || true
+    fail "restore drill pg_restore failed for $RESTORE_DRILL_HOST/$drill_db"
+  fi
+
+  if ! restore_summary="$(drill_remote "sudo -u loom psql -d '$drill_db' -v ON_ERROR_STOP=1 -qAt" <<'SQL'
+DO $$
+BEGIN
+  IF to_regclass('public.goose_db_version') IS NULL THEN
+    RAISE EXCEPTION 'missing public.goose_db_version';
+  END IF;
+  IF to_regclass('nodes.nodes') IS NULL THEN
+    RAISE EXCEPTION 'missing nodes.nodes';
+  END IF;
+  IF to_regclass('workers.worker_instances') IS NULL THEN
+    RAISE EXCEPTION 'missing workers.worker_instances';
+  END IF;
+  IF to_regclass('workers.worker_runs') IS NULL THEN
+    RAISE EXCEPTION 'missing workers.worker_runs';
+  END IF;
+  IF to_regclass('maintenance.operations') IS NULL THEN
+    RAISE EXCEPTION 'missing maintenance.operations';
+  END IF;
+  IF (SELECT count(*) FROM nodes.nodes) < 1 THEN
+    RAISE EXCEPTION 'restored database has no nodes';
+  END IF;
+  IF (SELECT count(*) FROM workers.worker_instances) < 1 THEN
+    RAISE EXCEPTION 'restored database has no worker instances';
+  END IF;
+END $$;
+SELECT json_build_object(
+  'migration', (SELECT max(version_id) FROM public.goose_db_version WHERE is_applied),
+  'nodes', (SELECT count(*) FROM nodes.nodes),
+  'worker_instances', (SELECT count(*) FROM workers.worker_instances),
+  'worker_runs', (SELECT count(*) FROM workers.worker_runs),
+  'maintenance_operations', (SELECT count(*) FROM maintenance.operations)
+)::text;
+SQL
+  )"; then
+    cleanup_restore_drill_database "$drill_db" || true
+    fail "restore drill verification failed for $RESTORE_DRILL_HOST/$drill_db"
+  fi
+
+  log "restore drill verification: $restore_summary"
+
+  if ! cleanup_restore_drill_database "$drill_db"; then
+    fail "restore drill succeeded but cleanup failed for $RESTORE_DRILL_HOST/$drill_db"
+  fi
+
+  if [[ "$KEEP_RESTORE_DRILL" == "1" ]]; then
+    printf 'restore drill ok: %s -> %s/%s kept\n' "$backup_dir" "$RESTORE_DRILL_HOST" "$drill_db"
+  else
+    printf 'restore drill ok: %s -> %s/%s dropped\n' "$backup_dir" "$RESTORE_DRILL_HOST" "$drill_db"
+  fi
+}
+
+main() {
+  local command="${1:-}"
+  if [[ -n "$command" ]]; then
+    shift
+  fi
+
+  case "$command" in
+    create) cmd_create "$@" ;;
+    verify) cmd_verify "$@" ;;
+    restore-drill) cmd_restore_drill "$@" ;;
+    ""|-h|--help|help) usage ;;
+    *) fail "unknown command: $command" ;;
+  esac
+}
+
+main "$@"

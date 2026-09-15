@@ -1,0 +1,251 @@
+{
+  "candidates": [
+    {
+      "candidate_id": "00000000-0000-4000-8000-000000000101",
+      "schema_version": "1.0",
+      "state": "pending",
+      "domain": "invented-slice-one",
+      "visibility": "private",
+      "record_kind": "decision",
+      "claim": "Use an isolated PostgreSQL ledger for the invented fixture.",
+      "record_context": "Invariant A store fixture for the LOOM provenance kernel.",
+      "assertion_posture": "accepted_decision",
+      "producer_id": "invented-store-worker",
+      "registered_at": "2026-08-20T11:00:01Z",
+      "submitted": {"ambiguity":["Runtime wiring is outside this fixture."]},
+      "payload": {"schema_version":"1.0","state":"pending"}
+    },
+    {
+      "candidate_id": "00000000-0000-4000-8000-000000000102",
+      "schema_version": "1.0",
+      "state": "pending",
+      "domain": "invented-slice-one",
+      "visibility": "private",
+      "record_kind": "observation",
+      "claim": "The invented fixture has a parent candidate.",
+      "record_context": "Candidate lineage fixture.",
+      "assertion_posture": "unverified",
+      "producer_id": "invented-store-worker",
+      "registered_at": "2026-08-20T11:00:00Z",
+      "submitted": {"ambiguity":[]},
+      "payload": {"schema_version":"1.0","state":"pending"}
+    }
+  ],
+  "sources": [
+    {
+      "source_reference_id": "00000000-0000-4000-8000-000000000201",
+      "candidate_id": "00000000-0000-4000-8000-000000000101",
+      "schema_version": "1.0",
+      "source_kind": "git",
+      "status": "resolved",
+      "verification_posture": "content_verified",
+      "resolver_name": "invented-git-resolver",
+      "resolver_version": "1.0",
+      "resolution_at": "2026-08-20T11:00:01Z",
+      "canonical_locator": "repo://invented/store-contract.json",
+      "version_address": "git:0000000000000000000000000000000000000000",
+      "content_digest": "sha256:invented-source",
+      "source_context": "Invented exact source evidence.",
+      "submitted": {"kind":"git","repository":"invented","ref":"fixture"},
+      "payload": {"status":"resolved","verification_posture":"content_verified"}
+    },
+    {
+      "source_reference_id": "00000000-0000-4000-8000-000000000202",
+      "schema_version": "1.0",
+      "source_kind": "source_gap",
+      "status": "unresolved",
+      "verification_posture": "unverified",
+      "resolver_name": "explicit-source-gap",
+      "resolver_version": "1.0",
+      "resolution_at": "2026-08-20T11:00:02Z",
+      "gap_reason": "The invented evidence has no external source.",
+      "source_context": "An explicit unresolved source remains qualified.",
+      "submitted": {"kind":"source_gap","reason":"invented"},
+      "payload": {"status":"unresolved","verification_posture":"unverified"}
+    },
+    {
+      "source_reference_id": "00000000-0000-4000-8000-000000000211",
+      "candidate_id": "00000000-0000-4000-8000-000000000102",
+      "schema_version": "1.0",
+      "source_kind": "source_gap",
+      "status": "unresolved",
+      "verification_posture": "unknown",
+      "resolver_name": "explicit-source-gap",
+      "resolver_version": "1.0",
+      "resolution_at": "2026-08-20T11:00:00Z",
+      "gap_reason": "The invented parent has no external source.",
+      "submitted": {"kind":"source_gap","reason":"invented parent"},
+      "payload": {"status":"unresolved","verification_posture":"unknown"}
+    }
+  ],
+  "records": [
+    {
+      "record_id": "00000000-0000-4000-8000-000000000301",
+      "schema_version": "1.0",
+      "claim": "The invented fixture uses an isolated PostgreSQL ledger.",
+      "record_kind": "decision",
+      "record_context": "Accepted representation for the invented Slice 1 fixture.",
+      "ambiguity": ["No runtime deployment is implied."],
+      "domain": "invented-slice-one",
+      "visibility": "private",
+      "assertion_posture": "accepted_decision",
+      "source_actor_id": "invented-source-actor",
+      "temporal_interpretation": {"interpretation":"Applies only to the invariant fixture.","observed_at":"2026-08-20T11:00:01Z"},
+      "anchors": {"entities":["LOOM Provenance"],"topics":["semantic ledger"],"projects":[]},
+      "created_at": "2026-08-20T11:00:03Z",
+      "payload": {"schema_version":"1.0","record_id":"00000000-0000-4000-8000-000000000301"}
+    },
+    {
+      "record_id": "00000000-0000-4000-8000-000000000302",
+      "schema_version": "1.0",
+      "claim": "The invented fixture preserves append-oriented history.",
+      "record_kind": "constraint",
+      "record_context": "Second endpoint for the relationship fixture.",
+      "ambiguity": [],
+      "domain": "invented-slice-one",
+      "visibility": "private",
+      "assertion_posture": "accepted_constraint",
+      "temporal_interpretation": {"interpretation":"Applies only to the invariant fixture."},
+      "created_at": "2026-08-20T11:00:04Z",
+      "payload": {"schema_version":"1.0","record_id":"00000000-0000-4000-8000-000000000302"}
+    }
+  ],
+  "processing_run": {
+    "processing_run_id": "00000000-0000-4000-8000-000000000501",
+    "run_kind": "invented_store_primitive",
+    "schema_version": "1.0",
+    "input_hash": "sha256:invented-operation-input",
+    "status": "prepared",
+    "actor": {"actor_id":"invented-runtime-actor"},
+    "bounds": {"max_operations":10},
+    "started_at": "2026-08-20T11:00:05Z",
+    "payload": {"reconciliation_protocol_version":"2.0"}
+  },
+  "operation": {
+    "operation_id": "00000000-0000-4000-8000-000000000502",
+    "processing_run_id": "00000000-0000-4000-8000-000000000501",
+    "pack_id": "00000000-0000-4000-8000-000000000503",
+    "operation_type": "invented_append",
+    "schema_version": "1.0",
+    "producer": {"producer_id":"invented-store-worker","producer_kind":"working_agent"},
+    "occurred_at": "2026-08-20T11:00:06Z",
+    "input_hash": "sha256:invented-operation-input",
+    "result": "applied",
+    "operation": {"operation_type":"invented_append"},
+    "result_payload": {"status":"applied"},
+    "applied_at": "2026-08-20T11:00:06Z"
+  },
+  "resolution_case": {
+    "case_id": "00000000-0000-4000-8000-000000000401",
+    "schema_version": "1.0",
+    "issue": "Confirm the invented relationship scope.",
+    "domain": "invented-slice-one",
+    "visibility": "private",
+    "initial_status": "open",
+    "created_at": "2026-08-20T11:00:07Z",
+    "created_by_operation_id": "00000000-0000-4000-8000-000000000502",
+    "payload": {"status":"open","dimensions":["invented scope"]}
+  },
+  "case_members": [
+    {
+      "case_id": "00000000-0000-4000-8000-000000000401",
+      "member_type": "candidate",
+      "candidate_id": "00000000-0000-4000-8000-000000000101",
+      "role": "subject",
+      "attached_at": "2026-08-20T11:00:07Z",
+      "operation_id": "00000000-0000-4000-8000-000000000502"
+    },
+    {
+      "case_id": "00000000-0000-4000-8000-000000000401",
+      "member_type": "record",
+      "record_id": "00000000-0000-4000-8000-000000000301",
+      "role": "related record",
+      "attached_at": "2026-08-20T11:00:08Z",
+      "operation_id": "00000000-0000-4000-8000-000000000502"
+    }
+  ],
+  "case_event": {
+    "event_id": "00000000-0000-4000-8000-000000000402",
+    "case_id": "00000000-0000-4000-8000-000000000401",
+    "schema_version": "1.0",
+    "event_type": "opened",
+    "occurred_at": "2026-08-20T11:00:07Z",
+    "producer": {"producer_id":"invented-store-worker","producer_kind":"working_agent"},
+    "summary": "Opened the invented resolution case.",
+    "evidence_source_reference_ids": ["00000000-0000-4000-8000-000000000201"],
+    "operation_id": "00000000-0000-4000-8000-000000000502",
+    "payload": {"event_type":"opened"}
+  },
+  "relationship": {
+    "relationship_id": "00000000-0000-4000-8000-000000000601",
+    "schema_version": "1.0",
+    "relationship_type": "supports",
+    "from_record_id": "00000000-0000-4000-8000-000000000301",
+    "to_record_id": "00000000-0000-4000-8000-000000000302",
+    "resolution_case_id": "00000000-0000-4000-8000-000000000401",
+    "context": "The append-only constraint supports the isolated ledger decision.",
+    "coverage": {"description":"Invented fixture scope","dimensions":{"environment":"test"}},
+    "evidence_source_reference_ids": ["00000000-0000-4000-8000-000000000201"],
+    "created_at": "2026-08-20T11:00:09Z",
+    "created_by": {"producer_id":"invented-store-worker","producer_kind":"working_agent"},
+    "created_by_operation_id": "00000000-0000-4000-8000-000000000502",
+    "payload": {"relationship_type":"supports"}
+  },
+  "evidence_registration": {
+    "registration_id": "00000000-0000-4000-8000-000000000203",
+    "reconciliation_protocol_version": "2.0",
+    "source_reference_id": "00000000-0000-4000-8000-000000000202",
+    "domain": "invented-slice-one",
+    "visibility": "private",
+    "evidence_context": "Invented evidence-only registration.",
+    "producer": {"producer_id":"invented-store-worker","producer_kind":"working_agent"},
+    "registered_at": "2026-08-20T11:00:10Z",
+    "resolution_case_id": "00000000-0000-4000-8000-000000000401",
+    "payload": {"registration_type":"evidence"}
+  },
+  "candidate_evidence_link": {
+    "link_id": "00000000-0000-4000-8000-000000000204",
+    "candidate_id": "00000000-0000-4000-8000-000000000101",
+    "source_reference_id": "00000000-0000-4000-8000-000000000202",
+    "operation_id": "00000000-0000-4000-8000-000000000502",
+    "linked_at": "2026-08-20T11:00:11Z",
+    "producer": {"producer_id":"invented-store-worker","producer_kind":"working_agent"},
+    "payload": {"evidence_context":"Invented linked evidence."}
+  },
+  "candidate_lineage": {
+    "candidate_id": "00000000-0000-4000-8000-000000000101",
+    "derived_from_candidate_id": "00000000-0000-4000-8000-000000000102",
+    "registered_at": "2026-08-20T11:00:01Z"
+  },
+  "candidate_event": {
+    "object_id": "00000000-0000-4000-8000-000000000101",
+    "event_type": "deferred",
+    "operation_id": "00000000-0000-4000-8000-000000000502",
+    "occurred_at": "2026-08-20T11:00:12Z",
+    "payload": {"reason_code":"invented_evidence_gap"}
+  },
+  "record_event": {
+    "object_id": "00000000-0000-4000-8000-000000000301",
+    "event_type": "qualification_appended",
+    "operation_id": "00000000-0000-4000-8000-000000000502",
+    "occurred_at": "2026-08-20T11:00:13Z",
+    "payload": {"qualification":"Invented fixture only."}
+  },
+  "relationship_event": {
+    "object_id": "00000000-0000-4000-8000-000000000601",
+    "event_type": "represented",
+    "operation_id": "00000000-0000-4000-8000-000000000502",
+    "occurred_at": "2026-08-20T11:00:14Z",
+    "payload": {"reason":"Invented fixture representation."}
+  },
+  "registration_replay": {
+    "replay_key": "invented-store-worker/00000000-0000-4000-8000-000000000501/invented-task",
+    "workflow_key": "invented-store-worker/00000000-0000-4000-8000-000000000501/invented-task",
+    "registration_digest": "sha256:invented-registration",
+    "producer": {"producer_id":"invented-store-worker","producer_kind":"working_agent","run_id":"00000000-0000-4000-8000-000000000501","task_id":"invented-task"},
+    "candidate_ids": ["00000000-0000-4000-8000-000000000101"],
+    "receipts": [{"candidate_id":"00000000-0000-4000-8000-000000000101","state":"pending"}],
+    "registered_at": "2026-08-20T11:00:15Z",
+    "payload": {"schema_version":"1.0"}
+  }
+}

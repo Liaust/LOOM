@@ -1,0 +1,10 @@
+kind: future
+schema_version: repo.future.v1
+id: future/<slug>
+slug: <slug>
+title: "<title>"
+status: captured
+created_at: <YYYY-MM-DD>
+updated_at: <YYYY-MM-DD>
+related_initiative: null
+related_features: []

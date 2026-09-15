@@ -1,0 +1,12 @@
+kind: loom.project
+schema_version: project.contract.v0.4
+
+project:
+  id: project_01ARZ3NDEKTSV4RRFFQ69G5FB0
+  slug: slice5-duplicate
+  name: Slice 5 Duplicate Identity
+  owner_node: main
+  status: active
+
+facets:
+  repos: true

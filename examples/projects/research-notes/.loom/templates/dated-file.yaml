@@ -1,0 +1,5 @@
+file:
+  path: {{printf "%q" .Path}}
+created_at: {{printf "%q" .CreatedAt}}
+updated_at: {{printf "%q" .UpdatedAt}}
+metadata: {}

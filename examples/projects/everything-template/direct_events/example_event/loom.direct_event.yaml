@@ -1,0 +1,52 @@
+kind: loom.direct_event
+schema_version: direct_event.contract.v0.3
+
+event:
+  key: example_event
+  display_name: Example Event
+  description: Draft scaffolded direct event.
+  status: draft
+
+integration:
+  key: example_integration
+  display_name: Example Integration
+  description: Scaffolded direct-event integration.
+  main_auth_level: 3
+
+endpoint:
+  slug: example_event
+  display_name: Example Event
+  event_type: example.received
+  status: draft
+
+target:
+  capability: main@everything-template.hello_world
+
+auth:
+  profiles:
+    - name: private_network
+      kind: private_network
+      create_if_missing: true
+
+mapping:
+  fields:
+    message:
+      source: body
+      expr: $.message
+  required:
+    - message
+
+idempotency:
+  strategy: payload_path
+  path: $.id
+
+response:
+  mode: accepted
+
+storage:
+  payload_limit_bytes: 1048576
+  store_raw_body: true
+
+examples:
+  payload: examples/payload.json
+  expected_mapped_input: examples/expected_mapped_input.json

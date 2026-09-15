@@ -1,0 +1,1 @@
+D0 opaque application dependency fixture, revision one. E1 owns the real schema.

@@ -1,0 +1,27 @@
+{
+  "schema_version": "loom.mini_dashboard.v1",
+  "generated_at": "2026-08-17T14:42:08Z",
+  "header": { "product": "LOOM", "node_label": "MAIN", "overall": "warning", "source_updated_at": "2026-08-17T14:42:00Z", "stale_after_seconds": 30, "freshness_state": "live" },
+  "attention": { "message": "WARNING Storage capacity at 84%", "severity": "warning", "additional_count": 1 },
+  "system": [
+    { "key": "cpu", "label": "CPU", "value": "48%", "severity": "healthy", "state": "live" },
+    { "key": "temperature", "label": "Temp", "value": "63 C", "severity": "healthy", "state": "live" },
+    { "key": "memory", "label": "Memory", "value": "72%", "severity": "healthy", "state": "live" },
+    { "key": "storage", "label": "Storage", "value": "84%", "severity": "warning", "state": "live" }
+  ],
+  "runtime": [
+    { "key": "loomd", "label": "loomd", "value": "OK", "severity": "healthy", "state": "live" },
+    { "key": "database", "label": "Database", "value": "OK", "severity": "healthy", "state": "live" },
+    { "key": "workers", "label": "Workers", "value": "15/16", "severity": "warning", "state": "live" },
+    { "key": "queue", "label": "Queue", "value": "2", "severity": "healthy", "state": "live" }
+  ],
+  "protection": [
+    { "key": "local", "label": "Local", "value": "25h ago", "severity": "healthy", "state": "live" },
+    { "key": "cloud", "label": "Cloud", "value": "7h ago", "severity": "healthy", "state": "cached" },
+    { "key": "coverage", "label": "Coverage", "value": "Complete", "severity": "healthy", "state": "cached" },
+    { "key": "findings", "label": "Findings", "value": "0", "severity": "healthy", "state": "live" }
+  ],
+  "network": { "state": "NETWORK", "detail": "1 online / 2 known - cloud reachable (cached 9m)", "severity": "healthy" },
+  "activity": { "state": "IDLE", "detail": "last activity: automation completed 7m ago", "severity": "healthy" },
+  "freshness": {}
+}

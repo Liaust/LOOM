@@ -1,0 +1,15 @@
+kind: loom.repos
+schema_version: repos.contract.v0.4
+
+repos:
+  status: active
+  watch_roots: []
+  members:
+    - id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAA
+      key: api
+      path: api
+      role: primary
+    - id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAB
+      key: portal
+      path: portal
+      role: primary

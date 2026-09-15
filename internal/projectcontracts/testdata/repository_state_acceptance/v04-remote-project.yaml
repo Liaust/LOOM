@@ -1,0 +1,12 @@
+kind: loom.project
+schema_version: project.contract.v0.4
+
+project:
+  id: project_01ARZ3NDEKTSV4RRFFQ69G5FAZ
+  slug: slice5-remote
+  name: Slice 5 Remote Repository
+  owner_node: workspace-remote
+  status: active
+
+facets:
+  repos: true

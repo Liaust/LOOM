@@ -1,0 +1,23 @@
+kind: loom.repository_state
+schema_version: repo.state.v1
+repository:
+  id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAV
+  name: "Atlas API"
+  aliases:
+    - atlas
+    - atlas-api
+  role: component
+  purpose: "Serve the Atlas product API."
+  topics:
+    - api
+    - atlas
+    - go
+owner_project:
+  id: project_01ARZ3NDEKTSV4RRFFQ69G5FAV
+  slug: atlas
+branches:
+  stable: main
+  default: main
+source:
+  tracking: git
+  state_root: .repo

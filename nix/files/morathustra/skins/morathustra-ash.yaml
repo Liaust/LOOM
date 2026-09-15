@@ -1,0 +1,128 @@
+# Morathustra: Ash palette + mathematical notation. Proposed revision.
+# See README.md: face arrays are not guaranteed ordered animation frames.
+# Generated from supplied theme data and the approved sigil; no live installation.
+name: morathustra-ash
+description: Ash and bone, with mathematical notation and point-field activity motifs.
+colors:
+  background: '#0B0E13'
+  ui_text: '#D8D2C8'
+  ui_border: '#3B434F'
+  banner_border: '#3B434F'
+  banner_title: '#D8D2C8'
+  banner_accent: '#8B9DB3'
+  banner_dim: '#9B9790'
+  banner_text: '#D8D2C8'
+  ui_accent: '#8B9DB3'
+  ui_label: '#B1A08C'
+  ui_tool: '#8B9DB3'
+  ui_thinking: '#A7A49E'
+  ui_ok: '#93A287'
+  ui_warn: '#C4A06A'
+  ui_error: '#CA8B83'
+  prompt: '#8B9DB3'
+  input_rule: '#3B434F'
+  response_border: '#8B9DB3'
+  session_label: '#B1A08C'
+  session_border: '#3B434F'
+  shell_dollar: '#8B9DB3'
+  status_bar_bg: '#15191F'
+  status_bar_text: '#9B9790'
+  status_bar_strong: '#D8D2C8'
+  status_bar_dim: '#9B9790'
+  status_bar_good: '#93A287'
+  status_bar_warn: '#C4A06A'
+  status_bar_bad: '#C4A06A'
+  status_bar_critical: '#CA8B83'
+  voice_status_bg: '#15191F'
+  selection_bg: '#293544'
+  completion_menu_bg: '#15191F'
+  completion_menu_current_bg: '#293544'
+  completion_menu_meta_bg: '#15191F'
+  completion_menu_meta_current_bg: '#293544'
+  diff_added: '#18231C'
+  diff_removed: '#291B1D'
+  diff_added_word: '#304735'
+  diff_removed_word: '#503237'
+  syntax_string: '#A6B49A'
+  syntax_number: '#D8D2C8'
+  syntax_keyword: '#8B9DB3'
+  syntax_comment: '#9B9790'
+spinner:
+  waiting_faces:
+  - ·....
+  - .·...
+  - ..·..
+  - '...·.'
+  - '....·'
+  - '...·.'
+  - ..·..
+  - .·...
+  thinking_faces:
+  - '.....'
+  - ..:..
+  - .:::.
+  - ':::::'
+  - .:::.
+  - ..:..
+  thinking_verbs:
+  - considering
+  - forming a model
+  - tracing implications
+  - weighing alternatives
+  - integrating evidence
+  - synthesizing
+  wings:
+  - - ⟨
+    - ⟩
+branding:
+  agent_name: Morathustra
+  welcome: Let us examine it. Type /help for commands.
+  goodbye: Until next time.
+  response_label: ' ∴ Morathustra '
+  prompt_symbol: ›
+  help_header: ∴ Morathustra · Commands
+tool_prefix: ·
+tool_emojis:
+  clarify: '?'
+  code_execution: ∿
+  execute_code: ∿
+  cronjob: ⧖
+  delegation: λ
+  delegate_task: λ
+  file: ≡
+  patch: Δ
+  read_file: ≡
+  search_files: ⌕
+  write_file: Δ
+  memory: μ
+  project: ⌂
+  desktop_project: ⌂
+  session_search: ⌕
+  web_search: ⊙
+  terminal: ›
+  browser: ⊙
+  python: ∿
+banner_logo: |-
+  [#D8D2C8]███╗   ███╗ ██████╗ ██████╗  █████╗ ████████╗██╗  ██╗██╗   ██╗███████╗████████╗██████╗  █████╗[/]
+  [#C0BEB9]████╗ ████║██╔═══██╗██╔══██╗██╔══██╗╚══██╔══╝██║  ██║██║   ██║██╔════╝╚══██╔══╝██╔══██╗██╔══██╗[/]
+  [#A7A49E]██╔████╔██║██║   ██║██████╔╝███████║   ██║   ███████║██║   ██║███████╗   ██║   ██████╔╝███████║[/]
+  [#9EA2A5]██║╚██╔╝██║██║   ██║██╔══██╗██╔══██║   ██║   ██╔══██║██║   ██║╚════██║   ██║   ██╔══██╗██╔══██║[/]
+  [#94A0AC]██║ ╚═╝ ██║╚██████╔╝██║  ██║██║  ██║   ██║   ██║  ██║╚██████╔╝███████║   ██║   ██║  ██║██║  ██║[/]
+  [#8B9DB3]╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝[/]
+banner_hero: |-
+  [#8b9db3]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
+  [#8f9eb0]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣴⣾⣿⡿⡑⢦⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
+  [#949fad]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣴⣿⣫⣿⣿⡻⢷⣌⠙⠶⣄⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
+  [#98a1ab]⠀⠀⠀⠀⠀⠀⠀⠀⠀⢠⣟⣵⣿⣫⣿⣿⣿⣿⣿⢷⡀⠀⠙⠆⠀⠀⠀⠀⠀⠀⠀⠀[/]
+  [#9ca2a8]⠀⠀⠀⠀⠀⠀⠀⠀⢀⡾⣻⣿⢿⣿⣿⣿⣿⣝⢿⡜⡿⡄⡄⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
+  [#a0a3a5]⠀⠀⠀⠀⠀⠀⠀⠀⣸⢣⣿⣿⣿⡿⠟⠋⠛⢿⡘⣿⣴⠘⠘⡀⠀⠀⠀⠀⠀⠀⠀⠀[/]
+  [#a5a4a2]⠀⠀⠀⠀⠀⠀⠀⢠⢇⣿⣿⡿⠛⠁⠀⠀⠀⠀⠳⣍⣷⣧⠀⠡⠀⠀⠀⠀⠀⠀⠀⠀[/]
+  [#a7a49e]⠀⠀⠀⠀⠀⠀⠀⣾⣾⣽⠏⠀⠀⠀⠀⠀⠀⠀⠀⠈⢻⡻⡆⠁⢁⠀⠀⠀⠀⠀⠀⠀[/]
+  [#a29e98]⠀⠀⠀⠀⠀⠀⣸⢇⣿⠃⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⢾⡀⠈⡢⠀⠀⠀⠀⠀⠀[/]
+  [#9d9892]⠀⠀⠀⠀⠀⣰⠏⡾⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢳⠀⡕⠀⠀⠀⠀⠀⠀[/]
+  [#97938c]⠀⠀⠀⠀⠀⠈⠪⢧⡀⢀⠠⡀⠀⠀⠀⠀⠀⠀⠀⠀⢜⣴⣄⡼⠀⠠⡄⠀⠀⠀⠀⠀[/]
+  [#928d86]⠀⠀⠀⠀⣀⠟⢧⠀⠈⠛⠷⣌⢂⡀⡀⠀⢀⣠⠔⣰⠿⠛⠉⠀⠀⡠⠁⣢⠄⠀⠀⠀[/]
+  [#8d8880]⠀⠀⣀⣼⡙⢷⡌⠳⣵⣄⠠⠬⣥⣥⣶⣾⣛⡡⠔⠁⣠⠔⣀⡴⠞⠁⡈⠀⠀⢤⡀⠀[/]
+  [#88827a]⠀⣨⠩⢿⣷⡈⢿⣶⡀⠙⠻⣶⣤⣀⠠⠴⠊⣀⡤⠾⠗⠋⠉⣠⠊⡼⠀⣂⣤⡓⠀⠀[/]
+  [#837d74]⢠⡿⡆⠙⢿⡗⡆⠻⢷⣸⣤⡈⠙⠲⠶⠖⠿⠛⣋⡴⢊⡔⣴⠋⣼⠃⠰⣮⠃⢠⠆⠀[/]
+  [#7e776e]⡾⡄⢻⠀⠀⡇⢳⠸⡄⠙⢷⢳⣌⠲⢄⡒⠒⡯⠁⡰⢋⡾⠁⡼⡏⠀⠜⠁⠀⡜⠀⠀[/]

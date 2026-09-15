@@ -1,0 +1,24 @@
+schema_version: loom.ai_pack.v2
+name: fixture-pack
+version: 1.0.0
+loom_compatibility: ">=0"
+documentation: {version: same-as-pack, path: ../docs}
+catalogue: catalogue.yaml
+hash_policy: {algorithm: sha256, mode: generated-at-release}
+harnesses:
+  codex: {mechanism: native-skills}
+  orca: {mechanism: native-skills-or-plugins}
+recommended_skill_sets:
+  project:
+    visibility: [shared_core]
+  morathustra:
+    visibility: [shared_core, morathustra_operations]
+compatibility: {worktree_authority: orca, credential_authority: proton-pass}
+skills:
+  - name: fixture-skill
+    version: 1.0.0
+    path: skills/fixture-skill
+    visibility: shared_core
+    hash: release-generated
+templates: []
+build: {loom_version: test}

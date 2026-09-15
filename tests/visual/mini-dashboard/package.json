@@ -1,0 +1,13 @@
+{
+  "name": "loom-mini-dashboard-visual",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "test": "playwright test",
+    "screenshots": "playwright test --project=chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1"
+  }
+}

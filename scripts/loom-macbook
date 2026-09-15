@@ -1,0 +1,1588 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+LOOM_NODE_AGENT_BIN="${LOOM_NODE_AGENT_BIN:-loom-node-agent}"
+LOOM_CLI_BIN="${LOOM_CLI_BIN:-loom}"
+PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+MAIN_HOST="${LOOM_MAIN_HOST:-loom-main}"
+VPS_HOST="${LOOM_VPS_HOST:-loom-vps}"
+MAIN_HTTP_URL="${LOOM_MAIN_HTTP_URL:-http://10.44.0.2:8080}"
+MAC_WG_IP="${LOOM_MACBOOK_WG_IP:-10.44.0.5}"
+WG_CONF="${LOOM_MACBOOK_WG_CONF:-$HOME/.loom/secrets/wireguard/loomwg0.conf}"
+WG_PUB="${LOOM_MACBOOK_WG_PUB:-$HOME/.loom/secrets/wireguard/macbook-primary.pub}"
+MAIN_STORAGE_HOST="${LOOM_MAIN_STORAGE_HOST:-10.44.0.2}"
+MAIN_STORAGE_MOUNT="${LOOM_MAIN_STORAGE_MOUNT:-$HOME/loom-storage}"
+MAIN_SMB_HOST="${LOOM_MAIN_SMB_HOST:-loom-storage}"
+MAIN_SMB_IP="${LOOM_MAIN_SMB_IP:-$MAIN_STORAGE_HOST}"
+MAIN_SMB_SHARE="${LOOM_MAIN_SMB_SHARE:-loom-storage}"
+MAIN_SMB_FINDER_MOUNT="${LOOM_MAIN_SMB_FINDER_MOUNT:-/Volumes/$MAIN_SMB_SHARE}"
+MAIN_SMB_USER="${LOOM_MAIN_SMB_USER:-loomshare}"
+MAIN_SMB_URL="${LOOM_MAIN_SMB_URL:-//$MAIN_SMB_USER@$MAIN_SMB_HOST/$MAIN_SMB_SHARE}"
+MAIN_SMB_DISPLAY_URL="//$MAIN_SMB_USER@$MAIN_SMB_HOST/$MAIN_SMB_SHARE"
+MAIN_SMB_CHECK_VIEW="${LOOM_MAIN_SMB_CHECK_VIEW:-auto}"
+MAIN_BOX_MOUNT="${LOOM_MAIN_BOX_MOUNT:-$HOME/loom-main-box}"
+MAIN_BOX_SMB_HOST="${LOOM_MAIN_BOX_SMB_HOST:-$MAIN_SMB_HOST}"
+MAIN_BOX_SMB_IP="${LOOM_MAIN_BOX_SMB_IP:-$MAIN_SMB_IP}"
+MAIN_BOX_SMB_SHARE="${LOOM_MAIN_BOX_SMB_SHARE:-loom-main-box}"
+MAIN_BOX_SMB_FINDER_MOUNT="${LOOM_MAIN_BOX_SMB_FINDER_MOUNT:-/Volumes/$MAIN_BOX_SMB_SHARE}"
+MAIN_BOX_SMB_USER="${LOOM_MAIN_BOX_SMB_USER:-$MAIN_SMB_USER}"
+MAIN_BOX_SMB_URL="${LOOM_MAIN_BOX_SMB_URL:-//$MAIN_BOX_SMB_USER@$MAIN_BOX_SMB_HOST/$MAIN_BOX_SMB_SHARE}"
+MAIN_BOX_SMB_DISPLAY_URL="//$MAIN_BOX_SMB_USER@$MAIN_BOX_SMB_HOST/$MAIN_BOX_SMB_SHARE"
+CLOUD_STORAGE_ALIAS="${LOOM_CLOUD_STORAGE_ALIAS:-loom-cloud-storage}"
+CLOUD_STORAGE_HOST="${LOOM_CLOUD_STORAGE_HOST:-u613836.your-storagebox.de}"
+CLOUD_STORAGE_USER="${LOOM_CLOUD_STORAGE_USER:-u613836}"
+CLOUD_STORAGE_PORT="${LOOM_CLOUD_STORAGE_PORT:-23}"
+CLOUD_STORAGE_KEY="${LOOM_CLOUD_STORAGE_KEY:-$HOME/.ssh/loom_hetzner_storage_box_mac_ed25519}"
+CLOUD_FOLDER_PROTOCOL="${LOOM_CLOUD_FOLDER_PROTOCOL:-smb}"
+CLOUD_FOLDER_REMOTE="${LOOM_CLOUD_FOLDER_REMOTE:-loom-cloud-folder}"
+CLOUD_FOLDER_ROOT="${LOOM_CLOUD_FOLDER_ROOT:-loom/cloud-folder}"
+CLOUD_FOLDER_MOUNT="${LOOM_CLOUD_FOLDER_MOUNT:-$HOME/loom-cloud}"
+CLOUD_FOLDER_VOLNAME="${LOOM_CLOUD_FOLDER_VOLNAME:-loom-cloud}"
+CLOUD_FOLDER_RCLONE_CONFIG="${LOOM_CLOUD_FOLDER_RCLONE_CONFIG:-$HOME/.loom/rclone/loom-cloud-folder.conf}"
+CLOUD_FOLDER_SMB_HOST="${LOOM_CLOUD_FOLDER_SMB_HOST:-$CLOUD_STORAGE_HOST}"
+CLOUD_FOLDER_SMB_SHARE="${LOOM_CLOUD_FOLDER_SMB_SHARE:-backup}"
+CLOUD_FOLDER_SMB_FINDER_MOUNT="${LOOM_CLOUD_FOLDER_SMB_FINDER_MOUNT:-/Volumes/$CLOUD_FOLDER_SMB_SHARE}"
+CLOUD_FOLDER_SMB_USER="${LOOM_CLOUD_FOLDER_SMB_USER:-$CLOUD_STORAGE_USER}"
+CLOUD_FOLDER_SMB_DISPLAY_URL="//$CLOUD_FOLDER_SMB_USER@$CLOUD_FOLDER_SMB_HOST/$CLOUD_FOLDER_SMB_SHARE"
+CLOUD_FOLDER_SMB_FINDER_URL="smb://$CLOUD_FOLDER_SMB_USER@$CLOUD_FOLDER_SMB_HOST/$CLOUD_FOLDER_SMB_SHARE"
+RCLONE_VFS_CACHE_MODE="${LOOM_RCLONE_VFS_CACHE_MODE:-full}"
+RCLONE_DIR_CACHE_TIME="${LOOM_RCLONE_DIR_CACHE_TIME:-30s}"
+RCLONE_VFS_CACHE_MAX_SIZE="${LOOM_RCLONE_VFS_CACHE_MAX_SIZE:-10G}"
+RCLONE_VFS_CACHE_MAX_AGE="${LOOM_RCLONE_VFS_CACHE_MAX_AGE:-24h}"
+
+usage() {
+  cat <<EOF
+Usage: scripts/loom-macbook <command>
+
+Commands:
+  auth-status    Check SSH agent/Keychain, main SSH, SMB, and Storage Box auth.
+  network-check  Verify SSH, WireGuard route, and direct main HTTP health.
+  safe-check     Run the production MacBook LOOM workspace lifecycle smoke.
+  smb-preflight  Verify SMB client tools, route, TCP/445, and local mount path.
+  smb-host-alias-status
+                 Verify the local loom-storage host alias used by Finder/SMB.
+  smb-host-alias-install
+                 Install or refresh the local /etc/hosts alias for LOOM storage.
+  mount-main     Mount the read-only LOOM Main Storage SMB share.
+  unmount-main   Unmount only the exact LOOM Main Storage SMB identity.
+  restart-main-mount
+                 Unmount and remount the LOOM Main Storage SMB share.
+  mount-main-smb Mount LOOM Main storage over SMB.
+  unmount-main-smb
+                 Unmount the SMB LOOM Main storage mount.
+  restart-main-smb
+                 Restart the SMB LOOM Main storage mount.
+  mount-main-box-smb
+                 Mount the writable LOOM Main Box SMB share.
+  unmount-main-box-smb
+                 Unmount only the exact LOOM Main Box SMB identity.
+  restart-main-box-smb
+                 Restart the writable LOOM Main Box SMB mount.
+  main-storage-status
+                 Show distinct direct Main Storage and Main Box SMB state.
+  storage-enable
+                 Set LOOM Main storage desired state to mounted and repair once.
+  storage-disable
+                 Set LOOM Main storage desired state to unmounted and unmount.
+  storage-status
+                 Show node-agent managed LOOM Main storage desired/actual state.
+  storage-repair-once
+                 Run one non-interactive node-agent storage mount repair cycle.
+  lane-status    Show local LOOM Lane pending items and rsync/SSH preflight.
+  lane-preflight Alias for lane-status.
+  lane-send      Send pending LOOM Lane files to main with rsync/SSH.
+  cloud-status   Show the direct user-managed LOOM Cloud mount status.
+  cloud-enable   Set LOOM Cloud desired state to mounted and repair once.
+  cloud-disable  Set LOOM Cloud desired state to unmounted and unmount.
+  cloud-repair-once
+                 Run one node-agent LOOM Cloud mount repair cycle.
+  mount-cloud    Mount the direct user-managed LOOM Cloud folder.
+  unmount-cloud  Unmount the direct user-managed LOOM Cloud folder.
+  restart-cloud  Restart the direct user-managed LOOM Cloud folder mount.
+  wg-up          Bring up the MacBook WireGuard tunnel.
+  wg-down        Bring down the MacBook WireGuard tunnel.
+  wg-status      Show local route/interface state and VPS handshake counters.
+
+Environment:
+  LOOM_MAIN_HOST         Production main SSH alias. Default: loom-main
+  LOOM_VPS_HOST          WireGuard hub SSH alias. Default: loom-vps
+  LOOM_MAIN_HTTP_URL     Production main private HTTP URL. Default: http://10.44.0.2:8080
+  LOOM_MACBOOK_WG_IP     MacBook WireGuard address. Default: 10.44.0.5
+  LOOM_MACBOOK_WG_CONF   Local WireGuard config path. Default: ~/.loom/secrets/wireguard/loomwg0.conf
+  LOOM_MACBOOK_WG_PUB    Local WireGuard public key path. Default: ~/.loom/secrets/wireguard/macbook-primary.pub
+  LOOM_MAIN_STORAGE_HOST  Main WireGuard storage host. Default: 10.44.0.2
+  LOOM_MAIN_STORAGE_MOUNT Local mount path. Default: ~/loom-storage
+  LOOM_MAIN_SMB_HOST      SMB host alias or IP. Default: loom-storage
+  LOOM_MAIN_SMB_IP        Expected WireGuard IP for SMB host alias. Default: LOOM_MAIN_STORAGE_HOST
+  LOOM_MAIN_SMB_SHARE     SMB share. Default: loom-storage
+  LOOM_MAIN_SMB_FINDER_MOUNT
+                          Finder SMB mount path. Default: /Volumes/loom-storage
+  LOOM_MAIN_SMB_USER      SMB user. Default: loomshare
+  LOOM_MAIN_SMB_URL       mount_smbfs URL. Default: //loomshare@loom-storage/loom-storage
+  LOOM_MAIN_SMB_CHECK_VIEW
+                          auto, 1, or 0. auto only runs smbutil view when URL includes credentials.
+  LOOM_MAIN_BOX_MOUNT     Local writable Box mount path. Default: ~/loom-main-box
+  LOOM_MAIN_BOX_SMB_HOST  Box SMB host alias or IP. Default: LOOM_MAIN_SMB_HOST
+  LOOM_MAIN_BOX_SMB_IP    Expected Box SMB WireGuard IP. Default: LOOM_MAIN_SMB_IP
+  LOOM_MAIN_BOX_SMB_SHARE Box SMB share. Default: loom-main-box
+  LOOM_MAIN_BOX_SMB_FINDER_MOUNT
+                          Finder Box mount path. Default: /Volumes/loom-main-box
+  LOOM_MAIN_BOX_SMB_USER  Box SMB user. Default: LOOM_MAIN_SMB_USER
+  LOOM_CLOUD_STORAGE_ALIAS
+                          SSH alias for Hetzner Storage Box. Default: loom-cloud-storage
+  LOOM_CLOUD_STORAGE_HOST Hetzner Storage Box host. Default: u613836.your-storagebox.de
+  LOOM_CLOUD_STORAGE_USER Hetzner Storage Box user. Default: u613836
+  LOOM_CLOUD_STORAGE_PORT Hetzner Storage Box SSH/SFTP port. Default: 23
+  LOOM_CLOUD_STORAGE_KEY  MacBook Storage Box key. Default: ~/.ssh/loom_hetzner_storage_box_mac_ed25519
+  LOOM_CLOUD_FOLDER_PROTOCOL
+                          Direct cloud folder protocol: smb or rclone. Default: smb
+  LOOM_CLOUD_FOLDER_REMOTE
+                          rclone remote name for direct cloud folder. Default: loom-cloud-folder
+  LOOM_CLOUD_FOLDER_ROOT   Remote folder root. Default: loom/cloud-folder
+  LOOM_CLOUD_FOLDER_MOUNT  Local rclone mount path. Default: ~/loom-cloud
+  LOOM_CLOUD_FOLDER_RCLONE_CONFIG
+                          Managed direct-cloud rclone config path. Default: ~/.loom/rclone/loom-cloud-folder.conf
+  LOOM_CLOUD_FOLDER_SMB_HOST
+                          SMB host for direct cloud folder when protocol=smb. Default: LOOM_CLOUD_STORAGE_HOST
+  LOOM_CLOUD_FOLDER_SMB_SHARE
+                          SMB share when protocol=smb. Default: backup
+  LOOM_CLOUD_FOLDER_SMB_FINDER_MOUNT
+                          Finder SMB mount path. Default: /Volumes/<share>
+  LOOM_CLOUD_FOLDER_SMB_USER
+                          SMB user when protocol=smb. Default: LOOM_CLOUD_STORAGE_USER
+  LOOM_CLI_BIN            LOOM CLI binary used by helper commands. Default: loom
+  LOOM_USE_REPO_CLI       Set to 1 to force go run ./cmd/loom from this repository.
+
+Private keys must stay outside this repository. This helper only references
+local config paths. SMB passwords are never stored in this script; use Finder,
+Keychain, or a temporary environment override when explicitly smoke-testing.
+EOF
+}
+
+fail() {
+  printf 'loom-macbook: %s\n' "$*" >&2
+  exit 1
+}
+
+AUTH_FAILURES=0
+AUTH_WARNINGS=0
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"
+}
+
+run_node_agent() {
+  if command -v "$LOOM_NODE_AGENT_BIN" >/dev/null 2>&1; then
+    "$LOOM_NODE_AGENT_BIN" "$@"
+    return
+  fi
+  if command -v go >/dev/null 2>&1 && [[ -d "$REPO_DIR/cmd/loom-node-agent" ]]; then
+    (cd "$REPO_DIR" && go run ./cmd/loom-node-agent "$@")
+    return
+  fi
+  fail "missing loom-node-agent binary; set LOOM_NODE_AGENT_BIN or run from the LOOM repository with Go available"
+}
+
+run_loom_cli() {
+  if [[ "${LOOM_USE_REPO_CLI:-0}" == "1" ]]; then
+    if command -v go >/dev/null 2>&1 && [[ -d "$REPO_DIR/cmd/loom" ]]; then
+      (cd "$REPO_DIR" && go run ./cmd/loom "$@")
+      return
+    fi
+    fail "LOOM_USE_REPO_CLI=1 but Go or $REPO_DIR/cmd/loom is unavailable"
+  fi
+  if command -v "$LOOM_CLI_BIN" >/dev/null 2>&1; then
+    "$LOOM_CLI_BIN" "$@"
+    return
+  fi
+  if command -v go >/dev/null 2>&1 && [[ -d "$REPO_DIR/cmd/loom" ]]; then
+    (cd "$REPO_DIR" && go run ./cmd/loom "$@")
+    return
+  fi
+  fail "missing loom binary; install LOOM CLI or run from the LOOM repository with Go available"
+}
+
+auth_ok() {
+  printf 'ok: %s\n' "$*"
+}
+
+auth_warn() {
+  AUTH_WARNINGS=$((AUTH_WARNINGS + 1))
+  printf 'warning: %s\n' "$*"
+}
+
+auth_fail() {
+  AUTH_FAILURES=$((AUTH_FAILURES + 1))
+  printf 'error: %s\n' "$*"
+}
+
+apple_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "$value"
+}
+
+run_admin_shell() {
+  local command="$1"
+  if sudo -n true 2>/dev/null; then
+    sudo /bin/bash -lc "$command"
+    return
+  fi
+  osascript -e "do shell script $(apple_quote "$command") with administrator privileges"
+}
+
+wg_conf_quoted() {
+  local quoted
+  printf -v quoted '%q' "$WG_CONF"
+  printf '%s' "$quoted"
+}
+
+has_private_route() {
+  netstat -rn -f inet 2>/dev/null | awk '{print $1}' | grep -Eq '^(10\.44|10\.44/24|10\.44\.0\.0/24)$'
+}
+
+cloud_folder_protocol() {
+  printf '%s' "$CLOUD_FOLDER_PROTOCOL" | tr '[:upper:]' '[:lower:]'
+}
+
+is_ipv4_literal() {
+  [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+resolve_host_ip() {
+  local host="$1"
+  if is_ipv4_literal "$host"; then
+    printf '%s\n' "$host"
+    return 0
+  fi
+  if command -v dscacheutil >/dev/null 2>&1; then
+    dscacheutil -q host -a name "$host" 2>/dev/null | awk '/ip_address:/ { print $2; exit }'
+    return 0
+  fi
+  if command -v getent >/dev/null 2>&1; then
+    getent hosts "$host" 2>/dev/null | awk '{ print $1; exit }'
+    return 0
+  fi
+  awk -v host="$host" '
+    $1 !~ /^#/ {
+      for (i = 2; i <= NF; i++) {
+        if ($i == host) {
+          print $1
+          exit
+        }
+      }
+    }
+  ' /etc/hosts 2>/dev/null || true
+}
+
+resolved_storage_host_ip() {
+  resolve_host_ip "$MAIN_SMB_HOST" | sed -n '1p'
+}
+
+is_wireguard_storage_host() {
+  local ip
+  ip="$(resolve_host_ip "$1" 2>/dev/null | sed -n '1p')"
+  case "$ip" in
+    10.44.*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+smb_url_has_inline_secret() {
+  case "$1" in
+    //*:*@*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+should_check_smb_view() {
+  local url="$1"
+  case "$MAIN_SMB_CHECK_VIEW" in
+    1|true|yes) return 0 ;;
+    0|false|no) return 1 ;;
+    auto|"") smb_url_has_inline_secret "$url" ;;
+    *) fail "invalid LOOM_MAIN_SMB_CHECK_VIEW value: $MAIN_SMB_CHECK_VIEW" ;;
+  esac
+}
+
+single_quote() {
+  printf "%s" "$1" | sed "s/'/'\\\\''/g; 1s/^/'/; \$s/\$/'/"
+}
+
+host_alias_names() {
+  local names=("$MAIN_SMB_HOST" "loom-storage" "loom-main-storage" "loom-main")
+  if [[ "$MAIN_BOX_SMB_IP" == "$MAIN_SMB_IP" ]]; then
+    names+=("$MAIN_BOX_SMB_HOST")
+  fi
+  local seen="" name
+  for name in "${names[@]}"; do
+    [[ -n "$name" ]] || continue
+    case " $seen " in
+      *" $name "*) ;;
+      *)
+        printf '%s\n' "$name"
+        seen="$seen $name"
+        ;;
+    esac
+  done
+}
+
+host_alias_line() {
+  printf '%s' "$MAIN_SMB_IP"
+  host_alias_names | while IFS= read -r name; do
+    printf ' %s' "$name"
+  done
+  printf '\n'
+}
+
+macfuse_installed() {
+  [[ -d /Library/Filesystems/macfuse.fs ]] || [[ -d /Library/Filesystems/osxfuse.fs ]] || pkgutil --pkg-info io.macfuse.installer.components.core >/dev/null 2>&1
+}
+
+macfuse_loaded() {
+  kextstat 2>/dev/null | grep -Eiq 'macfuse|osxfuse' && return 0
+  kmutil showloaded 2>/dev/null | grep -Eiq 'macfuse|osxfuse' && return 0
+  return 1
+}
+
+macfuse_load_hint() {
+  printf 'macFUSE is installed but not loaded/approved; approve it in macOS System Settings if prompted, then reboot or run /Library/Filesystems/macfuse.fs/Contents/Resources/load_macfuse'
+}
+
+homebrew_rclone() {
+  local rclone_path brew_prefix
+  rclone_path="$(command -v rclone 2>/dev/null || true)"
+  [[ -n "$rclone_path" ]] || return 1
+  if command -v brew >/dev/null 2>&1; then
+    brew_prefix="$(brew --prefix 2>/dev/null || true)"
+    if [[ -n "$brew_prefix" && "$rclone_path" == "$brew_prefix/bin/rclone" ]]; then
+      return 0
+    fi
+  fi
+  [[ "$rclone_path" == "/opt/homebrew/bin/rclone" || "$rclone_path" == "/usr/local/bin/rclone" ]] && brew list --versions rclone >/dev/null 2>&1
+}
+
+rclone_mount_supported() {
+  command -v rclone >/dev/null 2>&1 || return 1
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    rclone version 2>/dev/null | grep -Eiq 'go/tags:.*cmount'
+    return
+  fi
+  return 0
+}
+
+rclone_mount_hint() {
+  if homebrew_rclone; then
+    printf 'Homebrew rclone on macOS does not support rclone mount; install the official rclone.org binary earlier in PATH or use the default LOOM_CLOUD_FOLDER_PROTOCOL=smb path'
+    return
+  fi
+  printf 'rclone does not advertise macOS cmount support; install the official rclone.org binary earlier in PATH or use the default LOOM_CLOUD_FOLDER_PROTOCOL=smb path'
+}
+
+mount_source_at() {
+  local wanted="$1" line source
+  while IFS= read -r line; do
+    case "$line" in
+      *" on $wanted ("*)
+        source="${line%% on *}"
+        printf '%s\n' "$source"
+        return 0
+        ;;
+    esac
+  done < <(mount 2>/dev/null)
+  return 1
+}
+
+smb_source_matches() {
+  local source="$1" user="$2" host="$3" expected_ip="$4" share="$5"
+  case "$source" in
+    "//$user@$host/$share"|"//$host/$share") return 0 ;;
+  esac
+  if [[ -n "$expected_ip" ]]; then
+    case "$source" in
+      "//$user@$expected_ip/$share"|"//$expected_ip/$share") return 0 ;;
+    esac
+  fi
+  return 1
+}
+
+is_path_mounted() {
+  mount_source_at "$1" >/dev/null 2>&1
+}
+
+is_expected_smb_mounted() {
+  local path="$1" user="$2" host="$3" expected_ip="$4" share="$5" source
+  source="$(mount_source_at "$path" 2>/dev/null || true)"
+  [[ -n "$source" ]] && smb_source_matches "$source" "$user" "$host" "$expected_ip" "$share"
+}
+
+reject_foreign_mount_identity() {
+  local path="$1" user="$2" host="$3" expected_ip="$4" share="$5" source
+  source="$(mount_source_at "$path" 2>/dev/null || true)"
+  [[ -z "$source" ]] && return 0
+  if ! smb_source_matches "$source" "$user" "$host" "$expected_ip" "$share"; then
+    fail "mount path $path is owned by $source, not //$user@$host/$share"
+  fi
+}
+
+attest_main_storage_mount_paths() {
+  reject_foreign_mount_identity "$MAIN_STORAGE_MOUNT" "$MAIN_SMB_USER" "$MAIN_SMB_HOST" "$MAIN_SMB_IP" "$MAIN_SMB_SHARE"
+  reject_foreign_mount_identity "$MAIN_SMB_FINDER_MOUNT" "$MAIN_SMB_USER" "$MAIN_SMB_HOST" "$MAIN_SMB_IP" "$MAIN_SMB_SHARE"
+}
+
+attest_main_box_mount_paths() {
+  reject_foreign_mount_identity "$MAIN_BOX_MOUNT" "$MAIN_BOX_SMB_USER" "$MAIN_BOX_SMB_HOST" "$MAIN_BOX_SMB_IP" "$MAIN_BOX_SMB_SHARE"
+  reject_foreign_mount_identity "$MAIN_BOX_SMB_FINDER_MOUNT" "$MAIN_BOX_SMB_USER" "$MAIN_BOX_SMB_HOST" "$MAIN_BOX_SMB_IP" "$MAIN_BOX_SMB_SHARE"
+}
+
+report_foreign_smb_mounts() {
+  local user="$1" host="$2" expected_ip="$3" share="$4"
+  shift 4
+  local path source
+  for path in "$@"; do
+    source="$(mount_source_at "$path" 2>/dev/null || true)"
+    if [[ -n "$source" ]] && ! smb_source_matches "$source" "$user" "$host" "$expected_ip" "$share"; then
+      printf '  - CONFLICT: %s <- %s (expected //%s@%s/%s)\n' "$path" "$source" "$user" "$host" "$share"
+    fi
+  done
+}
+
+ensure_empty_smb_mount_path() {
+  local path="$1" child
+  [[ "$path" == /* ]] || fail "SMB mount path must be absolute: $path"
+  case "/${path#/}/" in
+    *"//"*|*"/./"*|*"/../"*) fail "SMB mount path must be lexically clean: $path" ;;
+  esac
+  [[ ! -L "$path" ]] || fail "SMB mount path must not be a symlink: $path"
+  if [[ -e "$path" && ! -d "$path" ]]; then
+    fail "SMB mount path exists and is not a directory: $path"
+  fi
+  if [[ ! -e "$path" ]]; then
+    mkdir -p "$path" || fail "cannot create SMB mount path: $path"
+  fi
+  if ! child="$(find "$path" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"; then
+    fail "cannot inspect SMB mount path contents: $path"
+  fi
+  if [[ -n "$child" ]]; then
+    fail "SMB mount path is not empty: $path"
+  fi
+}
+
+mounted_storage_paths() {
+  local path seen=""
+  for path in "$MAIN_STORAGE_MOUNT" "$MAIN_SMB_FINDER_MOUNT"; do
+    [[ -n "$path" ]] || continue
+    case " $seen " in
+      *" $path "*) continue ;;
+    esac
+    seen="$seen $path"
+    if is_expected_smb_mounted "$path" "$MAIN_SMB_USER" "$MAIN_SMB_HOST" "$MAIN_SMB_IP" "$MAIN_SMB_SHARE"; then
+      printf '%s\n' "$path"
+    fi
+  done
+}
+
+mounted_main_box_paths() {
+  local path seen=""
+  for path in "$MAIN_BOX_MOUNT" "$MAIN_BOX_SMB_FINDER_MOUNT"; do
+    [[ -n "$path" ]] || continue
+    case " $seen " in
+      *" $path "*) continue ;;
+    esac
+    seen="$seen $path"
+    if is_expected_smb_mounted "$path" "$MAIN_BOX_SMB_USER" "$MAIN_BOX_SMB_HOST" "$MAIN_BOX_SMB_IP" "$MAIN_BOX_SMB_SHARE"; then
+      printf '%s\n' "$path"
+    fi
+  done
+}
+
+first_mounted_main_box_path() {
+  mounted_main_box_paths | sed -n '1p'
+}
+
+is_main_box_mounted() {
+  [[ -n "$(first_mounted_main_box_path)" ]]
+}
+
+first_mounted_storage_path() {
+  mounted_storage_paths | sed -n '1p'
+}
+
+is_main_storage_mounted() {
+  [[ -n "$(first_mounted_storage_path)" ]]
+}
+
+is_cloud_folder_mounted() {
+  [[ -n "$(first_mounted_cloud_folder_path)" ]]
+}
+
+mounted_cloud_folder_paths() {
+  local path seen=""
+  local candidates=("$CLOUD_FOLDER_MOUNT")
+  if [[ "$(cloud_folder_protocol)" == "smb" ]]; then
+    candidates=("$CLOUD_FOLDER_SMB_FINDER_MOUNT")
+  fi
+  for path in "${candidates[@]}"; do
+    [[ -n "$path" ]] || continue
+    case " $seen " in
+      *" $path "*) continue ;;
+    esac
+    seen="$seen $path"
+    if [[ "$(cloud_folder_protocol)" == "smb" ]]; then
+      if is_expected_smb_mounted "$path" "$CLOUD_FOLDER_SMB_USER" "$CLOUD_FOLDER_SMB_HOST" "" "$CLOUD_FOLDER_SMB_SHARE"; then
+        printf '%s\n' "$path"
+      fi
+    elif rclone_source_matches "$(mount_source_at "$path" 2>/dev/null || true)"; then
+      printf '%s\n' "$path"
+    fi
+  done
+}
+
+rclone_source_matches() {
+  local source="$1" expected="$CLOUD_FOLDER_REMOTE:$CLOUD_FOLDER_ROOT"
+  [[ "$source" == "$expected" || "$source" == "$expected/" ]]
+}
+
+reject_foreign_cloud_mount_identity() {
+  local source
+  if [[ "$(cloud_folder_protocol)" == "smb" ]]; then
+    reject_foreign_mount_identity "$CLOUD_FOLDER_SMB_FINDER_MOUNT" "$CLOUD_FOLDER_SMB_USER" "$CLOUD_FOLDER_SMB_HOST" "" "$CLOUD_FOLDER_SMB_SHARE"
+    return
+  fi
+  source="$(mount_source_at "$CLOUD_FOLDER_MOUNT" 2>/dev/null || true)"
+  if [[ -n "$source" ]] && ! rclone_source_matches "$source"; then
+    fail "cloud mount path $CLOUD_FOLDER_MOUNT is owned by $source, not $CLOUD_FOLDER_REMOTE:$CLOUD_FOLDER_ROOT"
+  fi
+}
+
+first_mounted_cloud_folder_path() {
+  mounted_cloud_folder_paths | sed -n '1p'
+}
+
+cloud_storage_sftp_batch() {
+  local batch_file="$1"
+  local key
+  key="$(expand_user_path "$CLOUD_STORAGE_KEY")"
+  sftp -P "$CLOUD_STORAGE_PORT" -o BatchMode=yes -o ConnectTimeout=8 -i "$key" -b "$batch_file" "$CLOUD_STORAGE_USER@$CLOUD_STORAGE_HOST"
+}
+
+write_cloud_folder_rclone_config() {
+  local key
+  key="$(expand_user_path "$CLOUD_STORAGE_KEY")"
+  mkdir -p "$(dirname "$CLOUD_FOLDER_RCLONE_CONFIG")"
+  umask 077
+  cat >"$CLOUD_FOLDER_RCLONE_CONFIG" <<EOF
+[$CLOUD_FOLDER_REMOTE]
+type = sftp
+host = $CLOUD_STORAGE_HOST
+user = $CLOUD_STORAGE_USER
+port = $CLOUD_STORAGE_PORT
+key_file = $key
+shell_type = unix
+EOF
+  chmod 600 "$CLOUD_FOLDER_RCLONE_CONFIG"
+}
+
+ensure_mount_path() {
+  local path="$1"
+  if [[ -d "$path" ]]; then
+    return
+  fi
+  if mkdir -p "$path" 2>/dev/null; then
+    return
+  fi
+  if [[ "$path" == /Volumes/* ]]; then
+    fail "mount path does not exist and needs admin setup: run sudo mkdir -p $(single_quote "$path") && sudo chown $(id -u):$(id -g) $(single_quote "$path"), or set LOOM_CLOUD_FOLDER_MOUNT to a user-writable path"
+  fi
+  fail "cannot create mount path: $path"
+}
+
+preflight_ok() {
+  printf 'ok\n'
+}
+
+preflight_fail() {
+  printf 'failed (%s)\n' "$1"
+}
+
+expand_user_path() {
+  local path="$1"
+  case "$path" in
+    "~") printf '%s\n' "$HOME" ;;
+    "~/"*) printf '%s/%s\n' "$HOME" "${path#\~/}" ;;
+    *) printf '%s\n' "$path" ;;
+  esac
+}
+
+truthy_enabled() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    yes|true|1|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+ssh_config_for_host() {
+  local host="$1"
+  ssh -G "$host" 2>/dev/null || true
+}
+
+ssh_config_value() {
+  local config="$1"
+  local key="$2"
+  printf '%s\n' "$config" | awk -v key="$key" 'tolower($1) == tolower(key) { print $2; exit }'
+}
+
+ssh_config_file_value() {
+  local host="$1"
+  local key="$2"
+  local config_path="$HOME/.ssh/config"
+  [[ -f "$config_path" ]] || return 0
+  awk -v host="$host" -v key="$key" '
+    tolower($1) == "host" {
+      active = 0
+      for (i = 2; i <= NF; i++) {
+        if ($i == host || $i == "*") {
+          active = 1
+        }
+      }
+      next
+    }
+    active && tolower($1) == tolower(key) {
+      print $2
+      exit
+    }
+  ' "$config_path"
+}
+
+first_existing_identity_for_host() {
+  local host="$1"
+  local config raw path expanded
+  config="$(ssh_config_for_host "$host")"
+  raw="$(printf '%s\n' "$config" | awk 'tolower($1) == "identityfile" { print $2 }')"
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    expanded="$(expand_user_path "$path")"
+    if [[ -f "$expanded" ]]; then
+      printf '%s\n' "$expanded"
+      return 0
+    fi
+  done <<<"$raw"
+  return 1
+}
+
+public_key_fingerprint() {
+  local key="$1"
+  local pub="${key}.pub"
+  if [[ -f "$pub" ]]; then
+    ssh-keygen -lf "$pub" 2>/dev/null | awk '{ print $2; exit }'
+    return 0
+  fi
+  ssh-keygen -lf "$key" 2>/dev/null | awk '{ print $2; exit }'
+}
+
+ssh_agent_has_fingerprint() {
+  local fingerprint="$1"
+  [[ -n "$fingerprint" ]] || return 1
+  ssh-add -l 2>/dev/null | awk '{ print $2 }' | grep -Fx "$fingerprint" >/dev/null 2>&1
+}
+
+smb_keychain_has_credential() {
+  local user="$1" host="$2" display_url="$3"
+  command -v security >/dev/null 2>&1 || return 1
+  local server
+  for server in "$host" "smb://$host" "$display_url"; do
+    security find-internet-password -a "$user" -s "$server" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
+cloud_finder_user_root() {
+  printf '%s/loom-cloud\n' "$CLOUD_FOLDER_SMB_FINDER_MOUNT"
+}
+
+cmd_auth_status() {
+  AUTH_FAILURES=0
+  AUTH_WARNINGS=0
+
+  printf 'LOOM auth status\n\n'
+
+  local command_name
+  for command_name in ssh ssh-add ssh-keygen sftp; do
+    if command -v "$command_name" >/dev/null 2>&1; then
+      auth_ok "$command_name is available"
+    else
+      auth_fail "missing command: $command_name"
+    fi
+  done
+
+  if command -v security >/dev/null 2>&1; then
+    auth_ok "macOS Keychain security command is available"
+  else
+    auth_warn "macOS Keychain security command is unavailable on this host"
+  fi
+
+  local main_config main_host_name main_add_keys main_use_keychain main_identity main_fingerprint
+  main_config="$(ssh_config_for_host "$MAIN_HOST")"
+  if [[ -n "$main_config" ]]; then
+    main_host_name="$(ssh_config_value "$main_config" hostname)"
+    main_add_keys="$(ssh_config_value "$main_config" addkeystoagent)"
+    main_use_keychain="$(ssh_config_value "$main_config" usekeychain)"
+    auth_ok "$MAIN_HOST SSH config resolves hostname ${main_host_name:-unknown}"
+    [[ -n "$main_use_keychain" ]] || main_use_keychain="$(ssh_config_file_value "$MAIN_HOST" usekeychain)"
+    if truthy_enabled "$main_add_keys"; then
+      auth_ok "$MAIN_HOST AddKeysToAgent is enabled"
+    else
+      auth_warn "$MAIN_HOST AddKeysToAgent is ${main_add_keys:-unset}; add 'AddKeysToAgent yes' to avoid repeated passphrase prompts"
+    fi
+    if truthy_enabled "$main_use_keychain"; then
+      auth_ok "$MAIN_HOST UseKeychain is enabled"
+    else
+      auth_warn "$MAIN_HOST UseKeychain is ${main_use_keychain:-unset}; add 'UseKeychain yes' on macOS"
+    fi
+  else
+    auth_fail "could not resolve SSH config for $MAIN_HOST"
+  fi
+
+  main_identity="$(first_existing_identity_for_host "$MAIN_HOST" || true)"
+  if [[ -n "$main_identity" ]]; then
+    auth_ok "$MAIN_HOST identity file exists: $main_identity"
+    main_fingerprint="$(public_key_fingerprint "$main_identity" || true)"
+    if [[ -n "$main_fingerprint" ]]; then
+      if ssh_agent_has_fingerprint "$main_fingerprint"; then
+        auth_ok "$MAIN_HOST identity is loaded in ssh-agent"
+      else
+        auth_warn "$MAIN_HOST identity is not loaded in ssh-agent; run: ssh-add --apple-use-keychain $main_identity"
+      fi
+    else
+      auth_warn "could not compute fingerprint for $MAIN_HOST identity"
+    fi
+  else
+    auth_warn "no existing IdentityFile found in SSH config for $MAIN_HOST"
+  fi
+
+  if ssh -o BatchMode=yes -o ConnectTimeout=5 "$MAIN_HOST" 'true' >/dev/null 2>&1; then
+    auth_ok "BatchMode SSH to $MAIN_HOST succeeds"
+  else
+    auth_fail "BatchMode SSH to $MAIN_HOST failed"
+  fi
+
+  local cloud_config cloud_host_name cloud_add_keys cloud_use_keychain cloud_key cloud_fingerprint
+  cloud_config="$(ssh_config_for_host "$CLOUD_STORAGE_ALIAS")"
+  if [[ -n "$cloud_config" ]]; then
+    cloud_host_name="$(ssh_config_value "$cloud_config" hostname)"
+    cloud_add_keys="$(ssh_config_value "$cloud_config" addkeystoagent)"
+    cloud_use_keychain="$(ssh_config_value "$cloud_config" usekeychain)"
+    if [[ "$cloud_host_name" == "$CLOUD_STORAGE_HOST" ]]; then
+      auth_ok "$CLOUD_STORAGE_ALIAS SSH config points to $CLOUD_STORAGE_HOST"
+    else
+      auth_warn "$CLOUD_STORAGE_ALIAS SSH config hostname is ${cloud_host_name:-unknown}; expected $CLOUD_STORAGE_HOST"
+    fi
+    [[ -n "$cloud_use_keychain" ]] || cloud_use_keychain="$(ssh_config_file_value "$CLOUD_STORAGE_ALIAS" usekeychain)"
+    if truthy_enabled "$cloud_add_keys"; then
+      auth_ok "$CLOUD_STORAGE_ALIAS AddKeysToAgent is enabled"
+    else
+      auth_warn "$CLOUD_STORAGE_ALIAS AddKeysToAgent is ${cloud_add_keys:-unset}; add 'AddKeysToAgent yes' to avoid repeated passphrase prompts"
+    fi
+    if truthy_enabled "$cloud_use_keychain"; then
+      auth_ok "$CLOUD_STORAGE_ALIAS UseKeychain is enabled"
+    else
+      auth_warn "$CLOUD_STORAGE_ALIAS UseKeychain is ${cloud_use_keychain:-unset}; add 'UseKeychain yes' on macOS"
+    fi
+  else
+    auth_warn "could not resolve SSH config for $CLOUD_STORAGE_ALIAS; explicit SFTP key check will still run"
+  fi
+
+  cloud_key="$(expand_user_path "$CLOUD_STORAGE_KEY")"
+  if [[ -f "$cloud_key" ]]; then
+    auth_ok "Storage Box key exists: $cloud_key"
+    cloud_fingerprint="$(public_key_fingerprint "$cloud_key" || true)"
+    if [[ -n "$cloud_fingerprint" ]]; then
+      if ssh_agent_has_fingerprint "$cloud_fingerprint"; then
+        auth_ok "Storage Box key is loaded in ssh-agent"
+      else
+        auth_warn "Storage Box key is not loaded in ssh-agent; run: ssh-add --apple-use-keychain $cloud_key"
+      fi
+    else
+      auth_warn "could not compute fingerprint for Storage Box key"
+    fi
+  else
+    auth_fail "Storage Box key is missing: $cloud_key"
+  fi
+
+  if [[ -f "$cloud_key" ]] && sftp -P "$CLOUD_STORAGE_PORT" -o BatchMode=yes -o ConnectTimeout=5 -i "$cloud_key" -b /dev/null "$CLOUD_STORAGE_USER@$CLOUD_STORAGE_HOST" >/dev/null 2>&1; then
+    auth_ok "BatchMode SFTP to $CLOUD_STORAGE_HOST:$CLOUD_STORAGE_PORT succeeds"
+  else
+    auth_fail "BatchMode SFTP to $CLOUD_STORAGE_HOST:$CLOUD_STORAGE_PORT failed"
+  fi
+
+  if is_main_storage_mounted; then
+    auth_ok "LOOM Main SMB storage is already mounted"
+  elif smb_keychain_has_credential "$MAIN_SMB_USER" "$MAIN_SMB_HOST" "$MAIN_SMB_DISPLAY_URL"; then
+    auth_ok "SMB credential for $MAIN_SMB_USER@$MAIN_SMB_HOST exists in Keychain"
+  else
+    auth_fail "SMB credential for $MAIN_SMB_USER@$MAIN_SMB_HOST is not mounted and was not found in Keychain"
+  fi
+
+  if is_main_box_mounted; then
+    auth_ok "LOOM Main Box SMB share is already mounted"
+  elif smb_keychain_has_credential "$MAIN_BOX_SMB_USER" "$MAIN_BOX_SMB_HOST" "$MAIN_BOX_SMB_DISPLAY_URL"; then
+    auth_ok "SMB credential for $MAIN_BOX_SMB_USER@$MAIN_BOX_SMB_HOST can authenticate the Main Box share"
+  else
+    auth_fail "Main Box SMB credential for $MAIN_BOX_SMB_USER@$MAIN_BOX_SMB_HOST is not mounted and was not found in Keychain"
+  fi
+
+  printf '\nSummary: errors=%d warnings=%d\n' "$AUTH_FAILURES" "$AUTH_WARNINGS"
+  if (( AUTH_FAILURES > 0 )); then
+    return 1
+  fi
+}
+
+cmd_smb_host_alias_status() {
+  local resolved
+  resolved="$(resolved_storage_host_ip || true)"
+  printf 'smb host: %s\n' "$MAIN_SMB_HOST"
+  printf 'expected ip: %s\n' "$MAIN_SMB_IP"
+  printf 'resolved ip: %s\n' "${resolved:-missing}"
+  printf 'hosts line: %s\n' "$(host_alias_line)"
+
+  if is_ipv4_literal "$MAIN_SMB_HOST"; then
+    printf 'status: direct-ip\n'
+    return
+  fi
+  if [[ -z "$resolved" ]]; then
+    fail "$MAIN_SMB_HOST does not resolve. Run scripts/loom-macbook smb-host-alias-install."
+  fi
+  if [[ "$resolved" != "$MAIN_SMB_IP" ]]; then
+    fail "$MAIN_SMB_HOST resolves to $resolved, expected $MAIN_SMB_IP. Run scripts/loom-macbook smb-host-alias-install."
+  fi
+  printf 'status: ok\n'
+}
+
+cmd_smb_host_alias_install() {
+  if is_ipv4_literal "$MAIN_SMB_HOST"; then
+    printf 'SMB host is already an IP literal: %s\n' "$MAIN_SMB_HOST"
+    return
+  fi
+
+  local ip_quoted aliases_quoted command
+  ip_quoted="$(single_quote "$MAIN_SMB_IP")"
+  aliases_quoted="$(single_quote "$(host_alias_names | paste -sd ' ' -)")"
+  command="set -e; tmp=\$(mktemp); awk 'BEGIN { skip = 0 } /^# BEGIN LOOM main storage alias$/ { skip = 1; next } /^# END LOOM main storage alias$/ { skip = 0; next } skip == 0 { print }' /etc/hosts > \"\$tmp\"; { cat \"\$tmp\"; printf '\\n# BEGIN LOOM main storage alias\\n%s %s\\n# END LOOM main storage alias\\n' $ip_quoted $aliases_quoted; } > \"\$tmp.new\"; cp \"\$tmp.new\" /etc/hosts; rm -f \"\$tmp\" \"\$tmp.new\"; dscacheutil -flushcache >/dev/null 2>&1 || true; killall -HUP mDNSResponder >/dev/null 2>&1 || true"
+  run_admin_shell "$command"
+  printf 'Installed LOOM SMB host alias: %s -> %s\n' "$MAIN_SMB_HOST" "$MAIN_SMB_IP"
+  cmd_smb_host_alias_status
+}
+
+cmd_wg_up() {
+  require_command wg-quick
+  [[ -f "$WG_CONF" ]] || fail "WireGuard config does not exist: $WG_CONF"
+
+  if ifconfig 2>/dev/null | grep -q "inet $MAC_WG_IP "; then
+    printf 'wireguard: already up (%s)\n' "$MAC_WG_IP"
+    return
+  fi
+
+  run_admin_shell "/opt/homebrew/bin/wg-quick up $(wg_conf_quoted)"
+  printf 'wireguard: up (%s)\n' "$MAC_WG_IP"
+}
+
+cmd_wg_down() {
+  require_command wg-quick
+  [[ -f "$WG_CONF" ]] || fail "WireGuard config does not exist: $WG_CONF"
+
+  if ! ifconfig 2>/dev/null | grep -q "inet $MAC_WG_IP "; then
+    printf 'wireguard: already down (%s not present)\n' "$MAC_WG_IP"
+    return
+  fi
+
+  run_admin_shell "/opt/homebrew/bin/wg-quick down $(wg_conf_quoted)"
+  printf 'wireguard: down (%s)\n' "$MAC_WG_IP"
+}
+
+cmd_wg_status() {
+  printf 'local interface:\n'
+  ifconfig 2>/dev/null | awk -v ip="$MAC_WG_IP" '
+    /^[a-z0-9]+:/ { iface=$1 }
+    $0 ~ "inet " ip " " { print iface " " $0 }
+  '
+
+  printf '\nlocal route:\n'
+  netstat -rn -f inet 2>/dev/null | awk '$1 ~ /^10\.44/ { print }'
+
+  if [[ -f "$WG_PUB" ]]; then
+    printf '\nvps peer:\n'
+    local pub
+    pub="$(tr -d '\n' < "$WG_PUB")"
+    ssh -o BatchMode=yes "$VPS_HOST" MAC_PUB="$pub" 'bash -s' <<'REMOTE'
+set -euo pipefail
+sudo wg show wg0 latest-handshakes | awk -v pub="$MAC_PUB" '$1 == pub { print "latest_handshake_epoch=" $2 }'
+sudo wg show wg0 transfer | awk -v pub="$MAC_PUB" '$1 == pub { print "transfer_rx_bytes=" $2 "\ntransfer_tx_bytes=" $3 }'
+REMOTE
+  fi
+}
+
+cmd_network_check() {
+  require_command curl
+
+  printf 'ssh main: '
+  ssh -o BatchMode=yes "$MAIN_HOST" 'hostname >/dev/null && systemctl is-active loomd >/dev/null' \
+    && printf 'ok\n' \
+    || fail "ssh main check failed"
+
+  printf 'wireguard route: '
+  has_private_route && printf 'ok\n' || fail "missing 10.44/24 route"
+
+  printf 'wireguard address: '
+  if ifconfig 2>/dev/null | grep -q "inet $MAC_WG_IP "; then
+    printf '%s\n' "$MAC_WG_IP"
+  else
+    fail "missing MacBook WireGuard address $MAC_WG_IP"
+  fi
+
+  printf 'main private health: '
+  curl --max-time 5 -fsS "$MAIN_HTTP_URL/v1/health" | {
+    if command -v jq >/dev/null 2>&1; then
+      jq -r '"ok=" + (.ok|tostring) + " status=" + (.data.status // "unknown") + " node=" + (.data.node.id // "unknown")'
+    else
+      sed 's/[[:space:]]//g'
+    fi
+  }
+
+  cmd_wg_status
+}
+
+cmd_safe_check() {
+  local script_dir
+  script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+  LOOM_RUN_PRODUCTION_MACBOOK_SMOKE=1 "$script_dir/../tests/smoke/v0_5_3_slice_07_final_workspace_lifecycle.sh"
+}
+
+normalized_mount_path() {
+  local path="${1%/}" parent base
+  [[ -n "$path" ]] || path="/"
+  [[ "$path" == /* ]] || fail "mount identity path must be absolute: $path"
+  case "/${path#/}/" in
+    *"//"*|*"/./"*|*"/../"*) fail "mount identity path must be lexically clean: $path" ;;
+  esac
+  parent="$(dirname "$path")"
+  base="$(basename "$path")"
+  if [[ -d "$parent" ]]; then
+    printf '%s/%s\n' "$(cd -P -- "$parent" && pwd)" "$base"
+    return
+  fi
+  printf '%s\n' "$path"
+}
+
+validate_mount_policy_collisions() {
+  local storage_path storage_finder box_path box_finder cloud_path cloud_finder
+  storage_path="$(normalized_mount_path "$MAIN_STORAGE_MOUNT")"
+  storage_finder="$(normalized_mount_path "$MAIN_SMB_FINDER_MOUNT")"
+  box_path="$(normalized_mount_path "$MAIN_BOX_MOUNT")"
+  box_finder="$(normalized_mount_path "$MAIN_BOX_SMB_FINDER_MOUNT")"
+  if [[ "$(cloud_folder_protocol)" == "smb" ]]; then
+    cloud_path="$(normalized_mount_path "$CLOUD_FOLDER_SMB_FINDER_MOUNT")"
+  else
+    cloud_path="$(normalized_mount_path "$CLOUD_FOLDER_MOUNT")"
+  fi
+  cloud_finder="$(normalized_mount_path "$CLOUD_FOLDER_SMB_FINDER_MOUNT")"
+
+  if [[ "$MAIN_SMB_USER" != "$MAIN_BOX_SMB_USER" ]]; then
+    fail "LOOM Main Storage and Box must use the same dedicated SMB user"
+  fi
+
+  local paths=("$storage_path" "$storage_finder" "$box_path" "$box_finder")
+  local owners=("main Storage" "main Storage" "main Box" "main Box")
+  local i j left
+  for ((i = 0; i < ${#paths[@]}; i++)); do
+    for ((j = i + 1; j < ${#paths[@]}; j++)); do
+      if [[ "${paths[$i]}" == "${paths[$j]}" && "${owners[$i]}" != "${owners[$j]}" ]]; then
+        fail "${owners[$i]} and ${owners[$j]} mount identities collide at ${paths[$i]}"
+      fi
+    done
+  done
+
+  for left in "${paths[@]}"; do
+    if [[ "$left" == "$cloud_path" || ( "$(cloud_folder_protocol)" == "smb" && "$left" == "$cloud_finder" ) ]]; then
+      fail "LOOM main and direct cloud mount identities collide at $left"
+    fi
+  done
+
+  if [[ "$(cloud_folder_protocol)" == "smb" ]]; then
+    local storage_host box_host cloud_host
+    storage_host="${MAIN_SMB_IP:-$MAIN_SMB_HOST}"
+    box_host="${MAIN_BOX_SMB_IP:-$MAIN_BOX_SMB_HOST}"
+    cloud_host="$(resolve_host_ip "$CLOUD_FOLDER_SMB_HOST" 2>/dev/null | sed -n '1p')"
+    [[ -n "$cloud_host" ]] || cloud_host="$CLOUD_FOLDER_SMB_HOST"
+    if [[ "$storage_host/$MAIN_SMB_SHARE" == "$cloud_host/$CLOUD_FOLDER_SMB_SHARE" ]]; then
+      fail "LOOM Main Storage and direct cloud SMB identities collide"
+    fi
+    if [[ "$box_host/$MAIN_BOX_SMB_SHARE" == "$cloud_host/$CLOUD_FOLDER_SMB_SHARE" ]]; then
+      fail "LOOM Main Box and direct cloud SMB identities collide"
+    fi
+  fi
+
+  local storage_host box_host
+  storage_host="${MAIN_SMB_IP:-$MAIN_SMB_HOST}"
+  box_host="${MAIN_BOX_SMB_IP:-$MAIN_BOX_SMB_HOST}"
+  if [[ "$storage_host/$MAIN_SMB_SHARE" == "$box_host/$MAIN_BOX_SMB_SHARE" ]]; then
+    fail "LOOM Main Storage and Box SMB identities collide"
+  fi
+}
+
+smb_preflight() {
+  local label="$1" host="$2" expected_ip="$3" share="$4" user="$5" url="$6" display_url="$7" mount_path="$8" finder_path="$9"
+  local failures=0 resolved_ip=""
+
+  validate_mount_policy_collisions
+
+  printf 'mount_smbfs: '
+  command -v mount_smbfs >/dev/null 2>&1 && preflight_ok || { preflight_fail "missing mount_smbfs"; failures=$((failures + 1)); }
+  printf 'smbutil: '
+  command -v smbutil >/dev/null 2>&1 && preflight_ok || { preflight_fail "missing smbutil"; failures=$((failures + 1)); }
+  printf 'nc: '
+  command -v nc >/dev/null 2>&1 && preflight_ok || { preflight_fail "missing nc"; failures=$((failures + 1)); }
+
+  printf 'smb host identity: '
+  resolved_ip="$(resolve_host_ip "$host" 2>/dev/null | sed -n '1p')"
+  if [[ -z "$resolved_ip" ]]; then
+    preflight_fail "$host does not resolve"
+    failures=$((failures + 1))
+  elif [[ -n "$expected_ip" && "$resolved_ip" != "$expected_ip" ]]; then
+    preflight_fail "$host resolves to $resolved_ip, expected $expected_ip"
+    failures=$((failures + 1))
+  else
+    printf '%s -> %s\n' "$host" "$resolved_ip"
+  fi
+
+  printf 'wireguard route: '
+  if [[ "$resolved_ip" == 10.44.* ]]; then
+    has_private_route && preflight_ok || { preflight_fail "missing 10.44/24 route; run scripts/loom-macbook wg-up"; failures=$((failures + 1)); }
+    printf 'wireguard address: '
+    if ifconfig 2>/dev/null | grep -q "inet $MAC_WG_IP "; then
+      printf '%s\n' "$MAC_WG_IP"
+    else
+      preflight_fail "missing $MAC_WG_IP"
+      failures=$((failures + 1))
+    fi
+  else
+    printf 'failed (SMB host must resolve to the private 10.44/24 network)\n'
+    failures=$((failures + 1))
+  fi
+
+  printf 'tcp 445: '
+  if command -v nc >/dev/null 2>&1 && nc -G 5 -z "$host" 445 >/dev/null 2>&1; then
+    preflight_ok
+  else
+    preflight_fail "cannot reach $host:445"
+    failures=$((failures + 1))
+  fi
+
+  printf 'local mount identity: '
+  reject_foreign_mount_identity "$mount_path" "$user" "$host" "$expected_ip" "$share"
+  reject_foreign_mount_identity "$finder_path" "$user" "$host" "$expected_ip" "$share"
+  if is_expected_smb_mounted "$mount_path" "$user" "$host" "$expected_ip" "$share" || is_expected_smb_mounted "$finder_path" "$user" "$host" "$expected_ip" "$share"; then
+    printf 'already mounted as %s\n' "$display_url"
+  else
+    ensure_empty_smb_mount_path "$mount_path"
+    printf '%s\n' "$mount_path"
+  fi
+
+  printf 'smb share: '
+  if should_check_smb_view "$url"; then
+    smbutil view "$url" >/dev/null 2>&1 && printf '%s\n' "$display_url" || {
+      preflight_fail "cannot list $display_url; check Keychain credentials for $user"
+      failures=$((failures + 1))
+    }
+  else
+    printf 'not probed (%s; Finder/Keychain supplies credentials)\n' "$display_url"
+  fi
+
+  if (( failures > 0 )); then
+    fail "$failures $label SMB preflight check(s) failed"
+  fi
+}
+
+cmd_smb_preflight() {
+  smb_preflight "Main Storage" "$MAIN_SMB_HOST" "$MAIN_SMB_IP" "$MAIN_SMB_SHARE" "$MAIN_SMB_USER" "$MAIN_SMB_URL" "$MAIN_SMB_DISPLAY_URL" "$MAIN_STORAGE_MOUNT" "$MAIN_SMB_FINDER_MOUNT"
+}
+
+cmd_main_box_smb_preflight() {
+  smb_preflight "Main Box" "$MAIN_BOX_SMB_HOST" "$MAIN_BOX_SMB_IP" "$MAIN_BOX_SMB_SHARE" "$MAIN_BOX_SMB_USER" "$MAIN_BOX_SMB_URL" "$MAIN_BOX_SMB_DISPLAY_URL" "$MAIN_BOX_MOUNT" "$MAIN_BOX_SMB_FINDER_MOUNT"
+}
+
+mount_smb_with_finder_fallback() {
+  local label="$1" mount_url="$2" finder_url="$3" mount_path="$4" finder_path="$5"
+  local user="$6" host="$7" expected_ip="$8" share="$9"
+
+  if [[ "$finder_url" == //* ]]; then
+    finder_url="smb:${finder_url}"
+  fi
+
+  if mount_smbfs "$mount_url" "$mount_path"; then
+    return 0
+  fi
+  command -v osascript >/dev/null 2>&1 || return 1
+
+  printf '%s direct mount did not consume the Finder Keychain credential; trying Finder.\n' "$label" >&2
+  osascript \
+    -e 'on run argv' \
+    -e 'mount volume item 1 of argv' \
+    -e 'end run' \
+    "$finder_url" >/dev/null 2>&1 || return 1
+  local attempt
+  for attempt in {1..20}; do
+    if is_expected_smb_mounted "$finder_path" "$user" "$host" "$expected_ip" "$share"; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+cmd_mount_main_smb() {
+  require_command mount_smbfs
+  validate_mount_policy_collisions
+  attest_main_storage_mount_paths
+  if is_main_storage_mounted; then
+    printf 'LOOM Main already mounted at %s\n' "$(first_mounted_storage_path)"
+    return
+  fi
+  cmd_smb_preflight
+  mount_smb_with_finder_fallback "LOOM Main Storage" "$MAIN_SMB_URL" "$MAIN_SMB_DISPLAY_URL" "$MAIN_STORAGE_MOUNT" "$MAIN_SMB_FINDER_MOUNT" "$MAIN_SMB_USER" "$MAIN_SMB_HOST" "$MAIN_SMB_IP" "$MAIN_SMB_SHARE" || fail "SMB mount failed. If preflight reached tcp 445, check Keychain/Finder credentials for $MAIN_SMB_USER@$MAIN_SMB_HOST."
+  sleep 1
+  is_main_storage_mounted || fail "SMB mount did not appear at $MAIN_STORAGE_MOUNT or $MAIN_SMB_FINDER_MOUNT"
+  printf 'LOOM Main mounted over SMB at %s\n' "$(first_mounted_storage_path)"
+}
+
+cmd_mount_main_box_smb() {
+  require_command mount_smbfs
+  validate_mount_policy_collisions
+  attest_main_box_mount_paths
+  if is_main_box_mounted; then
+    printf 'LOOM Main Box already mounted at %s\n' "$(first_mounted_main_box_path)"
+    return
+  fi
+  cmd_main_box_smb_preflight
+  mount_smb_with_finder_fallback "LOOM Main Box" "$MAIN_BOX_SMB_URL" "$MAIN_BOX_SMB_DISPLAY_URL" "$MAIN_BOX_MOUNT" "$MAIN_BOX_SMB_FINDER_MOUNT" "$MAIN_BOX_SMB_USER" "$MAIN_BOX_SMB_HOST" "$MAIN_BOX_SMB_IP" "$MAIN_BOX_SMB_SHARE" || fail "Main Box SMB mount failed. Check Keychain/Finder credentials for $MAIN_BOX_SMB_USER@$MAIN_BOX_SMB_HOST."
+  sleep 1
+  is_main_box_mounted || fail "Main Box SMB mount did not appear with the expected identity at $MAIN_BOX_MOUNT or $MAIN_BOX_SMB_FINDER_MOUNT"
+  printf 'LOOM Main Box mounted read/write over SMB at %s\n' "$(first_mounted_main_box_path)"
+}
+
+cmd_unmount_main_smb() {
+  validate_mount_policy_collisions
+  attest_main_storage_mount_paths
+  if ! is_main_storage_mounted; then
+    printf 'LOOM Main is not mounted at %s or %s\n' "$MAIN_STORAGE_MOUNT" "$MAIN_SMB_FINDER_MOUNT"
+    return
+  fi
+  local path unmounted=0
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    umount "$path" 2>/dev/null || diskutil unmount force "$path" >/dev/null
+    unmounted=$((unmounted + 1))
+  done < <(mounted_storage_paths)
+  sleep 1
+  if is_main_storage_mounted; then
+    fail "could not unmount LOOM Main storage"
+  fi
+  printf 'LOOM Main SMB mount unmounted from %d path(s)\n' "$unmounted"
+}
+
+cmd_restart_main_smb() {
+  cmd_unmount_main_smb
+  cmd_mount_main_smb
+}
+
+cmd_unmount_main_box_smb() {
+  validate_mount_policy_collisions
+  attest_main_box_mount_paths
+  if ! is_main_box_mounted; then
+    printf 'LOOM Main Box is not mounted at %s or %s\n' "$MAIN_BOX_MOUNT" "$MAIN_BOX_SMB_FINDER_MOUNT"
+    return
+  fi
+  local path unmounted=0
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    umount "$path" 2>/dev/null || diskutil unmount force "$path" >/dev/null
+    unmounted=$((unmounted + 1))
+  done < <(mounted_main_box_paths)
+  sleep 1
+  if is_main_box_mounted; then
+    fail "could not unmount LOOM Main Box"
+  fi
+  printf 'LOOM Main Box SMB mount unmounted from %d path(s)\n' "$unmounted"
+}
+
+cmd_restart_main_box_smb() {
+  cmd_unmount_main_box_smb
+  cmd_mount_main_box_smb
+}
+
+cmd_main_storage_status_smb() {
+  local resolved_ip
+  resolved_ip="$(resolved_storage_host_ip || true)"
+  printf 'protocol: smb\n'
+  printf 'network state: '
+  if launchctl print "system/local.loom.network-watchdog" >/dev/null 2>&1; then
+    printf 'loom-up (watchdog on)\n'
+  else
+    printf 'loom-down (watchdog off)\n'
+  fi
+  printf 'local mount: '
+  if is_main_storage_mounted; then
+    printf 'mounted\n'
+    mounted_storage_paths | sed 's/^/  - /'
+  else
+    printf 'not mounted at %s or %s\n' "$MAIN_STORAGE_MOUNT" "$MAIN_SMB_FINDER_MOUNT"
+  fi
+  report_foreign_smb_mounts "$MAIN_SMB_USER" "$MAIN_SMB_HOST" "$MAIN_SMB_IP" "$MAIN_SMB_SHARE" "$MAIN_STORAGE_MOUNT" "$MAIN_SMB_FINDER_MOUNT"
+  printf 'smb share: %s\n' "$MAIN_SMB_DISPLAY_URL"
+  printf 'smb host: %s -> %s\n' "$MAIN_SMB_HOST" "${resolved_ip:-missing}"
+  printf 'backing root: configured canonical Storage root (read-only)\n\n'
+
+  printf 'wireguard route: '
+  if is_wireguard_storage_host "$MAIN_SMB_HOST"; then
+    has_private_route && preflight_ok || preflight_fail "missing 10.44/24 route"
+  else
+    printf 'skipped (SMB host is not resolved to 10.44/24)\n'
+  fi
+
+  printf 'tcp 445: '
+  if command -v nc >/dev/null 2>&1 && nc -G 5 -z "$MAIN_SMB_HOST" 445 >/dev/null 2>&1; then
+    preflight_ok
+  else
+    preflight_fail "cannot reach $MAIN_SMB_HOST:445"
+  fi
+
+  printf '\nmain Box local mount: '
+  if is_main_box_mounted; then
+    printf 'mounted\n'
+    mounted_main_box_paths | sed 's/^/  - /'
+  else
+    printf 'not mounted at %s or %s\n' "$MAIN_BOX_MOUNT" "$MAIN_BOX_SMB_FINDER_MOUNT"
+  fi
+  report_foreign_smb_mounts "$MAIN_BOX_SMB_USER" "$MAIN_BOX_SMB_HOST" "$MAIN_BOX_SMB_IP" "$MAIN_BOX_SMB_SHARE" "$MAIN_BOX_MOUNT" "$MAIN_BOX_SMB_FINDER_MOUNT"
+  printf 'main Box share: %s\n' "$MAIN_BOX_SMB_DISPLAY_URL"
+  printf 'main Box backing root: configured canonical Box root (read/write)\n'
+}
+
+cmd_mount_main() {
+  cmd_mount_main_smb
+}
+
+cmd_unmount_main() {
+  cmd_unmount_main_smb
+}
+
+cmd_restart_main_mount() {
+  cmd_restart_main_smb
+}
+
+cmd_main_storage_status() {
+  validate_mount_policy_collisions
+  cmd_main_storage_status_smb
+}
+
+cmd_storage_enable() {
+  run_node_agent storage-mount enable --repair
+}
+
+cmd_storage_disable() {
+  run_node_agent storage-mount disable
+}
+
+cmd_storage_status() {
+  run_node_agent storage-mount status
+}
+
+cmd_storage_repair_once() {
+  run_node_agent storage-mount repair-once --force
+}
+
+cmd_cloud_enable() {
+  LOOM_CLOUD_FOLDER_PROTOCOL=smb run_node_agent storage-mount cloud enable --repair
+}
+
+cmd_cloud_disable() {
+  LOOM_CLOUD_FOLDER_PROTOCOL=smb run_node_agent storage-mount cloud disable
+}
+
+cmd_cloud_repair_once() {
+  LOOM_CLOUD_FOLDER_PROTOCOL=smb run_node_agent storage-mount cloud repair-once --force
+}
+
+cmd_lane_status() {
+  run_loom_cli lane status
+}
+
+cmd_lane_send() {
+  run_loom_cli lane send "$@"
+}
+
+cmd_cloud_status() {
+  local protocol
+  protocol="$(cloud_folder_protocol)"
+  printf 'LOOM Cloud folder\n'
+  printf 'protocol: %s\n' "$protocol"
+  if [[ "$protocol" == "smb" ]]; then
+    printf 'mount path: %s\n' "$(cloud_finder_user_root)"
+  else
+    printf 'mount path: %s\n' "$CLOUD_FOLDER_MOUNT"
+  fi
+  printf 'local mount: '
+  if is_cloud_folder_mounted; then
+    printf 'mounted\n'
+    mounted_cloud_folder_paths | sed 's/^/  - /'
+  else
+    printf 'not mounted\n'
+  fi
+
+  case "$protocol" in
+    rclone)
+      printf 'remote: %s:%s\n' "$CLOUD_FOLDER_REMOTE" "$CLOUD_FOLDER_ROOT"
+      printf 'rclone config: %s\n' "$CLOUD_FOLDER_RCLONE_CONFIG"
+      printf 'scope: user-managed direct cloud folder only\n'
+      printf 'managed roots exposed: no\n'
+
+      printf 'rclone: '
+      command -v rclone >/dev/null 2>&1 && preflight_ok || preflight_fail "missing rclone"
+      printf 'rclone binary: %s\n' "$(command -v rclone 2>/dev/null || printf 'missing')"
+
+      printf 'rclone mount support: '
+      if command -v rclone >/dev/null 2>&1 && rclone_mount_supported; then
+        preflight_ok
+      elif command -v rclone >/dev/null 2>&1; then
+        preflight_fail "$(rclone_mount_hint)"
+      else
+        preflight_fail "missing rclone"
+      fi
+
+      printf 'macFUSE: '
+      macfuse_installed && preflight_ok || preflight_fail "missing macFUSE"
+
+      printf 'macFUSE loaded: '
+      if macfuse_loaded; then
+        preflight_ok
+      else
+        preflight_fail "$(macfuse_load_hint)"
+      fi
+
+      printf 'storage key: '
+      local key
+      key="$(expand_user_path "$CLOUD_STORAGE_KEY")"
+      if [[ -f "$key" ]]; then
+        printf '%s\n' "$key"
+      else
+        preflight_fail "missing $key"
+      fi
+
+      printf 'BatchMode SFTP: '
+      if [[ -f "$key" ]] && cloud_storage_sftp_batch /dev/null >/dev/null 2>&1; then
+        preflight_ok
+      else
+        preflight_fail "cannot authenticate to $CLOUD_STORAGE_HOST:$CLOUD_STORAGE_PORT without prompts"
+      fi
+
+      printf 'remote root: '
+      if command -v rclone >/dev/null 2>&1 && [[ -f "$CLOUD_FOLDER_RCLONE_CONFIG" ]]; then
+        if rclone lsf "$CLOUD_FOLDER_REMOTE:$CLOUD_FOLDER_ROOT" --config "$CLOUD_FOLDER_RCLONE_CONFIG" >/dev/null 2>&1; then
+          printf 'exists\n'
+        else
+          preflight_fail "missing or inaccessible; mount-cloud will try to create it"
+        fi
+      else
+        printf 'not checked (config is created by mount-cloud)\n'
+      fi
+      ;;
+    smb)
+      printf 'smb share: %s\n' "$CLOUD_FOLDER_SMB_DISPLAY_URL"
+      printf 'finder url: %s\n' "$CLOUD_FOLDER_SMB_FINDER_URL"
+      printf 'Finder share mount: %s\n' "$CLOUD_FOLDER_SMB_FINDER_MOUNT"
+      printf 'cloud folder: %s\n' "$(cloud_finder_user_root)"
+      printf 'scope: trusted admin direct Storage Box SMB mount\n'
+      printf 'managed roots exposed: yes, intentionally, because this MacBook is trusted admin-owned\n'
+      report_foreign_smb_mounts "$CLOUD_FOLDER_SMB_USER" "$CLOUD_FOLDER_SMB_HOST" "" "$CLOUD_FOLDER_SMB_SHARE" "$CLOUD_FOLDER_SMB_FINDER_MOUNT"
+      printf 'tcp 445: '
+      if command -v nc >/dev/null 2>&1 && nc -G 5 -z "$CLOUD_FOLDER_SMB_HOST" 445 >/dev/null 2>&1; then
+        preflight_ok
+      else
+        preflight_fail "cannot reach $CLOUD_FOLDER_SMB_HOST:445"
+      fi
+      ;;
+    *)
+      fail "unsupported LOOM_CLOUD_FOLDER_PROTOCOL: $CLOUD_FOLDER_PROTOCOL"
+      ;;
+  esac
+}
+
+cmd_mount_cloud_rclone() {
+  require_command rclone
+  validate_mount_policy_collisions
+  reject_foreign_cloud_mount_identity
+  if is_cloud_folder_mounted; then
+    printf 'LOOM Cloud already mounted at %s\n' "$CLOUD_FOLDER_MOUNT"
+    open "$CLOUD_FOLDER_MOUNT" >/dev/null 2>&1 || true
+    return
+  fi
+
+  local failures=0 key
+  key="$(expand_user_path "$CLOUD_STORAGE_KEY")"
+
+  printf 'rclone: '
+  command -v rclone >/dev/null 2>&1 && preflight_ok || { preflight_fail "install rclone first"; failures=$((failures + 1)); }
+  printf 'rclone binary: %s\n' "$(command -v rclone 2>/dev/null || printf 'missing')"
+
+  printf 'rclone mount support: '
+  if rclone_mount_supported; then
+    preflight_ok
+  else
+    preflight_fail "$(rclone_mount_hint)"
+    failures=$((failures + 1))
+  fi
+
+  printf 'macFUSE: '
+  macfuse_installed && preflight_ok || { preflight_fail "install macFUSE first"; failures=$((failures + 1)); }
+
+  printf 'macFUSE loaded: '
+  if macfuse_loaded; then
+    preflight_ok
+  else
+    preflight_fail "$(macfuse_load_hint)"
+    failures=$((failures + 1))
+  fi
+
+  printf 'storage key: '
+  if [[ -f "$key" ]]; then
+    printf '%s\n' "$key"
+  else
+    preflight_fail "missing $key"
+    failures=$((failures + 1))
+  fi
+
+  printf 'BatchMode SFTP: '
+  if [[ -f "$key" ]] && cloud_storage_sftp_batch /dev/null >/dev/null 2>&1; then
+    preflight_ok
+  else
+    preflight_fail "cannot authenticate to $CLOUD_STORAGE_HOST:$CLOUD_STORAGE_PORT without prompts"
+    failures=$((failures + 1))
+  fi
+
+  if (( failures > 0 )); then
+    fail "$failures LOOM Cloud preflight check(s) failed"
+  fi
+
+  write_cloud_folder_rclone_config
+  printf 'remote root: '
+  rclone mkdir "$CLOUD_FOLDER_REMOTE:$CLOUD_FOLDER_ROOT" --config "$CLOUD_FOLDER_RCLONE_CONFIG" >/dev/null
+  rclone lsf "$CLOUD_FOLDER_REMOTE:$CLOUD_FOLDER_ROOT" --config "$CLOUD_FOLDER_RCLONE_CONFIG" >/dev/null
+  printf '%s:%s\n' "$CLOUD_FOLDER_REMOTE" "$CLOUD_FOLDER_ROOT"
+
+  ensure_mount_path "$CLOUD_FOLDER_MOUNT"
+  mkdir -p "$HOME/.loom/logs"
+  rclone mount "$CLOUD_FOLDER_REMOTE:$CLOUD_FOLDER_ROOT" "$CLOUD_FOLDER_MOUNT" \
+    --config "$CLOUD_FOLDER_RCLONE_CONFIG" \
+    --vfs-cache-mode "$RCLONE_VFS_CACHE_MODE" \
+    --dir-cache-time "$RCLONE_DIR_CACHE_TIME" \
+    --vfs-cache-max-size "$RCLONE_VFS_CACHE_MAX_SIZE" \
+    --vfs-cache-max-age "$RCLONE_VFS_CACHE_MAX_AGE" \
+    --log-file "$HOME/.loom/logs/rclone-cloud-folder.log" \
+    --log-level INFO \
+    --volname "$CLOUD_FOLDER_VOLNAME" \
+    --daemon-wait 10s \
+    --daemon
+  sleep 1
+  is_cloud_folder_mounted || fail "LOOM Cloud mount did not appear at $CLOUD_FOLDER_MOUNT. Check ~/.loom/logs/rclone-cloud-folder.log and macFUSE approval/system-extension state."
+  open "$CLOUD_FOLDER_MOUNT" >/dev/null 2>&1 || true
+  printf 'LOOM Cloud mounted at %s\n' "$CLOUD_FOLDER_MOUNT"
+}
+
+cmd_mount_cloud_smb() {
+  cmd_cloud_enable
+  open "$(cloud_finder_user_root)" >/dev/null 2>&1 || true
+}
+
+cmd_mount_cloud() {
+  validate_mount_policy_collisions
+  case "$(cloud_folder_protocol)" in
+    rclone) cmd_mount_cloud_rclone ;;
+    smb) cmd_mount_cloud_smb ;;
+    *) fail "unsupported LOOM_CLOUD_FOLDER_PROTOCOL: $CLOUD_FOLDER_PROTOCOL" ;;
+  esac
+}
+
+cmd_unmount_cloud() {
+  validate_mount_policy_collisions
+  reject_foreign_cloud_mount_identity
+  if [[ "$(cloud_folder_protocol)" == "smb" ]]; then
+    cmd_cloud_disable
+    return
+  fi
+  if ! is_cloud_folder_mounted; then
+    printf 'LOOM Cloud is not mounted\n'
+    return
+  fi
+  local path unmounted=0
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    umount "$path" 2>/dev/null || diskutil unmount force "$path" >/dev/null
+    unmounted=$((unmounted + 1))
+  done < <(mounted_cloud_folder_paths)
+  sleep 1
+  if is_cloud_folder_mounted; then
+    fail "could not unmount LOOM Cloud"
+  fi
+  printf 'LOOM Cloud unmounted from %d path(s)\n' "$unmounted"
+}
+
+cmd_restart_cloud() {
+  cmd_unmount_cloud
+  cmd_mount_cloud
+}
+
+main() {
+  local command="${1:-}"
+  shift || true
+  case "$command" in
+    auth-status) cmd_auth_status ;;
+    network-check) cmd_network_check ;;
+    safe-check) cmd_safe_check ;;
+    smb-preflight) cmd_smb_preflight ;;
+    smb-host-alias-status) cmd_smb_host_alias_status ;;
+    smb-host-alias-install) cmd_smb_host_alias_install ;;
+    mount-main) cmd_mount_main ;;
+    unmount-main) cmd_unmount_main ;;
+    restart-main-mount) cmd_restart_main_mount ;;
+    mount-main-smb) cmd_mount_main_smb ;;
+    unmount-main-smb) cmd_unmount_main_smb ;;
+    restart-main-smb) cmd_restart_main_smb ;;
+    mount-main-box-smb) cmd_mount_main_box_smb ;;
+    unmount-main-box-smb) cmd_unmount_main_box_smb ;;
+    restart-main-box-smb) cmd_restart_main_box_smb ;;
+    main-storage-status) cmd_main_storage_status ;;
+    storage-enable) cmd_storage_enable ;;
+    storage-disable) cmd_storage_disable ;;
+    storage-status) cmd_storage_status ;;
+    storage-repair-once) cmd_storage_repair_once ;;
+    cloud-enable) cmd_cloud_enable ;;
+    cloud-disable) cmd_cloud_disable ;;
+    cloud-repair-once) cmd_cloud_repair_once ;;
+    lane-status) cmd_lane_status "$@" ;;
+    lane-preflight) cmd_lane_status "$@" ;;
+    lane-send) cmd_lane_send "$@" ;;
+    cloud-status) cmd_cloud_status ;;
+    mount-cloud) cmd_mount_cloud ;;
+    unmount-cloud) cmd_unmount_cloud ;;
+    restart-cloud) cmd_restart_cloud ;;
+    wg-up) cmd_wg_up ;;
+    wg-down) cmd_wg_down ;;
+    wg-status) cmd_wg_status ;;
+    -h|--help|help|"") usage ;;
+    *) fail "unknown command: $command" ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,5 @@
+kind: loom.repository
+schema_version: repo.contract.v0.1
+repository:
+  id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAK
+  project_id: project_01ARZ3NDEKTSV4RRFFQ69G5FB1

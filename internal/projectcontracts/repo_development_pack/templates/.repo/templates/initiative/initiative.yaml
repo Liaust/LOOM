@@ -1,0 +1,11 @@
+kind: initiative
+schema_version: repo.initiative.v1
+id: initiative/<slug>
+slug: <slug>
+title: "<title>"
+status: exploring
+created_at: <YYYY-MM-DD>
+updated_at: <YYYY-MM-DD>
+features: []
+future: []
+releases: []

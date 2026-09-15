@@ -1,0 +1,110 @@
+{
+  "module": {
+    "id": "loom.project-cockpit",
+    "name": "LOOM Project Cockpit",
+    "version": "0.1.0",
+    "kind": "native",
+    "description": "Minimal native module declaration for project status visibility.",
+    "source_ref": "modules/examples/loom-project-cockpit-minimal",
+    "compatible_core_min": "0.0.0-dev"
+  },
+  "requires": {
+    "core_version_min": "0.0.0-dev",
+    "runtime_features": [
+      "postgres",
+      "event_log",
+      "capability_registry"
+    ]
+  },
+  "storage": {
+    "database": {
+      "required": false
+    },
+    "filesystem": {
+      "required": false
+    }
+  },
+  "provides": {
+    "object_types": [],
+    "providers": [
+      {
+        "provider_key": "loom-project-cockpit",
+        "display_name": "LOOM Project Cockpit",
+        "description": "Declared provider for future project cockpit capabilities.",
+        "runtime_requirements": {
+          "node_role": "main"
+        },
+        "health_check_spec": {
+          "kind": "manifest_only"
+        }
+      }
+    ],
+    "capabilities": [
+      {
+        "provider_key": "loom-project-cockpit",
+        "endpoint_name": "status.read",
+        "capability_class_namespace": "module.project_cockpit",
+        "capability_class_name": "status.read",
+        "display_name": "Read Project Cockpit Status",
+        "description": "Return a compact project cockpit status summary after the module is installed and exposed.",
+        "form": "query",
+        "input_schema_json": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "project_ref": {
+              "type": "string"
+            }
+          }
+        },
+        "output_schema_json": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "execution_authorization_level": 1,
+        "risk_level": "low",
+        "side_effects_json": {
+          "writes": false,
+          "external_network": false
+        }
+      }
+    ],
+    "usage_documents": [
+      {
+        "target_kind": "capability",
+        "target_ref": "loom-project-cockpit.status.read",
+        "title": "Project Cockpit Status Read Usage",
+        "path": "usage-documents/status-read.md",
+        "body_format": "markdown",
+        "section_map_json": {
+          "sections": [
+            "direct_use",
+            "workflow_use"
+          ]
+        },
+        "visibility_policy_json": {
+          "agent_visible_after_exposure": true
+        },
+        "review_status": "pending_review"
+      }
+    ],
+    "backup_hooks": [
+      {
+        "hook_key": "manifest-export",
+        "hook_kind": "manifest",
+        "trigger_mode": "manual",
+        "output_schema_json": {
+          "type": "object",
+          "required": [
+            "module",
+            "version",
+            "declarations"
+          ]
+        },
+        "retention_policy_json": {
+          "retain_latest": 5
+        }
+      }
+    ]
+  }
+}

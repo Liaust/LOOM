@@ -1,0 +1,4 @@
+interface:
+  display_name: "Search LOOM Docs"
+  short_description: "Find release-matched LOOM guidance"
+  default_prompt: "Use $search-loom-docs to find and cite the current LOOM guidance for this task."

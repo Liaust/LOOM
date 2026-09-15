@@ -1,0 +1,24 @@
+kind: loom.project
+schema_version: project.contract.v0.3
+
+project:
+  slug: connector-command
+  name: Connector Command
+  description: Example connector with a command-backed runtime capability.
+  owner_node: main
+  status: draft
+
+facets:
+  connectors: true
+
+provider_defaults:
+  scripts_provider: project
+  workflows_provider: project
+
+portal:
+  display_group: projects
+  summary: Connector provider example.
+
+metadata:
+  example: true
+  slice: v0.3-slice-14

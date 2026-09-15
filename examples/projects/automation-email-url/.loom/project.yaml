@@ -1,0 +1,26 @@
+kind: loom.project
+schema_version: project.contract.v0.3
+
+project:
+  slug: automation-email-url
+  name: Automation Email URL
+  description: Example direct-event project that maps an email URL into one script capability call.
+  owner_node: main
+  status: draft
+
+facets:
+  notes: true
+  scripts: true
+  direct_events: true
+
+provider_defaults:
+  scripts_provider: project
+  workflows_provider: project
+
+portal:
+  display_group: projects
+  summary: Direct event example that fetches a URL from an email payload.
+
+metadata:
+  example: true
+  slice: v0.3-slice-14

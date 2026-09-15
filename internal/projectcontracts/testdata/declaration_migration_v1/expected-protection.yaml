@@ -1,0 +1,16 @@
+kind: loom.project
+schema_version: project.contract.v0.5
+project:
+  id: project_01ARZ3NDEKTSV4RRFFQ69G5FAV
+  slug: preview-project
+  name: Preview café 日本
+  description: Existing project
+  owner_node: fixture-node
+  status: active
+resources:
+  documents:
+    kind: protection
+    protection: {policy_ref: .loom/contracts/backup.yaml, path: data/docs}
+  studies:
+    kind: protection
+    protection: {policy_ref: .loom/contracts/backup.yaml, path: data/études}

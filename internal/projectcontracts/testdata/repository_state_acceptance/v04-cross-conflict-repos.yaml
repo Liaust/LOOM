@@ -1,0 +1,11 @@
+kind: loom.repos
+schema_version: repos.contract.v0.4
+
+repos:
+  status: active
+  watch_roots: []
+  members:
+    - id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAA
+      key: stolen-owner
+      path: stolen-owner
+      role: primary

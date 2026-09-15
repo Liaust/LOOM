@@ -1,0 +1,38 @@
+kind: loom.script
+id: word_count
+name: Word Count
+version: "1.0.0"
+description: Count words in a LOOM input object and publish a report artifact.
+entrypoint:
+  command:
+    - sh
+    - word_count.sh
+runtime:
+  kind: shell
+  requires:
+    - sh
+    - wc
+    - grep
+execution:
+  timeout_seconds: 30
+  network: false
+  filesystem:
+    workdir: controlled
+inputs:
+  object:
+    required: true
+    description: Source text object to inspect.
+outputs:
+  word_count:
+    type: integer
+    description: Number of whitespace-delimited words in the source object.
+artifacts:
+  - key: report
+    path: artifacts/report.md
+    type: report
+    title: Word Count Report
+usage_documents:
+  - path: usage.md
+    target: capability-search
+metadata:
+  smoke_slice: "05"

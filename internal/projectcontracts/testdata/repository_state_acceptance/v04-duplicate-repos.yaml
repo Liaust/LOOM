@@ -1,0 +1,15 @@
+kind: loom.repos
+schema_version: repos.contract.v0.4
+
+repos:
+  status: active
+  watch_roots: []
+  members:
+    - id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAK
+      key: first
+      path: first
+      role: primary
+    - id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAK
+      key: second
+      path: second
+      role: component

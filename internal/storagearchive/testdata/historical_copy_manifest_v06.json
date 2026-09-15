@@ -1,0 +1,10 @@
+{
+  "schema_version": "storage.archive_manifest.v0.6",
+  "archive_manifest_id": "storage_archive_manifest_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "archive_key": "project-legacy-copy",
+  "archive_kind": "project_archive",
+  "source_ref": "main/Backups/Projects/legacy",
+  "target_path": "main/Archive/Projects/legacy",
+  "complete": true,
+  "entries": []
+}

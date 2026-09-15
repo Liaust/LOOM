@@ -1,0 +1,21 @@
+# Review aid only. The bridge uses its fixed argv with -F /dev/null.
+# No Include, Match, ProxyCommand, shell expansion or ambient SSH defaults.
+Host loom-mac-computer-use
+    HostName @HOST@
+    User @USER@
+    IdentityFile @IDENTITY_FILE@
+    UserKnownHostsFile @KNOWN_HOSTS@
+    GlobalKnownHostsFile /dev/null
+    BatchMode yes
+    StrictHostKeyChecking yes
+    IdentitiesOnly yes
+    IdentityAgent none
+    ForwardAgent no
+    ClearAllForwardings yes
+    RequestTTY no
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    UpdateHostKeys no
+    ConnectTimeout 5
+    ConnectionAttempts 1
+    RemoteCommand /usr/local/libexec/loom-mac-endpoint

@@ -1,0 +1,22 @@
+kind: loom.script
+id: fail_always
+name: Fail Always
+version: "1.0.0"
+description: Deterministic failing script fixture for job runner smoke tests.
+entrypoint:
+  command:
+    - sh
+    - fail_always.sh
+runtime:
+  kind: shell
+  requires:
+    - sh
+execution:
+  timeout_seconds: 10
+  network: false
+  filesystem:
+    workdir: controlled
+outputs: {}
+artifacts: []
+metadata:
+  smoke_slice: "v0.2-05"

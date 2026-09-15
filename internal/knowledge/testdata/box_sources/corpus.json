@@ -1,0 +1,962 @@
+{
+  "schema_version": "loom.box_sources.corpus.v1",
+  "identity_binding": "fixture_keys_are_not_runtime_ids",
+  "projects": [
+    "atlas",
+    "other"
+  ],
+  "roots": [
+    {
+      "key": "main-notes",
+      "category": "notes",
+      "root_kind": "box_notes",
+      "node_key": "main",
+      "project_key": "",
+      "relative_path": "Notes",
+      "registered": true,
+      "owner_online": true
+    },
+    {
+      "key": "main-topics",
+      "category": "topics",
+      "root_kind": "box_topics",
+      "node_key": "main",
+      "project_key": "",
+      "relative_path": "Topics",
+      "registered": true,
+      "owner_online": true
+    },
+    {
+      "key": "main-library",
+      "category": "library",
+      "root_kind": "box_library",
+      "node_key": "main",
+      "project_key": "",
+      "relative_path": "Library",
+      "registered": true,
+      "owner_online": true
+    },
+    {
+      "key": "atlas-notes",
+      "category": "projects",
+      "root_kind": "project_notes",
+      "node_key": "main",
+      "project_key": "atlas",
+      "relative_path": "Projects/atlas/Notes",
+      "registered": true,
+      "owner_online": true
+    },
+    {
+      "key": "atlas-material",
+      "category": "projects",
+      "root_kind": "project_material",
+      "node_key": "main",
+      "project_key": "atlas",
+      "relative_path": "Projects/atlas",
+      "registered": true,
+      "owner_online": true
+    },
+    {
+      "key": "other-material",
+      "category": "projects",
+      "root_kind": "project_material",
+      "node_key": "main",
+      "project_key": "other",
+      "relative_path": "Projects/other",
+      "registered": true,
+      "owner_online": true
+    },
+    {
+      "key": "main-documents",
+      "category": "documents",
+      "root_kind": "",
+      "node_key": "main",
+      "project_key": "",
+      "relative_path": "Documents",
+      "registered": false,
+      "owner_online": true
+    },
+    {
+      "key": "main-imports",
+      "category": "imports",
+      "root_kind": "",
+      "node_key": "main",
+      "project_key": "",
+      "relative_path": "Imports",
+      "registered": false,
+      "owner_online": true
+    },
+    {
+      "key": "mac-notes",
+      "category": "notes",
+      "root_kind": "box_notes",
+      "node_key": "macbook",
+      "project_key": "",
+      "relative_path": "Notes",
+      "registered": true,
+      "owner_online": false
+    }
+  ],
+  "sources": [
+    {
+      "key": "note",
+      "root_key": "main-notes",
+      "relative_path": "cadence.md",
+      "media": "markdown",
+      "posture": "source_material",
+      "selection": "eligible",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "",
+      "topic_key": "",
+      "collection_key": "",
+      "lifecycle": "active",
+      "extraction": "native_text",
+      "current_version": "note-v2",
+      "versions": [
+        {
+          "key": "note-v1",
+          "fixture_text": "The accepted pilot stores daily snapshots at 03:15. This note records source material, not authority.",
+          "passages": [
+            {
+              "key": "note-p1",
+              "text": "The accepted pilot stores daily snapshots at 03:15. This note records source material, not authority.",
+              "locator": {
+                "kind": "heading",
+                "heading": "Cadence",
+                "page": 0
+              }
+            }
+          ]
+        },
+        {
+          "key": "note-v2",
+          "fixture_text": "The revised pilot measures source-to-search latency independently from query latency.",
+          "passages": [
+            {
+              "key": "note-p2",
+              "text": "The revised pilot measures source-to-search latency independently from query latency.",
+              "locator": {
+                "kind": "heading",
+                "heading": "Cadence",
+                "page": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "topic",
+      "root_key": "main-topics",
+      "relative_path": "atlas/ideas.md",
+      "media": "markdown",
+      "posture": "draft",
+      "selection": "eligible",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "",
+      "topic_key": "atlas",
+      "collection_key": "",
+      "lifecycle": "active",
+      "extraction": "native_text",
+      "current_version": "topic-v1",
+      "versions": [
+        {
+          "key": "topic-v1",
+          "fixture_text": "Atlas brainstorm: perhaps hourly snapshots would make discovery easier.",
+          "passages": [
+            {
+              "key": "topic-p1",
+              "text": "Atlas brainstorm: perhaps hourly snapshots would make discovery easier.",
+              "locator": {
+                "kind": "heading",
+                "heading": "Cadence",
+                "page": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "library-a",
+      "root_key": "main-library",
+      "relative_path": "cadence/source-a.pdf",
+      "media": "pdf_native",
+      "posture": "attributed_claim",
+      "selection": "eligible",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "",
+      "topic_key": "",
+      "collection_key": "cadence",
+      "lifecycle": "active",
+      "extraction": "native_text",
+      "current_version": "library-a-v1",
+      "versions": [
+        {
+          "key": "library-a-v1",
+          "fixture_text": "Source A argues that hourly snapshots reduce the recovery window.\nThe second page discusses write contention.",
+          "passages": [
+            {
+              "key": "library-a-p1",
+              "text": "Source A argues that hourly snapshots reduce the recovery window.",
+              "locator": {
+                "kind": "page",
+                "heading": "",
+                "page": 1
+              }
+            },
+            {
+              "key": "library-a-p2",
+              "text": "The second page discusses write contention.",
+              "locator": {
+                "kind": "page",
+                "heading": "",
+                "page": 2
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "library-b",
+      "root_key": "main-library",
+      "relative_path": "cadence/source-b.md",
+      "media": "markdown",
+      "posture": "attributed_claim",
+      "selection": "eligible",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "",
+      "topic_key": "",
+      "collection_key": "cadence",
+      "lifecycle": "active",
+      "extraction": "native_text",
+      "current_version": "library-b-v1",
+      "versions": [
+        {
+          "key": "library-b-v1",
+          "fixture_text": "Source B argues that daily snapshots avoid unnecessary contention.",
+          "passages": [
+            {
+              "key": "library-b-p1",
+              "text": "Source B argues that daily snapshots avoid unnecessary contention.",
+              "locator": {
+                "kind": "heading",
+                "heading": "Cadence",
+                "page": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "library-office",
+      "root_key": "main-library",
+      "relative_path": "cadence/outline.docx",
+      "media": "docx",
+      "posture": "attributed_claim",
+      "selection": "eligible",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "",
+      "topic_key": "",
+      "collection_key": "cadence",
+      "lifecycle": "active",
+      "extraction": "native_text",
+      "current_version": "library-office-v1",
+      "versions": [
+        {
+          "key": "library-office-v1",
+          "fixture_text": "The reference outline separates recovery time from query latency.",
+          "passages": [
+            {
+              "key": "library-office-p1",
+              "text": "The reference outline separates recovery time from query latency.",
+              "locator": {
+                "kind": "heading",
+                "heading": "Cadence",
+                "page": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "library-scan",
+      "root_key": "main-library",
+      "relative_path": "cadence/scanned.pdf",
+      "media": "pdf_scanned",
+      "posture": "attributed_claim",
+      "selection": "eligible",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "",
+      "topic_key": "",
+      "collection_key": "cadence",
+      "lifecycle": "active",
+      "extraction": "needs_ocr",
+      "current_version": "library-scan-v1",
+      "versions": [
+        {
+          "key": "library-scan-v1",
+          "fixture_text": "",
+          "passages": []
+        }
+      ]
+    },
+    {
+      "key": "library-image",
+      "root_key": "main-library",
+      "relative_path": "cadence/diagram.png",
+      "media": "image",
+      "posture": "attributed_claim",
+      "selection": "eligible",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "",
+      "topic_key": "",
+      "collection_key": "cadence",
+      "lifecycle": "active",
+      "extraction": "needs_image_description",
+      "current_version": "library-image-v1",
+      "versions": [
+        {
+          "key": "library-image-v1",
+          "fixture_text": "",
+          "passages": []
+        }
+      ]
+    },
+    {
+      "key": "library-binary",
+      "root_key": "main-library",
+      "relative_path": "cadence/raw.bin",
+      "media": "unsupported",
+      "posture": "attributed_claim",
+      "selection": "eligible",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "",
+      "topic_key": "",
+      "collection_key": "cadence",
+      "lifecycle": "active",
+      "extraction": "metadata_only",
+      "current_version": "library-binary-v1",
+      "versions": [
+        {
+          "key": "library-binary-v1",
+          "fixture_text": "",
+          "passages": []
+        }
+      ]
+    },
+    {
+      "key": "legacy-project-note",
+      "root_key": "atlas-notes",
+      "relative_path": "design.md",
+      "media": "markdown",
+      "posture": "source_material",
+      "selection": "eligible",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "legacy_notes",
+      "topic_key": "",
+      "collection_key": "",
+      "lifecycle": "active",
+      "extraction": "native_text",
+      "current_version": "legacy-project-note-v1",
+      "versions": [
+        {
+          "key": "legacy-project-note-v1",
+          "fixture_text": "Atlas legacy project Notes must retain their existing identities.",
+          "passages": [
+            {
+              "key": "legacy-project-note-p1",
+              "text": "Atlas legacy project Notes must retain their existing identities.",
+              "locator": {
+                "kind": "heading",
+                "heading": "Cadence",
+                "page": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "project-doc",
+      "root_key": "atlas-material",
+      "relative_path": "docs/architecture.md",
+      "media": "markdown",
+      "posture": "source_material",
+      "selection": "eligible",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "docs",
+      "topic_key": "",
+      "collection_key": "",
+      "lifecycle": "active",
+      "extraction": "native_text",
+      "current_version": "project-doc-v1",
+      "versions": [
+        {
+          "key": "project-doc-v1",
+          "fixture_text": "Atlas architecture declares narrative material without indexing its source tree.",
+          "passages": [
+            {
+              "key": "project-doc-p1",
+              "text": "Atlas architecture declares narrative material without indexing its source tree.",
+              "locator": {
+                "kind": "heading",
+                "heading": "Cadence",
+                "page": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "project-research",
+      "root_key": "atlas-material",
+      "relative_path": "research/questions.md",
+      "media": "markdown",
+      "posture": "source_material",
+      "selection": "eligible",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "research",
+      "topic_key": "",
+      "collection_key": "",
+      "lifecycle": "active",
+      "extraction": "native_text",
+      "current_version": "project-research-v1",
+      "versions": [
+        {
+          "key": "project-research-v1",
+          "fixture_text": "Atlas research separates a hypothesis from an accepted decision.",
+          "passages": [
+            {
+              "key": "project-research-p1",
+              "text": "Atlas research separates a hypothesis from an accepted decision.",
+              "locator": {
+                "kind": "heading",
+                "heading": "Cadence",
+                "page": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "undeclared-code",
+      "root_key": "atlas-material",
+      "relative_path": "src/main.go",
+      "media": "code",
+      "posture": "source_material",
+      "selection": "undeclared_repository",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "",
+      "topic_key": "",
+      "collection_key": "",
+      "lifecycle": "active",
+      "extraction": "native_text",
+      "current_version": "undeclared-code-v1",
+      "versions": [
+        {
+          "key": "undeclared-code-v1",
+          "fixture_text": "Synthetic private implementation marker.",
+          "passages": [
+            {
+              "key": "undeclared-code-p1",
+              "text": "Synthetic private implementation marker.",
+              "locator": {
+                "kind": "heading",
+                "heading": "Cadence",
+                "page": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "duplicate-atlas",
+      "root_key": "atlas-material",
+      "relative_path": "docs/shared.md",
+      "media": "markdown",
+      "posture": "source_material",
+      "selection": "eligible",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "docs",
+      "topic_key": "",
+      "collection_key": "",
+      "lifecycle": "active",
+      "extraction": "native_text",
+      "current_version": "duplicate-atlas-v1",
+      "versions": [
+        {
+          "key": "duplicate-atlas-v1",
+          "fixture_text": "The same copied sentence does not transfer project membership.",
+          "passages": [
+            {
+              "key": "duplicate-atlas-p1",
+              "text": "The same copied sentence does not transfer project membership.",
+              "locator": {
+                "kind": "heading",
+                "heading": "Cadence",
+                "page": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "duplicate-other",
+      "root_key": "other-material",
+      "relative_path": "docs/shared.md",
+      "media": "markdown",
+      "posture": "source_material",
+      "selection": "eligible",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "docs",
+      "topic_key": "",
+      "collection_key": "",
+      "lifecycle": "active",
+      "extraction": "native_text",
+      "current_version": "duplicate-other-v1",
+      "versions": [
+        {
+          "key": "duplicate-other-v1",
+          "fixture_text": "The same copied sentence does not transfer project membership.",
+          "passages": [
+            {
+              "key": "duplicate-other-p1",
+              "text": "The same copied sentence does not transfer project membership.",
+              "locator": {
+                "kind": "heading",
+                "heading": "Cadence",
+                "page": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "documents-default",
+      "root_key": "main-documents",
+      "relative_path": "unregistered.md",
+      "media": "markdown",
+      "posture": "source_material",
+      "selection": "registration_required",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "",
+      "topic_key": "",
+      "collection_key": "",
+      "lifecycle": "active",
+      "extraction": "native_text",
+      "current_version": "documents-default-v1",
+      "versions": [
+        {
+          "key": "documents-default-v1",
+          "fixture_text": "Documents custody does not opt the entire folder into Notes.",
+          "passages": [
+            {
+              "key": "documents-default-p1",
+              "text": "Documents custody does not opt the entire folder into Notes.",
+              "locator": {
+                "kind": "heading",
+                "heading": "Cadence",
+                "page": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "imports-default",
+      "root_key": "main-imports",
+      "relative_path": "unregistered.md",
+      "media": "markdown",
+      "posture": "source_material",
+      "selection": "registration_required",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "",
+      "topic_key": "",
+      "collection_key": "",
+      "lifecycle": "active",
+      "extraction": "native_text",
+      "current_version": "imports-default-v1",
+      "versions": [
+        {
+          "key": "imports-default-v1",
+          "fixture_text": "Imports custody does not authorize extraction.",
+          "passages": [
+            {
+              "key": "imports-default-p1",
+              "text": "Imports custody does not authorize extraction.",
+              "locator": {
+                "kind": "heading",
+                "heading": "Cadence",
+                "page": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "private-topic",
+      "root_key": "main-topics",
+      "relative_path": "atlas/private.md",
+      "media": "markdown",
+      "posture": "draft",
+      "selection": "private_no_index",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "",
+      "topic_key": "atlas",
+      "collection_key": "",
+      "lifecycle": "active",
+      "extraction": "native_text",
+      "current_version": "private-topic-v1",
+      "versions": [
+        {
+          "key": "private-topic-v1",
+          "fixture_text": "Synthetic private brainstorming marker.",
+          "passages": [
+            {
+              "key": "private-topic-p1",
+              "text": "Synthetic private brainstorming marker.",
+              "locator": {
+                "kind": "heading",
+                "heading": "Cadence",
+                "page": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "credential",
+      "root_key": "main-library",
+      "relative_path": "cadence/.env",
+      "media": "text",
+      "posture": "source_material",
+      "selection": "credentials",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "",
+      "topic_key": "",
+      "collection_key": "cadence",
+      "lifecycle": "active",
+      "extraction": "native_text",
+      "current_version": "credential-v1",
+      "versions": [
+        {
+          "key": "credential-v1",
+          "fixture_text": "SYNTHETIC_CREDENTIAL_MARKER_NOT_A_SECRET",
+          "passages": [
+            {
+              "key": "credential-p1",
+              "text": "SYNTHETIC_CREDENTIAL_MARKER_NOT_A_SECRET",
+              "locator": {
+                "kind": "heading",
+                "heading": "Cadence",
+                "page": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "agent-state",
+      "root_key": "main-library",
+      "relative_path": "cadence/.hermes/state.db",
+      "media": "unsupported",
+      "posture": "source_material",
+      "selection": "agent_runtime",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "",
+      "topic_key": "",
+      "collection_key": "cadence",
+      "lifecycle": "active",
+      "extraction": "native_text",
+      "current_version": "agent-state-v1",
+      "versions": [
+        {
+          "key": "agent-state-v1",
+          "fixture_text": "SYNTHETIC_RUNTIME_MARKER",
+          "passages": [
+            {
+              "key": "agent-state-p1",
+              "text": "SYNTHETIC_RUNTIME_MARKER",
+              "locator": {
+                "kind": "heading",
+                "heading": "Cadence",
+                "page": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "cache",
+      "root_key": "main-library",
+      "relative_path": "cadence/.cache/cached.md",
+      "media": "markdown",
+      "posture": "source_material",
+      "selection": "cache",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "",
+      "topic_key": "",
+      "collection_key": "cadence",
+      "lifecycle": "active",
+      "extraction": "native_text",
+      "current_version": "cache-v1",
+      "versions": [
+        {
+          "key": "cache-v1",
+          "fixture_text": "Synthetic cached passage.",
+          "passages": [
+            {
+              "key": "cache-p1",
+              "text": "Synthetic cached passage.",
+              "locator": {
+                "kind": "heading",
+                "heading": "Cadence",
+                "page": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "dependency",
+      "root_key": "atlas-material",
+      "relative_path": "node_modules/demo/README.md",
+      "media": "markdown",
+      "posture": "source_material",
+      "selection": "dependency",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "",
+      "topic_key": "",
+      "collection_key": "",
+      "lifecycle": "active",
+      "extraction": "native_text",
+      "current_version": "dependency-v1",
+      "versions": [
+        {
+          "key": "dependency-v1",
+          "fixture_text": "Synthetic dependency passage.",
+          "passages": [
+            {
+              "key": "dependency-p1",
+              "text": "Synthetic dependency passage.",
+              "locator": {
+                "kind": "heading",
+                "heading": "Cadence",
+                "page": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "build",
+      "root_key": "atlas-material",
+      "relative_path": "dist/generated.md",
+      "media": "markdown",
+      "posture": "source_material",
+      "selection": "build",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "",
+      "topic_key": "",
+      "collection_key": "",
+      "lifecycle": "active",
+      "extraction": "native_text",
+      "current_version": "build-v1",
+      "versions": [
+        {
+          "key": "build-v1",
+          "fixture_text": "Synthetic generated passage.",
+          "passages": [
+            {
+              "key": "build-p1",
+              "text": "Synthetic generated passage.",
+              "locator": {
+                "kind": "heading",
+                "heading": "Cadence",
+                "page": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "ignored",
+      "root_key": "main-topics",
+      "relative_path": "atlas/scratch/ignored.md",
+      "media": "markdown",
+      "posture": "draft",
+      "selection": "loomignore",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "",
+      "topic_key": "atlas",
+      "collection_key": "",
+      "lifecycle": "active",
+      "extraction": "native_text",
+      "current_version": "ignored-v1",
+      "versions": [
+        {
+          "key": "ignored-v1",
+          "fixture_text": "Synthetic loomignore passage.",
+          "passages": [
+            {
+              "key": "ignored-p1",
+              "text": "Synthetic loomignore passage.",
+              "locator": {
+                "kind": "heading",
+                "heading": "Cadence",
+                "page": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "link",
+      "root_key": "main-topics",
+      "relative_path": "atlas/linked.md",
+      "media": "markdown",
+      "posture": "draft",
+      "selection": "link_outside_authority",
+      "entry_type": "symlink",
+      "link_target": "../../private/hidden.md",
+      "declaration": "",
+      "topic_key": "atlas",
+      "collection_key": "",
+      "lifecycle": "active",
+      "extraction": "metadata_only",
+      "current_version": "link-v1",
+      "versions": [
+        {
+          "key": "link-v1",
+          "fixture_text": "",
+          "passages": []
+        }
+      ]
+    },
+    {
+      "key": "offline",
+      "root_key": "mac-notes",
+      "relative_path": "offline.md",
+      "media": "markdown",
+      "posture": "source_material",
+      "selection": "eligible",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "",
+      "topic_key": "",
+      "collection_key": "",
+      "lifecycle": "offline",
+      "extraction": "native_text",
+      "current_version": "offline-v1",
+      "versions": [
+        {
+          "key": "offline-v1",
+          "fixture_text": "This retained observation does not prove the owner is currently online.",
+          "passages": [
+            {
+              "key": "offline-p1",
+              "text": "This retained observation does not prove the owner is currently online.",
+              "locator": {
+                "kind": "heading",
+                "heading": "Cadence",
+                "page": 0
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "key": "archived",
+      "root_key": "main-topics",
+      "relative_path": "atlas/archived.md",
+      "media": "markdown",
+      "posture": "draft",
+      "selection": "eligible",
+      "entry_type": "regular_file",
+      "link_target": "",
+      "declaration": "",
+      "topic_key": "atlas",
+      "collection_key": "",
+      "lifecycle": "archived",
+      "extraction": "native_text",
+      "current_version": "archived-v1",
+      "versions": [
+        {
+          "key": "archived-v1",
+          "fixture_text": "Archived Atlas brainstorming remains a source, not a superseded decision.",
+          "passages": [
+            {
+              "key": "archived-p1",
+              "text": "Archived Atlas brainstorming remains a source, not a superseded decision.",
+              "locator": {
+                "kind": "heading",
+                "heading": "Cadence",
+                "page": 0
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "semantic_records": [
+    {
+      "key": "accepted-cadence",
+      "collection": "accepted_records",
+      "posture": "accepted_decision",
+      "source_version": "note-v1",
+      "passage_key": "note-p1",
+      "text": "A separately accepted synthetic decision selects 03:15 daily; source edits alone do not supersede it."
+    },
+    {
+      "key": "pending-hourly",
+      "collection": "pending_candidates",
+      "posture": "unaccepted_proposal",
+      "source_version": "topic-v1",
+      "passage_key": "topic-p1",
+      "text": "A synthetic hourly proposal remains pending and does not replace the accepted decision."
+    }
+  ]
+}

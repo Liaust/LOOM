@@ -1,0 +1,11 @@
+interface:
+  display_name: "Use LOOM Provenance"
+  short_description: "Retrieve and capture qualified Main context"
+  default_prompt: "Use $use-loom-provenance to retrieve exact Main context or capture source-backed durable meaning as pending candidates, without confusing capture with acceptance."
+policy:
+  allow_implicit_invocation: true
+  visibility: shared_provenance
+dependencies:
+  commands:
+    - loom
+    - curl

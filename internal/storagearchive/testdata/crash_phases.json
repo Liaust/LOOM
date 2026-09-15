@@ -1,0 +1,14 @@
+{
+  "schema_version": "storage.workspace_archive_crash_fixture.v1",
+  "crash_boundaries": [
+    {"operation_kind": "archive", "last_safe_phase": "archive_planned"},
+    {"operation_kind": "archive", "last_safe_phase": "archive_intent_committed"},
+    {"operation_kind": "archive", "last_safe_phase": "archive_payload_moved"},
+    {"operation_kind": "archive", "last_safe_phase": "archive_projections_committed"},
+    {"operation_kind": "restore", "last_safe_phase": "restore_planned"},
+    {"operation_kind": "restore", "last_safe_phase": "restore_intent_committed"},
+    {"operation_kind": "restore", "last_safe_phase": "restore_payload_moved"},
+    {"operation_kind": "restore", "last_safe_phase": "restore_projections_committed"}
+  ],
+  "completion_phases": ["archive_complete", "restore_complete"]
+}

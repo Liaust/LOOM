@@ -1,0 +1,224 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://loom.local/schemas/module-manifest/v0.1/module.schema.json",
+  "title": "LOOM module manifest v0.1",
+  "type": "object",
+  "required": ["module", "requires", "storage", "provides"],
+  "additionalProperties": false,
+  "properties": {
+    "module": {
+      "type": "object",
+      "required": ["id", "name", "version", "kind", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^loom\\.[a-z0-9-]+(\\.[a-z0-9-]+)*$"
+        },
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "kind": {
+          "type": "string",
+          "enum": ["native", "internal", "experimental", "deprecated"]
+        },
+        "description": { "type": "string" },
+        "owner": { "type": "string" },
+        "source_ref": { "type": "string" },
+        "compatible_core_min": { "type": "string" },
+        "compatible_core_max": { "type": "string" }
+      }
+    },
+    "requires": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "core_version_min": { "type": "string" },
+        "core_version_max": { "type": "string" },
+        "runtime_features": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "modules": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "connectors": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "credentials": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "required": ["database", "filesystem"],
+      "additionalProperties": false,
+      "properties": {
+        "database": { "$ref": "#/$defs/storageNeed" },
+        "filesystem": { "$ref": "#/$defs/storageNeed" }
+      }
+    },
+    "provides": {
+      "type": "object",
+      "required": ["object_types", "providers", "capabilities", "usage_documents", "backup_hooks"],
+      "additionalProperties": false,
+      "properties": {
+        "object_types": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/objectType" }
+        },
+        "providers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/provider" }
+        },
+        "capabilities": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/capability" }
+        },
+        "usage_documents": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/usageDocument" }
+        },
+        "backup_hooks": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/backupHook" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "storageNeed": {
+      "type": "object",
+      "required": ["required"],
+      "additionalProperties": false,
+      "properties": {
+        "required": { "type": "boolean" },
+        "metadata": { "type": "object" }
+      }
+    },
+    "objectType": {
+      "type": "object",
+      "required": ["object_type"],
+      "additionalProperties": false,
+      "properties": {
+        "object_type": { "type": "string", "minLength": 1 },
+        "schema_json": { "type": "object" },
+        "default_classification": { "type": "string" },
+        "default_indexing_policy": { "type": "string" },
+        "default_backup_policy": { "type": "string" },
+        "metadata": { "type": "object" }
+      }
+    },
+    "provider": {
+      "type": "object",
+      "required": ["provider_key", "display_name"],
+      "additionalProperties": false,
+      "properties": {
+        "provider_key": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+        },
+        "display_name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "runtime_requirements": { "type": "object" },
+        "health_check_spec": { "type": "object" },
+        "metadata": { "type": "object" }
+      }
+    },
+    "capability": {
+      "type": "object",
+      "required": [
+        "provider_key",
+        "endpoint_name",
+        "capability_class_namespace",
+        "capability_class_name",
+        "display_name",
+        "form"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "provider_key": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+        },
+        "endpoint_name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$"
+        },
+        "capability_class_namespace": { "type": "string", "minLength": 1 },
+        "capability_class_name": { "type": "string", "minLength": 1 },
+        "display_name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "form": {
+          "type": "string",
+          "enum": ["query", "command", "job", "session", "stream", "subscription", "lease"]
+        },
+        "input_schema_json": { "type": "object" },
+        "output_schema_json": { "type": "object" },
+        "execution_authorization_level": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "risk_level": {
+          "type": "string",
+          "enum": ["low", "medium", "high", "critical"]
+        },
+        "side_effects_json": { "type": "object" },
+        "credential_requirements_json": { "type": "object" },
+        "policy_requirements_json": { "type": "object" },
+        "metadata": { "type": "object" }
+      }
+    },
+    "usageDocument": {
+      "type": "object",
+      "required": ["target_kind", "target_ref", "title", "path"],
+      "additionalProperties": false,
+      "properties": {
+        "target_kind": {
+          "type": "string",
+          "enum": ["provider", "capability"]
+        },
+        "target_ref": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "body_format": {
+          "type": "string",
+          "enum": ["markdown", "plain"]
+        },
+        "section_map_json": { "type": "object" },
+        "visibility_policy_json": { "type": "object" },
+        "review_status": {
+          "type": "string",
+          "enum": ["pending_review", "approved", "rejected"]
+        },
+        "metadata": { "type": "object" }
+      }
+    },
+    "backupHook": {
+      "type": "object",
+      "required": ["hook_key", "hook_kind"],
+      "additionalProperties": false,
+      "properties": {
+        "hook_key": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]{0,62}$"
+        },
+        "hook_kind": {
+          "type": "string",
+          "enum": ["manifest", "database_export", "file_export", "object_manifest", "restore_metadata"]
+        },
+        "trigger_mode": {
+          "type": "string",
+          "enum": ["manual", "scheduled_later", "pre_update", "pre_remove"]
+        },
+        "output_schema_json": { "type": "object" },
+        "retention_policy_json": { "type": "object" },
+        "metadata": { "type": "object" }
+      }
+    }
+  }
+}

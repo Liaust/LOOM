@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MAIN_HOST="${LOOM_MAIN_HOST:-loom-dev}"
+WORKSPACE_HOST="${LOOM_WORKSPACE_HOST:-loom-workspace}"
+VPS_HOST="${LOOM_VPS_HOST:-loom-vps}"
+MAIN_HTTP_URL="${LOOM_MAIN_HTTP_URL:-http://10.44.0.2:8080}"
+
+usage() {
+  cat <<EOF
+Usage: scripts/loom-dev-vpn <command>
+
+Commands:
+  status       Show concise WireGuard and LOOM listener status.
+  ping         Ping the hub/main/workspace WireGuard addresses.
+  curl-health  Call the main loomd health endpoint from the workspace VM.
+  wg-show      Show WireGuard state on VPS, main, and workspace.
+
+Environment:
+  LOOM_MAIN_HOST       Main VM SSH alias. Default: loom-dev
+  LOOM_WORKSPACE_HOST  Workspace VM SSH alias. Default: loom-workspace
+  LOOM_VPS_HOST        VPS SSH alias. Default: loom-vps
+  LOOM_MAIN_HTTP_URL   Main private HTTP URL. Default: http://10.44.0.2:8080
+EOF
+}
+
+fail() {
+  printf 'loom-dev-vpn: %s\n' "$*" >&2
+  exit 1
+}
+
+remote() {
+  local host="$1"
+  shift
+  ssh -o BatchMode=yes "$host" "$@"
+}
+
+workspace_sudo() {
+  local command="$1"
+  if [[ -n "${LOOM_WORKSPACE_SUDO_PASSWORD:-}" ]]; then
+    printf '%s\n' "$LOOM_WORKSPACE_SUDO_PASSWORD" | ssh -o BatchMode=yes "$WORKSPACE_HOST" "sudo -S -p '' $command"
+    return
+  fi
+  remote "$WORKSPACE_HOST" "sudo -n $command"
+}
+
+cmd_status() {
+  printf 'vps:\n'
+  remote "$VPS_HOST" 'hostname; ip -br addr show wg0; ss -lntup | grep -E ":(22|51820)\\b|:8080\\b" || true'
+
+  printf '\nmain:\n'
+  remote "$MAIN_HOST" 'hostname; systemctl is-active loomd postgresql wireguard-wg0; ip -br addr show wg0; ss -lntp | grep -E "10\\.44\\.0\\.2:8080|:8080\\b" || true'
+
+  printf '\nworkspace:\n'
+  remote "$WORKSPACE_HOST" 'hostname; systemctl is-active wireguard-wg0; ip -br addr show wg0'
+}
+
+cmd_ping() {
+  remote "$MAIN_HOST" 'ping -c 3 -W 2 10.44.0.1 && ping -c 3 -W 2 10.44.0.3'
+  remote "$WORKSPACE_HOST" 'ping -c 3 -W 2 10.44.0.1 && ping -c 3 -W 2 10.44.0.2'
+}
+
+cmd_curl_health() {
+  remote "$WORKSPACE_HOST" "nix-shell -p curl jq --run 'curl -fsS $MAIN_HTTP_URL/v1/health | jq .'"
+}
+
+cmd_wg_show() {
+  printf 'vps:\n'
+  remote "$VPS_HOST" 'wg show wg0'
+
+  printf '\nmain:\n'
+  remote "$MAIN_HOST" 'sudo wg show wg0'
+
+  printf '\nworkspace:\n'
+  workspace_sudo 'wg show wg0'
+}
+
+main() {
+  local cmd="${1:-}"
+
+  case "$cmd" in
+    status) cmd_status ;;
+    ping) cmd_ping ;;
+    curl-health) cmd_curl_health ;;
+    wg-show) cmd_wg_show ;;
+    -h|--help|help|"") usage ;;
+    *) fail "unknown command: $cmd" ;;
+  esac
+}
+
+main "$@"

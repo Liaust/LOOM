@@ -1,0 +1,23 @@
+kind: loom.project_sync_policy
+schema_version: sync.policy.v0.3
+
+sync:
+  enabled: true
+  defaults:
+    safe_root: project
+    mode: markdown
+    index: markdown_text
+    delete: tombstone
+    max_file_bytes: 1048576
+    max_text_bytes: 524288
+    logical_name_strategy: relative_path
+  roots:
+    - key: notes
+      path: notes
+      include:
+        - "**/*.md"
+        - "**/*.markdown"
+      exclude:
+        - ".obsidian/**"
+        - ".trash/**"
+        - "**/.DS_Store"

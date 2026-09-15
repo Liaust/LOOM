@@ -1,0 +1,22 @@
+kind: loom.repos
+schema_version: repos.contract.v0.4
+
+repos:
+  status: active
+  defaults:
+    sync: false
+    backup: true
+    index: false
+  watch_roots:
+    - key: repositories
+      path: .
+      display_name: Project Repositories
+  members:
+    - id: repo_01ARZ3NDEKTSV4RRFFQ69G6AAD
+      key: core
+      path: core
+      role: primary
+    - id: repo_01ARZ3NDEKTSV4RRFFQ69G6AAE
+      key: plugin
+      path: plugin
+      role: component

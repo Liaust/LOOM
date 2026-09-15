@@ -1,0 +1,25 @@
+{
+  "module": {
+    "id": "loom.everything-template",
+    "name": "LOOM Everything Template",
+    "version": "0.1.0",
+    "kind": "native",
+    "description": "Scaffolded LOOM module."
+  },
+  "requires": {},
+  "storage": {
+    "database": {
+      "required": false
+    },
+    "filesystem": {
+      "required": false
+    }
+  },
+  "provides": {
+    "object_types": [],
+    "providers": [],
+    "capabilities": [],
+    "usage_documents": [],
+    "backup_hooks": []
+  }
+}

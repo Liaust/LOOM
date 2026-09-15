@@ -1,0 +1,4 @@
+interface:
+  display_name: "Orchestrate LOOM Work"
+  short_description: "Map and route cross-project LOOM work"
+  default_prompt: "Use $orchestrate-loom-work to map dependencies and route this LOOM work to bounded owners."

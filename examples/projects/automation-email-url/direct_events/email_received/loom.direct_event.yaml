@@ -1,0 +1,56 @@
+kind: loom.direct_event
+schema_version: direct_event.contract.v0.3
+
+event:
+  key: email_received
+  display_name: Email Received
+  description: Example inbound email notification containing a URL.
+  status: draft
+
+integration:
+  key: gmail
+  display_name: Gmail
+  description: Example Gmail-style private integration.
+  main_auth_level: 3
+
+endpoint:
+  slug: email_received
+  display_name: Email Received
+  event_type: gmail.message.received
+  status: draft
+
+target:
+  capability: main@automation-email-url.fetch_url
+
+auth:
+  profiles:
+    - name: private_network
+      kind: private_network
+      create_if_missing: true
+
+mapping:
+  fields:
+    url:
+      source: body
+      expr: $.url
+    message_id:
+      source: body
+      expr: $.id
+  required:
+    - url
+    - message_id
+
+idempotency:
+  strategy: payload_path
+  path: $.id
+
+response:
+  mode: accepted
+
+storage:
+  payload_limit_bytes: 1048576
+  store_raw_body: true
+
+examples:
+  payload: examples/payload.json
+  expected_mapped_input: examples/expected_mapped_input.json

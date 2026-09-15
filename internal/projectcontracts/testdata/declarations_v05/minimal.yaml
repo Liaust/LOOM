@@ -1,0 +1,8 @@
+kind: loom.project
+schema_version: project.contract.v0.5
+project:
+  id: project_01ARZ3NDEKTSV4RRFFQ69G5FAV
+  slug: plain-project
+  name: Plain project
+  owner_node: main
+resources: {}

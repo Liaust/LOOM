@@ -1,0 +1,52 @@
+{
+  "schema_version": "loom.provenance_repository_card_contract.v1",
+  "semantic_surface": "loom provenance repo list",
+  "exact_get_surface": "loom provenance repo get",
+  "technical_registry_surface": "loom project",
+  "required_top_level_fields": [
+    "repository_id",
+    "name",
+    "aliases",
+    "owning_project",
+    "role",
+    "purpose",
+    "topics",
+    "current_state",
+    "active_focus",
+    "recent_outcomes",
+    "next_priorities",
+    "blockers",
+    "accepted_context",
+    "freshness",
+    "portable_navigation_ref",
+    "tracking_status",
+    "diagnostics",
+    "field_sources"
+  ],
+  "optional_top_level_fields": ["resolved_path"],
+  "required_nested_fields": {
+    "owning_project": ["project_id", "name", "lifecycle", "navigation_ref"],
+    "accepted_context": ["record_id", "summary", "qualification"],
+    "freshness": ["posture", "observed_at", "source_version", "source_digest", "observed_commit", "source_branch", "frontier_posture"],
+    "field_sources": ["source", "posture"]
+  },
+  "field_posture_groups": {
+    "deterministic": ["repository_id", "owning_project", "portable_navigation_ref"],
+    "declared": ["name", "aliases", "role", "purpose", "topics", "current_state", "active_focus", "recent_outcomes", "next_priorities", "blockers"],
+    "accepted": ["accepted_context"],
+    "observed": ["freshness", "tracking_status", "diagnostics"]
+  },
+  "tracking_statuses": ["valid", "not_enabled", "stale", "malformed", "mismatched_owner", "not_observed", "remote_unavailable"],
+  "registered_repository_visibility": "visible_with_typed_status_and_diagnostics",
+  "forbidden_technical_fields": [
+    "project_root",
+    "repository_path",
+    "facet_path",
+    "registry_recorded_at",
+    "contract_schema_version",
+    "membership_source_digest",
+    "git_command",
+    "raw_observation"
+  ],
+  "frontier_rule": "Observed branch, commit, and worktree freshness never imply an accepted repository frontier without a separately reviewed source-state posture."
+}

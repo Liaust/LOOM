@@ -1,0 +1,22 @@
+kind: loom.repos
+schema_version: repos.contract.v0.3
+
+repos:
+  status: active
+  defaults:
+    sync: true
+    backup: false
+    index: true
+    include:
+      - "**/*.go"
+      - "go.mod"
+    exclude:
+      - "vendor/**"
+  roots:
+    - key: source
+      path: source
+      display_name: Source Trees
+      backup: false
+      exclude:
+        - "vendor/**"
+        - "tmp/**"

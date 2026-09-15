@@ -1,0 +1,40 @@
+{
+  "schema_version": "storage.project_archive_adapter_fixtures.v1",
+  "cases": [
+    {
+      "key": "canonical-zero",
+      "owner_node": "main",
+      "root_kind": "canonical",
+      "repository_count": 0,
+      "runtime_facets": []
+    },
+    {
+      "key": "canonical-one",
+      "owner_node": "main",
+      "root_kind": "canonical",
+      "repository_count": 1,
+      "runtime_facets": ["scripts", "watched_roots"]
+    },
+    {
+      "key": "canonical-many",
+      "owner_node": "main",
+      "root_kind": "canonical",
+      "repository_count": 3,
+      "runtime_facets": ["scripts", "workflows", "connectors", "schedules", "direct_events", "watched_roots", "modules", "services"]
+    },
+    {
+      "key": "mac-owned",
+      "owner_node": "macbook",
+      "root_kind": "canonical",
+      "repository_count": 1,
+      "runtime_facets": ["scripts"]
+    },
+    {
+      "key": "external-main",
+      "owner_node": "main",
+      "root_kind": "external",
+      "repository_count": 1,
+      "runtime_facets": ["scripts"]
+    }
+  ]
+}

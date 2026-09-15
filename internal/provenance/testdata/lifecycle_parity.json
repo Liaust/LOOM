@@ -1,0 +1,87 @@
+{
+  "schema_version": "1.0",
+  "upstream_commit": "93d3d94a76059802d00dbbe818cb188babcb18f4",
+  "candidate_registration": {
+    "schema_version": "1.0",
+    "claim": "Use PostgreSQL for the invented durable semantic runtime.",
+    "record_kind": "decision",
+    "record_context": "An invented working agent is choosing storage for a durable semantic runtime.",
+    "sources": [
+      {
+        "source_reference_id": "00000000-0000-4000-8000-000000002001",
+        "kind": "source_gap",
+        "status": "unresolved",
+        "verification_posture": "unverified",
+        "resolver_name": "source-gap",
+        "resolver_version": "1.0",
+        "gap_reason": "The protocol fixture is invented and has no external message store.",
+        "submitted": {
+          "kind": "source_gap",
+          "reason": "The protocol fixture is invented and has no external message store.",
+          "evidence_excerpt": "Use PostgreSQL for the durable semantic runtime."
+        }
+      }
+    ],
+    "ambiguity": [
+      "Hosted multi-user deployments are outside this decision."
+    ],
+    "domain": "invented-provenance-runtime",
+    "visibility": "private",
+    "temporal_interpretation": {
+      "interpretation": "Applies to the invented durable semantic runtime."
+    },
+    "assertion_posture": "accepted",
+    "producer": {
+      "producer_id": "invented-protocol-worker",
+      "producer_kind": "working_agent",
+      "run_id": "00000000-0000-4000-8000-000000001301",
+      "task_id": "invented-protocol-task"
+    },
+    "anchors": {
+      "topics": ["durable storage"],
+      "projects": ["Invented Semantic Runtime"]
+    }
+  },
+  "duplicate_candidate_registration": {
+    "schema_version": "1.0",
+    "claim": "The invented durable semantic runtime should store its state in PostgreSQL.",
+    "record_kind": "decision",
+    "record_context": "A second invented extraction describes the same durable semantic runtime decision.",
+    "sources": [
+      {
+        "source_reference_id": "00000000-0000-4000-8000-000000002002",
+        "kind": "source_gap",
+        "status": "unresolved",
+        "verification_posture": "unverified",
+        "resolver_name": "source-gap",
+        "resolver_version": "1.0",
+        "gap_reason": "The duplicate fixture is invented and has no external message store.",
+        "submitted": {
+          "kind": "source_gap",
+          "reason": "The duplicate fixture is invented and has no external message store.",
+          "evidence_excerpt": "Store the durable semantic state in PostgreSQL."
+        }
+      }
+    ],
+    "domain": "invented-provenance-runtime",
+    "visibility": "private",
+    "temporal_interpretation": {
+      "interpretation": "Applies to the same invented durable semantic runtime."
+    },
+    "assertion_posture": "accepted",
+    "producer": {
+      "producer_id": "invented-protocol-worker",
+      "producer_kind": "working_agent",
+      "run_id": "00000000-0000-4000-8000-000000001301",
+      "task_id": "invented-protocol-task"
+    }
+  },
+  "reconciliation_scenarios": [
+    {"name": "compatible_contexts", "operations": ["accept_candidate"]},
+    {"name": "contradiction", "operations": ["create_resolution_case", "add_relationship"], "relationship_type": "contradicts"},
+    {"name": "refinement", "operations": ["add_relationship"], "relationship_type": "refines"},
+    {"name": "duplicate_provenance", "operations": ["consolidate_candidate"]},
+    {"name": "unresolved_ambiguity", "operations": ["append_qualification", "create_resolution_case"]},
+    {"name": "partial_supersession", "operations": ["create_resolution_case", "add_relationship"], "relationship_type": "partially_supersedes"}
+  ]
+}

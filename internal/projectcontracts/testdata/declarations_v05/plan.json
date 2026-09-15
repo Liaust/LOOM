@@ -1,0 +1,192 @@
+{
+  "schema_version": "project.declaration_plan.v0.5",
+  "plan_id": "sha256:14a02659a0c071efe4d109695bfb601d63c4dc1c7600d5c384a7cfa5db02a14a",
+  "basis": {
+    "schema_version": "project.declaration_plan.v0.5",
+    "target": {
+      "project_id": "project_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "owner_node_id": "node_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "project_root": "/fixture/projects/webdav-pilot",
+      "location_revision": "1"
+    },
+    "sources": [
+      {
+        "ref": ".loom/applications/webdav.yaml",
+        "schema_version": "opaque.fixture.v0.5",
+        "hash": "sha256:fd7d720a0ac1877c8fe6a59fee29925cfcdd596df163993b12c733e6ed600ef7",
+        "revision": "1"
+      },
+      {
+        "ref": ".loom/policies/backup.yaml",
+        "schema_version": "backup.policy.v0.3",
+        "hash": "sha256:aa6191f220c781b0f2fe559df87844010e81459ea971d466cc2c5820c8d92f8b",
+        "revision": "1"
+      },
+      {
+        "ref": ".loom/project.yaml",
+        "schema_version": "project.contract.v0.5",
+        "hash": "sha256:7c475561726d051ceeb293e26b54bcd48b595bddcdd79794aafa76a3efe86c97",
+        "revision": "1"
+      },
+      {
+        "ref": "credential:webdav.auth",
+        "schema_version": "opaque.fixture.v0.5",
+        "hash": "sha256:a0967f59a429fa7927a5a4ea06b4da94a78e9e1382a6c51436ba45db7e211f7e",
+        "revision": "1"
+      },
+      {
+        "ref": "endpoint:webdav.private",
+        "schema_version": "opaque.fixture.v0.5",
+        "hash": "sha256:e4db706e59d62e46064e94fea37cf95f04cbe6e6317e9e2e936d60866f41b7e3",
+        "revision": "1"
+      }
+    ],
+    "bindings": {
+      "code": {
+        "kind": "repository",
+        "repository_id": "repo_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+      },
+      "reading": {
+        "kind": "knowledge"
+      },
+      "retained": {
+        "kind": "protection"
+      },
+      "webdav": {
+        "kind": "application"
+      }
+    },
+    "revisions": {
+      "projects:registry": "1",
+      "projects:lifecycle": "1",
+      "authorization:actor_01ARZ3NDEKTSV4RRFFQ69G5FAV:node_01ARZ3NDEKTSV4RRFFQ69G5FAV": "1",
+      "owner:application-support": "fixture-supported-v1",
+      "projectcontracts:.loom/policies/backup.yaml": "1"
+    },
+    "effects": [
+      "reconcile"
+    ],
+    "actions": [
+      {
+        "id": "register_project:project",
+        "kind": "register_project",
+        "owner": "projects",
+        "target_ref": "project_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "input_hash": "sha256:2fffe3c4189f5b3bfcac994b16b4af2a4dc426c39faf83191ec185c1c7ba5db7",
+        "depends_on": [],
+        "authorization": {
+          "actor_id": "actor_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          "node_id": "node_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          "level": 3,
+          "policy_revision": "1",
+          "approval_required": false
+        }
+      },
+      {
+        "id": "reconcile_protection:retained",
+        "kind": "reconcile_protection",
+        "owner": "backupcontracts",
+        "target_ref": "project_01ARZ3NDEKTSV4RRFFQ69G5FAV/retained",
+        "input_hash": "sha256:719e930e60e5faf954db56446f36f018416296e8fea772c96bf1629a171e0947",
+        "depends_on": [
+          "register_project:project"
+        ],
+        "authorization": {
+          "actor_id": "actor_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          "node_id": "node_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          "level": 3,
+          "policy_revision": "1",
+          "approval_required": false
+        },
+        "resource": "retained"
+      },
+      {
+        "id": "enroll_knowledge:reading",
+        "kind": "enroll_knowledge",
+        "owner": "knowledge",
+        "target_ref": "project_01ARZ3NDEKTSV4RRFFQ69G5FAV/reading",
+        "input_hash": "sha256:16494bd145a7f19c5837f480c915cdd7e9ea71b142dee727368ba5b9cbcf6552",
+        "depends_on": [
+          "register_project:project"
+        ],
+        "authorization": {
+          "actor_id": "actor_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          "node_id": "node_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          "level": 3,
+          "policy_revision": "1",
+          "approval_required": false
+        },
+        "resource": "reading"
+      },
+      {
+        "id": "register_repository:code",
+        "kind": "register_repository",
+        "owner": "projects",
+        "target_ref": "project_01ARZ3NDEKTSV4RRFFQ69G5FAV/code",
+        "input_hash": "sha256:bffe81947e97d79716e7192d693240497d604169bd270e0cb758c29dc70b2e1b",
+        "depends_on": [
+          "register_project:project"
+        ],
+        "authorization": {
+          "actor_id": "actor_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          "node_id": "node_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          "level": 3,
+          "policy_revision": "1",
+          "approval_required": false
+        },
+        "resource": "code"
+      },
+      {
+        "id": "apply_application:webdav",
+        "kind": "apply_application",
+        "owner": "serviceregistry",
+        "target_ref": "project_01ARZ3NDEKTSV4RRFFQ69G5FAV/webdav",
+        "input_hash": "sha256:9b1b868778f0d330d2c0292ec653e051fbd490d669b507c4cdcdbf5375584a89",
+        "depends_on": [
+          "reconcile_protection:retained",
+          "register_repository:code"
+        ],
+        "authorization": {
+          "actor_id": "actor_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          "node_id": "node_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          "level": 3,
+          "policy_revision": "1",
+          "approval_required": false
+        },
+        "resource": "webdav"
+      }
+    ]
+  },
+  "readiness": {
+    "desired": {
+      "state": "satisfied",
+      "revision": "1"
+    },
+    "queued": {
+      "state": "pending",
+      "revision": "1"
+    },
+    "applied": {
+      "state": "pending",
+      "revision": "1"
+    },
+    "processing": {
+      "state": "unknown",
+      "revision": "1"
+    },
+    "healthy": {
+      "state": "unknown",
+      "revision": "1"
+    },
+    "protected": {
+      "state": "pending",
+      "revision": "1"
+    },
+    "verified": {
+      "state": "unknown",
+      "revision": "1"
+    }
+  },
+  "errors": [],
+  "generated_at": "2026-09-12T00:00:00Z"
+}

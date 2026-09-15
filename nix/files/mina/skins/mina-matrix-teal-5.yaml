@@ -1,0 +1,107 @@
+# MINA Theme Lab — complete Hermes skin
+name: "mina-matrix-teal-5"
+description: "MINA custom theme; 40 x 20 inverted Braille."
+colors:
+  background: "#000000"
+  ui_primary: "#48edbb"
+  ui_text: "#c2ddd4"
+  ui_border: "#1b443b"
+  banner_border: "#1b443b"
+  banner_title: "#d5fff0"
+  banner_accent: "#7bc6b0"
+  banner_dim: "#72958e"
+  banner_text: "#c2ddd4"
+  ui_accent: "#2fe7b8"
+  ui_label: "#7bc6b0"
+  ui_tool: "#6adab9"
+  ui_thinking: "#79b6a5"
+  ui_ok: "#48dfb5"
+  ui_warn: "#d2e3da"
+  ui_error: "#ffffff"
+  prompt: "#c2ddd4"
+  input_rule: "#267565"
+  response_border: "#39796a"
+  session_label: "#68d7b6"
+  session_border: "#72958e"
+  shell_dollar: "#54f0be"
+  status_bar_bg: "#0a1614"
+  status_bar_text: "#89ada4"
+  status_bar_strong: "#48edbb"
+  status_bar_dim: "#72958e"
+  status_bar_good: "#48dfb5"
+  status_bar_warn: "#d2e3da"
+  status_bar_bad: "#b8d5c9"
+  status_bar_critical: "#ffffff"
+  voice_status_bg: "#0c211d"
+  selection_bg: "#193f38"
+  completion_menu_bg: "#000000"
+  completion_menu_current_bg: "#17382d"
+  completion_menu_meta_bg: "#0a1614"
+  completion_menu_meta_current_bg: "#20463c"
+  diff_added: "#12382f"
+  diff_removed: "#1b1f1e"
+  diff_added_word: "#71edc8"
+  diff_removed_word: "#abc2bb"
+  syntax_string: "#7cdcc1"
+  syntax_number: "#b0edd7"
+  syntax_keyword: "#c8fff0"
+  syntax_comment: "#72958e"
+spinner:
+  waiting_faces: ["·....",".·...","..·..","...·.","....·","...·.","..·..",".·..."]
+  thinking_faces: [".....","..:..",".:::.",":::::",".:::.","..:.."]
+  thinking_verbs: ["thinking","checking assumptions","connecting ideas","testing possibilities","working through it","cross-checking"]
+  wings: [["⟨","⟩"]]
+branding:
+  session_hero_alignment: "center"
+  agent_name: "MINA"
+  welcome: "MINA online. Type /help for commands."
+  goodbye: "See you soon."
+  response_label: " ∴ MINA "
+  prompt_symbol: "›"
+  help_header: "∴ MINA / COMMANDS"
+tool_prefix: "·"
+tool_emojis:
+  clarify: "?"
+  terminal: "›"
+  read_file: "≡"
+  write_file: "Δ"
+  patch: "Δ"
+  search_files: "⌕"
+  web_search: "⌕"
+  browser: "⊙"
+  execute_code: "∿"
+  code_execution: "∿"
+  python: "∿"
+  delegate_task: "λ"
+  delegation: "λ"
+  memory: "μ"
+  session_search: "⌕"
+  cronjob: "⧖"
+banner_hero: |-
+  [#d4fff0]⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠟⠉⠉⠉⠉⠙⠻⠻⠿⠻⠿⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿[/]
+  [#c7feea]⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠛⠋⠁           ⠈⠁⠙⠿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿[/]
+  [#bbfce4]⣿⣿⣿⣿⣿⣿⣿⡟⠉           ⢀⣠⣀⣀⠈⠻⣿⡆ ⠝⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿[/]
+  [#aefbde]⣿⣿⣿⣿⣿⡿⠋    ⢀⡀        ⠉⠛⠛⠳ ⠈   ⠘⣟⣿⣿⣿⣿⣿⣿⣿⣿[/]
+  [#a1fad8]⣿⣿⣿⣿⠏   ⡠⠰⠃⠞⠁   ⠈⠛⢆            ⠈⠺⣿⣿⣿⣿⣿⣿⣿[/]
+  [#95f8d2]⣿⣿⣿⠃⡔         ⢷⡀                 ⠹⣿⣿⣿⣿⣿⣿[/]
+  [#88f7cc]⣿⣿⣿⠸⠁       ⢰ ⡸⣷⣦⠳⢄       ⠶⢋⣀     ⢾⣿⣿⣿⣿⣿[/]
+  [#7cf6c6]⣿⣿⣿       ⣇ ⢸⣆⣃⣥⣾⡿⠿⠿⡆     ⢠⣯⣶⣦   ⡀ ⠻⢿⣿⣿⣿[/]
+  [#70f3c0]⣿⣿⡇⣀    ⢘⣈⣘⣧⣤⣻⣿⣏⣴⣦⣀⣼⣿⡀  ⡀⠁⠘⣛⣿⡿   ⢳  ⠸⣿⣿⣿[/]
+  [#68edba]⣿⣿⢸⣿ ⡀   ⠉⣥⣈⣻⣿⣿⣿⣿⣿⣿⣿⣿⡇  ⣇⡆⠠⣈⢓    ⠘  ⠈⣿⣿⣿[/]
+  [#5fe8b5]⣿⣿⣼⣿⢠     ⢶⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷ ⡆⢟⡃⢀⠉        ⡄⢹⣿⣿[/]
+  [#56e3b0]⣿⣿⣿⣿⣏⡆    ⠸⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⡀⣴⣏⠇⡈        ⢰⡃⣼⣿⣿[/]
+  [#4dddaa]⣿⣿⣿⣿⣿⠁     ⠹⣿⣏⣭⣭⣽⣿⣿⣿⣿⣿⢷⠿⣋⡄⣁      ⢀ ⣸⣿⣿⣿⣿[/]
+  [#44d8a5]⣿⣿⣿⣿⣷⡆⢸⡄⢀   ⠈⢻⣷⣾⣿⣿⣿⣿⠿⣫⢠⣿⡿⡇⢹⡀ ⡀⣁⡀⣤⣿⣾⣿⣿⣿⣿⣿[/]
+  [#3bd3a0]⣿⣿⣿⣿⣿⣿⣎⣧⣿⡆ ⢣  ⠹⢿⡿⠟⠋⢁⣾⣿⢸⣿⡿⢡⠘⠇⠈⠙⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿[/]
+  [#32cd9a]⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣄⣦⣶⣔⣄⣀⣀⣀⡀⢻⣿⣿⠏⠟⠃     ⠻⣿⣿⣿⣿⣿⣿⣿⣿⣿[/]
+  [#29c895]⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡏ ⠈⠁         ⢀⣙⠿⣿⣿⣿⣿⣿⣿⣿[/]
+  [#26b88a]⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠟         ⢀⣠⣾⣿⣿⣿⣮⣽⣟⣿⣿⣿⣿[/]
+  [#25a27b]⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⠗          ⣠⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿[/]
+  [#248c6d]⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣥⣤⣤⣤⣤⣤⣤⣤⣤⣤⣤⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿[/]
+banner_logo: |-
+  [#d4fff0]███╗   ███╗ ██╗ ███╗   ██╗  █████╗ [/]
+  [#a4fad9]████╗ ████║ ██║ ████╗  ██║ ██╔══██╗[/]
+  [#74f5c2]██╔████╔██║ ██║ ██╔██╗ ██║ ███████║[/]
+  [#52e1ae]██║╚██╔╝██║ ██║ ██║╚██╗██║ ██╔══██║[/]
+  [#30cc99]██║ ╚═╝ ██║ ██║ ██║ ╚████║ ██║  ██║[/]
+  [#248c6d]╚═╝     ╚═╝ ╚═╝ ╚═╝  ╚═══╝ ╚═╝  ╚═╝[/]

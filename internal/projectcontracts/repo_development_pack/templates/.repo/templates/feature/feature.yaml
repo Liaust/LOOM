@@ -1,0 +1,14 @@
+kind: feature
+schema_version: repo.feature.v1
+id: feature/<slug>
+slug: <slug>
+title: "<title>"
+status: planned
+priority: medium
+initiative: null
+target_release: null
+dependencies: []
+created_at: <YYYY-MM-DD>
+updated_at: <YYYY-MM-DD>
+next_action: "Complete accepted scope and slice planning."
+blocked_reason: null

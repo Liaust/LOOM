@@ -1,0 +1,8 @@
+kind: loom.project
+schema_version: project.contract.v0.3
+project:
+  slug: preview-project
+  name: Preview café 日本
+  description: Existing project
+  owner_node: fixture-node
+  status: active

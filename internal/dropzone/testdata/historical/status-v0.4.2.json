@@ -1,0 +1,26 @@
+{
+  "runtime_state": "active",
+  "profile": "workspace",
+  "root_path": "/Users/example/loom-box",
+  "dropzone_path": "/Users/example/loom-box/Dropzone",
+  "status_dir": "/Users/example/.loom-box-state/dropzone",
+  "transfers_dir": "/Users/example/.loom-box-state/dropzone/transfers",
+  "policy_enabled": true,
+  "policy_schema": "loom.box.transfer_policy.v0.4.2",
+  "source_policy_schema": "loom.box.transfer_policy.v0.4.2",
+  "target": "main",
+  "counts": {"accepted": 1},
+  "accepted": [{
+    "transfer_id": "drop_historical_transfer",
+    "relative_dropzone_path": "Research/report.pdf",
+    "file_size_bytes": 128,
+    "status": "accepted",
+    "uploaded_bytes": 128,
+    "safe_to_delete": true,
+    "remote_storage_path": "/srv/loom/box/.loom/storage/dropzone/macbook/2026-06-05/drop_historical_transfer/report.pdf",
+    "storage_entry_id": "storage_entry_historical",
+    "updated_at": "2026-06-05T12:02:00Z",
+    "accepted_at": "2026-06-05T12:02:00Z"
+  }],
+  "inspected_at": "2026-06-05T12:03:00Z"
+}

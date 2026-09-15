@@ -1,0 +1,8 @@
+{
+  "schema_version": "project.declaration_request.v0.5",
+  "project_ref": "webdav-pilot",
+  "node_ref": "main",
+  "effects": [
+    "reconcile"
+  ]
+}

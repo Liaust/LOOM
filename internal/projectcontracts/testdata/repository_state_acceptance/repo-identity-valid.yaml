@@ -1,0 +1,5 @@
+kind: loom.repository
+schema_version: repo.contract.v0.1
+repository:
+  id: __REPOSITORY_ID__
+  project_id: __PROJECT_ID__

@@ -1,0 +1,13 @@
+{
+  "categories": [
+    "invalid_source",
+    "missing_evidence",
+    "conflict",
+    "unrepresentable",
+    "unsupported_subset"
+  ],
+  "disposition": "refused",
+  "candidate": null,
+  "basis_kind": "supplied_snapshot",
+  "runtime_assessment": "not_performed"
+}

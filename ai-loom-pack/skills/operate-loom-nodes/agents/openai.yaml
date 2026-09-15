@@ -1,0 +1,4 @@
+interface:
+  display_name: "Operate LOOM Nodes"
+  short_description: "Diagnose LOOM nodes and runtime health"
+  default_prompt: "Use $operate-loom-nodes to inspect and safely plan this LOOM node operation."

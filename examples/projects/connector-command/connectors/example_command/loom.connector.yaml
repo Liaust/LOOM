@@ -1,0 +1,37 @@
+kind: loom.connector
+schema_version: connector.contract.v0.3
+
+provider:
+  key: example_command
+  display_name: Example Command
+  description: Example command-backed connector provider.
+  type: connector
+  version: 0.1.0
+  status: draft
+
+runtime:
+  kind: command
+
+capabilities:
+  - endpoint: ping
+    display_name: Ping
+    description: Deterministic command-backed connector capability.
+    form: job
+    risk_level: low
+    side_effects: []
+    input_schema:
+      type: object
+    output_schema:
+      type: object
+    runtime:
+      kind: command
+      config:
+        argv:
+          - printf
+          - '{"message":"pong","source":"connector-command"}'
+        output:
+          mode: json
+
+usage_documents:
+  - path: README.md
+    target: provider

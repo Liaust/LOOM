@@ -1,0 +1,10 @@
+kind: release
+schema_version: repo.release.v1
+id: release/<version>
+version: <version>
+status: planning
+objective: "<release objective>"
+features: []
+created_at: <YYYY-MM-DD>
+updated_at: <YYYY-MM-DD>
+target_date: null

@@ -1,0 +1,14 @@
+kind: loom.repos
+schema_version: repos.contract.v0.4
+
+repos:
+  status: active
+  defaults:
+    sync: false
+    backup: false
+    index: false
+  watch_roots:
+    - key: repos
+      path: .
+      display_name: Project Repositories
+  members: []

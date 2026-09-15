@@ -1,0 +1,15 @@
+kind: loom.notes
+schema_version: notes.contract.v0.3
+
+notes:
+  status: draft
+  sync: true
+  index: true
+  backup: false
+  root_key: notes
+  path: .
+  include:
+    - "**/*.md"
+  exclude:
+    - ".obsidian/**"
+    - ".trash/**"

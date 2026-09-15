@@ -1,0 +1,22 @@
+kind: loom.project_backup_policy
+schema_version: backup.policy.v0.3
+
+backup:
+  enabled: true
+  defaults:
+    max_file_bytes: 1048576
+    max_batch_bytes: 1048576
+    max_pending_items: 10000
+    max_pending_bytes: 1073741824
+    include_deletion_markers: true
+    on_limit: degrade_and_require_manual_action
+  roots:
+    - key: project
+      path: .
+      display_name: Research Project Backup
+      mode: incremental_raw
+      include:
+        - "**/*"
+      exclude:
+        - "**/.git/**"
+        - "**/.DS_Store"

@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "repository": "same-owner-provenance-predecessor",
+  "commit": "93d3d94a76059802d00dbbe818cb188babcb18f4",
+  "source_posture": "same-owner private adaptation",
+  "license_declaration": "absent",
+  "included_migrations": [
+    {
+      "version": 1,
+      "path": "src/provenance/migrations/001_initial.sql",
+      "sha256": "b389be4d0329b2399950f309865c6a8765068e5840a42695545a4ecab5a00455"
+    },
+    {
+      "version": 2,
+      "path": "src/provenance/migrations/002_search.sql",
+      "sha256": "a134d4532b0ce04b60cdec97ca75d16466db18a3640ca6c1a32483560e196311"
+    },
+    {
+      "version": 3,
+      "path": "src/provenance/migrations/003_reconciliation_modes.sql",
+      "sha256": "c60b13ec97ceb7d346ace96cba7f48e465e8ce2b119fa78d62260f8971c24df2"
+    },
+    {
+      "version": 4,
+      "path": "src/provenance/migrations/004_archivist_run_accounting.sql",
+      "sha256": "aa5ae202c206363fefa1e81ce0c725ba7991f52a4e320abdbe51704dfd700e54"
+    },
+    {
+      "version": 5,
+      "path": "src/provenance/migrations/005_relational_search.sql",
+      "sha256": "75d3109ce115332f8dc287ee015c97ec1fe37830af4500a0b192541c1e4ac8c7"
+    },
+    {
+      "version": 6,
+      "path": "src/provenance/migrations/006_candidate_lifecycle.sql",
+      "sha256": "8750cf07ac3f565459fd415994a0a9e2f5d6611e61b668f55afc8686e4fd3447"
+    }
+  ],
+  "included_fixtures": [
+    {
+      "path": "tests/fixtures/agent_protocol/candidate_registration.json",
+      "sha256": "58239f760aa480c5207f4b5b85ddedec083ab28e358dd68c1c58bc5573c28aff"
+    },
+    {
+      "path": "tests/fixtures/agent_protocol/duplicate_candidate_registration.json",
+      "sha256": "2c616a2fd98135c532ec888693ea536d33a5013a02e32a737e7d267ba821f76d"
+    },
+    {
+      "path": "tests/fixtures/agent_protocol/evidence_registration.json",
+      "sha256": "47952f5a4b10c19a80cde9d10fcec38b46ed0ae0039bdf932a84c1cb84a32be9"
+    },
+    {
+      "path": "tests/fixtures/evaluation/candidate_lifecycle_failure_matrix.json",
+      "sha256": "04c8cf72c8d133c6345245e18007820bfff8aac2fae5e0f2e219b6d2c7fe9f9e"
+    },
+    {
+      "path": "tests/fixtures/reconciliation/scenarios.json",
+      "sha256": "a6da15711a75f6bff2630271d547af2cadb08b8fd1eb687a421bd78aad5e8252"
+    }
+  ],
+  "excluded_migrations": [
+    {
+      "version": 7,
+      "path": "src/provenance/migrations/007_project_source_state.sql",
+      "sha256": "bcc346a00ba3345ecab577e1ac717cd29f54ea00970b0044de9e81968c50de40",
+      "reason": "project source state is owned by LOOM project/repository contracts"
+    },
+    {
+      "version": 8,
+      "path": "src/provenance/migrations/008_project_awareness.sql",
+      "sha256": "978ac747e14979ca9a8f9395a5bb9a661cd2b830320fc4fdcc4c10773ebd857f",
+      "reason": "project awareness is outside the provenance kernel"
+    },
+    {
+      "version": 9,
+      "path": "src/provenance/migrations/009_project_tracking_registry.sql",
+      "sha256": "5df1a9367a5ed6a956fa3a6ca0ecb3ac578235f4fb01bfa8542d8da44b7ed40a",
+      "reason": "project tracking would duplicate LOOM project authority"
+    }
+  ],
+  "postgresql_adaptations": [
+    "TEXT semantic identifiers become native UUID columns without changing their string form.",
+    "JSON text becomes validated JSONB and timezone-bearing text becomes TIMESTAMPTZ.",
+    "SQLite append-only triggers become PostgreSQL trigger functions on immutable ledger tables.",
+    "SQLite FTS virtual tables and search triggers from migrations 002, 005, and 006 are omitted because ranked search is a later feature.",
+    "Archivist leases, checkpoints, bridge accounting, review outcomes, and clarification delivery orchestration in migrations 003, 004, and 006 are omitted because Archivist and lifecycle orchestration are later slices."
+  ]
+}

@@ -1,0 +1,173 @@
+schema_version: loom.ai_pack.v2
+name: ai-loom-pack
+version: 0.6.4
+loom_compatibility: ">=0.0.0-dev"
+documentation:
+  version: same-as-pack
+  path: ../docs
+catalogue: catalogue.yaml
+hash_policy:
+  algorithm: sha256
+  mode: generated-at-release
+harnesses:
+  codex:
+    mechanism: native-skills
+  orca:
+    mechanism: native-skills-or-plugins
+  hermes:
+    mechanism: native-skills-and-read-only-external-dirs
+recommended_skill_sets:
+  project:
+    visibility:
+      - shared_core
+      - shared_development
+      - shared_provenance
+  morathustra:
+    visibility:
+      - shared_core
+      - shared_development
+      - morathustra_operations
+      - shared_provenance
+  mina:
+    visibility:
+      - shared_core
+      - shared_development
+      - morathustra_operations
+      - shared_provenance
+  archivist:
+    visibility:
+      - shared_provenance
+compatibility:
+  project_layout: loom.project.layout.v1
+  root_agent_entry: AGENTS.md
+  project_guidance: .loom/agents/project.md
+  credential_references: .loom/contracts/credentials.yaml
+  worktree_authority: orca
+  credential_authority: proton-pass
+skills:
+  - name: search-loom-knowledge
+    version: 0.1.0
+    path: skills/search-loom-knowledge
+    visibility: shared_core
+    hash: release-generated
+  - name: search-loom-docs
+    version: 0.1.0
+    path: skills/search-loom-docs
+    visibility: shared_core
+    hash: release-generated
+  - name: manage-loom-projects
+    version: 0.1.0
+    path: skills/manage-loom-projects
+    visibility: shared_core
+    hash: release-generated
+  - name: operate-loom-storage
+    version: 0.1.0
+    path: skills/operate-loom-storage
+    visibility: morathustra_operations
+    hash: release-generated
+  - name: operate-loom-nodes
+    version: 0.1.0
+    path: skills/operate-loom-nodes
+    visibility: morathustra_operations
+    hash: release-generated
+  - name: investigate-loom-incidents
+    version: 0.1.0
+    path: skills/investigate-loom-incidents
+    visibility: morathustra_operations
+    hash: release-generated
+  - name: orchestrate-loom-work
+    version: 0.2.0
+    path: skills/orchestrate-loom-work
+    visibility: morathustra_operations
+    hash: release-generated
+  - name: use-proton-pass
+    version: 0.1.0
+    path: skills/use-proton-pass
+    visibility: shared_core
+    hash: release-generated
+  - name: use-loom-provenance
+    version: 0.2.0
+    path: skills/use-loom-provenance
+    visibility: shared_provenance
+    hash: release-generated
+templates:
+  - name: project
+    path: templates/project
+    files:
+      - AGENTS.md
+  - name: box-notes
+    path: templates/box/Notes
+    files:
+      - AGENTS.md
+  - name: box-documents
+    path: templates/box/Documents
+    files:
+      - AGENTS.md
+  - name: morathustra
+    path: templates/morathustra
+    files:
+      - .hermes/SOUL.md
+      - AGENTS.md
+      - OPERATING-POLICY.md
+      - TOOLING.md
+      - WORKFLOW.md
+      - WORKSPACE-MAP.md
+      - handoffs/HANDOFF-TEMPLATE.md
+      - investigations/README.md
+      - protocols/BASECAMP.md
+      - protocols/CREDENTIALS.md
+      - protocols/EXTERNAL-MESSAGING.md
+      - protocols/GITHUB.md
+      - protocols/LOOM-ROUTING.md
+      - protocols/PROJECT-DELEGATION.md
+      - protocols/PROVENANCE-AND-MEMORY.md
+      - protocols/README.md
+      - protocols/SESSION-RETRIEVAL.md
+      - protocols/SKILL-CREATION-AND-PROMOTION.md
+      - recovery/README.md
+      - skills/installed/README.md
+      - tmp/README.md
+  - name: mina
+    path: templates/mina
+    files:
+      - .hermes/SOUL.md
+      - AGENTS.md
+      - OPERATING-POLICY.md
+      - TOOLING.md
+      - WORKFLOW.md
+      - WORKSPACE-MAP.md
+      - handoffs/HANDOFF-TEMPLATE.md
+      - investigations/README.md
+      - protocols/BASECAMP.md
+      - protocols/CREDENTIALS.md
+      - protocols/DEVICE-AND-TOOL-ROUTING.md
+      - protocols/EXTERNAL-MESSAGING.md
+      - protocols/GITHUB.md
+      - protocols/LOOM-ROUTING.md
+      - protocols/MAC-COMPUTER-USE.md
+      - protocols/PROJECT-DELEGATION.md
+      - protocols/PROVENANCE-AND-MEMORY.md
+      - protocols/README.md
+      - protocols/SESSION-RETRIEVAL.md
+      - protocols/SKILL-CREATION-AND-PROMOTION.md
+      - recovery/README.md
+      - skills/installed/README.md
+      - tmp/README.md
+  - name: archivist
+    path: templates/archivist
+    files:
+      - AGENTS.md
+      - ARCHIVIST.md
+      - WORKFLOW.md
+      - WORKSPACE-MAP.md
+      - OPERATING-POLICY.md
+      - protocols/README.md
+      - protocols/RETRIEVAL-ROUTING.md
+      - protocols/CANDIDATE-REVIEW.md
+      - skills/README.md
+      - investigations/README.md
+      - handoffs/HANDOFF-TEMPLATE.md
+build:
+  loom_version: release-generated
+  commit: release-generated
+  built_at: release-generated

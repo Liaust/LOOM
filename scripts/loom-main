@@ -1,0 +1,564 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+SMOKE_DIR="$REPO_ROOT/tests/smoke"
+
+HOST="${LOOM_MAIN_HOST:-loom-main}"
+KEYCHAIN_SERVICE="${LOOM_MAIN_KEYCHAIN_SERVICE:-loom-main.sudo}"
+KEYCHAIN_ACCOUNT="${LOOM_MAIN_KEYCHAIN_ACCOUNT:-loomadmin}"
+
+usage() {
+  cat <<EOF
+Usage: scripts/loom-main <command> [args]
+
+Commands:
+  ssh [args...]          Open SSH to the configured main-node target.
+  status                 Show concise main-node runtime status.
+  health                 Run loom health on the main node.
+  health-json            Run loom health --json on the main node.
+  password status        Check whether the fallback sudo password is in macOS Keychain.
+  password set           Prompt locally and store the loom-main sudo password in macOS Keychain.
+  password delete        Remove the loom-main sudo password from macOS Keychain.
+  sudo <command...>      Run a remote command through sudo, preferring passwordless sudo.
+  safe-check             Run production-safe read-only checks.
+  v0-5-1-safe-check      Alias for safe-check.
+  update status          Show remote update state.
+  update plan [args...]  Build a remote update plan.
+  update apply [args...] Apply a remote update after plan + backup checks.
+  update rollback [args...]
+                         Roll back using the remote active update manifest.
+  update maintenance [args...]
+                         Inspect or resume a remote update maintenance window.
+  logs [lines|-f]        Show loomd logs. Defaults to 80 lines.
+  slice-18-smoke         Staging-only hardware smoke. Requires LOOM_ALLOW_STAGING_SMOKE=1.
+  staging-slice-18-smoke Alias for slice-18-smoke.
+
+Environment:
+  LOOM_MAIN_HOST         SSH target. Default: loom-main
+  LOOM_MAIN_UPDATE_SOURCE
+                         Optional local release directory to rsync before update apply.
+  LOOM_MAIN_UPDATE_RELEASE_PATH
+                         Remote release path used with LOOM_MAIN_UPDATE_SOURCE.
+  LOOM_MAIN_UPDATE_FLAKE_OUTPUT
+                         Remote Nix flake output. Default: .#hardware-main.
+  LOOM_MAIN_KEYCHAIN_SERVICE
+                         macOS Keychain service for the main sudo password.
+                         Default: loom-main.sudo
+  LOOM_MAIN_KEYCHAIN_ACCOUNT
+                         macOS Keychain account for the main sudo password.
+                         Default: loomadmin
+  LOOM_MAIN_USE_KEYCHAIN_SUDO=0
+                         Disable automatic Keychain sudo prompt handling.
+  LOOM_ALLOW_STAGING_SMOKE=1
+                         Permit staging-only hardware smoke checks.
+
+Examples:
+  LOOM_MAIN_HOST=loom-dev scripts/loom-main status
+  scripts/loom-main safe-check
+  scripts/loom-main update plan --release-path /srv/loom/releases/v0.5.1
+  scripts/loom-main update apply --release-path /srv/loom/releases/v0.5.1 --yes
+EOF
+}
+
+fail() {
+  printf 'loom-main: %s\n' "$*" >&2
+  exit 1
+}
+
+ssh_remote() {
+  ssh -o BatchMode=yes "$HOST" "$@"
+}
+
+ssh_remote_tty() {
+  ssh -tt "$HOST" "$@"
+}
+
+ssh_remote_tty_keychain_sudo() {
+  if ssh_remote sudo -n true >/dev/null 2>&1; then
+    ssh_remote_tty "$@"
+    return $?
+  fi
+
+  if [[ "${LOOM_MAIN_USE_KEYCHAIN_SUDO:-1}" != "0" ]] && command -v expect >/dev/null 2>&1; then
+    local password
+    if password="$(loom_main_keychain_password 2>/dev/null)" && [[ -n "$password" ]]; then
+      LOOM_EXPECT_SUDO_PASSWORD="$password" expect -f - "$HOST" "$@" <<'EXPECT'
+set timeout -1
+set host [lindex $argv 0]
+set cmdArgs [lrange $argv 1 end]
+set password $env(LOOM_EXPECT_SUDO_PASSWORD)
+spawn ssh -tt $host {*}$cmdArgs
+expect {
+  -re {(\[sudo\] password for [^:]+:|[Pp]assword for [^:]+:)} {
+    send -- "$password\r"
+    exp_continue
+  }
+  eof {
+    if {[catch {wait} result] != 0} {
+      exit 1
+    }
+    if {[llength $result] < 4 || [lindex $result 2] != 0} {
+      exit 1
+    }
+    exit [lindex $result 3]
+  }
+}
+EXPECT
+      return $?
+    fi
+  fi
+  ssh_remote_tty "$@"
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "required command is missing: $1"
+}
+
+require_remote_command_args() {
+  local arg
+  for arg in "$@"; do
+    if [[ -z "$arg" || ! "$arg" =~ ^[A-Za-z0-9_./:@%+=,\#-]+$ ]]; then
+      fail "remote command argument contains unsupported whitespace or shell metacharacters"
+    fi
+  done
+}
+
+require_remote_host() {
+  if [[ -z "$HOST" || "$HOST" == -* || ! "$HOST" =~ ^[A-Za-z0-9_.:@-]+$ ]]; then
+    fail "remote host contains unsupported characters"
+  fi
+}
+
+loom_main_keychain_password() {
+  require_command security
+  security find-generic-password -a "$KEYCHAIN_ACCOUNT" -s "$KEYCHAIN_SERVICE" -w
+}
+
+keychain_add_password() {
+  require_command security
+  local password=""
+  if command -v osascript >/dev/null 2>&1 && [[ -z "${LOOM_MAIN_PASSWORD_NO_GUI:-}" ]]; then
+    password="$(
+      osascript <<OSA
+set dialogResult to display dialog "Enter the sudo password for ${KEYCHAIN_ACCOUNT}@${HOST}." default answer "" with hidden answer buttons {"Cancel", "Store"} default button "Store" cancel button "Cancel"
+text returned of dialogResult
+OSA
+    )" || fail "password entry cancelled"
+  else
+    printf 'Enter sudo password for %s@%s: ' "$KEYCHAIN_ACCOUNT" "$HOST" >&2
+    IFS= read -rs password
+    printf '\n' >&2
+  fi
+  [[ -n "$password" ]] || fail "empty password was not stored"
+  security add-generic-password -U -a "$KEYCHAIN_ACCOUNT" -s "$KEYCHAIN_SERVICE" -D "LOOM main sudo password" -w "$password" >/dev/null
+  printf 'loom-main: stored Keychain password service=%s account=%s\n' "$KEYCHAIN_SERVICE" "$KEYCHAIN_ACCOUNT"
+}
+
+cmd_password() {
+  local sub="${1:-status}"
+  case "$sub" in
+    status)
+      if loom_main_keychain_password >/dev/null 2>&1; then
+        printf 'loom-main: Keychain password exists service=%s account=%s\n' "$KEYCHAIN_SERVICE" "$KEYCHAIN_ACCOUNT"
+      else
+        printf 'loom-main: Keychain password missing service=%s account=%s\n' "$KEYCHAIN_SERVICE" "$KEYCHAIN_ACCOUNT"
+        return 1
+      fi
+      ;;
+    set)
+      keychain_add_password
+      ;;
+    delete|remove)
+      require_command security
+      security delete-generic-password -a "$KEYCHAIN_ACCOUNT" -s "$KEYCHAIN_SERVICE" >/dev/null
+      printf 'loom-main: removed Keychain password service=%s account=%s\n' "$KEYCHAIN_SERVICE" "$KEYCHAIN_ACCOUNT"
+      ;;
+    ""|-h|--help|help)
+      cat <<EOF
+Usage: scripts/loom-main password <command>
+
+Commands:
+  status   Check whether the sudo password is stored.
+  set      Prompt locally and store the sudo password in macOS Keychain.
+  delete   Remove the stored sudo password.
+
+Keychain item:
+  service: $KEYCHAIN_SERVICE
+  account: $KEYCHAIN_ACCOUNT
+EOF
+      ;;
+    *) fail "unknown password command: $sub" ;;
+  esac
+}
+
+cmd_sudo() {
+  [[ $# -gt 0 ]] || fail "sudo requires a remote command"
+  if ssh_remote sudo -n true >/dev/null 2>&1; then
+    ssh_remote sudo -n -- "$@"
+    return $?
+  fi
+
+  local password
+  password="$(loom_main_keychain_password)" || fail "Keychain password missing; run scripts/loom-main password set"
+  local remote_command="sudo -S -p ''"
+  local arg
+  for arg in "$@"; do
+    remote_command+=" $(printf '%q' "$arg")"
+  done
+  printf '%s\n' "$password" | ssh -o BatchMode=yes "$HOST" "$remote_command"
+}
+
+args_contains() {
+  local needle="$1"
+  shift
+  local arg
+  for arg in "$@"; do
+    if [[ "$arg" == "$needle" || "$arg" == "$needle="* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+args_value() {
+  local needle="$1"
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      "$needle")
+        shift
+        [[ $# -gt 0 ]] || return 1
+        printf '%s\n' "$1"
+        return 0
+        ;;
+      "$needle="*)
+        printf '%s\n' "${1#*=}"
+        return 0
+        ;;
+    esac
+    shift
+  done
+  return 1
+}
+
+remote_environment() {
+  ssh_remote '
+    set -e
+    if ! command -v jq >/dev/null 2>&1; then
+      printf "unknown\n"
+      exit 0
+    fi
+    loom health --json | jq -r ".data.environment // \"unknown\""
+  '
+}
+
+cmd_ssh() {
+  ssh "$HOST" "$@"
+}
+
+cmd_status() {
+  ssh_remote '
+    set -e
+    printf "host: "
+    hostname
+    printf "user: "
+    whoami
+    printf "root: "
+    findmnt -n -o SOURCE,FSTYPE /
+    printf "nixos: "
+    nixos-version
+    printf "postgresql: "
+    systemctl is-active postgresql
+    box_path="$(sed -n "s/^LOOM_BOX_PATH=//p" /etc/loom/loom.env | tail -n 1)"
+    storage_path="$(sed -n "s/^LOOM_STORAGE_ROOT=//p" /etc/loom/loom.env | tail -n 1)"
+    imports_path="$(sed -n "s/^LOOM_IMPORTS_ROOT=//p" /etc/loom/loom.env | tail -n 1)"
+    user_backups_path="$(sed -n "s/^LOOM_USER_BACKUPS_ROOT=//p" /etc/loom/loom.env | tail -n 1)"
+    archive_path="$(sed -n "s/^LOOM_ARCHIVE_ROOT=//p" /etc/loom/loom.env | tail -n 1)"
+    printf "canonical documents: "
+    if [ -n "$box_path" ] && [ -d "$box_path/Documents" ] && [ ! -L "$box_path/Documents" ]; then
+      stat -c "%U:%G %a %n" "$box_path/Documents"
+    else
+      printf "missing or invalid (%s/Documents)\n" "$box_path"
+    fi
+    printf "loomd: "
+    systemctl is-active loomd
+    printf "wireguard: "
+    systemctl is-active wireguard-wg0 || true
+    printf "loom user: "
+    id -un loom
+    printf "database: "
+    loom health --json | jq -r ".data.checks.database.database // .data.checks.database.status // \"unknown\""
+    printf "configured roots:\n"
+    for current_path in /srv/loom/current /var/lib/loom /var/lib/loom/object-store "$box_path" "$storage_path" "$imports_path" "$user_backups_path" "$archive_path" /etc/loom; do
+      [ -n "$current_path" ] || continue
+      if [ -e "$current_path" ]; then
+        stat -c "%U:%G %a %n" "$current_path"
+      else
+        printf "missing %s\n" "$current_path"
+      fi
+    done
+  '
+}
+
+cmd_health() {
+  ssh_remote 'loom health'
+}
+
+cmd_health_json() {
+  ssh_remote 'loom health --json'
+}
+
+cmd_safe_check() {
+  printf 'loom-main: target=%s\n' "$HOST" >&2
+  ssh_remote '
+    set -euo pipefail
+    command -v jq >/dev/null
+
+    health_json="$(loom health --json)"
+    environment="$(printf "%s\n" "$health_json" | jq -r ".data.environment // \"unknown\"")"
+    node_id="$(printf "%s\n" "$health_json" | jq -r ".data.node.id // \"unknown\"")"
+    status="$(printf "%s\n" "$health_json" | jq -r ".data.status // \"unknown\"")"
+
+    printf "runtime: environment=%s node=%s status=%s\n" "$environment" "$node_id" "$status"
+    printf "%s\n" "$health_json" | jq -e ".ok == true and .data.status == \"ok\"" >/dev/null
+
+    loom status --json | jq -e ".ok == true and .data.status == \"ok\"" >/dev/null
+    loom maintenance status --json | jq -e ".ok == true" >/dev/null
+    loom backup status --json | jq -e ".ok == true" >/dev/null
+    loom --config /etc/loom/loom.env update status --json | jq -e ".state_dir != null and .active_manifest_path != null" >/dev/null
+    loom_env_value() {
+      sed -n "s/^[[:space:]]*$1=//p" /etc/loom/loom.env | tail -n 1
+    }
+    box_path="$(loom_env_value LOOM_BOX_PATH)"
+    box_profile="$(loom_env_value LOOM_BOX_PROFILE)"
+    data_dir="$(loom_env_value LOOM_DATA_DIR)"
+    object_store="$(loom_env_value LOOM_OBJECT_STORE)"
+    service_root="$(loom_env_value LOOM_SERVICE_ROOT)"
+    storage_root="$(loom_env_value LOOM_STORAGE_ROOT)"
+    imports_root="$(loom_env_value LOOM_IMPORTS_ROOT)"
+    user_backups_root="$(loom_env_value LOOM_USER_BACKUPS_ROOT)"
+    archive_root="$(loom_env_value LOOM_ARCHIVE_ROOT)"
+    generated_root="$(loom_env_value LOOM_GENERATED_ROOT)"
+    box_state_root="$(loom_env_value LOOM_BOX_STATE_ROOT)"
+    socket_path="$(loom_env_value LOOM_SOCKET_PATH)"
+    http_listen_addr="$(loom_env_value LOOM_HTTP_LISTEN_ADDR)"
+    for value in "$box_path" "$box_profile" "$data_dir" "$object_store" "$service_root" "$storage_root" "$imports_root" "$user_backups_root" "$archive_root" "$generated_root" "$box_state_root" "$socket_path" "$http_listen_addr"; do
+      [ -n "$value" ] || {
+        printf "setup doctor: required value missing from /etc/loom/loom.env\n" >&2
+        exit 1
+      }
+    done
+    if ! setup_doctor_json="$(
+      loom --json setup doctor \
+        --kind main \
+        --role main \
+        --runtime-class main_full \
+        --node-key main \
+        --display-name "LOOM Main" \
+        --install-mode service \
+        --service-manager systemd \
+        --box-path "$box_path" \
+        --box-profile "$box_profile" \
+        --data-dir "$data_dir" \
+        --object-store "$object_store" \
+        --service-root "$service_root" \
+        --storage-root "$storage_root" \
+        --imports-root "$imports_root" \
+        --user-backups-root "$user_backups_root" \
+        --archive-root "$archive_root" \
+        --generated-root "$generated_root" \
+        --box-state-root "$box_state_root" \
+        --socket-path "$socket_path" \
+        --http-listen-addr "$http_listen_addr" \
+        --bootstrap-mode production \
+        --config-dir /etc/loom \
+        --state-dir /var/lib/loom/state \
+        --log-dir /var/lib/loom/logs \
+        --home-dir /home/loomadmin \
+        --user-name loomadmin
+    )"; then
+      printf "setup doctor: command failed\n" >&2
+      exit 1
+    fi
+    if ! printf "%s\n" "$setup_doctor_json" | jq -e ".summary != \"blocked\" and ([.findings[]? | select(.severity == \"error\" or .severity == \"blocking\" or .severity == \"critical\")] | length == 0)" >/dev/null; then
+      printf "setup doctor: failed\n" >&2
+      printf "%s\n" "$setup_doctor_json" | jq -r "\"summary=\" + (.summary // \"unknown\"), (.findings[]? | select(.severity == \"error\" or .severity == \"blocking\" or .severity == \"critical\") | \"- \" + (.severity // \"unknown\") + \" \" + (.code // \"unknown\") + \": \" + (.message // \"\"))" >&2
+      exit 1
+    fi
+
+    printf "safe-check: ok\n"
+  '
+}
+
+cmd_update_apply() {
+  local args=("$@")
+
+  if args_contains -h "${args[@]}" || args_contains --help "${args[@]}" || args_contains help "${args[@]}"; then
+    require_remote_host
+    ssh_remote loom --config /etc/loom/loom.env update apply --help
+    return $?
+  fi
+
+  local source="${LOOM_MAIN_UPDATE_SOURCE:-}"
+  local release_path="${LOOM_MAIN_UPDATE_RELEASE_PATH:-}"
+  local flake_output="${LOOM_MAIN_UPDATE_FLAKE_OUTPUT:-.#hardware-main}"
+
+  if [[ -z "$release_path" ]]; then
+    release_path="$(args_value --release-path "${args[@]}" || true)"
+  elif ! args_contains --release-path "${args[@]}"; then
+    args+=(--release-path "$release_path")
+  fi
+  [[ -n "$release_path" ]] || fail "update apply requires --release-path or LOOM_MAIN_UPDATE_RELEASE_PATH"
+
+  if ! args_contains --flake "${args[@]}"; then
+    args+=(--flake "$flake_output")
+  fi
+
+  if args_contains --backup-path "${args[@]}" && ! args_contains --backup-ref "${args[@]}"; then
+    fail "operator-supplied --backup-path requires the corresponding --backup-ref maintenance operation ID"
+  fi
+  if args_contains --backup-ref "${args[@]}" && ! args_contains --backup-path "${args[@]}"; then
+    fail "operator-supplied --backup-ref requires the corresponding --backup-path"
+  fi
+
+  if ! args_contains --current-migration "${args[@]}"; then
+    local current_migration
+    current_migration="$(
+      ssh_remote 'loom status --json | jq -r ".data.health.checks.migrations.current_version // empty"' 2>/dev/null || true
+    )"
+    if [[ "$current_migration" =~ ^[0-9]+$ ]]; then
+      args+=(--current-migration "$current_migration")
+    fi
+  fi
+
+  require_remote_host
+  require_remote_command_args "$release_path" "$flake_output" "${args[@]}"
+
+  if [[ -n "$source" ]]; then
+    [[ -d "$source" ]] || fail "LOOM_MAIN_UPDATE_SOURCE is not a directory: $source"
+    require_command rsync
+    printf 'loom-main: syncing release source %s -> %s:%s\n' "$source" "$HOST" "$release_path" >&2
+    rsync -az --delete --exclude '.git' "$source/" "$HOST:$release_path/"
+    # mktemp-created source roots are commonly mode 0700. The release root must
+    # remain traversable by the loom service after the immutable source sync;
+    # its contents retain their source modes.
+    ssh_remote chmod 0755 "$release_path"
+  fi
+
+  printf 'loom-main: planning update on %s\n' "$HOST" >&2
+  ssh_remote loom --config /etc/loom/loom.env update plan --release-path "$release_path" --flake "$flake_output" >/dev/null
+
+  if ! args_contains --dry-run "${args[@]}" && ! args_contains --skip-backup "${args[@]}" && ! args_contains --backup-path "${args[@]}"; then
+    require_command jq
+    printf 'loom-main: creating production backup on %s\n' "$HOST" >&2
+    local backup_json
+    backup_json="$(ssh_remote loom --config /etc/loom/loom.env --json backup create --production --reason "pre-update-backup-for:$release_path")"
+    local backup_path
+    backup_path="$(printf '%s\n' "$backup_json" | jq -r '
+      .data.run.result_summary_json as $summary
+      | if ($summary | type) == "object" then ($summary.backup_dir // empty) else empty end
+    ')"
+    [[ -n "$backup_path" && "$backup_path" != "null" ]] || fail "backup completed but no backup_dir was returned"
+    local backup_ref
+    backup_ref="$(printf '%s\n' "$backup_json" | jq -r '
+      .data.run.result_summary_json as $summary
+      | if ($summary | type) == "object" then ($summary.backup_operation_id // empty) else empty end
+    ')"
+    [[ -n "$backup_ref" && "$backup_ref" != "null" ]] || fail "backup completed but no backup_operation_id was returned"
+    args+=(--backup-path "$backup_path" --backup-ref "$backup_ref")
+    printf 'loom-main: backup ready %s (%s)\n' "$backup_path" "$backup_ref" >&2
+  fi
+
+  require_remote_command_args "${args[@]}"
+  ssh_remote_tty_keychain_sudo loom --config /etc/loom/loom.env update apply "${args[@]}"
+}
+
+cmd_update_plan() {
+  local args=("$@")
+  if ! args_contains --flake "${args[@]}"; then
+    args+=(--flake "${LOOM_MAIN_UPDATE_FLAKE_OUTPUT:-.#hardware-main}")
+  fi
+  if ! args_contains --current-migration "${args[@]}"; then
+    local current_migration
+    current_migration="$(
+      ssh_remote 'loom status --json | jq -r ".data.health.checks.migrations.current_version // empty"' 2>/dev/null || true
+    )"
+    if [[ "$current_migration" =~ ^[0-9]+$ ]]; then
+      args+=(--current-migration "$current_migration")
+    fi
+  fi
+  require_remote_host
+  require_remote_command_args "${args[@]}"
+  ssh_remote loom --config /etc/loom/loom.env update plan "${args[@]}"
+}
+
+cmd_update() {
+  local sub="${1:-}"
+  if [[ $# -gt 0 ]]; then
+    shift
+  fi
+
+  case "$sub" in
+    status) ssh_remote loom --config /etc/loom/loom.env update status "$@" ;;
+    plan) cmd_update_plan "$@" ;;
+    apply) cmd_update_apply "$@" ;;
+    rollback) ssh_remote_tty_keychain_sudo loom --config /etc/loom/loom.env update rollback "$@" ;;
+    maintenance) ssh_remote loom --config /etc/loom/loom.env update maintenance "$@" ;;
+    manifest) ssh_remote loom --config /etc/loom/loom.env update manifest "$@" ;;
+    history) ssh_remote loom --config /etc/loom/loom.env update history "$@" ;;
+    ""|-h|--help|help) usage ;;
+    *) fail "unknown update command: $sub" ;;
+  esac
+}
+
+cmd_logs() {
+  local arg="${1:-80}"
+
+  if [[ "$arg" == "-f" || "$arg" == "--follow" ]]; then
+    ssh "$HOST" 'journalctl -u loomd -f'
+  else
+    ssh_remote "journalctl -u loomd -n '$arg' --no-pager"
+  fi
+}
+
+cmd_slice_18_smoke() {
+  local script="$SMOKE_DIR/slice_18_pre_hardware_hardening.sh"
+
+  if [[ "${LOOM_ALLOW_STAGING_SMOKE:-0}" != "1" ]]; then
+    fail "slice-18-smoke is staging-only; set LOOM_ALLOW_STAGING_SMOKE=1 after confirming this is not production"
+  fi
+  [[ -x "$script" ]] || fail "smoke script is missing or not executable: $script"
+  local environment
+  environment="$(remote_environment)"
+  if [[ "$environment" == "production" ]]; then
+    fail "refusing to run staging smoke against production target '$HOST'"
+  fi
+  LOOM_MAIN_HOST="$HOST" "$script"
+}
+
+main() {
+  local cmd="${1:-}"
+  if [[ $# -gt 0 ]]; then
+    shift
+  fi
+
+  case "$cmd" in
+    ssh) cmd_ssh "$@" ;;
+    status) cmd_status "$@" ;;
+    health) cmd_health "$@" ;;
+    health-json) cmd_health_json "$@" ;;
+    password|keychain) cmd_password "$@" ;;
+    sudo) cmd_sudo "$@" ;;
+    safe-check|prod-health|production-safe-check|v0-5-1-safe-check) cmd_safe_check "$@" ;;
+    update) cmd_update "$@" ;;
+    logs) cmd_logs "$@" ;;
+    slice-18-smoke|staging-slice-18-smoke) cmd_slice_18_smoke "$@" ;;
+    smoke) fail "the generic smoke alias is disabled for main-node operations; use scripts/loom-dev for dev smoke tests" ;;
+    ""|-h|--help|help) usage ;;
+    *) fail "unknown command: $cmd" ;;
+  esac
+}
+
+main "$@"

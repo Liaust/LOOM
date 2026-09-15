@@ -1,0 +1,9 @@
+{
+  "project_id": "project_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "node": "fixture-node",
+  "location_revision": "location-1",
+  "registry_revision": "registry-1",
+  "lifecycle_revision": "lifecycle-1",
+  "snapshot_revision": "snapshot-1",
+  "reference_owner": "project_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use Proton Pass"
+  short_description: "Use approved credentials without exposure"
+  default_prompt: "Use $use-proton-pass to plan this bounded credential use without exposing secret values."

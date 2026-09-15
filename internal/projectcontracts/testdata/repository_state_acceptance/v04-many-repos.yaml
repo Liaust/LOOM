@@ -1,0 +1,51 @@
+kind: loom.repos
+schema_version: repos.contract.v0.4
+
+repos:
+  status: active
+  defaults:
+    sync: false
+    backup: false
+    index: false
+  watch_roots:
+    - key: repos
+      path: .
+      display_name: Project Repositories
+  members:
+    - id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAB
+      key: clean
+      path: clean
+      role: primary
+      state_root: .repo
+    - id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAC
+      key: dirty
+      path: dirty
+      role: component
+    - id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAD
+      key: absent
+      path: absent
+      role: component
+      state_root: .repo
+    - id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAE
+      key: malformed-state
+      path: malformed-state
+      role: component
+      state_root: .repo
+    - id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAK
+      key: missing-state
+      path: missing-state
+      role: component
+      state_root: .repo
+    - id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAF
+      key: mismatched-state
+      path: mismatched-state
+      role: component
+      state_root: .repo
+    - id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAG
+      key: nested
+      path: container/nested
+      role: component
+    - id: repo_01ARZ3NDEKTSV4RRFFQ69G5FAH
+      key: linked
+      path: linked
+      role: component

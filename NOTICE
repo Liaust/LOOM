@@ -1,0 +1,13 @@
+LOOM
+Copyright 2026 Leonardo Miranda and LOOM contributors
+
+The Provenance source snapshot records an earlier same-owner adaptation and
+its historical license metadata. That origin record does not override the
+Apache-2.0 license applied to original LOOM code in this public baseline.
+
+Original LOOM source and documentation are licensed under Apache-2.0.
+Third-party components retain their own copyright and license terms.
+See THIRD_PARTY_NOTICES.md and notices accompanying those components.
+
+LOOM is independent of the upstream projects it integrates. Their names are
+used for identification, not to claim affiliation or endorsement.

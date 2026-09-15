@@ -1,0 +1,26 @@
+kind: loom.project
+schema_version: project.contract.v0.3
+project:
+    slug: research-notes
+    name: Research Notes
+    description: Notes-first project with sync and markdown indexing policy.
+    owner_node: main
+    status: draft
+facets:
+    backup_policy: true
+    notes: true
+    sync_policy: true
+provider_defaults:
+    scripts_provider: project
+    workflows_provider: project
+policies:
+    sync: .loom/contracts/sync.yaml
+    backup: .loom/contracts/backup.yaml
+    workers: ""
+    credentials: ""
+portal:
+    display_group: research
+    summary: Notes-first project example.
+metadata:
+    example: true
+    slice: v0.3-slice-14

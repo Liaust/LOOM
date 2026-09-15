@@ -1,0 +1,8 @@
+{
+  "schema_version": "storage.workspace_archive_adversarial_fixture.v1",
+  "scenario": "source_drift",
+  "expected_finding": "source_drift",
+  "mutation": {
+    "inode_delta": 1
+  }
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Investigate LOOM Incidents"
+  short_description: "Build evidence-led LOOM incident handoffs"
+  default_prompt: "Use $investigate-loom-incidents to investigate this LOOM failure and prepare a bounded handoff."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manage LOOM Projects"
+  short_description: "Plan safe LOOM project lifecycle and export work"
+  default_prompt: "Use $manage-loom-projects to inspect and safely plan this LOOM project lifecycle or export change."

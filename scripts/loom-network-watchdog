@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+LOOM_MACBOOK="${LOOM_MACBOOK_HELPER:-$SCRIPT_DIR/loom-macbook}"
+LOOM_USER_HOME="${LOOM_USER_HOME:-$HOME}"
+MAC_WG_IP="${LOOM_MACBOOK_WG_IP:-10.44.0.5}"
+WG_CONF="${LOOM_MACBOOK_WG_CONF:-$LOOM_USER_HOME/.loom/secrets/wireguard/loomwg0.conf}"
+MAIN_SMB_HOST="${LOOM_MAIN_SMB_HOST:-loom-storage}"
+BREW_BASH="${LOOM_HOMEBREW_BASH:-/opt/homebrew/bin/bash}"
+WG_QUICK="${LOOM_WG_QUICK:-/opt/homebrew/bin/wg-quick}"
+LOG_DIR="${LOOM_NETWORK_WATCHDOG_LOG_DIR:-$LOOM_USER_HOME/.loom/logs}"
+STATE_DIR="${LOOM_NETWORK_WATCHDOG_STATE_DIR:-$LOOM_USER_HOME/.loom/run}"
+LOG_FILE="$LOG_DIR/network-watchdog.log"
+COOLDOWN_SECONDS="${LOOM_NETWORK_WATCHDOG_COOLDOWN_SECONDS:-20}"
+INTERVAL_SECONDS="${LOOM_NETWORK_WATCHDOG_INTERVAL_SECONDS:-30}"
+
+PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+mkdir -p "$LOG_DIR" "$STATE_DIR"
+
+log() {
+  printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >>"$LOG_FILE"
+}
+
+has_wg_address() {
+  ifconfig 2>/dev/null | grep -q "inet $MAC_WG_IP "
+}
+
+has_private_route() {
+  netstat -rn -f inet 2>/dev/null | awk '{print $1}' | grep -Eq '^(10\.44|10\.44/24|10\.44\.0\.0/24)$'
+}
+
+tcp_reachable() {
+  nc -G 2 -z "$MAIN_SMB_HOST" 445 >/dev/null 2>&1
+}
+
+cooldown_allows_repair() {
+  local marker="$STATE_DIR/network-watchdog.${EUID:-$(id -u)}.last-repair"
+  if [[ ! -f "$marker" ]]; then
+    return 0
+  fi
+  local now last
+  now="$(date +%s)"
+  last="$(cat "$marker" 2>/dev/null || printf '0')"
+  [[ $((now - last)) -ge "$COOLDOWN_SECONDS" ]]
+}
+
+mark_repair() {
+  date +%s >"$STATE_DIR/network-watchdog.${EUID:-$(id -u)}.last-repair"
+}
+
+repair_network() {
+	mark_repair
+	log "repair begin: addr=$(has_wg_address && echo yes || echo no) route=$(has_private_route && echo yes || echo no) smb=$(tcp_reachable && echo yes || echo no)"
+	HOME="$LOOM_USER_HOME" "$BREW_BASH" "$WG_QUICK" down "$WG_CONF" >>"$LOG_FILE" 2>&1 || true
+	HOME="$LOOM_USER_HOME" "$BREW_BASH" "$WG_QUICK" up "$WG_CONF" >>"$LOG_FILE" 2>&1 || {
+		log "repair failed: wg-up returned non-zero"
+		return 1
+	}
+  sleep 2
+  log "repair end: addr=$(has_wg_address && echo yes || echo no) route=$(has_private_route && echo yes || echo no) smb=$(tcp_reachable && echo yes || echo no)"
+}
+
+check_once() {
+	if has_wg_address && has_private_route && tcp_reachable; then
+		log "healthy: addr=yes route=yes smb=yes"
+		return 0
+	fi
+
+	if ! cooldown_allows_repair; then
+		log "unhealthy but cooldown active: addr=$(has_wg_address && echo yes || echo no) route=$(has_private_route && echo yes || echo no) smb=$(tcp_reachable && echo yes || echo no)"
+		return 0
+	fi
+
+	repair_network
+}
+
+if [[ "${1:-}" == "--once" ]]; then
+	check_once
+	exit $?
+fi
+
+log "watchdog loop started: interval=${INTERVAL_SECONDS}s"
+while true; do
+	check_once || true
+	sleep "$INTERVAL_SECONDS"
+done

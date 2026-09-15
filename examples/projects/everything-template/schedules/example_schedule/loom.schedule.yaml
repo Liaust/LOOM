@@ -1,0 +1,34 @@
+kind: loom.schedule
+schema_version: schedule.contract.v0.3
+
+schedule:
+  key: example_schedule
+  display_name: Example Schedule
+  description: Draft scaffolded schedule.
+  status: draft
+
+target:
+  capability: main@everything-template.hello_world
+  input_file: input.example.json
+  run_as: owner
+
+timing:
+  kind: interval
+  expression: 24h
+  timezone: UTC
+
+misfire:
+  policy: mark_missed
+  lateness_window_seconds: 0
+
+concurrency:
+  policy: allow_parallel
+
+approval:
+  policy: none
+
+timeout:
+  seconds: 60
+
+retry:
+  max_attempts: 1

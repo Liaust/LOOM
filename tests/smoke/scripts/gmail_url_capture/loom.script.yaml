@@ -1,0 +1,40 @@
+kind: loom.script
+id: gmail_url_capture
+name: Gmail URL Capture
+version: "1.0.0"
+description: Capture Gmail-style direct-event payload fields without external network access.
+entrypoint:
+  command:
+    - sh
+    - gmail_url_capture.sh
+runtime:
+  kind: shell
+  requires:
+    - sh
+    - sed
+    - grep
+execution:
+  timeout_seconds: 30
+  network: false
+  filesystem:
+    workdir: controlled
+inputs:
+  input:
+    required: true
+    description: Gmail-style event payload containing url, message_id, email_id, and token.
+outputs:
+  message_id:
+    type: string
+    description: External message ID used as the direct-event idempotency key.
+  email_id:
+    type: string
+    description: External email ID that a bridge could tag after LOOM confirmation.
+  url:
+    type: string
+    description: URL extracted from the email payload.
+  token:
+    type: string
+    description: Smoke token proving payload flow through script-runner.
+artifacts: []
+metadata:
+  smoke_slice: "v0.2-13"

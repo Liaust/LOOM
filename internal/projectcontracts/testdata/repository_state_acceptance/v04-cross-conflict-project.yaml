@@ -1,0 +1,12 @@
+kind: loom.project
+schema_version: project.contract.v0.4
+
+project:
+  id: project_01ARZ3NDEKTSV4RRFFQ69G5FB1
+  slug: slice5-cross-conflict
+  name: Slice 5 Cross Project Conflict
+  owner_node: main
+  status: active
+
+facets:
+  repos: true

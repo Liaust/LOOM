@@ -1,0 +1,16 @@
+kind: loom.project
+schema_version: project.contract.v0.4
+
+project:
+  id: project_01ARZ3NDEKTSV4RRFFQ69G6AAC
+  slug: digital-estate-multi
+  name: Digital Estate Multi Repository Pilot
+  owner_node: main
+  status: active
+
+facets:
+  repos: true
+  backup_policy: true
+
+policies:
+  backup: .loom/contracts/backup.yaml

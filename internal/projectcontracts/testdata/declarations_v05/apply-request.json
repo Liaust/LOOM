@@ -1,0 +1,10 @@
+{
+  "schema_version": "project.declaration_request.v0.5",
+  "project_ref": "webdav-pilot",
+  "node_ref": "main",
+  "effects": [
+    "reconcile"
+  ],
+  "plan_id": "sha256:14a02659a0c071efe4d109695bfb601d63c4dc1c7600d5c384a7cfa5db02a14a",
+  "idempotency_key": "fixture-request-1"
+}

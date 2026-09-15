@@ -1,0 +1,617 @@
+#!/usr/bin/env python3
+"""Offline, exact plan/apply/replay/revoke for the pinned desktop connector.
+
+plan --request FILE prints a zero-write plan. Save and review it, then:
+apply --plan FILE --digest SHA256 --confirm apply
+revoke --plan FILE --digest SHA256 --confirm revoke
+
+Only the packaged command can plan/apply. There is no driver/SSH execution,
+download, app install/start, permission grant or host discovery. Endpoint setup
+consumes the operator-installed fixed Cua app and locked archive. A restricted
+authorized-key LINE is staged for review, never merged into authorized_keys.
+Existing protected parent directories and the GUI home must be provisioned by
+their owner. A non-/ root is an offline staging tree, not installed acceptance.
+Main private keys must be owner-readable and owner-only for the fixed local
+agents account. Plans bind that consumer's UID/groups and key/ancestor metadata
+separately from the root publisher and the remote GUI identity; never key bytes.
+
+Receipts and staging inodes are retained for exact replay and revocation.
+Complete v1 bindings retain stable driver/host/user/policy identity across an
+ordinary restart; the connector validates each new runtime without rewriting
+these receipts. A changed stable identity needs explicit revoke/plan/review.
+This tool never observes/rebinds a daemon automatically. Interrupted mutations
+report partial publication and refuse unknown substitutions, including an
+unreceipted directory after a crash. No general cleanup is provided.
+"""
+from __future__ import annotations
+import argparse
+import base64
+import contextlib
+import fcntl
+import hashlib
+import ipaddress
+import json
+import os
+from pathlib import Path
+import plistlib
+import pwd
+import re
+import socket
+import stat
+import subprocess
+import sys
+import tarfile
+
+PACKAGE_DIR = None
+PACKAGE_SSH = None
+DRIVER = '/Applications/CuaDriver.app/Contents/MacOS/cua-driver'
+APP = '/Applications/CuaDriver.app'
+ENDPOINT = '/usr/local/libexec/loom-mac-endpoint'
+CONFIG = '/usr/local/etc/loom-mac-endpoint.json'
+MAIN_DIR = '/etc/loom-mac-computer-use'
+LIMIT = 1024 * 1024
+NOTICE = ('PID/socket inode are ephemeral runtime observations. Complete v1 bindings accept '
+          'a freshly validated restart with the same stable identity; old targets expire. '
+          'Changed driver/host/user/policy requires review. No replay of uncertain input.')
+
+
+class Refusal(Exception):
+    """Only fixed codes reach stdout; never exception/path/command stderr."""
+
+
+def require(condition, code='contract_refused'):
+    if not condition:
+        raise Refusal(code)
+
+
+def canonical(value):
+    return (json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode()
+
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def unique(pairs):
+    result = {}
+    for key, value in pairs:
+        require(key not in result, 'duplicate_field')
+        result[key] = value
+    return result
+
+
+def decode(data):
+    require(len(data) <= LIMIT, 'input_limit')
+    return json.loads(data, object_pairs_hook=unique,
+                      parse_constant=lambda _: require(False, 'invalid_number'))
+
+
+def fields(value, names):
+    require(isinstance(value, dict) and set(value) == set(names), 'unexpected_fields')
+
+
+def path(value):
+    require(isinstance(value, str) and re.fullmatch(r'/[A-Za-z0-9._/+@ -]*', value)
+            and str(Path(value)) == value and '..' not in Path(value).parts, 'unsafe_path')
+    return Path(value)
+
+
+def identity(st):
+    return {'dev': st.st_dev, 'ino': st.st_ino, 'uid': st.st_uid,
+            'gid': st.st_gid, 'mode': stat.S_IMODE(st.st_mode),
+            'kind': stat.S_IFMT(st.st_mode)}
+
+
+class Chain:
+    """Hold/revalidate every directory from /; all writes use dir_fd."""
+    def __init__(self, directory):
+        self.fds, self.names, self.ids = [], [], []
+        try:
+            for name in path(str(directory)).parts:
+                fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                             dir_fd=self.fds[-1] if self.fds else None)
+                self.fds.append(fd)
+                self.names.append(name)
+                st = os.fstat(fd)
+                self.validate_directory(st)
+                self.ids.append(identity(st))
+        except BaseException:
+            self.close()
+            raise
+
+    @property
+    def fd(self):
+        return self.fds[-1]
+
+    def validate_directory(self, st):
+        # Protected publication and ordinary input custody stay publisher-owned.
+        require(st.st_uid in {0, os.getuid()}, 'ancestor_owner')
+        require(not st.st_mode & 0o022 or
+                st.st_uid == 0 and st.st_mode & stat.S_ISVTX, 'ancestor_permissions')
+
+    def check(self):
+        for i, (name, fd, expected) in enumerate(zip(self.names, self.fds, self.ids)):
+            require(identity(os.fstat(fd)) == expected, 'ancestor_changed')
+            st = os.stat(name, dir_fd=self.fds[i-1] if i else None, follow_symlinks=False)
+            require(identity(st) == expected, 'ancestor_changed')
+
+    def close(self):
+        for fd in reversed(self.fds):
+            os.close(fd)
+        self.fds = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+class SignedAppInput(Chain):
+    """Read only the fixed signed app through macOS's admin-owned container."""
+    def __init__(self, filename):
+        p = path(str(filename))
+        require(sys.platform == 'darwin' and p in {
+            Path(APP) / 'Contents/Info.plist', Path(DRIVER)}, 'signed_app_input')
+        super().__init__(p.parent)
+
+    def validate_directory(self, st):
+        if (self.names == ['/', 'Applications'] and st.st_uid == 0
+                and st.st_gid == 80 and stat.S_IMODE(st.st_mode) == 0o775):
+            return
+        super().validate_directory(st)
+
+
+def main_consumer():
+    # Fixed existing Main service identity; never selected by request, GUI UID,
+    # environment, installer UID or an arbitrary caller-supplied allowlist.
+    account = pwd.getpwnam('agents')
+    require(account.pw_name == 'agents' and type(account.pw_uid) is int
+            and account.pw_uid > 0 and type(account.pw_gid) is int
+            and account.pw_gid >= 0, 'main_consumer_identity')
+    groups = sorted(set(os.getgrouplist('agents', account.pw_gid)))
+    require(account.pw_gid in groups and all(type(g) is int and g >= 0 for g in groups),
+            'main_consumer_identity')
+    return {'user': 'agents', 'uid': account.pw_uid, 'gid': account.pw_gid, 'groups': groups}
+
+
+class MainKey(Chain):
+    """Only the Main private-key path admits the exact consumer's custody.
+
+    Hold all parent descriptors, inspect the leaf with no-follow stat, and never
+    open/read/hash/copy the key. Protected destination Chain remains unchanged.
+    This proves POSIX metadata suitability, not service sandbox/live SSH access.
+    """
+    def __init__(self, filename):
+        self.key = path(str(filename))
+        self.consumer = main_consumer()
+        super().__init__(self.key.parent)
+
+    def validate_directory(self, st):
+        require(st.st_uid in {0, self.consumer['uid']}, 'key_ancestor_owner')
+        require(not st.st_mode & 0o022, 'key_ancestor_permissions')
+        # POSIX checks the matching class; an inaccessible owning group cannot
+        # fall through to world execute. Root-only 0700 ancestors are unusable.
+        execute = (0o100 if st.st_uid == self.consumer['uid'] else
+                   0o010 if st.st_gid in self.consumer['groups'] else 0o001)
+        require(st.st_mode & execute, 'key_ancestor_traversal')
+
+    def metadata(self):
+        before = os.stat(self.key.name, dir_fd=self.fd, follow_symlinks=False)
+        require(stat.S_ISREG(before.st_mode) and before.st_uid == self.consumer['uid'],
+                'private_key_owner')
+        require(stat.S_IMODE(before.st_mode) in {0o400, 0o600}, 'private_key_permissions')
+        self.check()
+        require(main_consumer() == self.consumer, 'main_consumer_changed')
+        after = os.stat(self.key.name, dir_fd=self.fd, follow_symlinks=False)
+        require(identity(after) == identity(before) and after.st_mtime_ns == before.st_mtime_ns
+                and after.st_ctime_ns == before.st_ctime_ns, 'private_key_changed')
+        return {'consumer': self.consumer, 'identity': identity(after), 'ancestors': self.ids}
+
+
+def inspect_file(filename, *, content=True, max_size=LIMIT, excluded_inode=None,
+                 signed_app=False):
+    p = path(str(filename))
+    with (SignedAppInput(p) if signed_app else Chain(p.parent)) as chain:
+        if excluded_inode is not None:
+            st = os.stat(p.name, dir_fd=chain.fd, follow_symlinks=False)
+            require((st.st_dev, st.st_ino) != excluded_inode, 'private_key_input_alias')
+        fd = os.open(p.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=chain.fd)
+        try:
+            before = os.fstat(fd)
+            # Recheck after open in case a public input was replaced by a key
+            # alias. No content read/hash occurs before this metadata refusal.
+            require((before.st_dev, before.st_ino) != excluded_inode, 'private_key_input_alias')
+            require(stat.S_ISREG(before.st_mode) and before.st_uid in {0, os.getuid()}
+                    and not before.st_mode & 0o022, 'file_custody')
+            require(not signed_app or before.st_uid == 0, 'file_custody')
+            value = {'identity': identity(before), 'ancestors': chain.ids}
+            data = b''
+            if content:
+                require(before.st_size <= max_size, 'input_limit')
+                chunks, digest = [], hashlib.sha256()
+                total = 0
+                while chunk := os.read(fd, 1024 * 1024):
+                    total += len(chunk)
+                    require(total <= max_size, 'input_limit')
+                    digest.update(chunk)
+                    if max_size <= LIMIT:
+                        chunks.append(chunk)
+                data = b''.join(chunks)
+                value['sha256'] = digest.hexdigest()
+                value['size'] = total
+            after = os.fstat(fd)
+            require(identity(after) == identity(before) and after.st_mtime_ns == before.st_mtime_ns
+                    and after.st_ctime_ns == before.st_ctime_ns, 'input_changed')
+            require(identity(os.stat(p.name, dir_fd=chain.fd, follow_symlinks=False)) == identity(after), 'input_changed')
+            chain.check()
+            return value, data
+        finally:
+            os.close(fd)
+
+
+def host_identity():
+    return {'host': socket.gethostname(), 'uid': os.getuid(),
+            'user': pwd.getpwuid(os.getuid()).pw_name, 'platform': sys.platform}
+
+
+def mapped(root, absolute):
+    return root / path(absolute).relative_to('/')
+
+
+def validate_runtime(runtime):
+    fields(runtime, ['host', 'user', 'uid', 'peer_uid', 'driver', 'driver_sha256',
+                     'runtime_pid', 'socket_inode', 'socket', 'permission_mode',
+                     'user_policy_sha256', 'managed_policy_sha256'])
+    require(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.-]*', runtime['host'])
+            and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_-]*', runtime['user']), 'runtime_identity')
+    for key in ('uid', 'peer_uid', 'runtime_pid', 'socket_inode'):
+        require(type(runtime[key]) is int and runtime[key] > 0, 'runtime_identity')
+    require(runtime['uid'] == runtime['peer_uid'] and runtime['driver'] == DRIVER, 'runtime_identity')
+    path(runtime['socket'])
+    require(runtime['permission_mode'] in ('standard', 'bounded'), 'runtime_policy')
+    for key in ('driver_sha256', 'user_policy_sha256', 'managed_policy_sha256'):
+        value = runtime[key]
+        require((key != 'driver_sha256' and value is None) or
+                isinstance(value, str) and re.fullmatch('[0-9a-f]{64}', value), 'runtime_identity')
+
+
+def codesign(app):
+    # No shell, override variable, driver or daemon command. Both outputs are
+    # bounded by the fixed codesign inspector; stderr is never returned.
+    for args in (['--verify', '--deep', '--strict', str(app)], ['-dvvv', str(app)]):
+        result = subprocess.run(['/usr/bin/codesign', *args], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                env={'PATH': '/usr/bin:/bin', 'LANG': 'C'}, timeout=20)
+        require(result.returncode == 0 and len(result.stdout) + len(result.stderr) <= 65536, 'signature_refused')
+    text = result.stderr.decode('utf-8', 'replace')
+    for token in ('Identifier=com.trycua.driver', 'TeamIdentifier=YCK386LBJ7',
+                  'Authority=Developer ID Application: Cua AI, Inc. (YCK386LBJ7)',
+                  'CDHash=8084d02233ae6121138ce3986a6ad3320c4c20ba'):
+        require(token in text.splitlines(), 'signature_identity')
+    require(re.search(r'flags=0x[0-9a-f]+\(runtime\)', text), 'signature_identity')
+
+
+def build(request):
+    """Recompute payload and immutable evidence without writing anything."""
+    require(PACKAGE_DIR is not None and PACKAGE_SSH is not None, 'use_packaged_command')
+    fields(request, ['schema_version', 'role', 'root', 'host_identity', 'runtime', 'inputs'])
+    require(request['schema_version'] == 1 and request['role'] in ('endpoint', 'main'), 'request_schema')
+    require(request['host_identity'] == host_identity(), 'host_changed')
+    root = path(request['root'])
+    require(root != Path('/') or os.getuid() == 0, 'protected_install_requires_operator')
+    with Chain(root) as chain:
+        root_identity = chain.ids
+    runtime = request['runtime']
+    validate_runtime(runtime)
+    evidence, payload = {}, {}
+
+    def read(label, filename, **kwargs):
+        info, data = inspect_file(filename, **kwargs)
+        evidence[label] = {'path': str(filename), **info}
+        return data
+
+    package = path(PACKAGE_DIR)
+    locked = decode(read('lock', package / 'dependency_lock.json'))
+    for name in ('bridge.py', 'mac_endpoint.py', 'endpoint-binding.schema.json', 'ssh_config.template'):
+        read(name, package / name)
+    read('setup', Path(__file__).absolute())
+    # Nix interpreter symlinks are intentionally resolved to the immutable store.
+    python = Path(sys.executable).resolve()
+    require(str(python).startswith('/nix/store/'), 'python_identity')
+    read('python', python, max_size=128 * LIMIT)
+    inputs = request['inputs']
+    state = None
+    if request['role'] == 'endpoint':
+        fields(inputs, ['archive', 'gui_home', 'main_source', 'public_key'])
+        require(host_identity()['platform'] == 'darwin', 'endpoint_platform')
+        account = pwd.getpwnam(runtime['user'])
+        require(account.pw_uid == runtime['uid'] and account.pw_dir == inputs['gui_home']
+                and runtime['host'] == host_identity()['host'], 'gui_identity')
+        require(os.getuid() == 0 or root != Path('/'), 'protected_install_requires_operator')
+        archive = locked['cua']['artifact']
+        read('archive', path(inputs['archive']), max_size=archive['size_bytes'])
+        require(evidence['archive']['sha256'] == archive['observed_sha256'] == archive['published_sha256']
+                and evidence['archive']['size'] == archive['size_bytes'], 'artifact_identity')
+        app = mapped(root, APP)
+        info = plistlib.loads(read('app_info', app / 'Contents/Info.plist',
+                                  signed_app=root == Path('/')))
+        require(info.get('CFBundleIdentifier') == locked['cua']['bundle']['id']
+                and info.get('CFBundleShortVersionString') == locked['cua']['bundle']['version']
+                and info.get('CFBundleExecutable') == 'cua-driver', 'app_identity')
+        read('driver', mapped(root, DRIVER), max_size=128 * LIMIT,
+             signed_app=root == Path('/'))
+        require(evidence['driver']['sha256'] == runtime['driver_sha256'], 'driver_identity')
+        # Check the supplied signed app executable belongs to the EXACT locked
+        # archive. Never extract archive members into a destination tree.
+        with tarfile.open(inputs['archive'], 'r:gz') as tar:
+            matches = [m for m in tar.getmembers() if m.name.endswith('/CuaDriver.app/Contents/MacOS/cua-driver')]
+            require(len(matches) == 1 and matches[0].isfile() and matches[0].size <= 128 * LIMIT, 'artifact_members')
+            with tar.extractfile(matches[0]) as source:
+                require(sha(source.read(128 * LIMIT + 1)) == runtime['driver_sha256'], 'artifact_driver_identity')
+        codesign(app)
+        # Identity checks are repeated after the external read-only verifier.
+        for label in ('archive', 'app_info', 'driver'):
+            old = evidence[label]
+            again, _ = inspect_file(old['path'], max_size=max(LIMIT, old['size']),
+                                   signed_app=root == Path('/') and label in ('app_info', 'driver'))
+            require(again == {k: v for k, v in old.items() if k != 'path'}, 'artifact_changed')
+        network = ipaddress.ip_network(inputs['main_source'], strict=True)
+        require(network.prefixlen == network.max_prefixlen and not network.is_unspecified, 'source_identity')
+        public = read('public_key', path(inputs['public_key'])).decode().strip()
+        parts = public.split()
+        require(len(parts) == 2 and parts[0] == 'ssh-ed25519', 'public_key_identity')
+        raw = base64.b64decode(parts[1], validate=True)
+        require(len(raw) == 51 and raw[:19] == b'\0\0\0\x0bssh-ed25519\0\0\0\x20', 'public_key_identity')
+        state = '/usr/local/var/loom-mac-runtime-' + sha(canonical(runtime))[:16]
+        with Chain(mapped(root, '/usr/local/var')):
+            pass
+        bridge_source = read('bridge.py', package / 'bridge.py').decode()
+        endpoint_source = read('mac_endpoint.py', package / 'mac_endpoint.py').decode()
+        # Embed the exact accepted payload, so root-protected executable custody
+        # has no caller-controlled import directory or Python environment.
+        launcher = ('#!' + str(python) + ' -I\nimport sys, types\n'
+                    'sys.dont_write_bytecode = True\n'
+                    'bridge = types.ModuleType("bridge")\nsys.modules["bridge"] = bridge\n'
+                    'exec(compile(' + repr(bridge_source) + ', "bridge.py", "exec"), bridge.__dict__)\n'
+                    'endpoint = types.ModuleType("mac_endpoint")\n'
+                    'exec(compile(' + repr(endpoint_source) + ', "mac_endpoint.py", "exec"), endpoint.__dict__)\n'
+                    'endpoint.main()\n')
+        payload[ENDPOINT] = (launcher.encode(), 0o555)
+        payload[CONFIG] = (canonical({'runtime': runtime, 'state_dir': state}), 0o644)
+        restriction = ('restrict,from="' + str(network) + '",command="' + ENDPOINT + '" ' + public + '\n')
+        payload['/usr/local/etc/loom-mac-authorized-key'] = (restriction.encode(), 0o600)
+        journal_parent = '/usr/local/etc'
+    else:
+        fields(inputs, ['host', 'known_hosts', 'identity_file'])
+        require(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.:-]*', inputs['host']), 'host_identity')
+        key_path = path(inputs['identity_file'])
+        key_file = mapped(root, str(key_path))
+        with MainKey(key_file) as key:
+            evidence['identity_locator'] = {'path': str(key_file), **key.metadata()}
+        key_identity = evidence['identity_locator']['identity']
+        known = read('known_hosts_input', path(inputs['known_hosts']),
+                     excluded_inode=(key_identity['dev'], key_identity['ino']))
+        parts = known.decode().strip().split()
+        require(len(parts) == 3 and parts[0] == inputs['host'] and parts[1] == 'ssh-ed25519', 'known_host_identity')
+        raw = base64.b64decode(parts[2], validate=True)
+        require(len(raw) == 51 and raw[:19] == b'\0\0\0\x0bssh-ed25519\0\0\0\x20', 'known_host_identity')
+        ssh = Path(PACKAGE_SSH).resolve()
+        read('openssh', ssh, max_size=128 * LIMIT)
+        binding = {'target_node': 'macbook', 'host': inputs['host'], 'user': runtime['user'],
+                   'ssh': str(ssh), 'ssh_sha256': evidence['openssh']['sha256'],
+                   'known_hosts': MAIN_DIR + '/known_hosts', 'known_hosts_sha256': sha(known),
+                   'identity_file': str(key_path), 'runtime': runtime}
+        payload[MAIN_DIR + '/binding.json'] = (canonical(binding), 0o644)
+        payload[MAIN_DIR + '/known_hosts'] = (known, 0o644)
+        template = read('ssh_config.template', package / 'ssh_config.template').decode()
+        for token, value in {'HOST': inputs['host'], 'USER': runtime['user'],
+                             'IDENTITY_FILE': '"' + str(key_path) + '"',
+                             'KNOWN_HOSTS': '"' + MAIN_DIR + '/known_hosts"'}.items():
+            template = template.replace('@' + token + '@', value)
+        payload[MAIN_DIR + '/ssh_config'] = (template.encode(), 0o644)
+        journal_parent = MAIN_DIR
+    return {'request': request, 'evidence': evidence, 'root_identity': root_identity,
+            'payload': {name: {'sha256': sha(data), 'mode': mode} for name, (data, mode) in payload.items()},
+            'state': state, 'journal_parent': journal_parent}, payload
+
+
+def destination(root, name):
+    p = mapped(root, name)
+    with Chain(p.parent) as parent:
+        try:
+            info, _ = inspect_file(p)
+        except FileNotFoundError:
+            info = None
+        return {'ancestors': parent.ids, 'existing': info}
+
+
+def plan(request):
+    body, _ = build(request)
+    root = path(request['root'])
+    body['destinations'] = {name: destination(root, name) for name in body['payload']}
+    require(all(value['existing'] is None for value in body['destinations'].values()), 'unknown_replacement')
+    if body['state']:
+        require(not os.path.lexists(mapped(root, body['state'])), 'unknown_state')
+        body['state_parent'] = destination(root, body['state'])['ancestors']
+    with Chain(mapped(root, body['journal_parent'])) as parent:
+        body['journal_parent_identity'] = parent.ids
+    return {'plan': body, 'digest': sha(canonical(body)), 'notice': NOTICE,
+            'posture': 'offline_staging' if request['root'] != '/' else 'operator_publication',
+            'ssh_restriction': 'staged_only_operator_must_review_publish_or_revoke_exact_key'}
+
+
+def write_new(parent, name, data, mode):
+    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=parent)
+    try:
+        with os.fdopen(fd, 'wb', closefd=False) as out:
+            out.write(data)
+            out.flush()
+            os.fchmod(fd, mode)
+            os.fsync(fd)
+        return identity(os.fstat(fd))
+    finally:
+        os.close(fd)
+
+
+def mutate(envelope, digest, action):
+    """Exact stages are inode witnesses: replay never adopts matching strangers."""
+    require(action in ('apply', 'revoke'), 'invalid_action')
+    fields(envelope, ['plan', 'digest', 'notice', 'posture', 'ssh_restriction'])
+    body = envelope['plan']
+    require(digest == envelope['digest'] == sha(canonical(body)), 'plan_digest')
+    require(body['request']['host_identity'] == host_identity(), 'host_changed')
+    root = path(body['request']['root'])
+    published = []
+    result = {'ok': False, 'code': 'publication_refused', 'published': published,
+              'publication_inventory': 'incomplete_until_success',
+              'journal_created': False, 'state_created': False,
+              'notice': NOTICE, 'ssh_restriction': 'staged_only', 'in_flight_effects': 'unobserved'}
+    try:
+        # Revoke deliberately does not require the old app/runtime/key artifact:
+        # an unavailable/restarted/revoked dependency must not prevent revocation.
+        payload = None
+        if action == 'apply':
+            current, payload = build(body['request'])
+            require(all(current[key] == body[key] for key in current), 'input_changed')
+        with contextlib.ExitStack() as stack:
+            key = None
+            if action == 'apply' and body['request']['role'] == 'main':
+                expected_key = body['evidence']['identity_locator']
+                key = stack.enter_context(MainKey(expected_key['path']))
+
+            def recheck_key():
+                if key is not None:
+                    require({'path': str(key.key), **key.metadata()} == expected_key, 'private_key_changed')
+
+            recheck_key()
+            journal_parent = stack.enter_context(Chain(mapped(root, body['journal_parent'])))
+            require(journal_parent.ids == body['journal_parent_identity'], 'ancestor_changed')
+            parents = {}
+            for name, expected in body['destinations'].items():
+                p = stack.enter_context(Chain(mapped(root, name).parent))
+                require(p.ids == expected['ancestors'], 'ancestor_changed')
+                parents[name] = p
+            journal_name = '.loom-mac-setup-' + digest
+            journal_path = mapped(root, body['journal_parent']) / journal_name
+            new = not os.path.lexists(journal_path)
+            require(action == 'apply' or not new, 'missing_receipt')
+            if new:
+                require(all(destination(root, name) == expected for name, expected in body['destinations'].items()), 'destination_changed')
+                journal_parent.check()
+                os.mkdir(journal_name, 0o700, dir_fd=journal_parent.fd)
+                result['journal_created'] = True
+                os.fsync(journal_parent.fd)
+            journal = stack.enter_context(Chain(journal_path))
+            require(journal.ids[-1]['mode'] == 0o700 and journal.ids[-1]['uid'] == os.getuid(), 'receipt_custody')
+            # Lock the directory itself: no pre-receipt lock-file race/overwrite.
+            fcntl.flock(journal.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if new:
+                stages = {}
+                for number, (name, (data, mode)) in enumerate(payload.items()):
+                    stage_name = 'stage-' + str(number)
+                    stages[name] = {'name': stage_name,
+                                    'identity': write_new(journal.fd, stage_name, data, mode)}
+                receipt = {'digest': digest, 'journal_identity': journal.ids[-1], 'stages': stages, 'state': None}
+                if body['state']:
+                    state_parent = stack.enter_context(Chain(mapped(root, body['state']).parent))
+                    require(state_parent.ids == body['state_parent'], 'ancestor_changed')
+                    state_parent.check()
+                    os.mkdir(Path(body['state']).name, 0o700, dir_fd=state_parent.fd)
+                    result['state_created'] = True
+                    state_fd = os.open(Path(body['state']).name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=state_parent.fd)
+                    try:
+                        if root == Path('/'):
+                            os.fchown(state_fd, body['request']['runtime']['uid'], -1)
+                        receipt['state'] = identity(os.fstat(state_fd))
+                        require(receipt['state']['mode'] == 0o700, 'state_permissions')
+                        require(identity(os.stat(Path(body['state']).name, dir_fd=state_parent.fd,
+                                                 follow_symlinks=False)) == receipt['state'], 'state_changed')
+                        state_parent.check()
+                        os.fsync(state_fd)
+                    finally:
+                        os.close(state_fd)
+                    os.fsync(state_parent.fd)
+                write_new(journal.fd, 'receipt.json', canonical(receipt), 0o600)
+                os.fsync(journal.fd)
+            receipt_info, receipt_data = inspect_file(journal_path / 'receipt.json')
+            require(receipt_info['identity']['mode'] == 0o600, 'receipt_custody')
+            receipt = decode(receipt_data)
+            require(receipt['digest'] == digest and receipt['journal_identity'] == journal.ids[-1]
+                    and set(receipt['stages']) == set(body['payload']), 'receipt_changed')
+            if body['state'] and action == 'apply':
+                state_parent = stack.enter_context(Chain(mapped(root, body['state']).parent))
+                require(state_parent.ids == body['state_parent'], 'ancestor_changed')
+                require(identity(mapped(root, body['state']).lstat()) == receipt['state'], 'state_changed')
+            revoked = os.path.lexists(journal_path / 'revoked.json')
+            if revoked:
+                _, marker = inspect_file(journal_path / 'revoked.json')
+                require(decode(marker) == {'digest': digest, 'revoked': True}, 'receipt_changed')
+                require(action == 'revoke', 'already_revoked')
+            # Validate the entire set before the first publication or unlink.
+            for name, stage in receipt['stages'].items():
+                info, _ = inspect_file(journal_path / stage['name'])
+                require(info['identity'] == stage['identity'] and info['sha256'] == body['payload'][name]['sha256']
+                        and info['identity']['mode'] == body['payload'][name]['mode'], 'stage_changed')
+                present = destination(root, name)['existing']
+                if present is not None:
+                    require(present['identity'] == stage['identity'] and present['sha256'] == info['sha256'], 'destination_changed')
+                    require(not revoked, 'revoked_destination_reappeared')
+                    published.append(name)
+            for name, stage in receipt['stages'].items():
+                parent = parents[name]
+                journal.check()
+                parent.check()
+                recheck_key()
+                present = destination(root, name)['existing']
+                if action == 'apply' and present is None:
+                    os.link(stage['name'], Path(name).name, src_dir_fd=journal.fd,
+                            dst_dir_fd=parent.fd, follow_symlinks=False)
+                    published.append(name)
+                elif action == 'revoke' and present is not None:
+                    require(present['identity'] == stage['identity'], 'destination_changed')
+                    os.unlink(Path(name).name, dir_fd=parent.fd)
+                    published.remove(name)
+                os.fsync(parent.fd)
+                parent.check()
+                recheck_key()
+            if action == 'revoke' and not revoked:
+                write_new(journal.fd, 'revoked.json', canonical({'digest': digest, 'revoked': True}), 0o600)
+                os.fsync(journal.fd)
+            result.update(ok=True, code='applied' if action == 'apply' else 'revoked',
+                          publication_inventory='complete',
+                          retained='exact_receipt_stages_and_private_runtime_state',
+                          state_created=bool(receipt['state']))
+    except (Refusal, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        # Published reports known effects; crashes before receipt completion are
+        # intentionally refusal, not adopted directories or rollback claims.
+        result.update(code='partial_or_refused', reconciliation_required=True,
+                      destination_namespace_recheck_required=True)
+    return result
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest='command', required=True)
+    prepare = sub.add_parser('plan', help='zero writes; print plan for operator review')
+    prepare.add_argument('--request', required=True)
+    for command in ('apply', 'revoke'):
+        child = sub.add_parser(command)
+        child.add_argument('--plan', required=True)
+        child.add_argument('--digest', required=True)
+        child.add_argument('--confirm', required=True, choices=[command])
+    args = parser.parse_args(argv)
+    try:
+        filename = args.request if args.command == 'plan' else args.plan
+        _, raw = inspect_file(path(filename))
+        value = decode(raw)
+        result = plan(value) if args.command == 'plan' else mutate(value, args.digest, args.command)
+        print(json.dumps(result, sort_keys=True))
+        return 0 if result.get('ok', True) else 1
+    except (Refusal, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        print(json.dumps({'ok': False, 'code': 'setup_refused', 'notice': NOTICE}))
+        return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

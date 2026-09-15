@@ -1,0 +1,18 @@
+kind: loom.project_sync_policy
+schema_version: sync.policy.v0.3
+
+sync:
+  enabled: true
+  roots:
+    - key: notes
+      path: notes
+      display_name: Research Notes
+      mode: markdown
+      index: markdown_text
+      delete: tombstone
+      include:
+        - "**/*.md"
+      exclude:
+        - ".obsidian/**"
+        - ".trash/**"
+        - "**/.DS_Store"

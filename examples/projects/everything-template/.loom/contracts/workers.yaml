@@ -1,0 +1,6 @@
+kind: loom.worker_policy
+schema_version: worker.policy.v0.3
+
+workers:
+  enabled: false
+  notes: Scaffolded policy only. Registration decides which workers apply.

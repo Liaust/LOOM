@@ -1,0 +1,637 @@
+--- a/tools/computer_use/cua_backend.py
++++ b/tools/computer_use/cua_backend.py
+@@ -405,6 +405,9 @@
+
+ def _empty_discovery_reason() -> str:
+     """One-line diagnosis for 'window discovery found nothing'."""
++    if _remote_mac_enabled():
++        return "No Mac windows are available; recheck the logged-in desktop."
++
+     locked = _linux_session_locked()
+     if locked is True:
+         return (
+@@ -456,6 +459,9 @@
+
+ def _linux_x11_active_window_id() -> Optional[int]:
+     """Best-effort read of ``_NET_ACTIVE_WINDOW`` via xprop. Never raises."""
++    if _remote_mac_enabled():
++        return None
++
+     if sys.platform != "linux" or not os.environ.get("DISPLAY"):
+         return None
+     try:
+@@ -926,6 +932,9 @@
+     reject it; callers should fall back to the no-overlay invocation on
+     spawn failure.
+     """
++    if _remote_mac_enabled():
++        return driver_cmd, ["mcp"]
++
+     try:
+         from tools.environments.local import _sanitize_subprocess_env
+         proc = subprocess.run(
+@@ -1107,6 +1116,9 @@
+     replaced by another binary. Otherwise resolve PATH first, then canonical
+     user-local installation locations used by the official installer.
+     """
++    if _remote_mac_enabled() and not (override or os.environ.get(_CUA_DRIVER_CMD_ENV)):
++        return None
++
+     for candidate in _candidate_cua_driver_commands(override):
+         expanded = os.path.expanduser(candidate)
+         if _has_path_separator(expanded):
+@@ -1565,6 +1577,174 @@
+ # Asyncio bridge — one long-lived loop on a background thread
+ # ---------------------------------------------------------------------------
+
++
++# Explicit opt-in: absence preserves the pinned upstream local execution path.
++def _remote_mac_enabled():
++    return bool(os.environ.get("HERMES_MAC_BINDING"))
++
++
++_REMOTE_CODES = {
++    "mac_unreachable", "mac_auth_failed", "mac_host_identity_mismatch",
++    "mac_desktop_unavailable", "mac_permission_denied", "mac_driver_unavailable",
++    "mac_target_stale", "mac_busy", "mac_connection_lost",
++    "mac_action_outcome_unknown", "mac_action_failed", "mac_policy_refused",
++    "mac_output_limit", "mac_protocol_error",
++}
++_REMOTE_FIELDS = {"target_node", "code", "phase", "delivery",
++                  "retryable_after_recheck", "next_action", "generation"}
++
++
++def _remote_metadata(code, phase="admission", delivery="not_sent"):
++    return {"target_node": "macbook", "code": code, "phase": phase,
++            "delivery": delivery, "retryable_after_recheck": code in {
++                "mac_unreachable", "mac_busy", "mac_connection_lost"},
++            "next_action": "observe_and_reconcile" if delivery == "unknown" or code in {"mac_target_stale", "mac_action_failed"}
++                           else "recheck_binding_and_availability"}
++
++
++class _RemoteMacError(RuntimeError):
++    def __init__(self, meta):
++        self.meta = ({k: v for k, v in meta.items() if k in _REMOTE_FIELDS}
++                     if type(meta) is dict and len(meta) <= 16 else {})
++        code = self.meta.get("code")
++        super().__init__(code if type(code) is str and code in _REMOTE_CODES
++                         else "mac_driver_unavailable")
++
++
++def _remote_failure_metadata(raw):
++    """Accept only the closed transport envelope; never echo child prose."""
++    phases = {"admission", "connect", "handshake", "capture", "input",
++              "response", "cancel", "teardown", "driver"}
++    deliveries = {"not_sent", "observed", "confirmed", "unknown"}
++    if type(raw) is not dict or len(raw) > len(_REMOTE_FIELDS) or not set(raw).issubset(_REMOTE_FIELDS):
++        return None
++    if not {"target_node", "code", "phase", "delivery", "retryable_after_recheck", "next_action"}.issubset(raw):
++        return None
++    if type(raw.get("target_node")) is not str or raw["target_node"] != "macbook":
++        return None
++    for field, choices in (("code", _REMOTE_CODES), ("phase", phases),
++                           ("delivery", deliveries)):
++        if type(raw.get(field)) is not str or raw[field] not in choices:
++            return None
++    if "retryable_after_recheck" in raw and type(raw["retryable_after_recheck"]) is not bool:
++        return None
++    if "next_action" in raw and (type(raw["next_action"]) is not str or
++            raw["next_action"] not in {"observe_and_reconcile", "recheck_binding_and_availability"}):
++        return None
++    generation = raw.get("generation")
++    if generation is not None and (type(generation) is not str or len(generation) != 32 or
++                                   re.fullmatch(r"[0-9a-f]{32}", generation) is None):
++        return None
++    if raw["code"] == "mac_action_outcome_unknown" and raw["delivery"] != "unknown":
++        return None
++    if raw["code"] in {"mac_unreachable", "mac_auth_failed"} and raw["delivery"] != "not_sent":
++        return None
++    meta = _remote_metadata(raw["code"], raw["phase"], raw["delivery"])
++    if generation is not None:
++        meta["generation"] = generation
++    return meta
++
++
++def _remote_error_response(exc, code="mac_driver_unavailable", *, before_dispatch=False):
++    # MCP 2.0 keeps JSON-RPC data on MCPError.error.data. Async context managers
++    # wrap that error in groups; neither outer messages nor stderr are evidence.
++    from mcp.shared.exceptions import MCPError
++    from mcp.types import ErrorData
++
++    pending = [(exc, 0, frozenset())]
++    seen = set()
++    evidence = []
++    invalid = False
++    incomplete = False
++    while pending:
++        if len(seen) >= 64:
++            incomplete = True
++            break
++        current, depth, ancestors = pending.pop()
++        marker = id(current)
++        if not isinstance(current, BaseException) or depth > 16 or marker in ancestors:
++            incomplete = True
++            continue
++        if marker in seen:
++            continue
++        seen.add(marker)
++        typed = isinstance(current, (_RemoteMacError, MCPError))
++        if typed:
++            raw = current.meta if isinstance(current, _RemoteMacError) else (
++                current.error.data if isinstance(current.error, ErrorData) and
++                type(current.error.code) is int and current.error.code == -32000 else None)
++            meta = _remote_failure_metadata(raw)
++            if meta is None:
++                invalid = True
++            elif meta not in evidence:
++                evidence.append(meta)
++        children = []
++        if isinstance(current, BaseExceptionGroup):
++            # Slice before extending: an attacker-sized group stays bounded.
++            children.extend(current.exceptions[:64])
++            incomplete |= len(current.exceptions) > 64
++        for child in (current.__cause__, current.__context__):
++            if child is not None and all(child is not c for c in children):
++                children.append(child)
++        if not typed and not children:
++            incomplete = True
++        ancestry = ancestors | {marker}
++        room = 64 - len(pending)
++        incomplete |= len(children) > room
++        pending.extend((child, depth + 1, ancestry) for child in children[:room])
++
++    if len(evidence) == 1 and not invalid and (not incomplete or evidence[0]["delivery"] == "unknown"):
++        meta = evidence[0]
++    elif any(m["delivery"] == "unknown" for m in evidence):
++        # Conflicting branches cannot downgrade possible input delivery.
++        meta = _remote_metadata("mac_action_outcome_unknown", "response", "unknown")
++    elif evidence or invalid:
++        meta = _remote_metadata("mac_protocol_error", "admission", "unknown")
++    elif (before_dispatch and len(seen) == 1 and
++          not isinstance(exc, BaseExceptionGroup) and
++          exc.__cause__ is None and exc.__context__ is None):
++        # This call site has not dispatched the current request. A simple
++        # untyped startup failure can carry that local fact, but cannot prove
++        # offline. Typed, malformed, conflicting or bounded-out evidence above
++        # stays conservative, including any possibly delivered prior input.
++        meta = _remote_metadata("mac_driver_unavailable", "admission", "not_sent")
++    else:
++        # The legacy fallback argument is not transport evidence. In particular
++        # a TypeError at backend lookup proves neither offline nor not-sent.
++        meta = _remote_metadata("mac_driver_unavailable", "admission", "unknown")
++    return dict(meta, ok=False, error=meta["code"], message=(
++        "Mac action outcome is unknown; observe and reconcile before another input."
++        if meta["delivery"] == "unknown" else "Mac request refused: " + meta["code"]))
++
++
++def _remote_result(code, phase="admission", delivery="not_sent"):
++    meta = _remote_metadata(code, phase, delivery)
++    message = ("Mac action outcome is unknown; observe and reconcile before another input."
++               if delivery == "unknown" else "Mac request refused: " + code + ". Recheck the selected target and availability.")
++    return {"data": message, "images": [], "isError": True, "structuredContent": meta}
++
++
++def _remote_client_session_class():
++    from mcp import ClientSession
++    from mcp.types import Tool, ListToolsResult, ListToolsRequest
++    from pydantic import Field
++
++    class DriverTool(Tool):
++        capabilities: list[str] = Field(default_factory=list)
++
++    class DriverListing(ListToolsResult):
++        tools: list[DriverTool]
++        capability_version: str = Field(default="", alias="capability_version")
++        schema_version: str = Field(default="", alias="schema_version")
++
++    class DriverSession(ClientSession):
++        async def list_tools(self, *, params=None):
++            result = await self.send_request(ListToolsRequest(params=params), DriverListing)
++            complete = (params is None or params.cursor is None) and result.next_cursor is None
++            return self._absorb_tool_listing(result, complete=complete)
++    return DriverSession
++
++
+ class _AsyncBridge:
+     """Runs one asyncio loop on a daemon thread; marshals coroutines from the caller."""
+
+@@ -1604,7 +1784,12 @@
+         fut = safe_schedule_threadsafe(coro, self._loop)
+         if fut is None:
+             raise RuntimeError("cua-driver bridge not started")
+-        return fut.result(timeout=timeout)
++        try:
++            return fut.result(timeout=timeout)
++        except (concurrent.futures.TimeoutError, concurrent.futures.CancelledError):
++            if _remote_mac_enabled():
++                fut.cancel()
++            raise
+
+     def stop(self) -> None:
+         if self._loop and self._loop.is_running():
+@@ -1685,6 +1870,8 @@
+         import time as _time
+         from mcp import ClientSession, StdioServerParameters
+         from mcp.client.stdio import stdio_client
++        if _remote_mac_enabled():
++            ClientSession = _remote_client_session_class()
+         from tools.environments.local import _sanitize_subprocess_env
+
+         # Build the shutdown event on the loop's thread so the asyncio
+@@ -1812,6 +1999,8 @@
+             if isinstance(cv, str):
+                 self._capability_version = cv
+         except Exception as e:
++            if _remote_mac_enabled():
++                raise _RemoteMacError(_remote_metadata("mac_driver_unavailable")) from None
+             logger.debug("cua-driver tools/list capability discovery failed: %s", e)
+
+     def start(self) -> None:
+@@ -1838,7 +2027,10 @@
+         self._lifecycle_future = asyncio.run_coroutine_threadsafe(
+             self._lifecycle_coro(), loop
+         )
+-        if not self._ready_event.wait(timeout=30.0):
++        if not self._ready_event.wait(timeout=10.0 if _remote_mac_enabled() else 30.0):
++            if _remote_mac_enabled():
++                self._lifecycle_future.cancel()
++                raise _RemoteMacError(_remote_metadata("mac_unreachable", "connect"))
+             # Best-effort: signal shutdown if the future is still alive.
+             self._signal_shutdown_locked()
+             # Surface which startup phase wedged (issue #57025) — "doctor
+@@ -1855,6 +2047,8 @@
+         # If setup failed, the lifecycle coroutine set _setup_error
+         # before setting _ready_event. Re-raise it on the caller's thread.
+         if self._setup_error is not None:
++            if _remote_mac_enabled():
++                raise _RemoteMacError(_remote_error_response(self._setup_error)) from None
+             raise RuntimeError(
+                 f"cua-driver session setup failed: {self._setup_error}"
+             ) from self._setup_error
+@@ -1864,6 +2058,10 @@
+
+     def stop(self) -> None:
+         with self._lock:
++            if _remote_mac_enabled() and self._lifecycle_future is not None:
++                self._started = False
++                self._stop_lifecycle_locked()
++                return
+             if not self._started:
+                 return
+             self._started = False
+@@ -1893,11 +2091,15 @@
+             # 5s budget for context unwind (stdio_client teardown).
+             fut.result(timeout=5.0)
+         except concurrent.futures.TimeoutError:
+-            logger.warning("cua-driver session shutdown timed out (5s)")
++            if _remote_mac_enabled():
++                fut.cancel()
++            else:
++                logger.warning("cua-driver session shutdown timed out (5s)")
+         except Exception as e:
+             # Real shutdown errors (not the previous cancel-scope race
+             # which is now structurally impossible) still get surfaced.
+-            logger.warning("cua-driver shutdown error: %s", e)
++            if not _remote_mac_enabled():
++                logger.warning("cua-driver shutdown error: %s", e)
+         finally:
+             self._lifecycle_future = None
+
+@@ -2121,6 +2323,8 @@
+         call is itself retried a few times with backoff, since the underlying
+         daemon socket can still be momentarily busy.
+         """
++        if _remote_mac_enabled():
++            raise _RemoteMacError(_remote_metadata("mac_policy_refused"))
+         import subprocess as _subprocess
+         import tempfile as _tempfile
+         import time as _time
+@@ -2328,7 +2532,50 @@
+             "isError": True,
+         }
+
++    def _call_remote_tool(self, name, args, timeout):
++        import time
++        deadline = min(time.monotonic() + min(max(timeout, 0.001), 30.0),
++                       getattr(self, "_remote_deadline", float("inf")))
++        if deadline <= time.monotonic():
++            return _remote_result("mac_connection_lost", "admission")
++        is_input = name not in self._TRANSPORT_REPLAY_SAFE_TOOLS | self._LIFECYCLE_CALLS
++        if name == "set_value":
++            return _remote_result("mac_policy_refused")
++        if is_input and getattr(self, "_remote_uncertain", False):
++            return _remote_result("mac_target_stale")
++        try:
++            if not self._started:
++                self.start()
++        except Exception as exc:
++            meta = _remote_error_response(exc, before_dispatch=True)
++            return {"data": meta["message"], "images": [], "isError": True, "structuredContent": meta}
++        try:
++            result = self._bridge.run(self._call_tool_async(name, args),
++                                      timeout=max(0.001, deadline - time.monotonic()))
++        except (Exception, asyncio.CancelledError):
++            self._notify_transport_reset()
++            self._remote_uncertain = is_input or getattr(self, "_remote_uncertain", False)
++            self._timeout_suspect = True
++            self._signal_shutdown_locked()
++            self._started = False
++            return _remote_result("mac_action_outcome_unknown" if is_input else "mac_connection_lost",
++                                  "response", "unknown" if is_input else "not_sent")
++        meta = result.get("structuredContent") or {}
++        if result.get("isError"):
++            if meta.get("delivery") == "unknown":
++                self._remote_uncertain = True
++            self._notify_transport_reset()
++            if meta.get("delivery") == "unknown" or meta.get("code") in {
++                "mac_connection_lost", "mac_output_limit", "mac_protocol_error", "mac_driver_unavailable"
++            }:
++                self.stop()
++        elif name == "get_window_state":
++            self._remote_uncertain = False
++        return result
++
+     def call_tool(self, name: str, args: Dict[str, Any], timeout: float = 30.0) -> Dict[str, Any]:
++        if _remote_mac_enabled():
++            return self._call_remote_tool(name, args, timeout)
+         # A prior MCP timeout (#74799) marks the session suspect: it may be
+         # wedged for every later call. Recreate it before this call so a
+         # single timeout never poisons the rest of the computer-use session.
+@@ -2636,6 +2883,8 @@
+     """Default computer-use backend. Cross-platform via cua-driver MCP."""
+
+     def __init__(self, permission_mode: str = "standard") -> None:
++        if _remote_mac_enabled():
++            permission_mode = "standard"
+         if permission_mode not in {"standard", "bounded", "unrestricted"}:
+             raise ValueError(f"unsupported cua-driver permission mode: {permission_mode}")
+         self.permission_mode = permission_mode
+@@ -2698,6 +2947,9 @@
+
+     # ── Lifecycle ──────────────────────────────────────────────────
+     def start(self) -> None:
++        if _remote_mac_enabled():
++            self._session.start()
++            return
+         contract = cua_driver_runtime_contract_status()
+         if not contract.get("ready"):
+             # An installed-but-incompatible driver (e.g. predating a Hermes
+@@ -2779,7 +3031,7 @@
+         # ownership, config overrides). Best-effort — even if it fails,
+         # the connection drop below releases the daemon-side state via
+         # the session_end hook cua-driver registers internally.
+-        if self._session._started:
++        if self._session._started and not _remote_mac_enabled():
+             try:
+                 self._session.call_tool("end_session", {"session": self._session_id})
+             except Exception as e:
+@@ -2810,9 +3062,22 @@
+         self._last_target = None
+         self._snapshot_tokens = {}
+
+-    def _failed_capture(self, mode: str, message: str = "") -> CaptureResult:
++    def _failed_capture(
++        self, mode: str, message: str = "", *, remote_code: str = "mac_target_stale",
++    ) -> CaptureResult:
+         """Return an empty capture after disarming any prior target context."""
+         self._clear_active_target()
++        if _remote_mac_enabled():
++            meta = getattr(self, "_remote_meta", {})
++            # A successful discovery/observation is not this capture's failure.
++            # Preserve only a current driver error, including unknown delivery.
++            if meta.get("code") not in _REMOTE_CODES:
++                failure = _remote_metadata(remote_code, phase="capture")
++                if meta.get("generation"):
++                    failure["generation"] = meta["generation"]
++                meta = failure
++            self._remote_meta = meta
++            raise _RemoteMacError(meta)
+         return CaptureResult(
+             mode=mode,
+             width=0,
+@@ -2831,7 +3096,12 @@
+         except Exception:
+             self._clear_active_target()
+             raise
++        if _remote_mac_enabled():
++            self._remote_meta = {k: v for k, v in (out.get("structuredContent") or {}).items() if k in _REMOTE_FIELDS}
+         if out.get("isError") is True:
++            if _remote_mac_enabled():
++                self._clear_active_target()
++                raise _RemoteMacError(self._remote_meta or _remote_metadata("mac_action_failed"))
+             message = out.get("data")
+             self._clear_active_target()
+             raise RuntimeError(
+@@ -2856,7 +3126,7 @@
+         )
+         windows = _ingest_windows(_windows_from_tool_result(out))
+         windows.sort(key=lambda w: w["z_index"], reverse=True)
+-        if windows:
++        if windows or _remote_mac_enabled():
+             return windows
+
+         logger.warning(
+@@ -3022,6 +3292,7 @@
+                 "<get_desktop_state returned no image; the driver may "
+                 "predate the desktop capture lane — try "
+                 "capture(app='<AppName>') for a specific window>",
++                remote_code="mac_driver_unavailable",
+             )
+         structured = out.get("structuredContent") or {}
+         width = int(structured.get("screenshot_width")
+@@ -3069,6 +3340,13 @@
+         Maps hermes `capture(mode, app)` → cua-driver `list_windows` +
+         `get_window_state` (ax/som) or `screenshot` (vision).
+         """
++        if _remote_mac_enabled():
++            # This attempt must not inherit a prior operation's result or target.
++            self._remote_meta = {}
++            self._clear_active_target()
++            if not self._session._started:
++                # Reconnect invalidation precedes selecting this capture's target.
++                self._session.start()
+         # Step 1: enumerate on-screen windows to find target pid/window_id.
+         # Surface 3 of NousResearch/hermes-agent#47072: read the canonical
+         # `structuredContent.windows` array directly. Pre-fix the wrapper
+@@ -3244,7 +3522,7 @@
+                     },
+                 )
+                 png_b64, image_mime_type = _image_from_tool_result(sc_out)
+-                if not png_b64:
++                if not png_b64 and not _remote_mac_enabled():
+                     # Driver had no usable `screenshot` (e.g. "Unknown tool:
+                     # screenshot" on ≥0.5.x, or an empty image part). Fall
+                     # through to the get_window_state path below.
+@@ -3269,7 +3547,7 @@
+                 if wt:
+                     window_title = wt.group(1)
+
+-            if not png_b64:
++            if not png_b64 and not _remote_mac_enabled():
+                 # Both MCP attempts came back imageless without raising (flaky
+                 # bridge dropping the heavy payload) — re-fetch the window
+                 # state over the CLI transport, which embeds a screenshot.
+@@ -3329,7 +3607,7 @@
+                 _, tr = _split_tree_text(txt or "")
+                 return not (tr and tr.strip())
+
+-            if _gws_is_empty(gws_out):
++            if _gws_is_empty(gws_out) and not _remote_mac_enabled():
+                 logger.warning(
+                     "cua-driver get_window_state returned an empty result over MCP "
+                     "(pid=%s window_id=%s); re-fetching via CLI transport",
+@@ -3392,7 +3670,7 @@
+         png_bytes_len = 0
+         if png_b64:
+             try:
+-                raw = base64.b64decode(png_b64, validate=False)
++                raw = base64.b64decode(png_b64, validate=_remote_mac_enabled() and mode == "vision")
+                 png_bytes_len = len(raw)
+                 detected_width, detected_height = _image_dimensions_from_bytes(raw)
+                 if detected_width and detected_height:
+@@ -3400,6 +3678,12 @@
+                     height = detected_height
+             except Exception:
+                 png_bytes_len = len(png_b64) * 3 // 4
++
++        if _remote_mac_enabled() and mode == "vision" and (not png_b64 or width <= 0 or height <= 0):
++            return self._failed_capture(
++                mode, "<vision capture returned no usable image>",
++                remote_code="mac_driver_unavailable",
++            )
+
+         return CaptureResult(
+             mode=mode,
+@@ -3411,6 +3695,7 @@
+             window_title=window_title,
+             png_bytes_len=png_bytes_len,
+             image_mime_type=image_mime_type,
++            meta=getattr(self, "_remote_meta", {}) if _remote_mac_enabled() else {},
+         )
+
+     # ── Pointer ────────────────────────────────────────────────────
+@@ -3672,6 +3957,8 @@
+
+     # ── Value setter ────────────────────────────────────────────────
+     def set_value(self, value: str, element: Optional[int] = None) -> ActionResult:
++        if _remote_mac_enabled():
++            return self._action("set_value", {})
+         """Set a value on an element. Handles AXPopUpButton selects natively."""
+         pid = self._active_pid
+         window_id = self._active_window_id
+--- a/tools/computer_use/tool.py
++++ b/tools/computer_use/tool.py
+@@ -37,6 +37,8 @@
+ """
+
+ from __future__ import annotations
++
++from tools.computer_use.cua_backend import _remote_mac_enabled, _remote_error_response, _RemoteMacError
+
+ import atexit
+ import base64
+@@ -247,6 +249,9 @@
+     bypass in either means the user explicitly opted out of approvals for
+     this run. Fails closed on any resolution error.
+     """
++    if _remote_mac_enabled():
++        return "standard"
++
+     try:
+         from tools.approval import (
+             get_current_session_key,
+@@ -568,10 +573,15 @@
+         if err is not None:
+             return err
+
++    # One remote budget includes lazy backend startup and all capture/action stages.
++    import time as _remote_time
++    remote_deadline = _remote_time.monotonic() + 30.0
+     # Dispatch to backend.
+     try:
+         backend = _get_backend(session_id=session_id)
+     except Exception as e:
++        if _remote_mac_enabled():
++            return json.dumps(_remote_error_response(e, "mac_unreachable"))
+         return json.dumps({
+             "error": f"computer_use backend unavailable: {e}",
+             "hint": "If the cua-driver binary is missing, run `hermes computer-use install`. "
+@@ -582,8 +592,25 @@
+         with _backend_lock:
+             call_lock = _backend_call_locks.setdefault(session_id, threading.RLock())
+         with call_lock:
+-            return _dispatch(backend, action, args)
++            if _remote_mac_enabled():
++                backend._session._remote_deadline = remote_deadline
++                if action == "wait" and float(args.get("seconds", 1.0)) > max(0.0, remote_deadline - _remote_time.monotonic()):
++                    from tools.computer_use.cua_backend import _remote_metadata
++                    raise _RemoteMacError(_remote_metadata("mac_policy_refused"))
++            result = _dispatch(backend, action, args)
++            if _remote_mac_enabled():
++                is_text = isinstance(result, str)
++                payload = json.loads(result) if is_text else result
++                meta = dict(getattr(backend, "_remote_meta", {}))
++                meta.update({k: v for k, v in (payload.get("meta") or {}).items() if k in {"target_node", "code", "phase", "delivery", "retryable_after_recheck", "next_action", "generation"}})
++                if isinstance(payload, dict):
++                    payload.update({k: v for k, v in meta.items() if k != "code"})
++                    payload.setdefault("target_node", "macbook")
++                result = json.dumps(payload) if is_text else payload
++            return result
+     except Exception as e:
++        if _remote_mac_enabled():
++            return json.dumps(_remote_error_response(e))
+         logger.exception("computer_use %s failed", action)
+         return json.dumps({"error": f"{action} failed: {e}"})
+
+@@ -866,6 +893,10 @@
+
+
+ def _action_payload(res: ActionResult) -> Dict[str, Any]:
++    if _remote_mac_enabled() and not res.ok and not res.meta.get("target_node"):
++        from tools.computer_use.cua_backend import _remote_metadata
++        res.meta.update(_remote_metadata("mac_target_stale"))
++        res.code = res.code or "mac_target_stale"
+     payload: Dict[str, Any] = {"ok": res.ok, "action": res.action}
+     if res.message:
+         payload["message"] = res.message
+@@ -890,7 +921,10 @@
+         payload["code"] = res.code
+     if res.meta:
+         payload["meta"] = res.meta
+-    payload["verdict"] = _classify_action_result(res)
++    if _remote_mac_enabled() and res.meta.get("delivery") == "unknown":
++        payload["verdict"] = {"decision": "reconcile", "hint": "Observe and reconcile; never replay uncertain input."}
++    else:
++        payload["verdict"] = _classify_action_result(res)
+     return payload
+
+
+@@ -968,6 +1002,17 @@
+
+
+ def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEMENTS) -> Any:
++    response = _native_capture_response(cap, max_elements)
++    if cap.meta:
++        is_text = isinstance(response, str)
++        payload = json.loads(response) if is_text else response
++        payload.update(cap.meta)
++        payload.setdefault("meta", {}).update(cap.meta)
++        return json.dumps(payload) if is_text else payload
++    return response
++
++
++def _native_capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEMENTS) -> Any:
+     total_elements = len(cap.elements)
+     visible_elements = cap.elements[:max_elements]
+     truncated_elements = max(0, total_elements - len(visible_elements))
+--- a/tools/computer_use/backend.py
++++ b/tools/computer_use/backend.py
+@@ -69,6 +69,8 @@
+     # capture lanes that intentionally return no elements (e.g. full-screen
+     # composited grabs) to tell the model how to reach an interactive lane.
+     note: str = ""
++
++    meta: Dict[str, Any] = field(default_factory=dict)
+
+
+ @dataclass

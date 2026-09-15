@@ -1,0 +1,508 @@
+{
+  "schema_version": "loom.box_sources.queries.v1",
+  "queries": [
+    {
+      "key": "notes-current",
+      "request": {"operation": "search", "query": "revised", "target": ""},
+      "text": "What does the revised pilot say about ingestion latency?",
+      "first_engine": "notes",
+      "scenario": "baseline",
+      "filters": {
+        "project_key": "",
+        "source_category": "",
+        "owner_node": ""
+      },
+      "include_pending": false,
+      "include_archived": false,
+      "dependency": "",
+      "expected": [
+        "note-p2"
+      ],
+      "prohibited": [
+        "note-p1"
+      ],
+      "expected_state": "current"
+    },
+    {
+      "key": "topic-draft",
+      "request": {"operation": "search", "query": "brainstorm", "target": ""},
+      "text": "What hourly snapshot ideas did we brainstorm for Atlas?",
+      "first_engine": "notes",
+      "scenario": "baseline",
+      "filters": {
+        "project_key": "",
+        "source_category": "topics",
+        "owner_node": ""
+      },
+      "include_pending": false,
+      "include_archived": false,
+      "dependency": "",
+      "expected": [
+        "topic-p1"
+      ],
+      "prohibited": [
+        "accepted-cadence"
+      ],
+      "expected_state": "current"
+    },
+    {
+      "key": "library-native-pdf",
+      "request": {"operation": "search", "query": "\"write contention\"", "target": ""},
+      "text": "What does page two of Source A say about contention?",
+      "first_engine": "notes",
+      "scenario": "baseline",
+      "filters": {
+        "project_key": "",
+        "source_category": "library",
+        "owner_node": ""
+      },
+      "include_pending": false,
+      "include_archived": false,
+      "dependency": "",
+      "expected": [
+        "library-a-p2"
+      ],
+      "prohibited": [],
+      "expected_state": "current"
+    },
+    {
+      "key": "library-conflicting-claims",
+      "request": {"operation": "search", "query": "argues", "target": ""},
+      "text": "Compare the hourly and daily snapshot claims in the sources.",
+      "first_engine": "notes",
+      "scenario": "baseline",
+      "filters": {
+        "project_key": "",
+        "source_category": "",
+        "owner_node": ""
+      },
+      "include_pending": false,
+      "include_archived": false,
+      "dependency": "",
+      "expected": [
+        "library-a-p1",
+        "library-b-p1"
+      ],
+      "prohibited": [
+        "accepted-cadence"
+      ],
+      "expected_state": "current"
+    },
+    {
+      "key": "library-office",
+      "request": {"operation": "search", "query": "\"reference outline\"", "target": ""},
+      "text": "Find the reference outline about query latency.",
+      "first_engine": "notes",
+      "scenario": "baseline",
+      "filters": {
+        "project_key": "",
+        "source_category": "",
+        "owner_node": ""
+      },
+      "include_pending": false,
+      "include_archived": false,
+      "dependency": "",
+      "expected": [
+        "library-office-p1"
+      ],
+      "prohibited": [],
+      "expected_state": "current"
+    },
+    {
+      "key": "library-scanned",
+      "request": {"operation": "search", "query": "scanned", "target": ""},
+      "text": "Can we read passages from the scanned reference?",
+      "first_engine": "notes",
+      "scenario": "baseline",
+      "filters": {
+        "project_key": "",
+        "source_category": "",
+        "owner_node": ""
+      },
+      "include_pending": false,
+      "include_archived": false,
+      "dependency": "",
+      "expected": [
+        "library-scan"
+      ],
+      "prohibited": [],
+      "expected_state": "needs_ocr"
+    },
+    {
+      "key": "library-image",
+      "request": {"operation": "search", "query": "diagram", "target": ""},
+      "text": "Is text available from the reference diagram?",
+      "first_engine": "notes",
+      "scenario": "baseline",
+      "filters": {
+        "project_key": "",
+        "source_category": "library",
+        "owner_node": ""
+      },
+      "include_pending": false,
+      "include_archived": false,
+      "dependency": "",
+      "expected": ["library-image"],
+      "prohibited": [],
+      "expected_state": "needs_image_description"
+    },
+    {
+      "key": "library-unsupported",
+      "request": {"operation": "inspect", "query": "", "target": "library-binary"},
+      "text": "What is the custody and extraction state of the binary reference?",
+      "first_engine": "objects",
+      "scenario": "baseline",
+      "filters": {
+        "project_key": "",
+        "source_category": "",
+        "owner_node": ""
+      },
+      "include_pending": false,
+      "include_archived": false,
+      "dependency": "",
+      "expected": [
+        "library-binary"
+      ],
+      "prohibited": [],
+      "expected_state": "metadata_only"
+    },
+    {
+      "key": "legacy-project-notes",
+      "request": {"operation": "search", "query": "legacy", "target": ""},
+      "text": "Find the legacy Atlas design note.",
+      "first_engine": "notes",
+      "scenario": "baseline",
+      "filters": {
+        "project_key": "atlas",
+        "source_category": "",
+        "owner_node": ""
+      },
+      "include_pending": false,
+      "include_archived": false,
+      "dependency": "",
+      "expected": [
+        "legacy-project-note-p1"
+      ],
+      "prohibited": [],
+      "expected_state": "current"
+    },
+    {
+      "key": "declared-project-doc",
+      "request": {"operation": "search", "query": "architecture", "target": ""},
+      "text": "Find Atlas architecture narrative.",
+      "first_engine": "notes",
+      "scenario": "baseline",
+      "filters": {
+        "project_key": "atlas",
+        "source_category": "",
+        "owner_node": ""
+      },
+      "include_pending": false,
+      "include_archived": false,
+      "dependency": "",
+      "expected": [
+        "project-doc-p1"
+      ],
+      "prohibited": [
+        "undeclared-code-p1"
+      ],
+      "expected_state": "current"
+    },
+    {
+      "key": "declared-project-research",
+      "request": {"operation": "search", "query": "hypothesis", "target": ""},
+      "text": "Find Atlas research about hypotheses.",
+      "first_engine": "notes",
+      "scenario": "baseline",
+      "filters": {
+        "project_key": "atlas",
+        "source_category": "",
+        "owner_node": ""
+      },
+      "include_pending": false,
+      "include_archived": false,
+      "dependency": "",
+      "expected": [
+        "project-research-p1"
+      ],
+      "prohibited": [],
+      "expected_state": "current"
+    },
+    {
+      "key": "undeclared-repository",
+      "request": {"operation": "search", "query": "implementation", "target": ""},
+      "text": "Search Notes for the synthetic implementation marker.",
+      "first_engine": "notes",
+      "scenario": "baseline",
+      "filters": {
+        "project_key": "",
+        "source_category": "",
+        "owner_node": ""
+      },
+      "include_pending": false,
+      "include_archived": false,
+      "dependency": "",
+      "expected": [],
+      "prohibited": [
+        "undeclared-code-p1"
+      ],
+      "expected_state": "current"
+    },
+    {
+      "key": "duplicate-project-isolation",
+      "request": {"operation": "search", "query": "\"copied sentence\"", "target": ""},
+      "text": "Find the shared sentence in Atlas only.",
+      "first_engine": "notes",
+      "scenario": "baseline",
+      "filters": {
+        "project_key": "atlas",
+        "source_category": "",
+        "owner_node": ""
+      },
+      "include_pending": false,
+      "include_archived": false,
+      "dependency": "",
+      "expected": [
+        "duplicate-atlas-p1"
+      ],
+      "prohibited": [
+        "duplicate-other-p1"
+      ],
+      "expected_state": "current"
+    },
+    {
+      "key": "documents-default",
+      "request": {"operation": "search", "query": "Documents", "target": ""},
+      "text": "Find the unregistered Documents passage in Notes.",
+      "first_engine": "notes",
+      "scenario": "baseline",
+      "filters": {
+        "project_key": "",
+        "source_category": "",
+        "owner_node": ""
+      },
+      "include_pending": false,
+      "include_archived": false,
+      "dependency": "",
+      "expected": [],
+      "prohibited": [
+        "documents-default-p1"
+      ],
+      "expected_state": "current"
+    },
+    {
+      "key": "imports-custody",
+      "request": {"operation": "inspect", "query": "", "target": "imports-default"},
+      "text": "Is the unregistered Imports object retained?",
+      "first_engine": "objects",
+      "scenario": "baseline",
+      "filters": {
+        "project_key": "",
+        "source_category": "",
+        "owner_node": ""
+      },
+      "include_pending": false,
+      "include_archived": false,
+      "dependency": "",
+      "expected": [
+        "imports-default"
+      ],
+      "prohibited": [],
+      "expected_state": "current"
+    },
+    {
+      "key": "privacy-exclusions",
+      "request": {"operation": "search", "query": "private SYNTHETIC_CREDENTIAL_MARKER_NOT_A_SECRET SYNTHETIC_RUNTIME_MARKER cached dependency generated loomignore linked", "target": ""},
+      "text": "Search Notes for private, credential, runtime, cache, dependency, build or ignored markers.",
+      "first_engine": "notes",
+      "scenario": "baseline",
+      "filters": {
+        "project_key": "",
+        "source_category": "",
+        "owner_node": ""
+      },
+      "include_pending": false,
+      "include_archived": false,
+      "dependency": "",
+      "expected": [],
+      "prohibited": [
+        "private-topic-p1",
+        "credential-p1",
+        "agent-state-p1",
+        "cache-p1",
+        "dependency-p1",
+        "build-p1",
+        "ignored-p1",
+        "link"
+      ],
+      "expected_state": "current"
+    },
+    {
+      "key": "offline-owner",
+      "request": {"operation": "inspect", "query": "", "target": "offline"},
+      "text": "Is the owner of the retained Mac note available?",
+      "first_engine": "objects",
+      "scenario": "baseline",
+      "filters": {
+        "project_key": "",
+        "source_category": "",
+        "owner_node": "macbook"
+      },
+      "include_pending": false,
+      "include_archived": false,
+      "dependency": "",
+      "expected": [
+        "offline"
+      ],
+      "prohibited": [],
+      "expected_state": "offline"
+    },
+    {
+      "key": "archive-default",
+      "request": {"operation": "search", "query": "\"Archived Atlas\"", "target": ""},
+      "text": "Find the archived Atlas brainstorming in ordinary Notes results.",
+      "first_engine": "notes",
+      "scenario": "baseline",
+      "filters": {
+        "project_key": "",
+        "source_category": "",
+        "owner_node": ""
+      },
+      "include_pending": false,
+      "include_archived": false,
+      "dependency": "",
+      "expected": [],
+      "prohibited": [
+        "archived-p1"
+      ],
+      "expected_state": "current"
+    },
+    {
+      "key": "archive-explicit",
+      "request": {"operation": "search", "query": "\"Archived Atlas\"", "target": ""},
+      "text": "Find retained archived Atlas brainstorming explicitly.",
+      "first_engine": "notes",
+      "scenario": "baseline",
+      "filters": {
+        "project_key": "",
+        "source_category": "",
+        "owner_node": ""
+      },
+      "include_pending": false,
+      "include_archived": true,
+      "dependency": "notes-archive-lifecycle",
+      "expected": [
+        "archived-p1"
+      ],
+      "prohibited": [],
+      "expected_state": "archived"
+    },
+    {
+      "key": "accepted-decision",
+      "request": {"operation": "search", "query": "decision", "target": ""},
+      "text": "What cadence was actually accepted?",
+      "first_engine": "provenance",
+      "scenario": "baseline",
+      "filters": {
+        "project_key": "",
+        "source_category": "",
+        "owner_node": ""
+      },
+      "include_pending": false,
+      "include_archived": false,
+      "dependency": "",
+      "expected": [
+        "accepted-cadence"
+      ],
+      "prohibited": [
+        "pending-hourly",
+        "topic-p1",
+        "library-a-p1"
+      ],
+      "expected_state": "current"
+    },
+    {
+      "key": "pending-opt-in",
+      "request": {"operation": "search", "query": "decision", "target": ""},
+      "text": "Show the accepted cadence and the pending hourly proposal separately.",
+      "first_engine": "provenance",
+      "scenario": "baseline",
+      "filters": {
+        "project_key": "",
+        "source_category": "",
+        "owner_node": ""
+      },
+      "include_pending": true,
+      "include_archived": false,
+      "dependency": "",
+      "expected": [
+        "accepted-cadence",
+        "pending-hourly"
+      ],
+      "prohibited": [],
+      "expected_state": "current"
+    },
+    {
+      "key": "historical-citation",
+      "request": {"operation": "exact_get", "query": "", "target": "note-p1"},
+      "text": "Inspect the exact source version cited by the accepted cadence.",
+      "first_engine": "notes",
+      "scenario": "historical_exact_get",
+      "filters": {
+        "project_key": "",
+        "source_category": "",
+        "owner_node": ""
+      },
+      "include_pending": false,
+      "include_archived": false,
+      "dependency": "",
+      "expected": [
+        "note-p1"
+      ],
+      "prohibited": [
+        "note-p2"
+      ],
+      "expected_state": "historical"
+    },
+    {
+      "key": "policy-exclusion-removes-passages",
+      "request": {"operation": "search", "query": "brainstorm", "target": ""},
+      "text": "Find the Atlas draft after private_no_index takes effect.",
+      "first_engine": "notes",
+      "scenario": "exclusion-change",
+      "filters": {
+        "project_key": "",
+        "source_category": "",
+        "owner_node": ""
+      },
+      "include_pending": false,
+      "include_archived": false,
+      "dependency": "",
+      "expected": [],
+      "prohibited": [
+        "topic-p1"
+      ],
+      "expected_state": "current"
+    },
+    {
+      "key": "permission-change-removes-passages",
+      "request": {"operation": "search", "query": "architecture", "target": ""},
+      "text": "Find Atlas architecture after access is revoked.",
+      "first_engine": "notes",
+      "scenario": "permission-change",
+      "filters": {
+        "project_key": "",
+        "source_category": "",
+        "owner_node": ""
+      },
+      "include_pending": false,
+      "include_archived": false,
+      "dependency": "",
+      "expected": [],
+      "prohibited": [
+        "project-doc-p1"
+      ],
+      "expected_state": "current"
+    }
+  ]
+}

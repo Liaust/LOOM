@@ -1,0 +1,327 @@
+{
+  "fixture_kind": "synthetic_source_projection",
+  "source_revision": "cc54254464c0c9aebfd6547fe7e4a0ceaf0456d7",
+  "manifest": {
+    "schema_version": "1",
+    "binary_version": "0.26.1",
+    "binary_path": "/Applications/CuaDriver.app/Contents/MacOS/cua-driver",
+    "features": {
+      "wayland_native": false,
+      "portal_input": false,
+      "portal_capture": false
+    },
+    "mcp_invocation": {
+      "command": "/Applications/CuaDriver.app/Contents/MacOS/cua-driver",
+      "args": [
+        "mcp"
+      ]
+    },
+    "subcommands": [
+      {
+        "name": "mcp",
+        "args": [
+          {
+            "name": "--socket"
+          },
+          {
+            "name": "--direct"
+          },
+          {
+            "name": "--embedded"
+          },
+          {
+            "name": "--host-bundle-id"
+          },
+          {
+            "name": "--grant"
+          }
+        ]
+      },
+      {
+        "name": "serve",
+        "args": [
+          {
+            "name": "--socket"
+          },
+          {
+            "name": "--permission-mode"
+          },
+          {
+            "name": "--grant"
+          },
+          {
+            "name": "--dangerously-bypass-approvals"
+          },
+          {
+            "name": "--capability-manifest"
+          },
+          {
+            "name": "--approve-capability-manifest"
+          },
+          {
+            "name": "--no-permissions-gate"
+          },
+          {
+            "name": "--embedded"
+          },
+          {
+            "name": "--host-bundle-id"
+          }
+        ]
+      },
+      {
+        "name": "stop",
+        "args": [
+          {
+            "name": "--socket"
+          }
+        ]
+      }
+    ]
+  },
+  "tools_list": {
+    "schema_version": "1",
+    "capability_version": "1",
+    "tools": [
+      {
+        "name": "list_windows",
+        "description": "Synthetic selected source projection, not a live driver advertisement",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "session": {
+              "type": "string"
+            },
+            "on_screen_only": {
+              "type": "boolean"
+            }
+          },
+          "required": []
+        },
+        "capabilities": []
+      },
+      {
+        "name": "get_window_state",
+        "description": "Synthetic selected source projection, not a live driver advertisement",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "session": {
+              "type": "string"
+            },
+            "pid": {
+              "type": "integer"
+            },
+            "window_id": {
+              "type": "integer"
+            }
+          },
+          "required": []
+        },
+        "capabilities": [
+          "accessibility.element_tokens"
+        ]
+      },
+      {
+        "name": "click",
+        "description": "Synthetic selected source projection, not a live driver advertisement",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "session": {
+              "type": "string"
+            },
+            "pid": {
+              "type": "integer"
+            },
+            "window_id": {
+              "type": "integer"
+            },
+            "element_index": {
+              "type": "integer"
+            },
+            "element_token": {
+              "type": "string"
+            },
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            },
+            "button": {
+              "type": "string",
+              "enum": [
+                "left",
+                "right",
+                "middle"
+              ]
+            },
+            "delivery_mode": {
+              "type": "string",
+              "enum": [
+                "background",
+                "foreground"
+              ]
+            }
+          },
+          "required": []
+        },
+        "capabilities": [
+          "accessibility.element_tokens"
+        ]
+      },
+      {
+        "name": "type_text",
+        "description": "Synthetic selected source projection, not a live driver advertisement",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "session": {
+              "type": "string"
+            },
+            "pid": {
+              "type": "integer"
+            },
+            "window_id": {
+              "type": "integer"
+            },
+            "text": {
+              "type": "string"
+            },
+            "delivery_mode": {
+              "type": "string",
+              "enum": [
+                "background",
+                "foreground"
+              ]
+            }
+          },
+          "required": []
+        },
+        "capabilities": []
+      },
+      {
+        "name": "start_session",
+        "description": "Synthetic selected source projection, not a live driver advertisement",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "session": {
+              "type": "string"
+            }
+          },
+          "required": []
+        },
+        "capabilities": []
+      },
+      {
+        "name": "end_session",
+        "description": "Synthetic selected source projection, not a live driver advertisement",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "session": {
+              "type": "string"
+            }
+          },
+          "required": []
+        },
+        "capabilities": []
+      }
+    ]
+  },
+  "native_actions": [
+    "capture",
+    "click",
+    "double_click",
+    "right_click",
+    "middle_click",
+    "drag",
+    "scroll",
+    "type",
+    "key",
+    "set_value",
+    "wait",
+    "list_apps",
+    "list_windows",
+    "focus_app"
+  ],
+  "target": {
+    "node": "macbook",
+    "platform": "darwin",
+    "pid": 4242,
+    "window_id": 701,
+    "app": "Safari",
+    "generation": "fixture-generation-1"
+  },
+  "windows_result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Synthetic Safari fixture"
+      }
+    ],
+    "isError": false,
+    "structuredContent": {
+      "windows": [
+        {
+          "app_name": "Safari",
+          "pid": 4242,
+          "window_id": 701,
+          "title": "LOOM synthetic fixture",
+          "z_index": 5,
+          "off_screen": false,
+          "width": 64,
+          "height": 64
+        }
+      ]
+    }
+  },
+  "capture_result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "AXWindow \"LOOM synthetic fixture\""
+      },
+      {
+        "type": "image",
+        "mimeType": "image/png",
+        "data": "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAeklEQVR4nO3PUQkAIBTAwBfHWpYyryH8OITBAtxm7fN1wwUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjSgBQ1oQQNa0IAWPHYBrHDxAIVreXYAAAAASUVORK5CYII="
+      }
+    ],
+    "isError": false,
+    "structuredContent": {
+      "elements": [
+        {
+          "element_index": 1,
+          "element_token": "sfixture:1",
+          "role": "AXButton",
+          "label": "Fixture button",
+          "frame": {
+            "x": 8,
+            "y": 8,
+            "w": 20,
+            "h": 20
+          }
+        }
+      ]
+    }
+  },
+  "action_result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Synthetic action acknowledged"
+      }
+    ],
+    "isError": false,
+    "structuredContent": {
+      "ok": true,
+      "effect": "confirmed",
+      "verified": true,
+      "path": "accessibility",
+      "degraded": false
+    }
+  }
+}

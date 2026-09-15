@@ -1,0 +1,27 @@
+kind: loom.script
+id: hello_world
+name: Hello World
+version: 0.1.0
+description: Minimal scaffolded script package.
+
+entrypoint:
+  command:
+    - ./run.sh
+
+runtime:
+  shell: bash
+
+inputs: {}
+outputs: {}
+
+execution:
+  timeout_seconds: 30
+  network: false
+  filesystem:
+    mode: read_only
+
+artifacts: []
+usage_documents:
+  - path: README.md
+metadata:
+  scaffolded_by: loom

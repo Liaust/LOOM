@@ -1,0 +1,502 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
+HOST="${LOOM_DEV_HOST:-loom-dev}"
+REMOTE_DIR="${LOOM_DEV_REMOTE_DIR:-/srv/loom/current}"
+SMOKE_DIR="$REPO_ROOT/tests/smoke"
+
+usage() {
+  cat <<EOF
+Usage: scripts/loom-dev <command> [args]
+
+Commands:
+  ssh                 Open an interactive SSH session.
+  sync                Rsync this repo to ${HOST}:${REMOTE_DIR}.
+  restart             Restart loomd on the VM.
+  logs [lines|-f]     Show loomd logs. Defaults to 80 lines.
+  status              Show concise VM/runtime status.
+  health              Run loom health on the VM.
+  health-json         Run loom health --json on the VM.
+  flake-check         Run nix flake check locally or on the VM.
+  rebuild             Run nixos-rebuild switch --flake .#dev-utm on the VM.
+  slice-00-smoke      Run only the Slice 0 smoke test.
+  slice-01-smoke      Run only the Slice 1 smoke test.
+  slice-02-smoke      Run only the Slice 2 smoke test.
+  slice-03-smoke      Run only the Slice 3 smoke test.
+  slice-04-smoke      Run only the Slice 4 smoke test.
+  slice-05-smoke      Run only the Slice 5 smoke test.
+  slice-06-smoke      Run only the Slice 6 smoke test.
+  slice-07-smoke      Run only the Slice 7 smoke test.
+  slice-08-smoke      Run only the Slice 8 smoke test.
+  slice-09-smoke      Run only the Slice 9 smoke test.
+  slice-10-smoke      Run only the Slice 10 smoke test.
+  slice-11-smoke      Run only the Slice 11 smoke test.
+  slice-12-smoke      Run only the Slice 12 smoke test.
+  slice-13-smoke      Run only the Slice 13 smoke test.
+  slice-15-smoke      Run only the Slice 15 smoke test.
+  slice-16-smoke      Run only the Slice 16 smoke test.
+  slice-17-smoke      Run only the Slice 17 smoke test.
+  slice-18-smoke      Run only the Slice 18 pre-hardware hardening smoke test.
+  v0-2-slice-01-smoke Run only the v0.2 Slice 01 worker-core smoke test.
+  v0-2-slice-02-smoke Run only the v0.2 Slice 02 main maintenance smoke test.
+  v0-2-slice-03-smoke Run only the v0.2 Slice 03 backup/integrity smoke test.
+  v0-2-slice-04-smoke Run only the v0.2 Slice 04 indexing worker smoke test.
+  v0-2-slice-05-smoke Run only the v0.2 Slice 05 job runner smoke test.
+  v0-2-slice-06-smoke Run only the v0.2 Slice 06 automation scheduler smoke test.
+  v0-2-slice-07-smoke Run only the v0.2 Slice 07 direct event smoke test.
+  v0-2-slice-08-smoke Run only the v0.2 Slice 08 node-agent runtime smoke test.
+  v0-2-slice-09-smoke Run only the v0.2 Slice 09 watched-root scanner smoke test.
+  v0-2-slice-10-smoke Run only the v0.2 Slice 10 watched-root sync/index smoke test.
+  v0-2-slice-11-smoke Run only the v0.2 Slice 11 watched-root backup smoke test.
+  v0-2-slice-12-smoke Run only the v0.2 Slice 12 CLI portal smoke test.
+  v0-2-slice-13-smoke Run only the v0.2 Slice 13 hardening smoke test.
+  v0-2-smoke          Run all v0.2 smoke tests through Slice 12 in order.
+  v0-2-acceptance     Run v0.2 smoke suite plus Slice 13 hardening acceptance.
+  v0-2-1-slice-01-smoke Run only the v0.2.1 Slice 01 portal foundation smoke test.
+  v0-2-1-slice-02-smoke Run only the v0.2.1 Slice 02 portal backend compatibility smoke test.
+  v0-2-1-slice-03-smoke Run only the v0.2.1 Slice 03 portal action lifecycle smoke test.
+  v0-2-1-slice-04-smoke Run only the v0.2.1 Slice 04 worker/index/maintenance action smoke test.
+  v0-2-1-slice-05-smoke Run only the v0.2.1 Slice 05 portal styling smoke test.
+  v0-2-1-slice-06-smoke Run only the v0.2.1 Slice 06 database objects portal smoke test.
+  v0-2-1-slice-07-smoke Run only the v0.2.1 Slice 07 portal action expansion smoke test.
+  v0-2-1-slice-08-smoke Run only the v0.2.1 Slice 08 portal command mode smoke test.
+  v0-2-1-slice-09-smoke Run only the v0.2.1 Slice 09 portal hardening smoke test.
+  v0-2-1-slice-10-smoke Run only the v0.2.1 Slice 10 scoped search smoke test.
+  v0-2-1-smoke       Run all v0.2.1 portal smoke tests in order.
+  v0-2-1-acceptance  Run the v0.2.1 portal acceptance suite.
+  v0-3-slice-04-smoke Run only the v0.3 Slice 04 project registration smoke test.
+  v0-3-slice-05-smoke Run only the v0.3 Slice 05 project script exposure smoke test.
+  v0-3-slice-06-smoke Run only the v0.3 Slice 06 project schedule smoke test.
+  v0-3-slice-07-smoke Run only the v0.3 Slice 07 project direct-event smoke test.
+  v0-3-slice-08-smoke Run only the v0.3 Slice 08 project watch policy smoke test.
+  v0-3-slice-09-smoke Run only the v0.3 Slice 09 project connector smoke test.
+  v0-3-slice-10-smoke Run only the v0.3 Slice 10 runtime executor smoke test.
+  v0-3-slice-11-smoke Run only the v0.3 Slice 11 project module smoke test.
+  v0-3-slice-12-smoke Run only the v0.3 Slice 12 workflow placeholder smoke test.
+  v0-3-slice-13-smoke Run only the v0.3 Slice 13 projects portal smoke test.
+  v0-3-slice-14-smoke Run only the v0.3 Slice 14 integration hardening smoke test.
+  v0-3-smoke          Run the deterministic v0.3 project expansion smoke suite.
+  v0-3-1-workflow-smoke Run the v0.3.1 executable workflow runtime smoke test.
+  v0-4-1-slice-02-smoke Run only the v0.4.1 Slice 02 Box init smoke test.
+  v0-4-1-slice-03-smoke Run the v0.4.1 Slice 03 Box project scaffold smoke test.
+  v0-4-1-slice-04-smoke Run the v0.4.1 Slice 04 Box watch policy smoke test.
+  v0-4-1-slice-05-smoke Run the v0.4.1 Slice 05 Box portal and acceptance smoke test.
+  v0-4-1-smoke       Run the v0.4.1 LOOM Box foundation acceptance smoke test.
+  v0-4-1-box-init-smoke Run the v0.4.1 Slice 02 Box init smoke test alias.
+  v0-4-2-slice-02-smoke Run the v0.4.2 Slice 02 Dropzone receiving smoke test.
+  v0-4-2-slice-03-smoke Run the v0.4.2 Slice 03 Dropzone workspace worker smoke test.
+  v0-4-2-slice-04-smoke Run the v0.4.2 Slice 04 Dropzone CLI/Portal smoke test.
+  v0-4-2-slice-05-smoke Run the v0.4.2 Slice 05 Dropzone hardening smoke test.
+  v0-4-2-dropzone-smoke Run the v0.4.2 Dropzone smoke suite.
+  v0-4-2-smoke       Run the v0.4.2 Dropzone smoke suite plus v0.4.1 Box regression.
+  v0-5-main-installer-smoke Run the v0.5 main SSH installer smoke test.
+  v0-5-workspace-installer-smoke Run the v0.5 workspace SSH installer smoke test.
+  v0-5-hardware-installer-smoke Run the v0.5 hardware/simulated SSH installer smoke test.
+  v0-5-smoke          Run the v0.5 installer acceptance smoke suite.
+  v0-5-1-production-guardrails-smoke Run the v0.5.1 production guardrail smoke.
+  v0-5-1-backup-restore-drill-smoke Run the v0.5.1 backup/restore-drill smoke.
+  v0-5-1-update-plan-smoke Run the v0.5.1 update plan smoke.
+  v0-5-1-update-apply-rollback-smoke Run the v0.5.1 update apply/rollback smoke.
+  v0-5-1-update-maintenance-smoke Run the v0.5.1 update maintenance-window smoke.
+  v0-5-1-smoke        Run the v0.5.1 production update/recovery acceptance suite.
+  v0-6-2-slice-01-smoke Run the v0.6.2 main human storage surface smoke.
+  v0-6-2-slice-02-smoke Run the v0.6.2 storage cleanup inventory smoke.
+  v0-6-2-slice-03-smoke Run the v0.6.2 Box watch responsiveness smoke.
+  v0-6-2-slice-04-smoke Run the v0.6.2 backup failure semantics smoke.
+  v0-6-2-slice-05-smoke Run the v0.6.2 shared file transfer model smoke.
+  v0-6-2-slice-06-smoke Run the v0.6.2 HTTP file transfer smoke.
+  v0-6-2-slice-07-smoke Run the v0.6.2 chunked watched-root backup smoke.
+  v0-6-2-slice-08-smoke Run the v0.6.2 Dropzone large-file transfer smoke.
+  v0-6-2-slice-09-smoke Run the v0.6.2 main Documents import smoke.
+  v0-6-2-slice-10-smoke Run the v0.6.2 storage status and portal feedback smoke.
+  v0-6-2-slice-11-smoke Run the v0.6.2 Mac network and SMB utilities smoke.
+  v0-6-2-slice-12-smoke Run the v0.6.2 production deployment acceptance smoke.
+  v0-6-2-smoke        Run the v0.6.2 storage usability patch smoke suite.
+  v2-project-local-loom-smoke Run the current local project-local .loom smoke.
+  v2-service-registry-local-smoke Run local service contract registration checks.
+  v2-service-registry-mac-smoke Run disposable macOS user LaunchAgent acceptance.
+  v2-protected-folder-local-smoke Run the current local protected-folder contract smoke.
+  v2-lane-bundle-local-smoke Run the current local Lane file-tree/bundle lifecycle smoke.
+  v2-main-box-intake-retirement-local-smoke Run local Main Imports, workspace Lane, cleanup, and reboot-topology checks.
+  hardware-main-smoke Run hardware main bring-up checks.
+  smoke               Run all current smoke tests in order.
+
+Environment:
+  LOOM_DEV_HOST       SSH target. Default: loom-dev
+  LOOM_DEV_REMOTE_DIR Remote source dir. Default: /srv/loom/current
+EOF
+}
+
+fail() {
+  printf 'loom-dev: %s\n' "$*" >&2
+  exit 1
+}
+
+ssh_remote() {
+  ssh -o BatchMode=yes "$HOST" "$@"
+}
+
+require_safe_remote_dir() {
+  case "$REMOTE_DIR" in
+    /srv/loom/current) ;;
+    *) fail "refusing to sync to non-standard remote dir: $REMOTE_DIR" ;;
+  esac
+}
+
+cmd_ssh() {
+  ssh "$HOST"
+}
+
+cmd_sync() {
+  require_safe_remote_dir
+
+  ssh_remote "test -d '$REMOTE_DIR' && test -w '$REMOTE_DIR'"
+
+  rsync -az --delete \
+    --exclude '.git/' \
+    --exclude '.direnv/' \
+    --exclude '.DS_Store' \
+    --exclude 'result' \
+    --exclude 'result-*' \
+    --exclude 'node_modules/' \
+    --exclude 'tmp/' \
+    --exclude '.cache/' \
+    "$REPO_ROOT"/ "$HOST:$REMOTE_DIR"/
+}
+
+cmd_restart() {
+  ssh_remote 'sudo systemctl restart loomd && systemctl is-active loomd'
+}
+
+cmd_logs() {
+  local arg="${1:-80}"
+
+  if [[ "$arg" == "-f" || "$arg" == "--follow" ]]; then
+    ssh "$HOST" 'journalctl -u loomd -f'
+  else
+    ssh_remote "journalctl -u loomd -n '$arg' --no-pager"
+  fi
+}
+
+cmd_status() {
+  ssh_remote '
+    set -e
+    printf "host: "
+    hostname
+    printf "user: "
+    whoami
+    printf "root: "
+    findmnt -n -o SOURCE,FSTYPE /
+    printf "nixos: "
+    nixos-version
+    printf "postgresql: "
+    systemctl is-active postgresql
+    printf "loomd: "
+    systemctl is-active loomd
+    printf "loom user: "
+    id -un loom
+    printf "database: "
+    sudo -u loom psql -d loom_main -tAc "SELECT current_user || '"'"':'"'"' || current_database();"
+    sudo stat -c "%U:%G %a %n" /srv/loom/current /var/lib/loom /var/lib/loom/object-store /etc/loom
+  '
+}
+
+cmd_health() {
+  ssh_remote 'loom health'
+}
+
+cmd_health_json() {
+  ssh_remote 'loom health --json'
+}
+
+cmd_flake_check() {
+  if command -v nix >/dev/null 2>&1; then
+    (cd "$REPO_ROOT" && nix flake check --show-trace)
+  else
+    ssh_remote "cd '$REMOTE_DIR' && nix flake check --no-write-lock-file --show-trace"
+  fi
+}
+
+cmd_rebuild() {
+  ssh_remote "cd '$REMOTE_DIR' && sudo nixos-rebuild switch --flake .#dev-utm --show-trace"
+}
+
+cmd_slice_smoke() {
+  local slice="$1"
+  local script="$SMOKE_DIR/$slice"
+
+  [[ -x "$script" ]] || fail "smoke script is missing or not executable: $script"
+  LOOM_DEV_HOST="$HOST" LOOM_DEV_REMOTE_DIR="$REMOTE_DIR" "$script"
+}
+
+cmd_smoke() {
+  local script
+
+  for script in "$SMOKE_DIR"/slice_*.sh; do
+    [[ -x "$script" ]] || fail "smoke script is missing or not executable: $script"
+    LOOM_DEV_HOST="$HOST" LOOM_DEV_REMOTE_DIR="$REMOTE_DIR" "$script"
+  done
+}
+
+cmd_v0_2_smoke() {
+  local script
+
+  for script in \
+    v0_2_slice_01_worker_core.sh \
+    v0_2_slice_02_main_maintenance.sh \
+    v0_2_slice_03_backup_integrity.sh \
+    v0_2_slice_04_indexing_worker.sh \
+    v0_2_slice_05_job_runner.sh \
+    v0_2_slice_06_automation_scheduler.sh \
+    v0_2_slice_07_direct_events.sh \
+    v0_2_slice_08_node_agent_runtime.sh \
+    v0_2_slice_09_watched_root_scanner.sh \
+    v0_2_slice_10_watched_root_sync_index.sh \
+    v0_2_slice_11_watched_root_backup.sh \
+    v0_2_slice_12_cli_portal.sh
+  do
+    cmd_slice_smoke "$script"
+  done
+}
+
+cmd_v0_2_acceptance() {
+  cmd_v0_2_smoke
+  cmd_slice_smoke "v0_2_slice_13_hardening.sh"
+  printf 'loom-dev: v0.2 acceptance passed\n'
+}
+
+cmd_v0_2_1_smoke() {
+  local script
+
+  for script in \
+    v0_2_1_slice_01_portal_foundation.sh \
+    v0_2_1_slice_02_backend_compatibility.sh \
+    v0_2_1_slice_03_action_lifecycle.sh \
+    v0_2_1_slice_04_worker_index_maintenance_actions.sh \
+    v0_2_1_slice_05_portal_styling.sh \
+    v0_2_1_slice_06_database_objects.sh \
+    v0_2_1_slice_07_action_expansion.sh \
+    v0_2_1_slice_08_command_mode.sh \
+    v0_2_1_slice_09_portal_hardening.sh \
+    v0_2_1_slice_10_portal_scoped_search.sh
+  do
+    cmd_slice_smoke "$script"
+  done
+}
+
+cmd_v0_2_1_acceptance() {
+  cmd_v0_2_1_smoke
+  printf 'loom-dev: v0.2.1 portal acceptance passed\n'
+}
+
+cmd_v0_3_smoke() {
+  local script
+
+  for script in \
+    v0_3_slice_04_project_registration.sh \
+    v0_3_slice_05_project_script_exposure.sh \
+    v0_3_slice_06_project_schedules.sh \
+    v0_3_slice_07_project_direct_events.sh \
+    v0_3_slice_08_project_watch_policies.sh \
+    v0_3_slice_09_project_connectors.sh \
+    v0_3_slice_10_runtime_executors.sh \
+    v0_3_slice_11_project_modules.sh \
+    v0_3_slice_12_workflow_placeholders.sh \
+    v0_3_slice_13_projects_portal.sh \
+    v0_3_slice_14_integration_hardening.sh
+  do
+    cmd_slice_smoke "$script"
+  done
+}
+
+cmd_v0_4_2_dropzone_smoke() {
+  local script
+
+  for script in \
+    v0_4_2_slice_02_dropzone_receiving.sh \
+    v0_4_2_slice_03_dropzone_workspace_worker.sh \
+    v0_4_2_slice_04_dropzone_cli_portal.sh \
+    v0_4_2_slice_05_dropzone_hardening.sh
+  do
+    cmd_slice_smoke "$script"
+  done
+}
+
+cmd_v0_4_2_smoke() {
+  cmd_v0_4_2_dropzone_smoke
+  cmd_slice_smoke "v0_4_1_loom_box_foundation.sh"
+  ssh_remote 'loom health --json | jq -e ".ok == true and .data.status == \"ok\"" >/dev/null'
+  printf 'loom-dev: v0.4.2 Dropzone acceptance passed\n'
+}
+
+cmd_v0_5_smoke() {
+  LOOM_DEV_HOST="$HOST" LOOM_DEV_REMOTE_DIR="$REMOTE_DIR" "$SMOKE_DIR/v0_5_installer_acceptance.sh"
+}
+
+cmd_v0_5_1_smoke() {
+  local script
+
+  for script in \
+    v0_5_1_production_guardrails.sh \
+    v0_5_1_backup_restore_drill.sh \
+    v0_5_1_update_plan.sh \
+    v0_5_1_update_apply_rollback.sh \
+    v0_5_1_update_maintenance_window.sh
+  do
+    cmd_slice_smoke "$script"
+  done
+  printf 'loom-dev: v0.5.1 production update/recovery acceptance passed\n'
+}
+
+cmd_v0_6_2_smoke() {
+  local script
+
+  for script in \
+    v0_6_2_slice_01_main_human_storage_surface.sh \
+    v0_6_2_slice_02_storage_cleanup_inventory.sh \
+    v0_6_2_slice_03_box_watch_responsiveness.sh \
+    v0_6_2_slice_04_backup_failure_semantics.sh \
+    v0_6_2_slice_05_file_transfer_model.sh \
+    v0_6_2_slice_06_file_transfer_http.sh \
+    v0_6_2_slice_07_node_agent_chunked_backup.sh \
+    v0_6_2_slice_08_dropzone_large_file_transfer.sh \
+    v0_6_2_slice_09_main_documents_import.sh \
+    v0_6_2_slice_10_storage_status_feedback.sh \
+    v0_6_2_slice_11_mac_network_smb_utilities.sh \
+    v0_6_2_slice_12_production_acceptance.sh
+  do
+    cmd_slice_smoke "$script"
+  done
+  printf 'loom-dev: v0.6.2 storage usability patch smoke passed\n'
+}
+
+cmd_hardware_main_smoke() {
+  "$SMOKE_DIR/pre_slice_13_hardware_main_bringup.sh" "$@"
+}
+
+main() {
+  local cmd="${1:-}"
+  if [[ $# -gt 0 ]]; then
+    shift
+  fi
+
+  case "$cmd" in
+    ssh) cmd_ssh "$@" ;;
+    sync) cmd_sync "$@" ;;
+    restart) cmd_restart "$@" ;;
+    logs) cmd_logs "$@" ;;
+    status) cmd_status "$@" ;;
+    health) cmd_health "$@" ;;
+    health-json) cmd_health_json "$@" ;;
+    flake-check) cmd_flake_check "$@" ;;
+    rebuild) cmd_rebuild "$@" ;;
+    slice-00-smoke) cmd_slice_smoke "slice_00_server_contract.sh" ;;
+    slice-01-smoke) cmd_slice_smoke "slice_01_health.sh" ;;
+    slice-02-smoke) cmd_slice_smoke "slice_02_core_spine.sh" ;;
+    slice-03-smoke) cmd_slice_smoke "slice_03_project_object_ingestion.sh" ;;
+    slice-04-smoke) cmd_slice_smoke "slice_04_text_search.sh" ;;
+    slice-05-smoke) cmd_slice_smoke "slice_05_script_job.sh" ;;
+    slice-06-smoke) cmd_slice_smoke "slice_06_cli_operability.sh" ;;
+    slice-07-smoke) cmd_slice_smoke "slice_07_provider_capability_registry.sh" ;;
+    slice-08-smoke) cmd_slice_smoke "slice_08_policy_authorization_approval_audit.sh" ;;
+    slice-09-smoke) cmd_slice_smoke "slice_09_local_capability_call.sh" ;;
+    slice-10-smoke) cmd_slice_smoke "slice_10_node_agent_communication_spine.sh" ;;
+    slice-11-smoke) cmd_slice_smoke "slice_11_remote_provider_advertisement.sh" ;;
+    slice-12-smoke) cmd_slice_smoke "slice_12_workspace_sync_backup.sh" ;;
+    slice-13-smoke) cmd_slice_smoke "slice_13_filesystem_connector.sh" ;;
+    slice-15-smoke) cmd_slice_smoke "slice_15_minimal_realtime_primitives.sh" ;;
+    slice-16-smoke) cmd_slice_smoke "slice_16_agent_tool_visibility.sh" ;;
+    slice-17-smoke) cmd_slice_smoke "slice_17_minimal_module_substrate.sh" ;;
+    slice-18-smoke) cmd_slice_smoke "slice_18_pre_hardware_hardening.sh" ;;
+    v0-2-slice-01-smoke) cmd_slice_smoke "v0_2_slice_01_worker_core.sh" ;;
+    v0-2-slice-02-smoke) cmd_slice_smoke "v0_2_slice_02_main_maintenance.sh" ;;
+    v0-2-slice-03-smoke) cmd_slice_smoke "v0_2_slice_03_backup_integrity.sh" ;;
+    v0-2-slice-04-smoke) cmd_slice_smoke "v0_2_slice_04_indexing_worker.sh" ;;
+    v0-2-slice-05-smoke) cmd_slice_smoke "v0_2_slice_05_job_runner.sh" ;;
+    v0-2-slice-06-smoke) cmd_slice_smoke "v0_2_slice_06_automation_scheduler.sh" ;;
+    v0-2-slice-07-smoke) cmd_slice_smoke "v0_2_slice_07_direct_events.sh" ;;
+    v0-2-slice-08-smoke) cmd_slice_smoke "v0_2_slice_08_node_agent_runtime.sh" ;;
+    v0-2-slice-09-smoke) cmd_slice_smoke "v0_2_slice_09_watched_root_scanner.sh" ;;
+    v0-2-slice-10-smoke) cmd_slice_smoke "v0_2_slice_10_watched_root_sync_index.sh" ;;
+    v0-2-slice-11-smoke) cmd_slice_smoke "v0_2_slice_11_watched_root_backup.sh" ;;
+    v0-2-slice-12-smoke) cmd_slice_smoke "v0_2_slice_12_cli_portal.sh" ;;
+    v0-2-slice-13-smoke) cmd_slice_smoke "v0_2_slice_13_hardening.sh" ;;
+    v0-2-smoke) cmd_v0_2_smoke "$@" ;;
+    v0-2-acceptance) cmd_v0_2_acceptance "$@" ;;
+    v0-2-1-slice-01-smoke) cmd_slice_smoke "v0_2_1_slice_01_portal_foundation.sh" ;;
+    v0-2-1-slice-02-smoke) cmd_slice_smoke "v0_2_1_slice_02_backend_compatibility.sh" ;;
+    v0-2-1-slice-03-smoke) cmd_slice_smoke "v0_2_1_slice_03_action_lifecycle.sh" ;;
+    v0-2-1-slice-04-smoke) cmd_slice_smoke "v0_2_1_slice_04_worker_index_maintenance_actions.sh" ;;
+    v0-2-1-slice-05-smoke) cmd_slice_smoke "v0_2_1_slice_05_portal_styling.sh" ;;
+    v0-2-1-slice-06-smoke) cmd_slice_smoke "v0_2_1_slice_06_database_objects.sh" ;;
+    v0-2-1-slice-07-smoke) cmd_slice_smoke "v0_2_1_slice_07_action_expansion.sh" ;;
+    v0-2-1-slice-08-smoke) cmd_slice_smoke "v0_2_1_slice_08_command_mode.sh" ;;
+    v0-2-1-slice-09-smoke) cmd_slice_smoke "v0_2_1_slice_09_portal_hardening.sh" ;;
+    v0-2-1-slice-10-smoke) cmd_slice_smoke "v0_2_1_slice_10_portal_scoped_search.sh" ;;
+    v0-2-1-smoke) cmd_v0_2_1_smoke "$@" ;;
+    v0-2-1-acceptance) cmd_v0_2_1_acceptance "$@" ;;
+    v0-3-slice-04-smoke) cmd_slice_smoke "v0_3_slice_04_project_registration.sh" ;;
+    v0-3-slice-05-smoke) cmd_slice_smoke "v0_3_slice_05_project_script_exposure.sh" ;;
+    v0-3-slice-06-smoke) cmd_slice_smoke "v0_3_slice_06_project_schedules.sh" ;;
+    v0-3-slice-07-smoke) cmd_slice_smoke "v0_3_slice_07_project_direct_events.sh" ;;
+    v0-3-slice-08-smoke) cmd_slice_smoke "v0_3_slice_08_project_watch_policies.sh" ;;
+    v0-3-slice-09-smoke) cmd_slice_smoke "v0_3_slice_09_project_connectors.sh" ;;
+    v0-3-slice-10-smoke) cmd_slice_smoke "v0_3_slice_10_runtime_executors.sh" ;;
+    v0-3-slice-11-smoke) cmd_slice_smoke "v0_3_slice_11_project_modules.sh" ;;
+    v0-3-slice-12-smoke) cmd_slice_smoke "v0_3_slice_12_workflow_placeholders.sh" ;;
+    v0-3-slice-13-smoke) cmd_slice_smoke "v0_3_slice_13_projects_portal.sh" ;;
+    v0-3-slice-14-smoke) cmd_slice_smoke "v0_3_slice_14_integration_hardening.sh" ;;
+    v0-3-smoke) cmd_v0_3_smoke "$@" ;;
+    v0-3-1-workflow-smoke) cmd_slice_smoke "v0_3_1_workflow_runtime.sh" ;;
+    v0-4-1-slice-02-smoke) cmd_slice_smoke "v0_4_1_box_init.sh" ;;
+    v0-4-1-slice-03-smoke) cmd_slice_smoke "v0_4_1_box_init.sh" ;;
+    v0-4-1-slice-04-smoke) cmd_slice_smoke "v0_4_1_box_init.sh" ;;
+    v0-4-1-slice-05-smoke) cmd_slice_smoke "v0_4_1_loom_box_foundation.sh" ;;
+    v0-4-1-smoke) cmd_slice_smoke "v0_4_1_loom_box_foundation.sh" ;;
+    v0-4-1-box-init-smoke) cmd_slice_smoke "v0_4_1_box_init.sh" ;;
+    v0-4-2-slice-02-smoke) cmd_slice_smoke "v0_4_2_slice_02_dropzone_receiving.sh" ;;
+    v0-4-2-slice-03-smoke) cmd_slice_smoke "v0_4_2_slice_03_dropzone_workspace_worker.sh" ;;
+    v0-4-2-slice-04-smoke) cmd_slice_smoke "v0_4_2_slice_04_dropzone_cli_portal.sh" ;;
+    v0-4-2-slice-05-smoke) cmd_slice_smoke "v0_4_2_slice_05_dropzone_hardening.sh" ;;
+    v0-4-2-dropzone-smoke) cmd_v0_4_2_dropzone_smoke "$@" ;;
+    v0-4-2-smoke) cmd_v0_4_2_smoke "$@" ;;
+    v0-5-main-installer-smoke) cmd_slice_smoke "v0_5_main_installer.sh" ;;
+    v0-5-workspace-installer-smoke) cmd_slice_smoke "v0_5_workspace_installer.sh" ;;
+    v0-5-hardware-installer-smoke) cmd_slice_smoke "v0_5_hardware_installer.sh" ;;
+    v0-5-smoke) cmd_v0_5_smoke "$@" ;;
+    v0-5-1-production-guardrails-smoke) cmd_slice_smoke "v0_5_1_production_guardrails.sh" ;;
+    v0-5-1-backup-restore-drill-smoke) cmd_slice_smoke "v0_5_1_backup_restore_drill.sh" ;;
+    v0-5-1-update-plan-smoke) cmd_slice_smoke "v0_5_1_update_plan.sh" ;;
+    v0-5-1-update-apply-rollback-smoke) cmd_slice_smoke "v0_5_1_update_apply_rollback.sh" ;;
+    v0-5-1-update-maintenance-smoke) cmd_slice_smoke "v0_5_1_update_maintenance_window.sh" ;;
+    v0-5-1-smoke|v0-5-1-acceptance) cmd_v0_5_1_smoke "$@" ;;
+    v0-6-2-slice-01-smoke) cmd_slice_smoke "v0_6_2_slice_01_main_human_storage_surface.sh" ;;
+    v0-6-2-slice-02-smoke) cmd_slice_smoke "v0_6_2_slice_02_storage_cleanup_inventory.sh" ;;
+    v0-6-2-slice-03-smoke) cmd_slice_smoke "v0_6_2_slice_03_box_watch_responsiveness.sh" ;;
+    v0-6-2-slice-04-smoke) cmd_slice_smoke "v0_6_2_slice_04_backup_failure_semantics.sh" ;;
+    v0-6-2-slice-05-smoke) cmd_slice_smoke "v0_6_2_slice_05_file_transfer_model.sh" ;;
+    v0-6-2-slice-06-smoke) cmd_slice_smoke "v0_6_2_slice_06_file_transfer_http.sh" ;;
+    v0-6-2-slice-07-smoke) cmd_slice_smoke "v0_6_2_slice_07_node_agent_chunked_backup.sh" ;;
+    v0-6-2-slice-08-smoke) cmd_slice_smoke "v0_6_2_slice_08_dropzone_large_file_transfer.sh" ;;
+    v0-6-2-slice-09-smoke) cmd_slice_smoke "v0_6_2_slice_09_main_documents_import.sh" ;;
+    v0-6-2-slice-10-smoke) cmd_slice_smoke "v0_6_2_slice_10_storage_status_feedback.sh" ;;
+    v0-6-2-slice-11-smoke) cmd_slice_smoke "v0_6_2_slice_11_mac_network_smb_utilities.sh" ;;
+    v0-6-2-slice-12-smoke) cmd_slice_smoke "v0_6_2_slice_12_production_acceptance.sh" ;;
+    v0-6-2-smoke|v0-6-2-acceptance) cmd_v0_6_2_smoke "$@" ;;
+    v2-project-local-loom-smoke) cmd_slice_smoke "v2_project_local_loom_local.sh" ;;
+    v2-service-registry-local-smoke) cmd_slice_smoke "v2_service_registry_local.sh" ;;
+    v2-service-registry-mac-smoke) cmd_slice_smoke "v2_service_registry_mac.sh" ;;
+    v2-protected-folder-local-smoke) cmd_slice_smoke "v2_protected_folder_local.sh" ;;
+    v2-lane-bundle-local-smoke) cmd_slice_smoke "v2_lane_bundle_local.sh" ;;
+    v2-main-box-intake-retirement-local-smoke) cmd_slice_smoke "main_box_intake_retirement_local.sh" ;;
+    hardware-main-smoke) cmd_hardware_main_smoke "$@" ;;
+    smoke) cmd_smoke "$@" ;;
+    -h|--help|help|"") usage ;;
+    *) fail "unknown command: $cmd" ;;
+  esac
+}
+
+main "$@"

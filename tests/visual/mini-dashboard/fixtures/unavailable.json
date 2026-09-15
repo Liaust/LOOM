@@ -1,0 +1,27 @@
+{
+  "schema_version": "loom.mini_dashboard.v1",
+  "generated_at": "2026-08-17T14:42:08Z",
+  "header": { "product": "LOOM", "node_label": "MAIN", "overall": "unknown", "stale_after_seconds": 30, "freshness_state": "unavailable" },
+  "attention": { "message": "No attention required", "severity": "healthy", "additional_count": 0 },
+  "system": [
+    { "key": "cpu", "label": "CPU", "value": "18%", "severity": "healthy", "state": "live" },
+    { "key": "temperature", "label": "Temp", "value": "43 C", "severity": "healthy", "state": "live" },
+    { "key": "memory", "label": "Memory", "value": "37%", "severity": "healthy", "state": "live" },
+    { "key": "storage", "label": "Storage", "value": "61%", "severity": "healthy", "state": "live" }
+  ],
+  "runtime": [
+    { "key": "loomd", "label": "loomd", "value": "Unavailable", "severity": "unknown", "state": "unavailable" },
+    { "key": "database", "label": "Database", "value": "Unavailable", "severity": "unknown", "state": "unavailable" },
+    { "key": "workers", "label": "Workers", "value": "Unavailable", "severity": "unknown", "state": "unavailable" },
+    { "key": "queue", "label": "Queue", "value": "Unavailable", "severity": "unknown", "state": "unavailable" }
+  ],
+  "protection": [
+    { "key": "local", "label": "Local", "value": "Unavailable", "severity": "unknown", "state": "unavailable" },
+    { "key": "cloud", "label": "Cloud", "value": "Unavailable", "severity": "unknown", "state": "unavailable" },
+    { "key": "coverage", "label": "Coverage", "value": "Unavailable", "severity": "unknown", "state": "unavailable" },
+    { "key": "findings", "label": "Findings", "value": "Unavailable", "severity": "unknown", "state": "unavailable" }
+  ],
+  "network": { "state": "UNKNOWN", "detail": "Network unavailable", "severity": "unknown" },
+  "activity": { "state": "IDLE", "detail": "No activity snapshot", "severity": "unknown" },
+  "freshness": {}
+}

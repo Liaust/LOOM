@@ -1,0 +1,10 @@
+kind: decision
+schema_version: repo.decision.v1
+id: decision/<ADR-NNNN>
+decision_id: <ADR-NNNN>
+title: "<title>"
+status: proposed
+date: <YYYY-MM-DD>
+owners: []
+related_features: []
+supersedes: []

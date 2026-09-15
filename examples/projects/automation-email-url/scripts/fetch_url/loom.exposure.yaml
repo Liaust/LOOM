@@ -1,0 +1,26 @@
+kind: loom.script_exposure
+schema_version: script.exposure.v0.3
+
+expose:
+  enabled: true
+  provider: project
+  endpoint: fetch_url
+  display_name: Fetch URL
+  description: Fetch or record the URL extracted from an email.
+
+capability:
+  class_namespace: project
+  class_name: fetch_url
+  form: job
+  risk_level: low
+  execution_authorization_level: 1
+  requires_approval: false
+  side_effects: []
+  input_schema:
+    type: object
+  output_schema:
+    type: object
+
+execution:
+  default_mode: wait_for_completion
+  wait_timeout_seconds: 30

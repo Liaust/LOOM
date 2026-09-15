@@ -1,0 +1,18 @@
+{
+  "schema_version": "loom.dropzone.custody.v0.4.2",
+  "custody_id": "drop_custody_historical",
+  "session_id": "drop_session_historical",
+  "transfer_id": "drop_historical_transfer",
+  "source_node_key": "macbook",
+  "source_box_id": "box_workspace_historical",
+  "relative_dropzone_path": "Research/report.pdf",
+  "file_name": "report.pdf",
+  "file_size_bytes": 128,
+  "checksum_algorithm": "sha256",
+  "checksum_value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "final_custody_path": "/srv/loom/box/.loom/storage/dropzone/macbook/2026-06-05/drop_historical_transfer/report.pdf",
+  "custody_metadata_path": "/srv/loom/box/.loom/storage/dropzone/macbook/2026-06-05/drop_historical_transfer/custody.json",
+  "storage_entry_id": "storage_entry_historical",
+  "received_upload_session_path": "/srv/loom/box-state/dropzone/incoming/drop_session_historical/session.json",
+  "accepted_at": "2026-06-05T12:02:00Z"
+}

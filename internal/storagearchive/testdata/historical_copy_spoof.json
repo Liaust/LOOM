@@ -1,0 +1,9 @@
+{
+  "schema_version": "storage.archive_manifest.v0.7",
+  "evidence_kind": "physical_workspace_move",
+  "archive_manifest_id": "storage_archive_manifest_01ARZ3NDEKTSV4RRFFQ69G5FAX",
+  "archive_key": "spoofed-copy",
+  "archive_kind": "manual_archive",
+  "complete": true,
+  "entries": []
+}

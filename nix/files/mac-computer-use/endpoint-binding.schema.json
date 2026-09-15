@@ -1,0 +1,345 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:loom:mac-computer-use:binding:1",
+  "title": "LOOM pinned Main/Mac endpoint bindings and offline setup requests",
+  "description": "No credential values. Bridge and endpoint dictionaries match the accepted Python sources. Setup requires the managed package, existing protected parents, exact current host identity, operator artifacts and an explicitly reviewed digest. Endpoint setup stages a restricted key line only and preserves Cua app-owned lifecycle. Offline root publication is not installed acceptance. Private state/receipts are retained on revoke.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/bridge"
+    },
+    {
+      "$ref": "#/$defs/endpoint"
+    },
+    {
+      "$ref": "#/$defs/setupRequest"
+    }
+  ],
+  "$defs": {
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "user",
+        "uid",
+        "peer_uid",
+        "driver",
+        "driver_sha256",
+        "runtime_pid",
+        "socket_inode",
+        "socket",
+        "permission_mode",
+        "user_policy_sha256",
+        "managed_policy_sha256"
+      ],
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "user": {
+          "type": "string"
+        },
+        "uid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "peer_uid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "driver": {
+          "const": "/Applications/CuaDriver.app/Contents/MacOS/cua-driver"
+        },
+        "driver_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "runtime_pid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "socket_inode": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "socket": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "Absolute operator-owned path; setup additionally confines and checks every ancestor."
+        },
+        "permission_mode": {
+          "enum": [
+            "standard",
+            "bounded"
+          ]
+        },
+        "user_policy_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "managed_policy_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "Complete v1 mac_endpoint.observe_runtime dictionary. uid must equal peer_uid. PID and socket inode record the setup observation, not permanent trust identity. Every new runtime must independently match every stable field; restart expires session/target handles without rewriting the binding. Missing stable fields fail closed. Driver/host/user/policy changes still require operator review; schema validation is not runtime attestation."
+    },
+    "bridge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target_node",
+        "host",
+        "user",
+        "ssh",
+        "ssh_sha256",
+        "known_hosts",
+        "known_hosts_sha256",
+        "identity_file",
+        "runtime"
+      ],
+      "properties": {
+        "target_node": {
+          "const": "macbook"
+        },
+        "host": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9.:-]*$"
+        },
+        "user": {
+          "type": "string",
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_-]*$"
+        },
+        "ssh": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "Absolute operator-owned path; setup additionally confines and checks every ancestor."
+        },
+        "ssh_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "known_hosts": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "Absolute operator-owned path; setup additionally confines and checks every ancestor."
+        },
+        "known_hosts_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "identity_file": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "Absolute operator-owned path; setup additionally confines and checks every ancestor."
+        },
+        "runtime": {
+          "$ref": "#/$defs/runtime"
+        }
+      }
+    },
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime",
+        "state_dir"
+      ],
+      "properties": {
+        "runtime": {
+          "$ref": "#/$defs/runtime"
+        },
+        "state_dir": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "Absolute operator-owned path; setup additionally confines and checks every ancestor."
+        }
+      }
+    },
+    "setupRequest": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "role",
+            "root",
+            "host_identity",
+            "runtime",
+            "inputs"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": 1
+            },
+            "role": {
+              "const": "endpoint"
+            },
+            "root": {
+              "type": "string",
+              "pattern": "^/",
+              "description": "Absolute operator-owned path; setup additionally confines and checks every ancestor."
+            },
+            "host_identity": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "host",
+                "uid",
+                "user",
+                "platform"
+              ],
+              "properties": {
+                "host": {
+                  "type": "string"
+                },
+                "uid": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "user": {
+                  "type": "string"
+                },
+                "platform": {
+                  "enum": [
+                    "darwin",
+                    "linux"
+                  ]
+                }
+              }
+            },
+            "runtime": {
+              "$ref": "#/$defs/runtime"
+            },
+            "inputs": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "archive",
+                "gui_home",
+                "main_source",
+                "public_key"
+              ],
+              "properties": {
+                "archive": {
+                  "type": "string",
+                  "pattern": "^/",
+                  "description": "Absolute operator-owned path; setup additionally confines and checks every ancestor."
+                },
+                "gui_home": {
+                  "type": "string",
+                  "pattern": "^/",
+                  "description": "Absolute operator-owned path; setup additionally confines and checks every ancestor."
+                },
+                "main_source": {
+                  "type": "string",
+                  "description": "Exact /32 IPv4 or /128 IPv6 Main source, no wildcard."
+                },
+                "public_key": {
+                  "type": "string",
+                  "pattern": "^/",
+                  "description": "Absolute operator-owned path; setup additionally confines and checks every ancestor."
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schema_version",
+            "role",
+            "root",
+            "host_identity",
+            "runtime",
+            "inputs"
+          ],
+          "properties": {
+            "schema_version": {
+              "const": 1
+            },
+            "role": {
+              "const": "main"
+            },
+            "root": {
+              "type": "string",
+              "pattern": "^/",
+              "description": "Absolute operator-owned path; setup additionally confines and checks every ancestor."
+            },
+            "host_identity": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "host",
+                "uid",
+                "user",
+                "platform"
+              ],
+              "properties": {
+                "host": {
+                  "type": "string"
+                },
+                "uid": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "user": {
+                  "type": "string"
+                },
+                "platform": {
+                  "enum": [
+                    "darwin",
+                    "linux"
+                  ]
+                }
+              }
+            },
+            "runtime": {
+              "$ref": "#/$defs/runtime"
+            },
+            "inputs": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "host",
+                "known_hosts",
+                "identity_file"
+              ],
+              "properties": {
+                "host": {
+                  "type": "string"
+                },
+                "known_hosts": {
+                  "type": "string",
+                  "pattern": "^/",
+                  "description": "Absolute operator-owned path; setup additionally confines and checks every ancestor."
+                },
+                "identity_file": {
+                  "type": "string",
+                  "pattern": "^/",
+                  "description": "Absolute private-key locator for the fixed local Main agents account, resolved through the publisher host account database. Must be agents-owned and mode 0400 or 0600. Only root/agents-owned non-group/world-writable ancestors with POSIX execute traversal for that consumer are accepted. Plan evidence binds the resolved user/UID/primary GID/group set and no-follow key/ancestor metadata, separately from publisher host_identity and remote runtime.uid. Key bytes are never opened, read, copied or hashed. Consumer UID/account is not caller-selectable; protected output custody remains root-owned for canonical publication. Service sandbox/live SSH access is a separate integration gate."
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,30 @@
+# Corrective synthetic fixture: artifact owns the WebDAV parameter schema.
+kind: loom.application
+schema_version: application.contract.v1
+artifact:
+  ref: webdav.package
+  digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  platform: aarch64-linux
+process:
+  manager: systemd
+  user: webdav-app
+  restart: on-failure
+  memory_max_bytes: 268435456
+listener:
+  port: 8080
+config:
+  schema: webdav.config.v1
+  values:
+    root: {type: data_ref, data_ref: library}
+    auth: {type: credential_ref, credential_ref: webdav.auth}
+    read_only: {type: boolean, boolean: false}
+health:
+  kind: http
+  method: OPTIONS
+  path: /
+  expected_status: 200
+  timeout_seconds: 5
+data:
+  library:
+    monitor_threshold_bytes: 8589934592
+    quota_bytes: 0

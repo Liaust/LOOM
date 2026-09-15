@@ -1,0 +1,11 @@
+kind: loom.project
+schema_version: project.contract.v0.3
+
+project:
+  slug: slice5-compat
+  name: Slice 5 Compatibility
+  owner_node: main
+  status: active
+
+facets:
+  repos: true

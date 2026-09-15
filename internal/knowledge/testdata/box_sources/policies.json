@@ -1,0 +1,312 @@
+{
+  "schema_version": "loom.box_sources.policies.v1",
+  "source_matrix": [
+    {
+      "category": "notes",
+      "admission": "registered_only",
+      "root_kinds": [
+        "box_notes"
+      ],
+      "default_posture": "source_material"
+    },
+    {
+      "category": "topics",
+      "admission": "registered_only",
+      "root_kinds": [
+        "box_topics"
+      ],
+      "default_posture": "draft"
+    },
+    {
+      "category": "library",
+      "admission": "registered_only",
+      "root_kinds": [
+        "box_library"
+      ],
+      "default_posture": "attributed_claim"
+    },
+    {
+      "category": "projects",
+      "admission": "explicit_declarations_only",
+      "root_kinds": [
+        "project_notes",
+        "project_material"
+      ],
+      "default_posture": "source_material"
+    },
+    {
+      "category": "documents",
+      "admission": "opt_in_not_default",
+      "root_kinds": [],
+      "default_posture": "source_material"
+    },
+    {
+      "category": "imports",
+      "admission": "explicit_registration_required",
+      "root_kinds": [],
+      "default_posture": "source_material"
+    },
+    {
+      "category": "archive",
+      "admission": "explicit_lifecycle_dependency",
+      "root_kinds": [
+        "box_topics"
+      ],
+      "default_posture": "preserve_source_posture"
+    }
+  ],
+  "exclusions": [
+    "private_no_index",
+    "credentials",
+    "agent_runtime",
+    "cache",
+    "dependency",
+    "build",
+    "loomignore",
+    "undeclared_repository",
+    "link_outside_authority",
+    "registration_required"
+  ],
+  "heavy_policy": {
+    "pdf_ocr_enabled": false,
+    "image_descriptions_enabled": false,
+    "embeddings_enabled": false
+  },
+  "authority": {
+    "semantic_promotion_on_ingest": false,
+    "semantic_supersession_on_edit": false,
+    "main_crawls_remote_paths": false,
+    "follow_links_outside_authority": false,
+    "cross_project_content_authority": false
+  },
+  "citation_fields": [
+    "knowledge_object_id",
+    "knowledge_object_version_id",
+    "knowledge_chunk_id",
+    "source_hash",
+    "source_category",
+    "owner_node",
+    "declared_context",
+    "extraction_status",
+    "source_lifecycle",
+    "passage_locator"
+  ],
+  "acceptance": {
+    "entry_boundary": "owner_watched_source",
+    "manual_knowledge_seed": false,
+    "manual_pipeline_run": false,
+    "fixture_hash_contract": "materialized_source_bytes_not_extracted_text",
+    "runtime_identity_binding": "observed_object_version_chunk_ids",
+    "archive_dependency": "notes-archive-lifecycle",
+    "baseline_pilot_max_source_bytes": 1024,
+    "latency_measurements": [
+      "source_change_to_upload",
+      "upload_to_admission",
+      "admission_to_search",
+      "query_p50",
+      "query_p95"
+    ],
+    "work_measurements": [
+      "eligible_bytes",
+      "extracted_bytes",
+      "extraction_jobs",
+      "chunk_count",
+      "queue_depth",
+      "cpu_time",
+      "peak_memory",
+      "generated_copy_count"
+    ],
+    "baseline_observed_seconds": [
+      352,
+      432
+    ],
+    "baseline_timings_are_not_sla": true
+  },
+  "scenarios": [
+    {
+      "key": "unattended-create",
+      "source": "note",
+      "action": "create_source_v1",
+      "identity": "new_observed_identity",
+      "extraction_jobs": 1,
+      "generated_copies": 1,
+      "semantic_mutations": 0,
+      "required": [
+        "watched_upload",
+        "catalog_admission",
+        "native_text",
+        "exact_lexical_citation",
+        "read_only_projection"
+      ]
+    },
+    {
+      "key": "unchanged-replay",
+      "source": "note",
+      "action": "repeat_unchanged_ticks",
+      "identity": "same_object_version_chunk",
+      "extraction_jobs": 0,
+      "generated_copies": 0,
+      "semantic_mutations": 0,
+      "required": [
+        "same_pipeline_count",
+        "same_generated_inode_mtime"
+      ]
+    },
+    {
+      "key": "metadata-edit",
+      "source": "note",
+      "action": "change_non_content_metadata",
+      "identity": "same_content_identity",
+      "extraction_jobs": 0,
+      "generated_copies": -1,
+      "semantic_mutations": 0,
+      "required": [
+        "updated_source_metadata",
+        "no_redundant_extraction"
+      ]
+    },
+    {
+      "key": "content-edit",
+      "source": "note",
+      "action": "replace_v1_with_v2",
+      "identity": "same_object_new_version",
+      "extraction_jobs": 1,
+      "generated_copies": 1,
+      "semantic_mutations": 0,
+      "required": [
+        "new_current_chunk",
+        "old_body_not_searchable",
+        "historical_citation_pinned",
+        "obsolete_publication_refused"
+      ]
+    },
+    {
+      "key": "duplicate-bytes",
+      "source": "duplicate-atlas",
+      "action": "compare_with_duplicate_other",
+      "identity": "distinct_source_permission_identity",
+      "extraction_jobs": -1,
+      "generated_copies": -1,
+      "semantic_mutations": 0,
+      "required": [
+        "same_fixture_bytes",
+        "distinct_project_identity",
+        "reuse_only_if_policy_and_extractor_match"
+      ]
+    },
+    {
+      "key": "exclusion-change",
+      "source": "topic",
+      "action": "set_private_no_index",
+      "identity": "preserved_history_not_currently_readable",
+      "extraction_jobs": 0,
+      "generated_copies": 0,
+      "semantic_mutations": 0,
+      "required": [
+        "no_current_passages",
+        "no_permission_bypass_via_history"
+      ]
+    },
+    {
+      "key": "permission-change",
+      "source": "project-doc",
+      "action": "revoke_source_access",
+      "identity": "preserved_history_not_currently_readable",
+      "extraction_jobs": 0,
+      "generated_copies": 0,
+      "semantic_mutations": 0,
+      "required": [
+        "no_current_passages",
+        "no_permission_bypass_via_history"
+      ]
+    },
+    {
+      "key": "linux-default-acl",
+      "source": "topic",
+      "action": "publish_under_inherited_read_only_default_acl",
+      "identity": "same_object_version_chunk",
+      "extraction_jobs": 0,
+      "generated_copies": 1,
+      "semantic_mutations": 0,
+      "required": [
+        "non_root_writer",
+        "source_mode_unchanged",
+        "agents_read_only",
+        "exact_nested_output"
+      ]
+    },
+    {
+      "key": "failed-projection",
+      "source": "topic",
+      "action": "inject_copy_failure_then_supported_retry",
+      "identity": "same_object_version_chunk",
+      "extraction_jobs": 0,
+      "generated_copies": -1,
+      "semantic_mutations": 0,
+      "required": [
+        "partial_state_visible",
+        "failure_receipt_retained",
+        "no_success_checkpoint_before_repair",
+        "replay_no_extra_extraction"
+      ]
+    },
+    {
+      "key": "orphaned-upload",
+      "source": "note",
+      "action": "ingest_with_unrelated_missing_project_upload",
+      "identity": "new_observed_identity",
+      "extraction_jobs": 1,
+      "generated_copies": 1,
+      "semantic_mutations": 0,
+      "required": [
+        "fresh_source_progress",
+        "orphan_stays_pending",
+        "aggregate_degradation_visible",
+        "no_queue_discard"
+      ]
+    },
+    {
+      "key": "restart",
+      "source": "note",
+      "action": "restart_daemon_after_completion",
+      "identity": "same_object_version_chunk",
+      "extraction_jobs": 0,
+      "generated_copies": 0,
+      "semantic_mutations": 0,
+      "required": [
+        "durable_admission_cursor",
+        "same_pipeline_count",
+        "same_generated_inode_mtime",
+        "exact_current_citation"
+      ]
+    },
+    {
+      "key": "offline-owner",
+      "source": "offline",
+      "action": "owner_unreachable",
+      "identity": "retained_observation_not_live_truth",
+      "extraction_jobs": 0,
+      "generated_copies": 0,
+      "semantic_mutations": 0,
+      "required": [
+        "explicit_offline_state",
+        "no_main_remote_path_crawl"
+      ]
+    },
+    {
+      "key": "archive-restore",
+      "source": "archived",
+      "action": "consume_trusted_archive_restore_events",
+      "identity": "same_object_version_chunk",
+      "extraction_jobs": 0,
+      "generated_copies": -1,
+      "semantic_mutations": 0,
+      "required": [
+        "notes_archive_lifecycle_required",
+        "no_path_prefix_inference",
+        "explicit_archive_search",
+        "source_posture_unchanged"
+      ]
+    }
+  ]
+}

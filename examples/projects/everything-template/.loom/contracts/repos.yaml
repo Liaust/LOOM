@@ -1,0 +1,22 @@
+kind: loom.repos
+schema_version: repos.contract.v0.3
+
+repos:
+  status: draft
+  defaults:
+    sync: false
+    backup: false
+    index: false
+    include:
+      - "**/*"
+    exclude:
+      - "**/.git/**"
+      - "**/node_modules/**"
+      - "**/.venv/**"
+      - "**/dist/**"
+      - "**/build/**"
+      - "**/.DS_Store"
+  roots:
+    - key: repos
+      path: .
+      display_name: Project Repositories

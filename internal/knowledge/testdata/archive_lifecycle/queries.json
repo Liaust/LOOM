@@ -1,0 +1,10 @@
+{
+  "schema_version":"loom.notes_archive.queries.v1",
+  "order":"object_id_asc_within_lifecycle",
+  "queries":[
+    {"name":"default-active","filter":"","active":["active-box","active-neighbour","active-project","restored-topic"],"archived":[],"archived_matches_omitted":4},
+    {"name":"explicit-active","filter":"active","active":["active-box","active-neighbour","active-project","restored-topic"],"archived":[],"archived_matches_omitted":4},
+    {"name":"archived-only","filter":"archived","active":[],"archived":["archived-failed","archived-metadata","archived-project","archived-topic"],"archived_matches_omitted":0},
+    {"name":"all-separated","filter":"all","active":["active-box","active-neighbour","active-project","restored-topic"],"archived":["archived-failed","archived-metadata","archived-project","archived-topic"],"archived_matches_omitted":0}
+  ]
+}

@@ -1,0 +1,195 @@
+{
+  "schema_version": "project.declaration_status.v0.5",
+  "target": {
+    "project_id": "project_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "owner_node_id": "node_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "project_root": "/fixture/projects/webdav-pilot",
+    "location_revision": "1"
+  },
+  "revision": "1",
+  "operation": {
+    "schema_version": "project.declaration_result.v0.5",
+    "operation_id": "job_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "plan_id": "sha256:14a02659a0c071efe4d109695bfb601d63c4dc1c7600d5c384a7cfa5db02a14a",
+    "target": {
+      "project_id": "project_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "owner_node_id": "node_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "project_root": "/fixture/projects/webdav-pilot",
+      "location_revision": "1"
+    },
+    "revision": "1",
+    "state": "partial",
+    "actions": [
+      {
+        "action_id": "register_project:project",
+        "state": "succeeded",
+        "effect_ref": "fixture:register_project:project"
+      },
+      {
+        "action_id": "reconcile_protection:retained",
+        "state": "succeeded",
+        "effect_ref": "fixture:reconcile_protection:retained"
+      },
+      {
+        "action_id": "enroll_knowledge:reading",
+        "state": "failed",
+        "error": {
+          "code": "declaration.owner_failed",
+          "resource": "reading",
+          "action_id": "enroll_knowledge:reading",
+          "message": "Synthetic knowledge delivery unavailable; completed owner effects are retained.",
+          "cause_code": "owner.delivery_unavailable",
+          "retryable": true,
+          "completed_effects": [
+            "fixture:register_project:project",
+            "fixture:reconcile_protection:retained",
+            "fixture:register_repository:code",
+            "fixture:apply_application:webdav"
+          ]
+        }
+      },
+      {
+        "action_id": "register_repository:code",
+        "state": "succeeded",
+        "effect_ref": "fixture:register_repository:code"
+      },
+      {
+        "action_id": "apply_application:webdav",
+        "state": "succeeded",
+        "effect_ref": "fixture:apply_application:webdav"
+      }
+    ],
+    "readiness": {
+      "desired": {
+        "state": "satisfied",
+        "revision": "1"
+      },
+      "queued": {
+        "state": "satisfied",
+        "revision": "1"
+      },
+      "applied": {
+        "state": "pending",
+        "revision": "1"
+      },
+      "processing": {
+        "state": "pending",
+        "revision": "1"
+      },
+      "healthy": {
+        "state": "unknown",
+        "revision": "1"
+      },
+      "protected": {
+        "state": "pending",
+        "revision": "1"
+      },
+      "verified": {
+        "state": "pending",
+        "revision": "1"
+      }
+    },
+    "errors": [
+      {
+        "code": "declaration.owner_failed",
+        "resource": "reading",
+        "action_id": "enroll_knowledge:reading",
+        "message": "Synthetic knowledge delivery unavailable; completed owner effects are retained.",
+        "cause_code": "owner.delivery_unavailable",
+        "retryable": true,
+        "completed_effects": [
+          "fixture:register_project:project",
+          "fixture:reconcile_protection:retained",
+          "fixture:register_repository:code",
+          "fixture:apply_application:webdav"
+        ]
+      }
+    ]
+  },
+  "resources": {
+    "webdav": {
+      "binding": {
+        "kind": "application"
+      },
+      "readiness": {
+        "desired": {
+          "state": "satisfied",
+          "revision": "1"
+        },
+        "queued": {
+          "state": "satisfied",
+          "revision": "1"
+        },
+        "applied": {
+          "state": "satisfied",
+          "revision": "1",
+          "evidence_ref": "fixture:apply_application:webdav"
+        },
+        "processing": {
+          "state": "pending",
+          "revision": "1"
+        },
+        "healthy": {
+          "state": "unknown",
+          "revision": "1"
+        },
+        "protected": {
+          "state": "pending",
+          "revision": "1"
+        },
+        "verified": {
+          "state": "pending",
+          "revision": "1"
+        }
+      },
+      "errors": []
+    }
+  },
+  "readiness": {
+    "desired": {
+      "state": "satisfied",
+      "revision": "1"
+    },
+    "queued": {
+      "state": "satisfied",
+      "revision": "1"
+    },
+    "applied": {
+      "state": "pending",
+      "revision": "1"
+    },
+    "processing": {
+      "state": "pending",
+      "revision": "1"
+    },
+    "healthy": {
+      "state": "unknown",
+      "revision": "1"
+    },
+    "protected": {
+      "state": "pending",
+      "revision": "1"
+    },
+    "verified": {
+      "state": "pending",
+      "revision": "1"
+    }
+  },
+  "errors": [
+    {
+      "code": "declaration.owner_failed",
+      "resource": "reading",
+      "action_id": "enroll_knowledge:reading",
+      "message": "Synthetic knowledge delivery unavailable; completed owner effects are retained.",
+      "cause_code": "owner.delivery_unavailable",
+      "retryable": true,
+      "completed_effects": [
+        "fixture:register_project:project",
+        "fixture:reconcile_protection:retained",
+        "fixture:register_repository:code",
+        "fixture:apply_application:webdav"
+      ]
+    }
+  ],
+  "observed_at": "2026-09-12T00:01:00Z"
+}

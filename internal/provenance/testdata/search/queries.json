@@ -1,0 +1,199 @@
+{
+  "schema_version": "loom.provenance_search_queries.v1",
+  "queries": [
+    {
+      "query_id": "canonical-box-current",
+      "query": "Where is the canonical Box root now?",
+      "expected_first_engine": "provenance",
+      "request": {"surface": "search", "include_pending": false, "filters": {}},
+      "expected": {
+        "collections": [{"collection": "accepted_records", "ids": ["11111111-1111-4111-8111-111111111001"]}],
+        "exact_get": {"collection": "accepted_records", "id": "11111111-1111-4111-8111-111111111001", "command": "loom provenance record get 11111111-1111-4111-8111-111111111001"},
+        "currentness": {"posture": "current", "explanation": "The accepted post-cutover decision supersedes both the draft Note and former decision."},
+        "prohibited_contamination": [
+          {"id": "note:storage-cutover-2026-07-01", "reason": "historical Note is source material, not qualified current state"},
+          {"id": "11111111-1111-4111-8111-111111111002", "reason": "superseded record must not be presented as current"}
+        ],
+        "repo_match_signals": []
+      }
+    },
+    {
+      "query_id": "historical-note-wording",
+      "query": "What did the July storage cutover note say before hardware acceptance?",
+      "expected_first_engine": "notes",
+      "request": {"surface": "notes_search", "include_pending": false, "filters": {"project": "project_01K41SEARCH000000000000001"}},
+      "expected": {
+        "collections": [{"collection": "notes", "ids": ["note:storage-cutover-2026-07-01"]}],
+        "exact_get": {"collection": "notes", "id": "note:storage-cutover-2026-07-01", "command": "loom notes get note:storage-cutover-2026-07-01"},
+        "currentness": {"posture": "historical_source", "explanation": "The query asks for original wording, so Notes is authoritative for the source artifact without implying present applicability."},
+        "prohibited_contamination": [{"id": "11111111-1111-4111-8111-111111111001", "reason": "a current semantic answer must not replace the requested historical source"}],
+        "repo_match_signals": []
+      }
+    },
+    {
+      "query_id": "superseded-storage-decision",
+      "query": "Which accepted storage-root decision applies?",
+      "expected_first_engine": "provenance",
+      "request": {"surface": "search", "include_pending": false, "filters": {"collection": "accepted_records"}},
+      "expected": {
+        "collections": [{"collection": "accepted_records", "ids": ["11111111-1111-4111-8111-111111111001"]}],
+        "exact_get": {"collection": "accepted_records", "id": "11111111-1111-4111-8111-111111111001", "command": "loom provenance record get 11111111-1111-4111-8111-111111111001"},
+        "currentness": {"posture": "current_after_supersession", "explanation": "The supersedes relationship makes the former accepted record historical."},
+        "prohibited_contamination": [{"id": "11111111-1111-4111-8111-111111111002", "reason": "superseded accepted state cannot rank as applicable current state"}],
+        "repo_match_signals": []
+      }
+    },
+    {
+      "query_id": "compatible-cloud-cadence-update",
+      "query": "What is the current daily cloud-backup cadence?",
+      "expected_first_engine": "provenance",
+      "request": {"surface": "search", "include_pending": false, "filters": {"project": "project_01K41SEARCH000000000000001"}},
+      "expected": {
+        "collections": [{"collection": "accepted_records", "ids": ["11111111-1111-4111-8111-111111111004"]}],
+        "exact_get": {"collection": "accepted_records", "id": "11111111-1111-4111-8111-111111111004", "command": "loom provenance record get 11111111-1111-4111-8111-111111111004"},
+        "currentness": {"posture": "current_compatible_update", "explanation": "The later record refines the 03:00 package time with timezone and archive timing; it is not a contradiction."},
+        "prohibited_contamination": [{"id": "11111111-1111-4111-8111-111111111003", "reason": "the compatible base belongs in exact lifecycle context, not as a competing compact result"}],
+        "repo_match_signals": []
+      }
+    },
+    {
+      "query_id": "unresolved-retention-contradiction",
+      "query": "May direct archives be deleted after 30 days, or must they remain for 90?",
+      "expected_first_engine": "provenance",
+      "request": {"surface": "search", "include_pending": false, "filters": {"project": "project_01K41SEARCH000000000000001"}},
+      "expected": {
+        "collections": [{"collection": "unresolved_cases", "ids": ["33333333-3333-4333-8333-333333333001"]}],
+        "exact_get": {"collection": "unresolved_cases", "id": "33333333-3333-4333-8333-333333333001", "command": "loom provenance case get 33333333-3333-4333-8333-333333333001"},
+        "currentness": {"posture": "contested", "explanation": "A live resolution case prevents either accepted claim from being presented as unqualified authority."},
+        "prohibited_contamination": [
+          {"id": "11111111-1111-4111-8111-111111111005", "reason": "30-day claim is contested"},
+          {"id": "11111111-1111-4111-8111-111111111006", "reason": "90-day claim is contested"}
+        ],
+        "repo_match_signals": []
+      }
+    },
+    {
+      "query_id": "pending-default-exclusion",
+      "query": "Should embeddings be enabled for provenance search now?",
+      "expected_first_engine": "provenance",
+      "request": {"surface": "search", "include_pending": false, "filters": {}},
+      "expected": {
+        "collections": [{"collection": "accepted_records", "ids": ["11111111-1111-4111-8111-111111111008"]}],
+        "exact_get": {"collection": "accepted_records", "id": "11111111-1111-4111-8111-111111111008", "command": "loom provenance record get 11111111-1111-4111-8111-111111111008"},
+        "currentness": {"posture": "accepted_current", "explanation": "Default search returns the accepted lexical-first decision and excludes the unaccepted proposal."},
+        "prohibited_contamination": [{"id": "22222222-2222-4222-8222-222222222001", "reason": "pending candidates are excluded unless the caller explicitly opts in"}],
+        "repo_match_signals": []
+      }
+    },
+    {
+      "query_id": "pending-explicit-inclusion",
+      "query": "Should embeddings be enabled for provenance search now?",
+      "expected_first_engine": "provenance",
+      "request": {"surface": "search", "include_pending": true, "filters": {}},
+      "expected": {
+        "collections": [
+          {"collection": "accepted_records", "ids": ["11111111-1111-4111-8111-111111111008"]},
+          {"collection": "pending_candidates", "ids": ["22222222-2222-4222-8222-222222222001"]}
+        ],
+        "exact_get": {"collection": "pending_candidates", "id": "22222222-2222-4222-8222-222222222001", "command": "loom provenance candidate get 22222222-2222-4222-8222-222222222001"},
+        "currentness": {"posture": "pending_unaccepted", "explanation": "Explicit inclusion exposes the candidate in a separate field without promoting it or mixing it with accepted records."},
+        "prohibited_contamination": [{"id": "22222222-2222-4222-8222-222222222001", "collection": "accepted_records", "reason": "an explicitly included candidate still must not appear in accepted_records"}],
+        "repo_match_signals": []
+      }
+    },
+    {
+      "query_id": "failed-object-extraction",
+      "query": "Why did object extract-0001 fail?",
+      "expected_first_engine": "objects",
+      "request": {"surface": "objects_search", "include_pending": false, "filters": {}},
+      "expected": {
+        "collections": [{"collection": "objects", "ids": ["object:extract-0001"]}],
+        "exact_get": {"collection": "objects", "id": "object:extract-0001", "command": "loom objects get object:extract-0001"},
+        "currentness": {"posture": "current_technical_state", "explanation": "Extraction failure is operational object state, not a durable semantic claim."},
+        "prohibited_contamination": [{"id": "11111111-1111-4111-8111-111111111009", "reason": "a semantic plan record does not answer object extraction diagnostics"}],
+        "repo_match_signals": []
+      }
+    },
+    {
+      "query_id": "repo-current-focus-over-stale-project",
+      "query": "Which repository is working on semantic search fixtures now?",
+      "expected_first_engine": "provenance",
+      "request": {"surface": "repo_list", "include_pending": false, "filters": {}},
+      "expected": {
+        "collections": [{"collection": "repo_state", "ids": ["repo_01K41SEARCH000000000000001"]}],
+        "exact_get": {"collection": "repo_state", "id": "repo_01K41SEARCH000000000000001", "command": "loom provenance repo get repo_01K41SEARCH000000000000001"},
+        "currentness": {"posture": "current_repo_state_over_stale_project_context", "explanation": "Newer repository state supplies active focus while project context only supplies ownership and navigation."},
+        "prohibited_contamination": [{"id": "project-projection:loom:2026-08-29", "reason": "stale project focus must not overwrite the newer repository focus"}],
+        "repo_match_signals": ["current_focus", "owning_project_context", "tracking_status"]
+      }
+    },
+    {
+      "query_id": "repo-fuzzy-alias-purpose-topics",
+      "query": "Where is the Weaver code for our private node network and agent operations?",
+      "expected_first_engine": "provenance",
+      "request": {"surface": "repo_list", "include_pending": false, "filters": {}},
+      "expected": {
+        "collections": [{"collection": "repo_state", "ids": ["repo_01K41SEARCH000000000000001"]}],
+        "exact_get": {"collection": "repo_state", "id": "repo_01K41SEARCH000000000000001", "command": "loom provenance repo get repo_01K41SEARCH000000000000001"},
+        "currentness": {"posture": "declared_with_observed_freshness", "explanation": "Alias, purpose, and topics identify LOOM; tracking posture qualifies freshness."},
+        "prohibited_contamination": [{"id": "repo_01K41SEARCH000000000000002", "reason": "Atlas does not match the private-network purpose or Weaver alias"}],
+        "repo_match_signals": ["alias", "purpose", "topics", "tracking_status"]
+      }
+    },
+    {
+      "query_id": "repo-fuzzy-owning-project",
+      "query": "Find Atlas in Personal Research for literature graphs.",
+      "expected_first_engine": "provenance",
+      "request": {"surface": "repo_list", "include_pending": false, "filters": {"project": "project_01K41SEARCH000000000000002", "topic": "literature"}},
+      "expected": {
+        "collections": [{"collection": "repo_state", "ids": ["repo_01K41SEARCH000000000000002"]}],
+        "exact_get": {"collection": "repo_state", "id": "repo_01K41SEARCH000000000000002", "command": "loom provenance repo get repo_01K41SEARCH000000000000002"},
+        "currentness": {"posture": "known_not_enabled", "explanation": "Owning-project context and purpose disambiguate Atlas; not_enabled qualifies tracking without hiding the registered repository."},
+        "prohibited_contamination": [{"id": "repo_01K41SEARCH000000000000003", "reason": "same alias belongs to a different owning project and purpose"}],
+        "repo_match_signals": ["alias", "purpose", "topics", "owning_project_context", "tracking_status"]
+      }
+    },
+    {
+      "query_id": "repo-fuzzy-tracking-diagnostic",
+      "query": "Which Client Atlas repository has broken development metadata for archival workflow?",
+      "expected_first_engine": "provenance",
+      "request": {"surface": "repo_list", "include_pending": false, "filters": {"project": "project_01K41SEARCH000000000000003"}},
+      "expected": {
+        "collections": [{"collection": "repo_state", "ids": ["repo_01K41SEARCH000000000000003"]}],
+        "exact_get": {"collection": "repo_state", "id": "repo_01K41SEARCH000000000000003", "command": "loom provenance repo get repo_01K41SEARCH000000000000003"},
+        "currentness": {"posture": "registered_but_malformed", "explanation": "The registered repository remains discoverable and carries a typed malformed tracking status and diagnostic."},
+        "prohibited_contamination": [{"id": "repo_01K41SEARCH000000000000002", "reason": "Personal Research Atlas has a different owner, purpose, and tracking status"}],
+        "repo_match_signals": ["purpose", "current_focus", "owning_project_context", "tracking_status"]
+      }
+    },
+    {
+      "query_id": "cross-project-atlas-ambiguity",
+      "query": "Open Atlas.",
+      "expected_first_engine": "provenance",
+      "request": {"surface": "search", "include_pending": false, "filters": {}},
+      "expected": {
+        "collections": [
+          {"collection": "repo_state", "ids": ["repo_01K41SEARCH000000000000002", "repo_01K41SEARCH000000000000003"]},
+          {"collection": "unresolved_cases", "ids": ["33333333-3333-4333-8333-333333333002"]}
+        ],
+        "exact_get": {"collection": "unresolved_cases", "id": "33333333-3333-4333-8333-333333333002", "command": "loom provenance case get 33333333-3333-4333-8333-333333333002"},
+        "currentness": {"posture": "ambiguous_cross_project", "explanation": "The shared alias is insufficient; both typed cards remain visible and the open case requires owning-project clarification."},
+        "prohibited_contamination": [{"id": "repo_01K41SEARCH000000000000001", "reason": "LOOM has no Atlas alias or purpose match"}],
+        "repo_match_signals": ["alias", "owning_project_context"]
+      }
+    },
+    {
+      "query_id": "technical-project-registry-boundary",
+      "query": "Show LOOM project roots, repository membership, and observation diagnostics.",
+      "expected_first_engine": "project_registry",
+      "request": {"surface": "project_inspect", "include_pending": false, "filters": {"project": "project_01K41SEARCH000000000000001"}},
+      "expected": {
+        "collections": [{"collection": "technical_project_registry", "ids": ["project_01K41SEARCH000000000000001"]}],
+        "exact_get": {"collection": "technical_project_registry", "id": "project_01K41SEARCH000000000000001", "command": "loom project inspect project_01K41SEARCH000000000000001"},
+        "currentness": {"posture": "technical_registry_state", "explanation": "Physical roots, membership contracts, and raw diagnostics remain on loom project rather than semantic repository cards."},
+        "prohibited_contamination": [{"id": "repo_01K41SEARCH000000000000001", "reason": "the compact semantic card must not substitute for technical registry inspection"}],
+        "repo_match_signals": []
+      }
+    }
+  ]
+}

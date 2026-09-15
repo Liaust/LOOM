@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=1024, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <meta name="color-scheme" content="dark">
+    <title>LOOM / MAIN</title>
+    <link rel="stylesheet" href="/dashboard.css">
+  </head>
+  <body>
+    <main id="dashboard" class="dashboard" data-overall="unknown" aria-label="LOOM Main health dashboard">
+      <header class="band header-band" data-band="header">
+        <div class="identity"><span class="brand">LOOM</span><span class="slash">/</span><span id="node-label">MAIN</span></div>
+        <div id="overall-state" class="overall state-text" data-severity="unknown">UNKNOWN</div>
+        <div class="header-time">
+          <time id="clock" class="clock" aria-label="Amsterdam time">--:--</time>
+          <span id="freshness" class="freshness" data-state="unknown">STALE --</span>
+        </div>
+      </header>
+
+      <section class="band attention-band" data-band="attention" aria-label="Attention">
+        <span class="status-marker" aria-hidden="true"></span>
+        <span id="attention-message" class="attention-message">Waiting for status</span>
+        <span id="attention-more" class="attention-more" hidden></span>
+      </section>
+
+      <section class="status-grid" data-band="status-grid" aria-label="System, runtime, and protection status">
+        <section class="status-column" data-column="system" aria-labelledby="system-heading">
+          <h2 id="system-heading">System</h2>
+          <div id="system-rows" class="metric-rows"></div>
+        </section>
+        <section class="status-column" data-column="runtime" aria-labelledby="runtime-heading">
+          <h2 id="runtime-heading">Runtime</h2>
+          <div id="runtime-rows" class="metric-rows"></div>
+        </section>
+        <section class="status-column" data-column="protection" aria-labelledby="protection-heading">
+          <h2 id="protection-heading">Protection</h2>
+          <div id="protection-rows" class="metric-rows"></div>
+        </section>
+      </section>
+
+      <section class="band summary-band network-band" data-band="network" aria-label="Network status">
+        <span id="network-state" class="summary-state">NETWORK</span>
+        <span id="network-detail" class="summary-detail">Network unavailable</span>
+      </section>
+
+      <section class="band summary-band activity-band" data-band="activity" aria-label="Activity status">
+        <span id="activity-state" class="activity-state">IDLE</span>
+        <span id="activity-detail" class="activity-detail">No recent activity</span>
+      </section>
+    </main>
+    <script src="/dashboard.js"></script>
+  </body>
+</html>

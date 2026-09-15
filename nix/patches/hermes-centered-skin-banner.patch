@@ -1,0 +1,85 @@
+--- a/ui-tui/src/theme.ts
++++ b/ui-tui/src/theme.ts
+@@ -50,6 +50,7 @@
+ }
+
+ export interface ThemeBrand {
++  centerSessionHero?: boolean
+   name: string
+   icon: string
+   prompt: string
+@@ -951,6 +952,7 @@
+       color: adapted,
+
+       brand: {
++        centerSessionHero: branding.session_hero_alignment === 'center',
+         name: branding.agent_name ?? d.brand.name,
+         icon: d.brand.icon,
+         prompt: cleanPromptSymbol(branding.prompt_symbol, d.brand.prompt),
+--- a/ui-tui/src/app/createGatewayEventHandler.ts
++++ b/ui-tui/src/app/createGatewayEventHandler.ts
+@@ -149,6 +149,7 @@
+
+   return (
+     a.brand.name === b.brand.name &&
++    a.brand.centerSessionHero === b.brand.centerSessionHero &&
+     a.brand.prompt === b.brand.prompt &&
+     a.bannerLogo === b.bannerLogo &&
+     a.bannerHero === b.bannerHero
+--- a/ui-tui/src/components/branding.tsx
++++ b/ui-tui/src/components/branding.tsx
+@@ -213,8 +213,10 @@
+   const term = useStdout().stdout?.columns ?? 100
+   const cols = Math.max(20, Math.min(term, maxWidth ?? term))
+   const heroLines = caduceus(t.color, t.bannerHero || undefined)
++  const centerHero = t.brand.centerSessionHero === true
++  const heroWidth = artWidth(heroLines) || CADUCEUS_WIDTH
+   const leftW = Math.min((artWidth(heroLines) || CADUCEUS_WIDTH) + 4, Math.floor(cols * 0.4))
+-  const wide = cols >= 90 && leftW + 40 < cols
++  const wide = cols >= 90 && leftW + 40 < cols && (!centerHero || heroWidth <= leftW)
+   const w = Math.max(20, wide ? cols - leftW - 14 : cols - 12)
+   const lineBudget = Math.max(12, w - 2)
+   const strip = (s: string) => (s.endsWith('_tools') ? s.slice(0, -6) : s)
+@@ -349,25 +351,27 @@
+   // Narrow drops to a single flexible track. Track math reproduces the old
+   // hand-rolled widths exactly: usable = (leftW + 2 + w) - gap = leftW + w.
+   const heroColumn = wide ? (
+-    <Box flexDirection="column" width="100%">
+-      <ArtLines lines={heroLines} />
+-      <Text />
++    <Box flexDirection="column" width="100%" justifyContent={centerHero ? 'center' : undefined}>
++      <Box flexDirection="column" alignSelf={centerHero ? 'center' : undefined} width={centerHero ? heroWidth : '100%'}>
++        <ArtLines lines={heroLines} />
++        <Text />
+
+-      <Text color={t.color.accent}>
+-        {info.model.split('/').pop()}
+-        <Text color={t.color.muted}> · Nous Research</Text>
+-      </Text>
+-
+-      <Text color={t.color.muted} wrap="truncate-end">
+-        {info.cwd || process.cwd()}
+-      </Text>
++        <Text color={t.color.accent} wrap={centerHero ? 'truncate-end' : undefined}>
++          {info.model.split('/').pop()}
++          <Text color={t.color.muted}> · Nous Research</Text>
++        </Text>
+
+-      {sid && (
+-        <Text>
+-          <Text color={t.color.sessionLabel}>Session: </Text>
+-          <Text color={t.color.sessionBorder}>{sid}</Text>
++        <Text color={t.color.muted} wrap="truncate-end">
++          {info.cwd || process.cwd()}
+         </Text>
+-      )}
++
++        {sid && (
++          <Text wrap={centerHero ? 'truncate-end' : undefined}>
++            <Text color={t.color.sessionLabel}>Session: </Text>
++            <Text color={t.color.sessionBorder}>{sid}</Text>
++          </Text>
++        )}
++      </Box>
+     </Box>
+   ) : null

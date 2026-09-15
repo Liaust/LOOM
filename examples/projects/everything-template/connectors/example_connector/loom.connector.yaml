@@ -1,0 +1,35 @@
+kind: loom.connector
+schema_version: connector.contract.v0.3
+
+provider:
+  key: example_connector
+  display_name: Example Connector
+  description: Scaffolded connector provider.
+  type: connector
+  version: 0.1.0
+  status: draft
+
+runtime:
+  kind: script
+  base_dir: scripts
+
+capabilities:
+  - endpoint: ping
+    display_name: Ping
+    description: Minimal connector capability.
+    form: job
+    risk_level: low
+    side_effects: []
+    input_schema:
+      type: object
+    output_schema:
+      type: object
+    runtime:
+      kind: script
+      script: scripts/ping
+      default_mode: wait_for_completion
+      wait_timeout_seconds: 30
+
+usage_documents:
+  - path: README.md
+    target: provider

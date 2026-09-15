@@ -1,0 +1,26 @@
+kind: loom.script_exposure
+schema_version: script.exposure.v0.3
+
+expose:
+  enabled: true
+  provider: project
+  endpoint: hello_world
+  display_name: Hello World
+  description: Minimal scaffolded script capability.
+
+capability:
+  class_namespace: project
+  class_name: scaffolded_script
+  form: job
+  risk_level: low
+  execution_authorization_level: 1
+  requires_approval: false
+  side_effects: []
+  input_schema:
+    type: object
+  output_schema:
+    type: object
+
+execution:
+  default_mode: wait_until_started
+  wait_timeout_seconds: 10
