@@ -41,6 +41,8 @@ development and has not completed a general-purpose installer acceptance pass.
   model-driven Hermes tasks is deferred; native Hermes cron is a separate owner.
 - Historical docs and compatibility surfaces are still being reconciled. Draft
   pages are useful explanations, not a promise of universal support.
+- The Portal retains facet/preset-based project forms; complete parity with the
+  current file-first project CLI is not claimed. Prefer the CLI for that workflow.
 
 ## Release Posture
 

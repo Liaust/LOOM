@@ -19,6 +19,8 @@ remaining acceptance, and possible future integrations are different things.
   documentation searches or registration ceremonies.
 - Improve actionable errors, prerequisite summaries, resumable operations,
   context discovery and the consistency of CLI/API/Portal workflows.
+- Bring remaining Portal project forms into line with file-first CLI creation
+  and declaration operations; do not make legacy facet forms the onboarding path.
 - Replace remaining maintainer-specific assumptions with documented operator
   configuration and make supported platform/dependency combinations explicit.
 

@@ -44,6 +44,24 @@ The system is usable through its CLI/API without any of those agent interfaces.
 Installing their binaries or templates does not perform model OAuth, external
 account login, messaging setup, desktop pairing or permission consent.
 
+## From A Conversation To A System Operation
+
+1. A person talks to an agent through its harness: for example Hermes TUI in an
+   ORCA terminal, a Hermes messaging gateway, or a separate coding-agent session.
+2. The harness loads the applicable workspace/project instructions and skills.
+   These help the model select an interface; they do not run services themselves.
+3. For LOOM work, the agent calls the CLI or a configured, authorized API tool.
+   The CLI's typed client reaches `loomd` through the configured connection.
+4. LOOM dispatches to the relevant owner: project operations, search services,
+   capability execution or a background job. Authorization and durable operation
+   state belong to those owners. Results return to the agent to interpret.
+
+Not all agent activity goes through step 3. Ordinary file edits, Git commands,
+Hermes conversational memory and native tools remain harness/workspace activity.
+They do not automatically become LOOM events, capabilities or accepted Provenance
+records. An integration must explicitly connect the action when that is needed.
+There is no requirement for every harness to use one universal MCP endpoint.
+
 ## Knowledge Is Not Conversational Memory
 
 Objects represent technical observations. Notes provide source material with

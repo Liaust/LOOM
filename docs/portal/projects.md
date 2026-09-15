@@ -8,8 +8,8 @@ tags:
   - loom
   - portal
   - projects
-status: verified
-verified_at: "2026-08-30"
+status: draft
+verified_at: "2026-09-15"
 source_scope:
   - "internal/loomcli/portal/projects_render.go"
   - "internal/loomcli/portal/project_actions.go"
@@ -29,6 +29,16 @@ aliases:
   - "Portal Projects"
 ---
 # Projects Portal
+
+## Current Scope
+
+The Portal still exposes legacy facet/preset and registration-oriented forms.
+It is not yet a complete visual equivalent of the newer file-first declaration
+workflow. For normal new-project creation and declaration plan/apply/status,
+use the [current project CLI](../cli/projects-and-scopes.md). The forms below
+describe compatibility surfaces, not extra steps required for a new project.
+Source inspection supports this distinction; this page is not a fresh interactive
+acceptance of every Portal action.
 
 ## Open Projects
 

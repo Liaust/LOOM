@@ -68,6 +68,20 @@ The reference deployment uses NixOS on Main and a macOS workspace node. A privat
 network and an optional edge proxy connect them; public exposure is an explicit
 operator configuration, not a default discovery mechanism.
 
+### Where Agents Connect
+
+The harness runs the agent. Project instructions and LOOM skills tell it which
+interfaces to use; the agent calls the CLI or an authorized API integration.
+Those calls reach `loomd`, which handles the relevant project, search, job or
+capability operation and returns structured results and errors. Skills are
+instructions, not the transport or an additional execution engine.
+
+Ordinary code edits and Git work remain in the agent's own workspace. They do
+not need a LOOM operation for every action. Conversely, starting Hermes through
+LOOM does not automatically put every shell command, native memory write or
+Hermes cron job under LOOM's event and policy model. See
+[agent and system boundaries](docs/concepts/modules-connectors-and-agents.md).
+
 > **Visual placeholder: system map.** Planned code-rendered map of nodes,
 > projects, capabilities, storage, knowledge, and agent runtimes.
 

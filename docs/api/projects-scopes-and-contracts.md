@@ -8,8 +8,8 @@ tags:
   - loom
   - api
   - projects
-status: verified
-verified_at: "2026-08-30"
+status: draft
+verified_at: "2026-09-15"
 source_scope:
   - "internal/httpapi/server.go"
   - "internal/httpapi/projects_test.go"
@@ -34,6 +34,23 @@ aliases:
 These private routes support the CLI and Portal. Prefer their typed clients
 instead of treating the route list as a public unauthenticated HTTP API.
 
+## Current Declaration Operations
+
+The file-first workflow uses these routes in addition to project record reads:
+
+| Route | Purpose |
+|---|---|
+| `POST /v1/project-declaration-plans` | Resolve current declarations, effects and prerequisites without applying them. |
+| `POST /v1/project-declaration-operations` | Apply a reviewed declaration request or resume its identified operation. |
+| `GET /v1/project-declaration-operations/{operation-id}` | Inspect durable operation state without advancing it. |
+| `GET /v1/projects/{ref}/declaration-status` | Read declaration readiness. |
+
+Use the matching typed client and request types rather than constructing a
+legacy registration request for a current declaration. The remaining sections
+include older facet/layout APIs still present for compatibility; their presence
+does not make facet registration a prerequisite for new projects. See the
+[current CLI flow](../cli/projects-and-scopes.md).
+
 ## Route Groups
 
 | Route | Purpose |
@@ -56,10 +73,14 @@ instead of treating the route list as a public unauthenticated HTTP API.
 | `/v1/projects/{ref}/watch-policy/apply` | Apply watched-root desired state. |
 | `/v1/projects/{ref}/sync-status` | Inspect project sync status. |
 | `/v1/projects/{ref}/backup-status` | Inspect project backup status. |
-| `/v1/projects/{ref}/archive` | Dry-run or apply project archive. |
+| `/v1/projects/{ref}/archive` | Legacy archive interface; its retired writer is not a physical-archive apply fallback. |
 | `/v1/projects/{ref}/archive/inspect` | Inspect runtime archive state. |
 | `/v1/projects/{ref}/archive/restore` | Plan restore. |
 | `/v1/projects/{ref}/archive/migrate-runtime` | Plan runtime migration. |
+
+Physical project archive has separate reviewed plan/apply/recovery routes.
+Follow [Projects](../user-guide/projects.md) and the current typed client for
+that lifecycle; do not infer write availability from this legacy route table.
 
 ## Standard Envelopes
 
