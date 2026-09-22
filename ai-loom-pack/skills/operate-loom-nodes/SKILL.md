@@ -27,15 +27,16 @@ Current task and repository/node instructions govern scope. Runtime records and
 approved host/service observations establish health; release-matched source and
 help establish support. Plans are future intent.
 
-The repository pins ORCA 1.4.191. Its committed Main deployment receipt includes
-paired-client worktree/session use, brief client-disconnect continuity and restart
-restoration. It is historical evidence, not current health or proof of every
-browser/mobile/Relay or Mac-off workload. Separate committed Linux proof covers non-Git folder
-registration through the patched package's public CLI, not installed patch
-availability. Registration does not create or validate a directory; use the
-version-matched native skill for the selected host.
+The committed ORCA 1.4.191 and non-Git registration evidence is historical,
+not installed patch availability or current health. Use the host's native skill.
 
 ## Authority and production
+
+For task-authorized Mac work, use the configured `loom-mac` alias and explicit
+remote paths: `ssh loom-mac 'uname -a'`. Shell commands and file transfers need
+no per-command LOOM registration. Inspect bindings with `ssh -G loom-mac`.
+Keep the desktop key separate, preserve host verification, and report connection
+failures. Reconcile mutations before retrying. SSH grants no sudo/privacy bypass.
 
 Read the matching machine note and operations runbook before connecting to a
 LOOM host or changing a service. Production updates, NixOS rebuilds, rollback,

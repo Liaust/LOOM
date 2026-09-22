@@ -98,6 +98,13 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    # Operator-owned host bindings and private keys stay outside Git and HOME,
+    # so both terminal agents and ProtectHome-enabled gateways can use SSH.
+    programs.ssh.extraConfig = ''
+      Include /etc/loom-agent-ssh/config
+      Host *
+    '';
+
     users.groups.agents = { };
     users.users.agents = {
       isNormalUser = true;

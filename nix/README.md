@@ -38,6 +38,35 @@ Copying them cannot authenticate an account. Obtain and verify your real public
 identifiers during your own authorized bootstrap. The agent protocols describe
 the distinction between named-agent and general coding-agent profiles.
 
+## Agent SSH Hosts
+
+When ORCA's shared agent account is enabled, the system SSH client includes the
+optional operator-owned `/etc/loom-agent-ssh/config`. An absent file enables no
+remote access. Configure ordinary OpenSSH host blocks there; keep the file and
+its parent root-owned and not writable by agents. End the included file with
+`Host *` so its last host block does not scope later system defaults.
+
+Provision dedicated private keys outside both Git/Nix values and `/home`, for
+example in `/var/lib/loom-agent-ssh` with directory mode 0700 and key mode 0600,
+owned by the intended agent account. This also works for the existing
+`ProtectHome` gateway without weakening its filesystem restrictions. Pin the
+remote host key in a protected known-hosts file; use `IdentitiesOnly yes`,
+`StrictHostKeyChecking yes`, `BatchMode yes` and bounded connection timeouts.
+The normal SSH client, not an extra LOOM wrapper, performs the connection.
+
+The pinned ORCA FHS environment exposes the host's `/etc` at `/.host-etc` and
+does not expose `/etc/ssh`. For these terminals, also install the selected host
+block as the agent's ordinary `~/.ssh/config` (agent-owned, mode 0600); preserve
+unrelated existing entries. List both the normal and `/.host-etc` known-hosts
+paths in `UserKnownHostsFile`. The system include serves the home-isolated
+gateway, while the user config serves ORCA. Keep their host/key values in sync.
+
+For a configured `loom-mac` alias, validate from an actual ORCA terminal and the
+gateway environment. Account access is broad user-level access, not per-agent
+isolation. Do not reuse a computer-use forced-command key, grant sudo, expose
+SSH publicly or change remote privacy permissions as part of host discovery.
+Revocation is the ordinary removal of this dedicated public key on the target.
+
 ## Dependency Ownership
 
 `flake.lock` pins the input sources. Package definitions pin separately fetched

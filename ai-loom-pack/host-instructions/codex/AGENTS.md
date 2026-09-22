@@ -64,3 +64,20 @@ Codex*`, or the trusted Basecamp project name when project-scoped, or simply
 The Archivist's specialized operating scope remains narrower than this general
 account guidance. Available authentication does not enable Basecamp projection,
 recurring execution, global scans or bypass its existing lifecycle rules.
+
+## Mac Shell Access
+
+When an operator has configured `loom-mac`, use ordinary `ssh`, `scp` or SFTP
+for task-authorized Mac file and development work. For example,
+`ssh loom-mac 'uname -a'`. Use explicit remote paths; the Main working directory
+and Linux toolchain do not carry over. No extra LOOM command registration is
+required for ordinary shell commands. Inspect `ssh -G loom-mac` when uncertain
+about the binding. The configured Mac account is a normal user account, not a
+project sandbox; all Main sessions sharing the agents Unix user share its key.
+
+Use computer use for visible Mac applications, and ORCA browser tools only for
+the selected shared page. The restricted computer-use SSH key is not a shell
+key. Do not bypass host-key checks, change accounts, grant sudo or alter macOS
+privacy settings as recovery. Report connection/authentication failures clearly;
+do not blindly retry mutations after a disconnect. Existing task, destructive
+action and external-effect authority still applies.
