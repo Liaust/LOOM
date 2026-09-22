@@ -728,6 +728,10 @@ func (builder *watchPolicyBuilder) items() []ProjectWatchedRootItem {
 			},
 			DeletePolicy: watchedroots.DeletePolicy{Mode: firstNonEmptyString(root.deleteMode, watchedroots.DeleteModeLocalStateOnly)},
 		}
+		// Knowledge folders need bounded polling even without filesystem events.
+		if root.metadata["knowledge_source"] != nil {
+			config.Scan.FullRescanInterval = "1m"
+		}
 		if config.SyncPolicy.Mode == watchedroots.SyncModeNone {
 			config.SyncPolicy.ProjectRef = ""
 			config.SyncPolicy.ScopeRef = ""

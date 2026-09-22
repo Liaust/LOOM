@@ -21,6 +21,20 @@ import (
 	loomsync "loom.local/loom/internal/sync"
 )
 
+func TestWatchedRootWorkerHonorsRescanCadence(t *testing.T) {
+	for _, tc := range []struct {
+		interval string
+		want     int
+	}{{"", 900}, {"6h", 900}, {"1m", 60}, {"5m", 300}, {"2s", 60}, {"invalid", 900}} {
+		t.Run(tc.interval, func(t *testing.T) {
+			cfg := watchedroots.RootConfig{RootKey: "project__received", Scan: watchedroots.ScanConfig{FullRescanInterval: tc.interval}}
+			if got := watchedRootWorkerIntervalSeconds(cfg); got != tc.want {
+				t.Fatalf("interval = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWatchedRootsCommandsAddStatusAndExplain(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

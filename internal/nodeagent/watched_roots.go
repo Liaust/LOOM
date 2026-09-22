@@ -320,7 +320,11 @@ func watchedRootWorkerIntervalSeconds(config watchedroots.RootConfig) int {
 	if strings.HasPrefix(config.RootKey, "loom_box__") {
 		return 60
 	}
-	return watchedroots.DefaultWorkerIntervalSeconds()
+	interval := watchedroots.DefaultWorkerIntervalSeconds()
+	if rescan, err := time.ParseDuration(config.Scan.FullRescanInterval); err == nil && rescan > 0 {
+		interval = min(interval, max(60, int(rescan.Seconds())))
+	}
+	return interval
 }
 
 // Caller holds this exact worker's execution lock after validating the entire
