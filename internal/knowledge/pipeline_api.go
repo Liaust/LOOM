@@ -208,10 +208,21 @@ func (s *Service) pipelineOperationsStatus(ctx context.Context, policy PipelineP
 		status.Tools[tool] = err == nil
 	}
 	runtimeConfig, configErr := config.Load(config.Overrides{})
-	status.Runtimes["embedding"] = configErr == nil && strings.TrimSpace(runtimeConfig.EmbeddingRuntime) != ""
-	status.Runtimes["vision"] = configErr == nil && strings.TrimSpace(runtimeConfig.VisionRuntime) != ""
-	status.Models["embedding"] = !policy.Policy.EmbeddingsEnabled || strings.TrimSpace(policy.EmbeddingSettings.ModelKey) != ""
-	status.Models["vision"] = !policy.Policy.ImageDescriptionsEnabled || configErr == nil && strings.TrimSpace(runtimeConfig.VisionModel) != ""
+	status.Runtimes["embedding"], status.Models["embedding"] = false, false
+	status.Runtimes["vision"], status.Models["vision"] = false, false
+	var embeddingModels map[string]bool
+	if policy.EmbeddingSettings.RuntimeKey == EmbeddingRuntimeOllama {
+		status.Runtimes["embedding"], embeddingModels = ollamaModelAvailability(ctx, policy.EmbeddingSettings.OllamaURL)
+		status.Models["embedding"] = embeddingModels[ollamaModelName(policy.EmbeddingSettings.ModelKey)]
+	}
+	if configErr == nil && runtimeConfig.VisionRuntime == "ollama" {
+		available, models := status.Runtimes["embedding"], embeddingModels
+		if runtimeConfig.VisionOllamaURL != policy.EmbeddingSettings.OllamaURL || embeddingModels == nil {
+			available, models = ollamaModelAvailability(ctx, runtimeConfig.VisionOllamaURL)
+		}
+		status.Runtimes["vision"] = available
+		status.Models["vision"] = models[ollamaModelName(runtimeConfig.VisionModel)]
+	}
 	if err := s.store.db.QueryRowContext(ctx, `SELECT count(*) FILTER(WHERE status='waiting_heavy')::int,count(*) FILTER(WHERE status IN ('failed','blocked_manual_action'))::int,COALESCE(EXTRACT(EPOCH FROM (now()-(min(created_at) FILTER(WHERE status NOT IN ('complete','complete_with_warnings','stale','cancelled'))))),0)::bigint,count(*) FILTER(WHERE status='processing' AND claim_expires_at<=now())::int FROM knowledge.pipeline_runs WHERE status<>'stale'`).Scan(&status.WaitingHeavy, &status.Blocked, &status.OldestActiveSeconds, &status.StaleClaims); err != nil {
 		return status, err
 	}

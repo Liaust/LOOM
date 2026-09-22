@@ -269,6 +269,11 @@ func parseDeclarationShape(raw []byte) (ProjectDeclaration, string) {
 			for _, p := range ps {
 				for _, other := range []DeclarationResourceKind{DeclarationRepository, DeclarationKnowledge} {
 					for _, q := range paths[other] {
+						// Knowledge is a read-only consumer, not a competing data owner.
+						// Require explicit selection of the data root or a descendant.
+						if other == DeclarationKnowledge && (q == p || strings.HasPrefix(q, p+"/")) {
+							continue
+						}
 						if declarationOverlap(p, q) {
 							return d, "declaration.overlap"
 						}

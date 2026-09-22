@@ -9,15 +9,12 @@ loom project create <name> --owner-node <node> --directory <parent> --dry-run
 loom project create <name> --owner-node <node> --directory <parent>
 ```
 
-Creates `.loom/project.yaml`, `.project/` Markdown, a short `AGENTS.md` and
-ordinary notes/ and repos/ folders. No Git initialization or resource activation.
-Caller-local creation reads no remote owner filesystem and stays source-only.
-`owner_node` is metadata; `--backend` selects the configured backend filesystem.
-`--backend` automatically connects that same project identity/source to LOOM;
-`--register` is backend-only compatibility. Dry-run never registers. If connection
-fails, `source_created/context_pending` retains the identity and files; retry
-the same create command after resolving the reported prerequisite.
-Context refresh is automatic; no per-folder enrollment or resource activation.
+Creates `.loom/project.yaml`, `.project/`, `AGENTS.md`, notes/ and repos/.
+No Git initialization or resource activation. Local creation stays source-only;
+`--backend` creates and automatically connects the source on the configured backend.
+`--register` is backend-only compatibility.
+Dry-run never registers. On `source_created/context_pending`, resolve the reported
+prerequisite and retry the same command; existing identity/files are preserved.
 
 ## Declare and reconcile when requested
 
@@ -30,6 +27,13 @@ resources:
     kind: knowledge
     knowledge: {path: journal, category: notes}
 ```
+
+Select any project-relative folder; eligible new/changed files enter Notes
+automatically after apply. Categories: notes/docs/research. An application's
+relative data folder or explicit child can be selected: the app owns writes,
+Notes reads. Ignores/formats still apply; no implied backup or Provenance acceptance.
+External allocations are not relative folders; do not substitute absolute paths
+or symlinks.
 
 Saving source does not enroll it. Review a plan against source visible on the
 selected owner node; resolve unmet prerequisites before applying supported effects:
@@ -65,11 +69,9 @@ data, credentials and public HTTPS beneath `apps.example.com`; no per-app host s
 orca repo add --path <existing-folder> --kind folder --json
 ```
 
-Accepted source-bound Linux proof covers the patched ORCA 1.4.191 package, not
-its installation or current health. Registration neither creates missing
-directories nor validates existence; unavailable/file paths can also register.
-Create an ordinary directory first. Native polling may convert its kind if Git
-appears. Preserve default/explicit Git behavior; do not manufacture a Git wrapper.
+Registration neither creates missing directories nor validates existence.
+Create the directory first. Native polling may convert its kind if Git appears.
+Do not manufacture a Git wrapper.
 
 ## Export custody
 

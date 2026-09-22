@@ -86,6 +86,64 @@ func TestDeclarationEnrollmentExplicitPath(t *testing.T) {
 		t.Fatal("substitution accepted")
 	}
 }
+
+func TestDeclarationEnrollmentApplicationOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name, sourcePath string
+		wantError        bool
+	}{
+		{"data_root", "data/library", false},
+		{"output_subfolder", "data/library/reports", false},
+		{"unrelated_folder", "material", false},
+		{"implicit_parent", "data", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := declarationWebDAVRoot(t)
+			d, err := ParseProjectDeclaration(fixtureRead(t, "webdav.yaml"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Protection is independent of read-only indexing in this scenario.
+			delete(d.Resources, "retained")
+			app := d.Resources["webdav"].Application
+			data := app.Data["library"]
+			data.Protection = ""
+			app.Data["library"] = data
+			d.Resources["reading"].Knowledge.Path = tc.sourcePath
+			if err := os.MkdirAll(filepath.Join(root, tc.sourcePath), 0700); err != nil {
+				t.Fatal(err)
+			}
+			raw, err := json.Marshal(d)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, CanonicalRootContractPath), raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			a := Analyze(root)
+			if tc.wantError {
+				if a.Report.OK {
+					t.Fatal("implicit application-data enrollment accepted")
+				}
+				return
+			}
+			if !a.Report.OK || len(a.Plan.WatchedRoots) != 1 {
+				t.Fatalf("knowledge enrollment: %+v", a.Report)
+			}
+			watch := a.Plan.WatchedRoots[0]
+			if watch.RootRelativePath != tc.sourcePath || watch.BackupMode != "none" || watch.SyncMode != "selected_files" {
+				t.Fatalf("unexpected consumer: %+v", watch)
+			}
+			if a.Loaded.Declaration.Resources["webdav"].Application.Data["library"].Path != "data/library" {
+				t.Fatal("application data owner changed")
+			}
+			if err := ValidateDeclarationEnrollment(*a.Loaded, a.Report, a.Plan); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestDeclarationEnrollmentProtectionComposition(t *testing.T) {
 	for _, disabled := range []bool{false, true} {
 		t.Run(map[bool]string{false: "enabled", true: "disabled"}[disabled], func(t *testing.T) {

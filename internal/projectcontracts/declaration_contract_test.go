@@ -704,6 +704,9 @@ func fixtureDeclaration(raw []byte) (ProjectDeclaration, string) {
 			for _, p := range ps {
 				for _, other := range []DeclarationResourceKind{DeclarationRepository, DeclarationKnowledge} {
 					for _, q := range paths[other] {
+						if other == DeclarationKnowledge && (q == p || strings.HasPrefix(q, p+"/")) {
+							continue
+						}
 						if fixtureOverlap(p, q) {
 							return d, "declaration.overlap"
 						}
