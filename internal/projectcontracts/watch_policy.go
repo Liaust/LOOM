@@ -18,6 +18,7 @@ import (
 	"loom.local/loom/internal/ids"
 	noderuntime "loom.local/loom/internal/nodeagent/runtime"
 	"loom.local/loom/internal/nodeagent/watchedroots"
+	loomsync "loom.local/loom/internal/sync"
 )
 
 const (
@@ -731,6 +732,9 @@ func (builder *watchPolicyBuilder) items() []ProjectWatchedRootItem {
 		// Knowledge folders need bounded polling even without filesystem events.
 		if root.metadata["knowledge_source"] != nil {
 			config.Scan.FullRescanInterval = "1m"
+			if config.SyncPolicy.MaxFileBytes == 0 {
+				config.SyncPolicy.MaxFileBytes = loomsync.MaxInlineObjectUploadBytes
+			}
 		}
 		if config.SyncPolicy.Mode == watchedroots.SyncModeNone {
 			config.SyncPolicy.ProjectRef = ""

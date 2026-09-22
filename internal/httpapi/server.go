@@ -1120,6 +1120,7 @@ func (s Server) handleNodeAgentSyncObjectUpload(w http.ResponseWriter, r *http.R
 		return
 	}
 	var input loomsync.SyncedObjectInput
+	r.Body = http.MaxBytesReader(w, r.Body, loomsync.MaxInlineObjectUploadRequestBytes)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&input); err != nil {

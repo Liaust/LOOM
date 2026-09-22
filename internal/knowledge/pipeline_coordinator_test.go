@@ -19,6 +19,18 @@ func TestConsolidatedArtifactTextOrdersLocatorsAndOmitsMetadata(t *testing.T) {
 	}
 }
 
+func TestPipelinePDFInputBudgetIsSeparateFromText(t *testing.T) {
+	for _, class := range []string{storagecatalog.FileClassPDF, storagecatalog.FileClassText, storagecatalog.FileClassMarkdown} {
+		want := int64(5 << 20)
+		if class == storagecatalog.FileClassPDF {
+			want = 32 << 20
+		}
+		if got := pipelineNativeSourceLimit(KnowledgeObject{FileClass: class}, 5<<20); got != want {
+			t.Fatalf("%s input limit = %d, want %d", class, got, want)
+		}
+	}
+}
+
 func TestWaitingPipelineStatusSeparatesCoordinatorAndHeavy(t *testing.T) {
 	if got := waitingPipelineStatus(PipelineExecutionCoordinator, false); got != FilePipelineStatusWaitingCoordinator {
 		t.Fatalf("coordinator status = %q", got)

@@ -58,6 +58,23 @@ func TestSourceMetadataPlannerPreservesContentAndObservationOrder(t *testing.T) 
 	}
 }
 
+func TestDocumentSyncPlannerHonorsTransportAndRootLimits(t *testing.T) {
+	for _, tc := range []struct {
+		size, limit int64
+		allowed     bool
+	}{
+		{8 << 20, 32 << 20, true}, {32 << 20, 32 << 20, true},
+		{32<<20 + 1, 64 << 20, false}, {2 << 20, 1 << 20, false},
+	} {
+		root := ValidatedRoot{Config: RootConfig{RootKey: "research", SyncPolicy: SyncPolicy{Mode: SyncModeSelectedFiles, MaxFileBytes: tc.limit}}}
+		state := PathState{Status: PathStatusIncluded, Kind: PathKindFile, RelativePath: "scan.pdf", ContentHashURI: "new-hash", SizeBytes: tc.size}
+		action, ok := planSyncOutputAction(root, state)
+		if !ok || (action.ActionKind == OutputActionSyncObject) != tc.allowed {
+			t.Fatalf("size %d limit %d: %+v", tc.size, tc.limit, action)
+		}
+	}
+}
+
 func TestPlanOutputsQueuesSelectedFilesAndSkipsCurrentHashes(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

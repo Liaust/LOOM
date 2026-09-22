@@ -67,6 +67,9 @@ func TestDeclarationEnrollmentExplicitPath(t *testing.T) {
 	if config.Scan.FullRescanInterval != "1m" {
 		t.Fatalf("knowledge folder polling interval = %q, want 1m", config.Scan.FullRescanInterval)
 	}
+	if config.SyncPolicy.MaxFileBytes != 32<<20 {
+		t.Fatalf("knowledge sync limit = %d, want 32 MiB", config.SyncPolicy.MaxFileBytes)
+	}
 	if len(a.Report.Facets) != 0 || len(a.Report.RepositoryMembers) != 0 {
 		t.Fatal("inferred enrollment")
 	}

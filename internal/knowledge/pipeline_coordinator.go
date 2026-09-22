@@ -9,7 +9,18 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"loom.local/loom/internal/storagecatalog"
 )
+
+// Raster-heavy PDFs need a binary input budget, not the text-file read limit.
+// Extracted text, page count and chunk limits remain independently bounded.
+func pipelineNativeSourceLimit(object KnowledgeObject, textLimit int64) int64 {
+	if object.FileClass == storagecatalog.FileClassPDF {
+		return DefaultPDFMaxSourceBytes
+	}
+	return textLimit
+}
 
 type PipelineCoordinatorRunInput struct {
 	WorkerRunID           string
@@ -82,7 +93,7 @@ func (s *Service) executeCoordinatorStage(ctx context.Context, item PipelineWork
 		})
 		return nil, err
 	case FilePipelineStageNativeText:
-		extraction, err := s.ExtractObject(ctx, TextPipelineInput{Object: item.Object, MaxBytes: input.MaxTextBytesPerObject, MaxExtractedTextBytes: input.MaxExtractedTextBytes, MaxChunks: input.MaxChunksPerObject})
+		extraction, err := s.ExtractObject(ctx, TextPipelineInput{Object: item.Object, MaxBytes: pipelineNativeSourceLimit(item.Object, input.MaxTextBytesPerObject), MaxExtractedTextBytes: input.MaxExtractedTextBytes, MaxChunks: input.MaxChunksPerObject})
 		if err != nil {
 			return nil, err
 		}
@@ -95,7 +106,7 @@ func (s *Service) executeCoordinatorStage(ctx context.Context, item PipelineWork
 		}
 		return nil, nil
 	case FilePipelineStagePDFPageAnalysis:
-		return s.PreparePDFPageAnalysis(ctx, item, input.MaxTextBytesPerObject)
+		return s.PreparePDFPageAnalysis(ctx, item, DefaultPDFMaxSourceBytes)
 	case FilePipelineStageConsolidateText:
 		artifacts, err := s.store.ListDerivedArtifacts(ctx, item.Run.KnowledgePipelineRunID, true)
 		if err != nil {

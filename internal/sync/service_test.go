@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -8,6 +9,22 @@ import (
 	"testing"
 	"time"
 )
+
+func TestSyncedObjectUploadSizeBounds(t *testing.T) {
+	for _, size := range []int64{2 << 20, 8 << 20, MaxInlineObjectUploadBytes, MaxInlineObjectUploadBytes + 1} {
+		input := syncedObjectInputForNormalizeTest()
+		input.SizeBytes = size
+		_, err := normalizeSyncedObjectInput(input)
+		if (err == nil) != (size <= MaxInlineObjectUploadBytes) {
+			t.Fatalf("size %d: %v", size, err)
+		}
+	}
+	input := syncedObjectInputForNormalizeTest()
+	input.ContentBase64 = base64.StdEncoding.EncodeToString([]byte("oversized"))
+	if _, err := normalizeSyncedObjectInput(input); err == nil {
+		t.Fatal("oversized encoded content accepted for a one-byte declaration")
+	}
+}
 
 func TestSyncedObjectPayloadIncludesLocalVersionIdentity(t *testing.T) {
 	sourceMtime := time.Date(2025, 3, 4, 5, 6, 7, 0, time.FixedZone("source", 2*60*60))

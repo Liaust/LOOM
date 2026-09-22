@@ -15,10 +15,11 @@ import (
 )
 
 const (
-	ExtractorKeyPDF         = "pdf_poppler"
-	ExtractorVersionPDF     = "pdf_poppler_extractor_v1"
-	DefaultPDFMaxPages      = 250
-	defaultPDFCommandTimout = 30 * time.Second
+	ExtractorKeyPDF          = "pdf_poppler"
+	ExtractorVersionPDF      = "pdf_poppler_extractor_v1"
+	DefaultPDFMaxPages       = 250
+	DefaultPDFMaxSourceBytes = 32 << 20
+	defaultPDFCommandTimout  = 30 * time.Second
 )
 
 var pdfAbsoluteTimePattern = regexp.MustCompile(`^D:(\d{14})(Z|([+-])(\d{2})'?(\d{2})'?)$`)

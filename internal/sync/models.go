@@ -55,8 +55,10 @@ const (
 	RawBackupPolicyPrivateRawBackup = "private_raw_backup"
 	RawBackupPolicyExcludedTemp     = "excluded_temp"
 
-	MaxInlineObjectUploadBytes = 1024 * 1024
-	MaxPrivateBackupBytes      = 1024 * 1024
+	MaxInlineObjectUploadBytes = 32 * 1024 * 1024
+	// Base64 payload plus bounded JSON metadata; other request limits are unchanged.
+	MaxInlineObjectUploadRequestBytes = ((MaxInlineObjectUploadBytes + 2) / 3 * 4) + 1024*1024
+	MaxPrivateBackupBytes             = 1024 * 1024
 
 	DeletionRequestStatusPendingReview = "pending_review"
 	DeletionRequestStatusRecorded      = "recorded"

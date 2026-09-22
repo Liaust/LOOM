@@ -1810,6 +1810,9 @@ func normalizeSyncedObjectInput(input SyncedObjectInput) (SyncedObjectInput, err
 	if input.SizeBytes < 0 || input.SizeBytes > MaxInlineObjectUploadBytes {
 		return SyncedObjectInput{}, fmt.Errorf("size_bytes must be between 0 and %d", MaxInlineObjectUploadBytes)
 	}
+	if len(input.ContentBase64) > base64.StdEncoding.EncodedLen(int(input.SizeBytes)) {
+		return SyncedObjectInput{}, fmt.Errorf("content_base64 exceeds the declared size_bytes")
+	}
 	if !strings.HasPrefix(input.HashURI, "sha256:") || len(strings.TrimPrefix(input.HashURI, "sha256:")) != 64 {
 		return SyncedObjectInput{}, fmt.Errorf("hash_uri must be a sha256 URI")
 	}

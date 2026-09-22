@@ -114,6 +114,22 @@ func TestPushLocalSyncContinuesAfterIndependentObjectUploadFailure(t *testing.T)
 	}
 }
 
+func TestCreateLocalSyncObjectAcceptsLargerDocument(t *testing.T) {
+	store, config, state, dir := localSyncObjectTestStore(t)
+	path := filepath.Join(dir, "scan.pdf")
+	content := bytes.Repeat([]byte("%PDF-data\n"), 700000)
+	if err := os.WriteFile(path, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	object, err := store.CreateLocalSyncObject(config, state, LocalSyncObjectCreateInput{Path: path, ProjectRef: "project_test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if object.SizeBytes != int64(len(content)) || object.HashURI != "sha256:"+rawBytesHashHex(content) {
+		t.Fatalf("large document identity lost: size=%d hash=%s", object.SizeBytes, object.HashURI)
+	}
+}
+
 func TestCreateLocalSyncObjectClassifiesLargeMarkdownMetadataOnly(t *testing.T) {
 	t.Parallel()
 	store, config, state, dir := localSyncObjectTestStore(t)

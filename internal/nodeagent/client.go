@@ -88,6 +88,12 @@ func (c Client) PushSyncBatch(ctx context.Context, correlationID, idempotencyKey
 }
 
 func (c Client) UploadSyncedObject(ctx context.Context, correlationID, idempotencyKey string, input loomsync.SyncedObjectInput) (response.Envelope[loomsync.SyncedObjectResult], error) {
+	// Document transfers need more time than small control requests on a node link.
+	if c.HTTPClient != nil && c.HTTPClient.Timeout > 0 && c.HTTPClient.Timeout < 2*time.Minute {
+		client := *c.HTTPClient
+		client.Timeout = 2 * time.Minute
+		c.HTTPClient = &client
+	}
 	return doJSON[loomsync.SyncedObjectInput, loomsync.SyncedObjectResult](ctx, c, http.MethodPost, "/v1/node-agent/sync/object-upload", correlationID, idempotencyKey, input)
 }
 
