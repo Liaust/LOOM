@@ -218,15 +218,18 @@ func newNotesPipelinePolicyCommand(opts *options) *cobra.Command {
 		if opts.jsonOutput {
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(envelope.Data)
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "PDF OCR: %t\nImage descriptions: %t\nEmbeddings: %t\n", envelope.Data.Policy.PDFOCREnabled, envelope.Data.Policy.ImageDescriptionsEnabled, envelope.Data.Policy.EmbeddingsEnabled)
+		fmt.Fprintf(cmd.OutOrStdout(), "PDF OCR: %t\nImage OCR: %t\nImage descriptions: %t\nEmbeddings: %t\n", envelope.Data.Policy.PDFOCREnabled, envelope.Data.Policy.ImageOCREnabled, envelope.Data.Policy.ImageDescriptionsEnabled, envelope.Data.Policy.EmbeddingsEnabled)
 		return nil
 	}})
-	var ocr, vision, embeddings, yes bool
+	var ocr, imageOCR, vision, embeddings, yes bool
 	set := &cobra.Command{Use: "set", RunE: func(cmd *cobra.Command, args []string) error {
 		if !yes {
 			return fmt.Errorf("pass --yes to update Notes pipeline policy")
 		}
 		input := knowledge.PipelinePolicyUpdate{}
+		if cmd.Flags().Changed("image-ocr") {
+			input.ImageOCREnabled = &imageOCR
+		}
 		if cmd.Flags().Changed("pdf-ocr") {
 			input.PDFOCREnabled = &ocr
 		}
@@ -250,6 +253,7 @@ func newNotesPipelinePolicyCommand(opts *options) *cobra.Command {
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(envelope.Data)
 	}}
 	set.Flags().BoolVar(&ocr, "pdf-ocr", true, "enable or disable PDF OCR")
+	set.Flags().BoolVar(&imageOCR, "image-ocr", false, "enable or disable standalone image OCR")
 	set.Flags().BoolVar(&vision, "image-descriptions", true, "enable or disable standalone image descriptions")
 	set.Flags().BoolVar(&embeddings, "embeddings", false, "enable or disable embeddings")
 	set.Flags().BoolVar(&yes, "yes", false, "confirm policy change")

@@ -34,6 +34,7 @@ type PipelineDefinition struct {
 
 type PipelinePolicy struct {
 	PDFOCREnabled            bool `json:"pdf_ocr_enabled"`
+	ImageOCREnabled          bool `json:"image_ocr_enabled"`
 	ImageDescriptionsEnabled bool `json:"image_descriptions_enabled"`
 	EmbeddingsEnabled        bool `json:"embeddings_enabled"`
 }
@@ -74,8 +75,10 @@ func PipelineDefinitionForObject(object KnowledgeObject) PipelineDefinition {
 		ocr := heavy(FilePipelineStagePDFOCR, []string{FilePipelineStagePDFPageAnalysis}, nil, []string{ArtifactKindOCRText})
 		definition.Stages = append([]PipelineStageDefinition{metadata, native, analysis, ocr, consolidateAfter(FilePipelineStagePDFOCR)}, finish(FilePipelineStageConsolidateText)...)
 	case "image":
-		description := heavy(FilePipelineStageImageDescription, []string{FilePipelineStageMetadata}, nil, []string{ArtifactKindVisionDescription})
-		definition.Stages = append([]PipelineStageDefinition{metadata, description, consolidateAfter(FilePipelineStageImageDescription)}, finish(FilePipelineStageConsolidateText)...)
+		definition.Version = "notes_image_pipeline.v2"
+		ocr := heavy(FilePipelineStageImageOCR, []string{FilePipelineStageMetadata}, nil, []string{ArtifactKindOCRText})
+		description := heavy(FilePipelineStageImageDescription, []string{FilePipelineStageImageOCR}, nil, []string{ArtifactKindVisionDescription})
+		definition.Stages = append([]PipelineStageDefinition{metadata, ocr, description, consolidateAfter(FilePipelineStageImageDescription)}, finish(FilePipelineStageConsolidateText)...)
 	case "metadata_only":
 		lexical := coordinator(FilePipelineStageLexicalIndex, []string{FilePipelineStageMetadata}, []string{ArtifactKindMetadataText}, nil)
 		finalize := coordinator(FilePipelineStageFinalize, []string{FilePipelineStageLexicalIndex}, nil, nil)

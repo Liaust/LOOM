@@ -51,6 +51,7 @@ type PipelinePolicyStatus struct {
 }
 type PipelinePolicyUpdate struct {
 	PDFOCREnabled            *bool `json:"pdf_ocr_enabled,omitempty"`
+	ImageOCREnabled          *bool `json:"image_ocr_enabled,omitempty"`
 	ImageDescriptionsEnabled *bool `json:"image_descriptions_enabled,omitempty"`
 	EmbeddingsEnabled        *bool `json:"embeddings_enabled,omitempty"`
 }
@@ -262,6 +263,9 @@ func pipelinePolicyFromSettings(settings EmbeddingSettings) PipelinePolicy {
 	policy := DefaultPipelinePolicy()
 	policy.EmbeddingsEnabled = settings.Enabled
 	metadata := jsonObject(settings.Metadata)
+	if value, ok := metadata["image_ocr_enabled"].(bool); ok {
+		policy.ImageOCREnabled = value
+	}
 	if value, ok := metadata["pdf_ocr_enabled"].(bool); ok {
 		policy.PDFOCREnabled = value
 	}
@@ -289,6 +293,9 @@ func (s *Service) updatePipelinePolicyAndReconcile(ctx context.Context, input Pi
 	}
 	currentPolicy := pipelinePolicyFromSettings(settings)
 	policy := currentPolicy
+	if input.ImageOCREnabled != nil {
+		policy.ImageOCREnabled = *input.ImageOCREnabled
+	}
 	if input.PDFOCREnabled != nil {
 		policy.PDFOCREnabled = *input.PDFOCREnabled
 	}
@@ -301,6 +308,7 @@ func (s *Service) updatePipelinePolicyAndReconcile(ctx context.Context, input Pi
 	metadata := jsonObject(settings.Metadata)
 	metadata["schema_version"] = "knowledge.pipeline_policy.v1"
 	metadata["pdf_ocr_enabled"] = policy.PDFOCREnabled
+	metadata["image_ocr_enabled"] = policy.ImageOCREnabled
 	metadata["image_descriptions_enabled"] = policy.ImageDescriptionsEnabled
 	payload, _ := json.Marshal(metadata)
 	settings, err = scanEmbeddingSettings(tx.QueryRowContext(ctx, `INSERT INTO knowledge.embedding_settings (
@@ -409,6 +417,9 @@ func policyTransitionObjectEligibleTx(ctx context.Context, tx *sql.Tx, object Kn
 			return true, nil
 		}
 	}
+	if !oldPolicy.ImageOCREnabled && newPolicy.ImageOCREnabled && compiledPlanContainsSelectedStage(newPlan, FilePipelineStageImageOCR) {
+		return true, nil
+	}
 	if !oldPolicy.ImageDescriptionsEnabled && newPolicy.ImageDescriptionsEnabled {
 		if compiledPlanContainsSelectedStage(newPlan, FilePipelineStageImageDescription) {
 			return true, nil
@@ -430,6 +441,9 @@ func policyTransitionObjectEligibleTx(ctx context.Context, tx *sql.Tx, object Kn
 		}
 	}
 	if oldPolicy.PDFOCREnabled && !newPolicy.PDFOCREnabled && compiledPlanContainsSelectedStage(oldPlan, FilePipelineStagePDFOCR) {
+		return hasCurrentPipelineRunTx(ctx, tx, object.KnowledgeObjectID)
+	}
+	if oldPolicy.ImageOCREnabled && !newPolicy.ImageOCREnabled && compiledPlanContainsSelectedStage(oldPlan, FilePipelineStageImageOCR) {
 		return hasCurrentPipelineRunTx(ctx, tx, object.KnowledgeObjectID)
 	}
 	if oldPolicy.ImageDescriptionsEnabled && !newPolicy.ImageDescriptionsEnabled && compiledPlanContainsSelectedStage(oldPlan, FilePipelineStageImageDescription) {

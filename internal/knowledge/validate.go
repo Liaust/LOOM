@@ -615,7 +615,7 @@ func ValidateDerivedArtifact(artifact DerivedArtifact) error {
 func isFilePipelineStage(value string) bool {
 	switch value {
 	case FilePipelineStageMetadata, FilePipelineStageNativeText, FilePipelineStagePDFPageAnalysis,
-		FilePipelineStagePDFOCR, FilePipelineStageImageDescription, FilePipelineStageConsolidateText,
+		FilePipelineStagePDFOCR, FilePipelineStageImageOCR, FilePipelineStageImageDescription, FilePipelineStageConsolidateText,
 		FilePipelineStageChunk, FilePipelineStageLexicalIndex, FilePipelineStageEmbedding, FilePipelineStageFinalize:
 		return true
 	default:

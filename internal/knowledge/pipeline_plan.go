@@ -42,6 +42,11 @@ func CompilePipelinePlan(object KnowledgeObject, policy PipelinePolicy) (Compile
 			QuietWindow: stage.QuietWindow, Required: stage.Required, ImplementationKey: stage.ImplementationKey, Selected: true,
 		}
 		switch stage.StageKey {
+		case FilePipelineStageImageOCR:
+			compiled.Selected = policy.ImageOCREnabled
+			if !compiled.Selected {
+				compiled.SkipReason = "disabled_by_policy"
+			}
 		case FilePipelineStagePDFOCR:
 			compiled.Selected = policy.PDFOCREnabled
 			if !compiled.Selected {

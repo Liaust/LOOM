@@ -16,3 +16,10 @@ func TestTesseractOCRNormalizesFakeOutput(t *testing.T) {
 		t.Fatalf("result = %#v", result)
 	}
 }
+
+func TestExtractionDoesNotIndexSuccessfulToolDiagnostics(t *testing.T) {
+	output, err := (execCommandRunner{}).Run(context.Background(), "sh", "-c", "printf 'actual text'; printf 'Estimating resolution' >&2")
+	if err != nil || string(output) != "actual text" {
+		t.Fatalf("output=%q error=%v", output, err)
+	}
+}

@@ -32,8 +32,8 @@ type execCommandRunner struct{}
 func (execCommandRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	command := exec.Command(name, args...)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	var output bytes.Buffer
-	command.Stdout, command.Stderr = &output, &output
+	var output, diagnostics bytes.Buffer
+	command.Stdout, command.Stderr = &output, &diagnostics
 	if err := command.Start(); err != nil {
 		return output.Bytes(), err
 	}
@@ -41,6 +41,9 @@ func (execCommandRunner) Run(ctx context.Context, name string, args ...string) (
 	go func() { done <- command.Wait() }()
 	select {
 	case err := <-done:
+		if err != nil {
+			return append(output.Bytes(), diagnostics.Bytes()...), err
+		}
 		return output.Bytes(), err
 	case <-ctx.Done():
 		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)

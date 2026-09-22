@@ -99,6 +99,8 @@ func containsWarning(values []string, target string) bool {
 
 func (s *Service) defaultHeavyStageHandler(stage string) HeavyStageHandler {
 	switch stage {
+	case FilePipelineStageImageOCR:
+		return ImageOCRStageHandler{Service: s}
 	case FilePipelineStagePDFOCR:
 		return PDFOCRStageHandler{Service: s}
 	case FilePipelineStageImageDescription:

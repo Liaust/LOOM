@@ -8,6 +8,8 @@ import (
 
 type TesseractOCR struct{ Runner commandRunner }
 
+var ErrNoOCRText = fmt.Errorf("%w: tesseract produced empty text", ErrInvalid)
+
 func (runtime TesseractOCR) Recognize(ctx context.Context, request OCRRequest) (OCRResult, error) {
 	runner := runtime.Runner
 	if runner == nil {
@@ -23,7 +25,7 @@ func (runtime TesseractOCR) Recognize(ctx context.Context, request OCRRequest) (
 	}
 	text := normalizeArtifactText(string(output))
 	if text == "" {
-		return OCRResult{}, fmt.Errorf("%w: tesseract produced empty text", ErrInvalid)
+		return OCRResult{}, ErrNoOCRText
 	}
 	return OCRResult{Text: text, EngineKey: "tesseract", EngineVersion: "tesseract.v1", Language: language}, nil
 }

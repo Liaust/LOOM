@@ -15,6 +15,7 @@ const (
 	FilePipelineStageNativeText       = "native_text"
 	FilePipelineStagePDFPageAnalysis  = "pdf_page_analysis"
 	FilePipelineStagePDFOCR           = "pdf_ocr"
+	FilePipelineStageImageOCR         = "image_ocr"
 	FilePipelineStageImageDescription = "image_description"
 	FilePipelineStageConsolidateText  = "consolidate_text"
 	FilePipelineStageChunk            = "chunk"
