@@ -326,9 +326,8 @@ func projectedPathForSource(source SourceObject) (string, error) {
 			if source.Declaration != "notes" && source.Declaration != "docs" && source.Declaration != "research" {
 				return "", fmt.Errorf("invalid material declaration")
 			}
-			if rootPath != source.Declaration && !strings.HasPrefix(rootPath, source.Declaration+"/") {
-				return "", fmt.Errorf("material root differs from declaration")
-			}
+			// The registered folder path is independent of its Notes category.
+			// Declaration enrollment and source selection own that binding.
 			project := firstNonEmpty(source.ProjectSlug, ptrValue(source.ProjectID))
 			if project == "" {
 				return "", fmt.Errorf("material project identity is missing")

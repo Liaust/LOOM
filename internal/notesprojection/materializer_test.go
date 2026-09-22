@@ -25,6 +25,9 @@ func TestBoxSourceProjectionPathsAndContext(t *testing.T) {
 		{RootKindBoxLibrary, "Library", "", "nodes/main/Library/a.md"},
 		{RootKindProjectMaterial, "docs/review", "docs", "projects/atlas/docs/review/a.md"},
 		{RootKindProjectMaterial, "research", "research", "projects/atlas/research/a.md"},
+		{RootKindProjectMaterial, "incoming", "research", "projects/atlas/incoming/a.md"},
+		{RootKindProjectMaterial, "app/output", "docs", "projects/atlas/app/output/a.md"},
+		{RootKindProjectMaterial, "late", "notes", "projects/atlas/late/a.md"},
 	} {
 		source := SourceObject{RootKind: test.kind, RootRelativePath: test.root, Declaration: test.decl, RelativePath: "a.md", SourceNodeKey: "main", ProjectSlug: "atlas"}
 		got, err := projectedPathForSource(source)
@@ -36,6 +39,38 @@ func TestBoxSourceProjectionPathsAndContext(t *testing.T) {
 			if _, err := projectedPathForSource(source); err == nil {
 				t.Fatal("accepted unbound projection root")
 			}
+		}
+	}
+}
+
+func TestProjectMaterialRefreshUsesDeclaredFolderNotCategory(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "generated")
+	defer makeProjectionWritableForCleanup(t, root)
+	source := writeProjectionSource(t, "paper.txt", "received material")
+	size := int64(len("received material"))
+	provider := fakeProjectionSources{sources: []SourceObject{{
+		KnowledgeObjectID: "knowledge_object_material", NotesSourceRootID: "notes_source_root_material",
+		RootKind: RootKindProjectMaterial, RootRelativePath: "incoming", Declaration: "research",
+		ProjectSlug: "atlas", SourcePath: source, RelativePath: "paper.txt", SizeBytes: &size,
+		SourceHash: "sha256:material", SourceRevision: "material",
+	}}}
+	svc := NewService(provider, root)
+	if changed, err := svc.Refresh(t.Context()); err != nil || !changed {
+		t.Fatalf("declared-folder refresh: %t %v", changed, err)
+	}
+	assertProjectionFile(t, filepath.Join(root, "projects/atlas/incoming/paper.txt"), "received material")
+	if changed, err := svc.Refresh(t.Context()); err != nil || changed {
+		t.Fatalf("unchanged declared-folder refresh: %t %v", changed, err)
+	}
+	for _, mutate := range []func(*SourceObject){
+		func(s *SourceObject) { s.Declaration = "unknown" },
+		func(s *SourceObject) { s.RootRelativePath = "../outside" },
+		func(s *SourceObject) { s.ProjectSlug = "" },
+	} {
+		invalid := provider.sources[0]
+		mutate(&invalid)
+		if _, err := projectedPathForSource(invalid); err == nil {
+			t.Fatal("invalid material scope accepted")
 		}
 	}
 }
