@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 
+	"loom.local/loom/internal/communication"
+
 	pc "loom.local/loom/internal/projectcontracts"
 	"loom.local/loom/internal/projects"
 	"loom.local/loom/internal/projectwatch"
@@ -47,6 +49,9 @@ func watchObservation(call ActionCall, result *projects.DeclarationWatchIntentOb
 		return Observation{State: Absent}, nil
 	}
 	if result.Final && result.Stage == "pending" {
+		if result.MessageStatus == communication.StatusFailedRetryable {
+			return Observation{State: Resumable, CauseCode: string(call.Action.Owner) + ".node_configuration_retryable"}, nil
+		}
 		return Observation{State: Pending, CauseCode: "awaiting_node_configuration"}, nil
 	}
 	if result.Final && (result.Stage != "applied" || !result.Applied) {

@@ -840,6 +840,7 @@ type DeclarationWatchIntentObservation struct {
 	Queued          bool
 	Applied         bool
 	MessageID       string
+	MessageStatus   string
 	DesiredRevision int64
 }
 type DeclarationWatchResourceState struct {
@@ -1009,6 +1010,7 @@ func observeDeclarationWatchIntentTx(ctx context.Context, tx *sql.Tx, req reques
 		return nil, err
 	}
 	observation.Queued = err == nil
+	observation.MessageStatus = status
 	var ack DeclarationWatchAcknowledgement
 	observed := err == nil && recordedAck && status == communication.StatusAcked && declarationDecode(raw, &ack) && ack.SchemaVersion == DeclarationWatchControlSchemaVersion && ack.OperationID == call.OperationID && ack.ProjectID == project && ack.NodeID == node && ack.GroupHash == groupHash && ack.Evidence.SchemaVersion == communication.ControlEvidenceSchemaVersion && ack.Evidence.DesiredRevision == observation.DesiredRevision && ack.Evidence.AppliedRevision == observation.DesiredRevision && ack.Evidence.ConfigHash == groupHash && ack.Evidence.Outcome == communication.ControlOutcomeCompleted && ack.ErrorCode == ""
 	if observation.Final && observation.Stage == "pending" && observed && consumeAck {
@@ -1176,6 +1178,14 @@ func (s Service) CommitDeclarationWatchIntent(ctx context.Context, req requestct
 	if existing, err := observeDeclarationWatchIntentTx(ctx, tx, req, call, true); err != nil {
 		return nil, err
 	} else if existing != nil {
+		if existing.Final && existing.Stage == "pending" && existing.MessageStatus == communication.StatusFailedRetryable {
+			if err = fence.Check(ctx); err != nil {
+				return nil, err
+			}
+			if err = retryDeclarationWatchTx(ctx, tx, req, call, existing); err != nil {
+				return nil, err
+			}
+		}
 		if err = tx.Commit(); err != nil {
 			return nil, err
 		}
@@ -1321,6 +1331,29 @@ func (s Service) CommitDeclarationWatchIntent(ctx context.Context, req requestct
 		return nil, err
 	}
 	return observation, nil
+}
+
+// Acknowledgements are immutable. Explicit resume uses a fresh delivery while
+// retaining the exact desired revision and the failed message as history.
+func retryDeclarationWatchTx(ctx context.Context, tx *sql.Tx, req requestctx.Context, call DeclarationWatchIntentRequest, observation *DeclarationWatchIntentObservation) error {
+	var payload []byte
+	if err := tx.QueryRowContext(ctx, `SELECT payload_json FROM communication.messages WHERE communication_message_id=$1 AND node_id=$2 AND kind=$3 AND status='failed_retryable' FOR UPDATE`, observation.MessageID, call.TargetNodeID, communication.KindProjectWatchReconcile).Scan(&payload); err != nil {
+		return err
+	}
+	message, err := communication.EnqueueProjectWatchTx(ctx, tx, req, call.TargetNodeID, "declaration-watch-retry:"+observation.MessageID, payload)
+	if err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE projects.declaration_watch_deliveries SET message_id=$1 WHERE operation_id=$2 AND project_id=$3 AND node_id=$4 AND desired_revision=$5 AND message_id=$6`, message.CommunicationMessageID, call.OperationID, call.Payload.Group.ProjectID, call.TargetNodeID, observation.DesiredRevision, observation.MessageID)
+	if err != nil {
+		return err
+	}
+	if n, err := result.RowsAffected(); err != nil || n != 1 {
+		return fmt.Errorf("watch retry delivery changed")
+	}
+	observation.MessageID = message.CommunicationMessageID
+	observation.MessageStatus = message.Status
+	return nil
 }
 func persistDeclarationWatchRowsTx(ctx context.Context, tx *sql.Tx, req requestctx.Context, registration ProjectContractRegistration, payload DeclarationWatchIntentPayload) error {
 	group := payload.Group

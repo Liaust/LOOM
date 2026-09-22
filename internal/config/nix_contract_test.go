@@ -171,6 +171,20 @@ func TestNixServiceRendersSetupIdentityAndScopedBoxAccess(t *testing.T) {
 	}
 }
 
+func TestNixNodeAgentReconcilesManagedBoxPaths(t *testing.T) {
+	service := readRepoFile(t, "nix/modules/loom-service.nix")
+	for _, want := range []string{
+		`lib.optionalString (cfg.boxPath != null)`,
+		`--arg box ${lib.escapeShellArg cfg.boxPath}`,
+		`--arg state ${lib.escapeShellArg cfg.boxStateRoot}`,
+		`'.box_root_path = $box | .box_state_root = $state'`,
+		`chmod --reference="$config_path" "$pending"`,
+		`mv -f "$pending" "$config_path"`,
+	} {
+		requireContains(t, service, want)
+	}
+}
+
 func TestNixServiceIncludesPopplerForKnowledgeExtraction(t *testing.T) {
 	service := readRepoFile(t, "nix/modules/loom-service.nix")
 	requireContains(t, service, "pkgs.poppler-utils")

@@ -422,6 +422,49 @@ func TestDeclarationRealWatchPipelinePostgres(t *testing.T) {
 		t.Fatalf("retired=%+v %v", retired, err)
 	}
 }
+
+func TestWatchRetryableObservation(t *testing.T) {
+	for _, status := range []string{communication.StatusAvailable, communication.StatusFailedRetryable, communication.StatusFailedPermanent} {
+		result, err := watchObservation(ActionCall{Action: pc.DeclarationAction{Owner: pc.DeclarationOwnerKnowledge}}, &projects.DeclarationWatchIntentObservation{Final: true, Stage: "pending", MessageStatus: status})
+		want := Pending
+		if status == communication.StatusFailedRetryable {
+			want = Resumable
+		}
+		if err != nil || result.State != want {
+			t.Fatalf("%s: %+v %v", status, result, err)
+		}
+	}
+}
+
+func TestDeclarationWatchExplicitRetryPostgres(t *testing.T) {
+	service, _, principal, root := realWatchFixture(t)
+	input, pending := watchPending(t, service, principal, root)
+	message := watchMessage(t, service, pending.OperationID)
+	credential, err := nodes.NewService(service.db).IssueNodeCredential(t.Context(), declarationRequest(principal), nodes.IssueNodeCredentialInput{NodeRef: message.NodeID, Reason: "watch retry fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = communication.NewService(service.db).Ack(t.Context(), declarationRequest(principal), communication.AckInput{NodeRef: message.NodeID, CredentialToken: credential.CredentialToken, CommunicationMessageRef: message.CommunicationMessageID, AckStatus: communication.AckStatusFailedRetryable, ResultJSON: json.RawMessage(`{}`), ErrorJSON: json.RawMessage(`{"code":"project_watch.configured_box_required"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Apply(t.Context(), principal, input)
+	if failureCause(err) != "owner_pending" || result.State != pc.DeclarationOperationPartial {
+		t.Fatalf("retry: %+v %v", result, err)
+	}
+	next := watchMessage(t, service, pending.OperationID)
+	if next.CommunicationMessageID == message.CommunicationMessageID || next.Status != communication.StatusAvailable || !reflect.DeepEqual(next.PayloadJSON, message.PayloadJSON) {
+		t.Fatalf("retry changed desired payload or did not queue: %+v", next)
+	}
+	_, _ = service.Apply(t.Context(), principal, input)
+	if again := watchMessage(t, service, pending.OperationID); again.CommunicationMessageID != next.CommunicationMessageID {
+		t.Fatal("pending retry was duplicated")
+	}
+	old, err := communication.NewService(service.db).GetMessage(t.Context(), message.CommunicationMessageID)
+	if err != nil || old.Status != communication.StatusFailedRetryable {
+		t.Fatal("failed receipt was not preserved")
+	}
+}
 func TestDeclarationRealWatchCancelledSiblingPostgres(t *testing.T) {
 	for _, mode := range []string{"cancel", "revoke", "source"} {
 		t.Run(mode, func(t *testing.T) {

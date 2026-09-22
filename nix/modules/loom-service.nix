@@ -47,6 +47,20 @@ let
         --role ${lib.escapeShellArg cfg.nodeRole} \
         --runtime-class ${lib.escapeShellArg cfg.runtimeClass}
     fi
+    ${lib.optionalString (cfg.boxPath != null) ''
+      # Reconcile managed paths on existing installations without resetting
+      # enrollment, watched roots, credentials, or runtime state.
+      config_path=${lib.escapeShellArg nodeAgentCfg.configPath}
+      pending=$(${pkgs.coreutils}/bin/mktemp "$config_path.XXXXXX")
+      trap 'rm -f "$pending"' EXIT
+      ${pkgs.jq}/bin/jq \
+        --arg box ${lib.escapeShellArg cfg.boxPath} \
+        --arg state ${lib.escapeShellArg cfg.boxStateRoot} \
+        '.box_root_path = $box | .box_state_root = $state' \
+        "$config_path" > "$pending"
+      ${pkgs.coreutils}/bin/chmod --reference="$config_path" "$pending"
+      ${pkgs.coreutils}/bin/mv -f "$pending" "$config_path"
+    ''}
   '';
   extraRuntimeWritePaths =
     lib.filter (path: !(pathInside cfg.dataDir path)) ([
