@@ -20,28 +20,85 @@ type Supervisor struct {
 }
 
 func (s Supervisor) Run(ctx context.Context) error {
+	return s.run(ctx, 5*time.Second)
+}
+
+func (s Supervisor) run(ctx context.Context, refreshInterval time.Duration) error {
 	if err := s.Store.Ensure(); err != nil {
 		return err
 	}
-	instances, err := s.instances()
-	if err != nil {
-		return err
+	ctx, cancel := context.WithCancel(ctx)
+	type schedule struct {
+		started time.Time
+		done    chan struct{}
 	}
+	schedules := map[string]*schedule{}
 	var wg sync.WaitGroup
-	for _, instance := range instances {
-		if !instance.Enabled {
-			continue
+	defer func() {
+		cancel()
+		wg.Wait()
+	}()
+	ticker := time.NewTicker(refreshInterval)
+	defer ticker.Stop()
+	for ctx.Err() == nil {
+		instances, err := s.instances()
+		if err != nil {
+			return err
 		}
-		instance := instance
-		s.runWorker(ctx, instance)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			s.workerLoop(ctx, instance)
-		}()
+		current := map[string]bool{}
+		for _, instance := range instances {
+			current[instance.WorkerKey] = instance.Enabled
+			if !instance.Enabled {
+				continue
+			}
+			state := schedules[instance.WorkerKey]
+			if state == nil {
+				state = &schedule{}
+				schedules[instance.WorkerKey] = state
+			}
+			if state.done != nil {
+				select {
+				case <-state.done:
+					state.done = nil
+				default:
+					continue
+				}
+			}
+			interval := time.Duration(instance.IntervalSeconds) * time.Second
+			if interval <= 0 {
+				interval = 30 * time.Second
+			}
+			if time.Since(state.started) < interval {
+				continue
+			}
+			state.started, state.done = time.Now(), make(chan struct{})
+			wg.Add(1)
+			go func(instance WorkerInstance, done chan struct{}) {
+				defer wg.Done()
+				defer close(done)
+				s.runWorker(ctx, instance)
+			}(instance, state.done)
+		}
+		// Keep an in-flight identity until it finishes, even if temporarily disabled.
+		for key, state := range schedules {
+			if current[key] {
+				continue
+			}
+			if state.done != nil {
+				select {
+				case <-state.done:
+				default:
+					continue
+				}
+			}
+			delete(schedules, key)
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
 	}
-	<-ctx.Done()
-	wg.Wait()
 	return nil
 }
 
@@ -58,23 +115,6 @@ func (s Supervisor) instances() ([]WorkerInstance, error) {
 		instances = append(instances, instance)
 	}
 	return instances, nil
-}
-
-func (s Supervisor) workerLoop(ctx context.Context, instance WorkerInstance) {
-	interval := time.Duration(instance.IntervalSeconds) * time.Second
-	if interval <= 0 {
-		interval = 30 * time.Second
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.runWorker(ctx, instance)
-		}
-	}
 }
 
 func (s Supervisor) runWorker(ctx context.Context, instance WorkerInstance) {
