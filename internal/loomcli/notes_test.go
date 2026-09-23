@@ -13,6 +13,24 @@ import (
 	"loom.local/loom/internal/response"
 )
 
+func TestNotesPipelineRetryPreservesBackendError(t *testing.T) {
+	socket, stop := startStorageCommandServer(t, func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost || !strings.HasSuffix(req.URL.Path, "/retry") {
+			t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
+		}
+		response.WriteJSON(w, http.StatusBadRequest, response.ErrorEnvelope{Error: response.ErrorBody{
+			Code: "knowledge.notes_pipeline_retry_failed", Summary: "Could not retry Notes pipeline.",
+			CorrelationID: "retry-correlation",
+		}})
+	})
+	defer stop()
+	out, _, err := executeRootCommand("--json", "--socket", socket, "notes", "pipelines", "retry", "pipeline", "--stage", "embedding", "--yes")
+	var got response.ErrorEnvelope
+	if err == nil || json.Unmarshal([]byte(out), &got) != nil || got.Error.Code != "knowledge.notes_pipeline_retry_failed" || got.Error.CorrelationID != "retry-correlation" {
+		t.Fatalf("lost typed backend failure: %s %v", out, err)
+	}
+}
+
 func TestNotesSearchFollowupCommandRoundtrip(t *testing.T) {
 	input := knowledge.NotesPassageInput{KnowledgeObjectID: ids.NewKnowledgeObjectID(), KnowledgeObjectVersionID: ids.NewKnowledgeObjectVersionID(), KnowledgeChunkID: ids.NewKnowledgeChunkID(), SourceHash: "sha256:" + strings.Repeat("a", 64), SourceLifecycle: knowledge.SourceLifecycleFilterArchived}
 	result := knowledge.NotesSearchResult{SourceKind: knowledge.KnowledgeSearchSourceKind, KnowledgeObjectID: input.KnowledgeObjectID, KnowledgeObjectVersionID: input.KnowledgeObjectVersionID, KnowledgeChunkID: input.KnowledgeChunkID, PassageFollowup: &input, NotesCustodyContext: knowledge.NotesCustodyContext{SourceLifecycle: knowledge.SourceLifecycleArchived}}

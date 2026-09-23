@@ -188,7 +188,7 @@ func newNotesPipelineRetryCommand(opts *options) *cobra.Command {
 		defer cancel()
 		envelope, err := client.RetryKnowledgeNotesPipeline(ctx, commandCtx.CorrelationID, args[0], knowledge.PipelineRetryInput{StageKey: stage, Priority: priority})
 		if err != nil {
-			return err
+			return renderError(cmd, opts, commandCtx.CorrelationID, err)
 		}
 		if opts.jsonOutput {
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(envelope.Data)

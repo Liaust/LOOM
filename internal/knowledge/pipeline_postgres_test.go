@@ -15,6 +15,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"loom.local/loom/internal/ids"
+	"loom.local/loom/internal/migrations"
 	"loom.local/loom/internal/storagecatalog"
 )
 
@@ -606,6 +607,83 @@ func TestRetryPipelineFromStageReusesUpstreamOnlyPostgres(t *testing.T) {
 	}
 	if _, err = service.RetryPipeline(context.Background(), retried.KnowledgePipelineRunID, PipelineRetryInput{StageKey: "not-a-stage"}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("invalid retry stage error = %v", err)
+	}
+}
+
+func TestRetryPipelineReusesRepublishedPDFPagesPostgres(t *testing.T) {
+	db, url := boxSourcesDatabase(t)
+	if _, err := migrations.Up(t.Context(), url, filepath.Join("..", "..", "migrations")); err != nil {
+		t.Fatal(err)
+	}
+	policy := PipelinePolicy{EmbeddingsEnabled: true}
+	setPipelinePolicyForTest(t, db, policy)
+	service, object := pipelineFixture(t, db, storagecatalog.FileClassPDF, "application/pdf", "retry pdf", time.Now().UTC())
+	run, err := service.EnsurePipelineRun(t.Context(), object, policy, false, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeRunForTest(t, db, run.KnowledgePipelineRunID)
+	stages, err := service.store.ListPipelineStageRuns(t.Context(), run.KnowledgePipelineRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, err := service.store.getKnowledgeObjectVersion(t.Context(), run.KnowledgeObjectVersionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fixture := range []struct{ stage, kind, locator, text string }{
+		{FilePipelineStageMetadata, ArtifactKindMetadataText, "document", "metadata"},
+		{FilePipelineStageNativeText, ArtifactKindEmbeddedText, "page:1", "native page"},
+		{FilePipelineStagePDFPageAnalysis, ArtifactKindEmbeddedText, "page:1", "native page"},
+		{FilePipelineStageConsolidateText, ArtifactKindConsolidatedText, "document", "native page"},
+	} {
+		var stage PipelineStageRun
+		for _, candidate := range stages {
+			if candidate.StageKey == fixture.stage {
+				stage = candidate
+			}
+		}
+		artifact, err := service.PrepareDerivedArtifact(run, stage, version, DerivedArtifactInput{ArtifactKind: fixture.kind, SourceLocator: fixture.locator, Text: fixture.text, GeneratorKey: ExtractorKeyPDF, GeneratorVersion: ExtractorVersionPDF})
+		if err != nil {
+			t.Fatal(err)
+		}
+		artifact, err = service.store.CreateDerivedArtifact(t.Context(), artifact)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = service.store.ActivateDerivedArtifact(t.Context(), artifact.KnowledgeDerivedArtifactID, run.Generation); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Restarting page analysis itself must not reuse outputs it will invalidate.
+	if _, err = service.RetryPipeline(t.Context(), run.KnowledgePipelineRunID, PipelineRetryInput{StageKey: FilePipelineStagePDFPageAnalysis}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("accepted downstream output during its own retry: %v", err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err = db.Exec(`UPDATE knowledge.pipeline_runs SET status='blocked_manual_action' WHERE knowledge_pipeline_run_id=$1`, run.KnowledgePipelineRunID); err != nil {
+			t.Fatal(err)
+		}
+		retried, err := service.RetryPipeline(t.Context(), run.KnowledgePipelineRunID, PipelineRetryInput{StageKey: FilePipelineStageEmbedding})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if retried.Generation != run.Generation+1 || retried.CurrentStageKey != FilePipelineStageEmbedding {
+			t.Fatalf("wrong retry: %+v", retried)
+		}
+		artifacts, err := service.store.ListDerivedArtifacts(t.Context(), retried.KnowledgePipelineRunID, true)
+		if err != nil || len(artifacts) != 3 {
+			t.Fatalf("upstream artifact reuse: count=%d error=%v", len(artifacts), err)
+		}
+		newStages, err := service.store.ListPipelineStageRuns(t.Context(), retried.KnowledgePipelineRunID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, stage := range newStages {
+			if stage.Ordinal < stageOrdinal(newStages, FilePipelineStageEmbedding) && (!isReusableUpstreamStageStatus(stage.Status) || stage.AttemptCount != 0) {
+				t.Fatalf("upstream stage reran: %+v", stage)
+			}
+		}
+		run = retried
 	}
 }
 

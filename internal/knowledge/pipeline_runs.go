@@ -451,7 +451,17 @@ func validateRetryReuseTx(ctx context.Context, tx *sql.Tx, object KnowledgeObjec
 		if stage.Status == PipelineStageStatusSkippedByPolicy && compiled.Selected {
 			return PipelineInspect{}, fmt.Errorf("%w: upstream stage %q is now enabled", ErrInvalid, compiled.StageKey)
 		}
-		if compiled.Selected && (stage.Status == PipelineStageStatusComplete || stage.Status == PipelineStageStatusCompleteWithWarning) && len(compiled.OutputArtifactKinds) > 0 && !hasReusableStageArtifact(artifacts, source, stage, compiled.OutputArtifactKinds) {
+		outputReusable := hasReusableStageArtifact(artifacts, source, stage, compiled.OutputArtifactKinds)
+		// PDF page analysis republishes native page text and retires the earlier
+		// artifacts. Those outputs suffice only when that later stage is reused too.
+		if !outputReusable && stage.StageKey == FilePipelineStageNativeText {
+			analysis, exists := byKey[FilePipelineStagePDFPageAnalysis]
+			if exists && analysis.Ordinal > stage.Ordinal && analysis.Ordinal < plan.Stages[retryIndex].Ordinal &&
+				(analysis.Status == PipelineStageStatusComplete || analysis.Status == PipelineStageStatusCompleteWithWarning) {
+				outputReusable = hasReusableStageArtifact(artifacts, source, analysis, []string{ArtifactKindEmbeddedText})
+			}
+		}
+		if compiled.Selected && (stage.Status == PipelineStageStatusComplete || stage.Status == PipelineStageStatusCompleteWithWarning) && len(compiled.OutputArtifactKinds) > 0 && !outputReusable {
 			return PipelineInspect{}, fmt.Errorf("%w: upstream stage %q has no complete active output", ErrInvalid, compiled.StageKey)
 		}
 	}
@@ -460,7 +470,7 @@ func validateRetryReuseTx(ctx context.Context, tx *sql.Tx, object KnowledgeObjec
 
 func hasReusableStageArtifact(artifacts []DerivedArtifact, run PipelineRun, stage PipelineStageRun, outputKinds []string) bool {
 	for _, artifact := range artifacts {
-		if !artifact.Active || artifact.KnowledgePipelineStageRunID != stage.KnowledgePipelineStageRunID || artifact.KnowledgeObjectVersionID != run.KnowledgeObjectVersionID || artifact.Generation != run.Generation {
+		if !artifact.Active || artifact.KnowledgePipelineRunID != run.KnowledgePipelineRunID || artifact.KnowledgePipelineStageRunID != stage.KnowledgePipelineStageRunID || artifact.KnowledgeObjectVersionID != run.KnowledgeObjectVersionID || artifact.Generation != run.Generation {
 			continue
 		}
 		for _, kind := range outputKinds {
