@@ -48,6 +48,7 @@ const (
 	EmbeddingRuntimeErrorBadStatus       EmbeddingRuntimeErrorKind = "bad_status"
 	EmbeddingRuntimeErrorInvalidRequest  EmbeddingRuntimeErrorKind = "invalid_request"
 	EmbeddingRuntimeErrorInvalidResponse EmbeddingRuntimeErrorKind = "invalid_response"
+	EmbeddingRuntimeErrorContextLength   EmbeddingRuntimeErrorKind = "context_length"
 )
 
 type EmbeddingRuntimeError struct {

@@ -3,11 +3,41 @@ package knowledge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 )
+
+func TestOllamaEmbedClassifiesOnlyExplicitContextRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		body   string
+		status int
+		want   EmbeddingRuntimeErrorKind
+	}{
+		{`{"error":"the input length exceeds the context length"}`, 400, EmbeddingRuntimeErrorContextLength},
+		{`{"error":"invalid model"}`, 400, EmbeddingRuntimeErrorBadStatus},
+		{`{"error":"the input length exceeds the context length"}`, 500, EmbeddingRuntimeErrorBadStatus},
+	} {
+		t.Run(tc.body+string(tc.want), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer server.Close()
+			runtime, err := NewOllamaEmbeddingRuntime(OllamaEmbeddingOptions{Endpoint: server.URL})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = runtime.Embed(t.Context(), EmbeddingRuntimeRequest{Inputs: []string{"dense"}})
+			var refusal *EmbeddingRuntimeError
+			if !errors.As(err, &refusal) || refusal.Kind != tc.want {
+				t.Fatalf("refusal=%v", err)
+			}
+		})
+	}
+}
 
 func TestOllamaEmbedRequestShapeAndResponseParsing(t *testing.T) {
 	var received ollamaEmbedRequest

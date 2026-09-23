@@ -1,10 +1,13 @@
 package knowledge
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -97,6 +100,33 @@ func EmbeddingRuntimeInputsFromPassages(passages []EmbeddingPassage) ([]string, 
 	return inputs, nil
 }
 
+// Character counts cannot predict model tokens for equations, tables or scripts.
+// Only an explicit context-length refusal narrows the passages. Every byte of
+// non-whitespace source text remains represented; other failures are not retried.
+func embedChunkPassages(ctx context.Context, runtime EmbeddingRuntime, model string, chunk KnowledgeChunk) (EmbeddingRuntimeResponse, []EmbeddingPassage, error) {
+	options := EmbeddingPassageOptions{TargetCharacters: DefaultEmbeddingPassageTargetCharacters, MaxCharacters: DefaultEmbeddingPassageMaxCharacters}
+	for {
+		if err := ctx.Err(); err != nil {
+			return EmbeddingRuntimeResponse{}, nil, err
+		}
+		passages, err := PrepareEmbeddingPassages([]KnowledgeChunk{chunk}, options)
+		if err != nil {
+			return EmbeddingRuntimeResponse{}, nil, err
+		}
+		inputs, err := EmbeddingRuntimeInputsFromPassages(passages)
+		if err != nil {
+			return EmbeddingRuntimeResponse{}, nil, err
+		}
+		response, err := runtime.Embed(ctx, EmbeddingRuntimeRequest{Model: model, Inputs: inputs, Truncate: false})
+		var runtimeErr *EmbeddingRuntimeError
+		if err == nil || !errors.As(err, &runtimeErr) || runtimeErr.Kind != EmbeddingRuntimeErrorContextLength || options.MaxCharacters <= 64 {
+			return response, passages, err
+		}
+		options.TargetCharacters = max(64, options.TargetCharacters/2)
+		options.MaxCharacters = max(64, options.MaxCharacters/2)
+	}
+}
+
 type embeddingTextSegment struct {
 	Text  string
 	Start int
@@ -130,6 +160,14 @@ func splitEmbeddingPassageText(text string, targetCharacters int, maxCharacters 
 			if end > len(text) {
 				end = len(text)
 			}
+		}
+		// Offsets are bytes, but JSON/model inputs must not split UTF-8 runes.
+		for end < len(text) && end > start && !utf8.RuneStart(text[end]) {
+			end--
+		}
+		if end == start {
+			_, size := utf8.DecodeRuneInString(text[start:])
+			end = start + size
 		}
 		if segment, ok := newEmbeddingTextSegment(text, start, end); ok {
 			segments = append(segments, segment)

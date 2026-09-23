@@ -520,6 +520,10 @@ func RetryableKnowledgeError(err error) bool {
 	if errors.Is(err, ErrInvalid) || errors.Is(err, sql.ErrNoRows) {
 		return false
 	}
+	var embeddingErr *EmbeddingRuntimeError
+	if errors.As(err, &embeddingErr) && embeddingErr.Kind == EmbeddingRuntimeErrorContextLength {
+		return false
+	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
@@ -559,6 +563,10 @@ func knowledgeProcessingErrorCode(err error) string {
 	}
 	if errors.Is(err, ErrInvalid) {
 		return "invalid_knowledge_object"
+	}
+	var embeddingErr *EmbeddingRuntimeError
+	if errors.As(err, &embeddingErr) && embeddingErr.Kind == EmbeddingRuntimeErrorContextLength {
+		return "embedding_context_length_exceeded"
 	}
 	message := strings.ToLower(err.Error())
 	switch {

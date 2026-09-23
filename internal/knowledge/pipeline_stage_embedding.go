@@ -42,15 +42,7 @@ func (handler EmbeddingStageHandler) Execute(ctx context.Context, item PipelineW
 		if reused {
 			continue
 		}
-		passages, err := PrepareEmbeddingPassages([]KnowledgeChunk{chunk}, EmbeddingPassageOptions{})
-		if err != nil {
-			return HeavyStageObservation{}, nil, err
-		}
-		inputs, err := EmbeddingRuntimeInputsFromPassages(passages)
-		if err != nil {
-			return HeavyStageObservation{}, nil, err
-		}
-		response, err := handler.Runtime.Embed(ctx, EmbeddingRuntimeRequest{Model: settings.ModelKey, Inputs: inputs, Truncate: false})
+		response, passages, err := embedChunkPassages(ctx, handler.Runtime, settings.ModelKey, chunk)
 		if err != nil {
 			return HeavyStageObservation{}, nil, err
 		}

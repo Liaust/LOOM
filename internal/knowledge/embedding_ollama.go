@@ -98,6 +98,10 @@ func (r *OllamaEmbeddingRuntime) Embed(ctx context.Context, request EmbeddingRun
 	}
 	if httpResponse.StatusCode < 200 || httpResponse.StatusCode > 299 {
 		kind := EmbeddingRuntimeErrorBadStatus
+		var refusal ollamaEmbedResponse
+		if httpResponse.StatusCode == http.StatusBadRequest && json.Unmarshal(responseBody, &refusal) == nil && strings.TrimSpace(refusal.Error) == "the input length exceeds the context length" {
+			kind = EmbeddingRuntimeErrorContextLength
+		}
 		if httpResponse.StatusCode == http.StatusServiceUnavailable || httpResponse.StatusCode == http.StatusNotFound {
 			kind = EmbeddingRuntimeErrorUnavailable
 		}

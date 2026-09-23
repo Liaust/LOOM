@@ -158,19 +158,7 @@ func (s *Service) processEmbeddingWorkItem(ctx context.Context, item EmbeddingWo
 	if reuse.Reused || reuse.Stale {
 		return reuse, nil
 	}
-	passages, err := PrepareEmbeddingPassages([]KnowledgeChunk{chunk}, EmbeddingPassageOptions{})
-	if err != nil {
-		return EmbeddingActivationResult{}, err
-	}
-	inputs, err := EmbeddingRuntimeInputsFromPassages(passages)
-	if err != nil {
-		return EmbeddingActivationResult{}, err
-	}
-	response, err := runtime.Embed(ctx, EmbeddingRuntimeRequest{
-		Model:    item.ModelKey,
-		Inputs:   inputs,
-		Truncate: false,
-	})
+	response, passages, err := embedChunkPassages(ctx, runtime, item.ModelKey, chunk)
 	if err != nil {
 		return EmbeddingActivationResult{}, err
 	}
