@@ -442,7 +442,10 @@ func validateRetryReuseTx(ctx context.Context, tx *sql.Tx, object KnowledgeObjec
 		if len(compiled.Dependencies) == 0 {
 			dependencies = []byte(`[]`)
 		}
-		if stage.Ordinal != compiled.Ordinal || stage.StageContractVersion != compiled.ContractVersion || stage.ExecutionClass != compiled.ExecutionClass || !pipelinePlanSnapshotsEqual(stage.DependencySnapshot, dependencies) || !pipelinePlanSnapshotsEqual(stage.Metadata, pipelineStageMetadata(compiled)) {
+		if stage.Ordinal != compiled.Ordinal || stage.StageContractVersion != compiled.ContractVersion || stage.ExecutionClass != compiled.ExecutionClass || !reusableStageMetadataMatches(stage, compiled) {
+			return PipelineInspect{}, fmt.Errorf("%w: upstream stage %q contract is incompatible", ErrInvalid, compiled.StageKey)
+		}
+		if !pipelinePlanSnapshotsEqual(stage.DependencySnapshot, dependencies) {
 			return PipelineInspect{}, fmt.Errorf("%w: upstream stage %q contract is incompatible", ErrInvalid, compiled.StageKey)
 		}
 		if !compiled.Selected && stage.Status != PipelineStageStatusSkippedByPolicy {
@@ -466,6 +469,27 @@ func validateRetryReuseTx(ctx context.Context, tx *sql.Tx, object KnowledgeObjec
 		}
 	}
 	return inspect, nil
+}
+
+func reusableStageMetadataMatches(stage PipelineStageRun, compiled CompiledPipelineStage) bool {
+	var metadata map[string]json.RawMessage
+	if json.Unmarshal(stage.Metadata, &metadata) != nil || metadata == nil {
+		return false
+	}
+	// These are execution observations added by the current stage owners, not
+	// changes to the reviewed implementation, dependencies or resource policy.
+	if stage.StageKey == FilePipelineStageChunk {
+		delete(metadata, "chunk_count")
+		delete(metadata, "consolidated_artifact_id")
+	}
+	if stage.StageKey == FilePipelineStagePDFOCR && compiled.Selected && stage.Status == PipelineStageStatusSkippedNotApplicable {
+		var reason string
+		if json.Unmarshal(metadata["skip_reason"], &reason) == nil && reason == "all_pages_have_useful_embedded_text" {
+			metadata["skip_reason"], _ = json.Marshal(compiled.SkipReason)
+		}
+	}
+	contract, err := json.Marshal(metadata)
+	return err == nil && pipelinePlanSnapshotsEqual(contract, pipelineStageMetadata(compiled))
 }
 
 func hasReusableStageArtifact(artifacts []DerivedArtifact, run PipelineRun, stage PipelineStageRun, outputKinds []string) bool {

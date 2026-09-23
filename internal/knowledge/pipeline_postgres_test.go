@@ -615,7 +615,7 @@ func TestRetryPipelineReusesRepublishedPDFPagesPostgres(t *testing.T) {
 	if _, err := migrations.Up(t.Context(), url, filepath.Join("..", "..", "migrations")); err != nil {
 		t.Fatal(err)
 	}
-	policy := PipelinePolicy{EmbeddingsEnabled: true}
+	policy := PipelinePolicy{EmbeddingsEnabled: true, PDFOCREnabled: true}
 	setPipelinePolicyForTest(t, db, policy)
 	service, object := pipelineFixture(t, db, storagecatalog.FileClassPDF, "application/pdf", "retry pdf", time.Now().UTC())
 	run, err := service.EnsurePipelineRun(t.Context(), object, policy, false, 100)
@@ -656,6 +656,12 @@ func TestRetryPipelineReusesRepublishedPDFPagesPostgres(t *testing.T) {
 		}
 	}
 	// Restarting page analysis itself must not reuse outputs it will invalidate.
+	if _, err = db.Exec(`UPDATE knowledge.pipeline_stage_runs SET status='skipped_not_applicable',metadata=metadata||'{"skip_reason":"all_pages_have_useful_embedded_text"}'::jsonb WHERE knowledge_pipeline_run_id=$1 AND stage_key='pdf_ocr'`, run.KnowledgePipelineRunID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE knowledge.pipeline_stage_runs SET metadata=metadata||'{"chunk_count":1,"consolidated_artifact_id":"observed-artifact"}'::jsonb WHERE knowledge_pipeline_run_id=$1 AND stage_key='chunk'`, run.KnowledgePipelineRunID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = service.RetryPipeline(t.Context(), run.KnowledgePipelineRunID, PipelineRetryInput{StageKey: FilePipelineStagePDFPageAnalysis}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("accepted downstream output during its own retry: %v", err)
 	}
