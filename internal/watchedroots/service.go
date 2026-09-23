@@ -87,6 +87,9 @@ func (s Service) Report(ctx context.Context, input ReportInput) (ReportResult, e
 	if err := correlateOrdinaryBoxReportTx(ctx, tx, node, root); err != nil {
 		return ReportResult{}, err
 	}
+	if err := correlateProjectReportTx(ctx, tx, node, root); err != nil {
+		return ReportResult{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return ReportResult{}, err
 	}
@@ -110,6 +113,27 @@ func correlateOrdinaryBoxReportTx(ctx context.Context, tx *sql.Tx, node nodes.No
 		  AND source_contract_deleted_at IS NULL
 		  AND activation_status IN ('registered', 'pending_agent_apply', 'applied', 'reported')
 	`, root.WatchedRootID, root.LastReportedAt, root.ConfigHash, node.NodeID, node.NodeKey, root.RootKey)
+	return err
+}
+
+// Project enrollment must converge from the authenticated node report itself,
+// without requiring an operator to invoke a project status command first.
+func correlateProjectReportTx(ctx context.Context, tx *sql.Tx, node nodes.Node, root WatchedRoot) error {
+	_, err := tx.ExecContext(ctx, `
+		UPDATE projects.project_watched_root_registrations
+		SET watched_root_id = $1, last_reported_at = $2,
+		    activation_status = CASE
+		      WHEN config_hash <> '' AND config_hash = $3 AND config_json = $7::jsonb THEN 'reported'
+		      ELSE 'pending_agent_apply'
+		    END,
+		    metadata = CASE
+		      WHEN config_hash <> '' AND config_hash = $3 AND config_json = $7::jsonb THEN metadata - 'config_drift'
+		      ELSE jsonb_set(metadata, '{config_drift}', 'true'::jsonb, true)
+		    END,
+		    updated_at = now()
+		WHERE node_id = $4 AND owner_node_key = $5 AND backend_root_key = $6
+		  AND activation_status IN ('registered', 'pending_agent_apply', 'applied', 'reported')
+	`, root.WatchedRootID, root.LastReportedAt, root.ConfigHash, node.NodeID, node.NodeKey, root.RootKey, root.ConfigJSON)
 	return err
 }
 

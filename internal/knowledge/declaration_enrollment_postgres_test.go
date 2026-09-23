@@ -46,6 +46,36 @@ type declarationEnrollmentDBFixture struct {
 	report     func(projectcontracts.ProjectWatchedRootItem)
 }
 
+func TestDeclarationReportAutomaticallyEnablesNotesPostgres(t *testing.T) {
+	f := declarationEnrollmentDB(t)
+	item := f.analysis.Report.WatchedRoots[0]
+	f.reconcile(t, SourceRootStatusBlocked)
+	f.report(item)
+	f.reconcile(t, SourceRootStatusActive)
+	f.publish(t)
+	f.visible(t, 1)
+
+	drift := item
+	drift.ConfigJSON = json.RawMessage(`{}`)
+	f.report(drift) // Even a repeated hash cannot authenticate different configuration.
+	f.reconcile(t, SourceRootStatusBlocked)
+	f.visible(t, 0)
+	f.report(item)
+	f.reconcile(t, SourceRootStatusActive)
+	f.visible(t, 1)
+
+	for _, status := range []string{"disabled", "stale", "blocked"} {
+		input := f.input
+		input.ActivationStatus = status
+		f.upsert(t, input)
+		f.report(item)
+		var got string
+		if err := f.db.QueryRowContext(t.Context(), `SELECT activation_status FROM projects.project_watched_root_registrations WHERE project_id=$1`, input.ProjectID).Scan(&got); err != nil || got != status {
+			t.Fatalf("report resurrected %s registration: %s %v", status, got, err)
+		}
+	}
+}
+
 func declarationEnrollmentDB(t *testing.T) *declarationEnrollmentDBFixture {
 	t.Helper()
 	db, url := boxSourcesDatabase(t)
