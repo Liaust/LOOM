@@ -1,6 +1,7 @@
 package knowledge
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -106,66 +107,109 @@ func (s *Service) readSyncedObjectSourceWith(ctx context.Context, object Knowled
 }
 
 func readVerifiedSyncedBlob(ctx context.Context, binding syncedSourceBinding, maxBytes int64) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
+	var payload bytes.Buffer
+	if err := copyVerifiedSyncedBlob(ctx, binding, maxBytes, &payload); err != nil {
 		return nil, err
+	}
+	return payload.Bytes(), nil
+}
+
+func copyVerifiedSyncedBlob(ctx context.Context, binding syncedSourceBinding, maxBytes int64, dst io.Writer) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	hash := strings.TrimPrefix(binding.Hash, "sha256:")
 	digest, err := hex.DecodeString(hash)
 	if err != nil || !strings.HasPrefix(binding.Hash, "sha256:") || len(digest) != sha256.Size || strings.ToLower(hash) != hash || binding.Size < 0 || !filepath.IsAbs(binding.Path) || filepath.Clean(binding.Path) != binding.Path {
-		return nil, fmt.Errorf("%w: invalid synced blob binding", ErrConflict)
+		return fmt.Errorf("%w: invalid synced blob binding", ErrConflict)
 	}
 	if maxBytes <= 0 {
 		maxBytes = defaultSyncedSourceMaxBytes
 	}
 	if binding.Size > maxBytes || binding.Size == int64(^uint64(0)>>1) {
-		return nil, fmt.Errorf("synced source size %d exceeds max_bytes %d", binding.Size, maxBytes)
+		return fmt.Errorf("synced source size %d exceeds max_bytes %d", binding.Size, maxBytes)
 	}
 	parent, name := filepath.Dir(binding.Path), filepath.Base(binding.Path)
 	root, err := os.OpenRoot(parent)
 	if err != nil {
-		return nil, fmt.Errorf("open synced blob parent: %w", err)
+		return fmt.Errorf("open synced blob parent: %w", err)
 	}
 	defer root.Close()
 	parentBefore, err := root.Stat(".")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	// Hold the parent and refuse a link or special leaf. NONBLOCK also makes a
 	// substituted FIFO fail promptly, without waiting for an external writer.
 	file, err := root.OpenFile(name, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
-		return nil, fmt.Errorf("open synced blob: %w", err)
+		return fmt.Errorf("open synced blob: %w", err)
 	}
 	defer file.Close()
 	before, err := file.Stat()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if !before.Mode().IsRegular() || before.Size() != binding.Size {
-		return nil, fmt.Errorf("%w: synced blob type or size mismatch", ErrConflict)
+		return fmt.Errorf("%w: synced blob type or size mismatch", ErrConflict)
 	}
-	payload, err := io.ReadAll(io.LimitReader(file, binding.Size+1))
+	hasher := sha256.New()
+	n, err := io.Copy(io.MultiWriter(dst, hasher), io.LimitReader(file, binding.Size+1))
 	if err != nil {
-		return nil, fmt.Errorf("read synced blob: %w", err)
+		return fmt.Errorf("read synced blob: %w", err)
 	}
 	after, err := file.Stat()
 	if err != nil {
-		return nil, err
+		return err
 	}
 	named, err := root.Lstat(name)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	parentAfter, err := os.Stat(parent)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	sum := sha256.Sum256(payload)
-	if !os.SameFile(parentBefore, parentAfter) || !os.SameFile(before, named) || !named.Mode().IsRegular() || before.Mode() != after.Mode() || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) || int64(len(payload)) != binding.Size || hex.EncodeToString(sum[:]) != hash {
-		return nil, fmt.Errorf("%w: synced blob identity or content mismatch", ErrConflict)
+	if !os.SameFile(parentBefore, parentAfter) || !os.SameFile(before, named) || !named.Mode().IsRegular() || before.Mode() != after.Mode() || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) || n != binding.Size || hex.EncodeToString(hasher.Sum(nil)) != hash {
+		return fmt.Errorf("%w: synced blob identity or content mismatch", ErrConflict)
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return err
 	}
-	return payload, nil
+	return nil
+}
+
+func (s *Service) prepareSyncedExtractionFile(ctx context.Context, object KnowledgeObject, maxBytes int64) (KnowledgeObject, func(), error) {
+	noop := func() {}
+	before, err := s.resolveSyncedSource(ctx, object)
+	if err != nil {
+		return object, noop, err
+	}
+	path, cleanup, err := writeExtractionTempFile(object, nil)
+	if err != nil {
+		return object, noop, err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		cleanup()
+		return object, noop, err
+	}
+	err = copyVerifiedSyncedBlob(ctx, before, maxBytes, f)
+	closeErr := f.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		var after syncedSourceBinding
+		after, err = s.resolveSyncedSource(ctx, object)
+		if err == nil && before != after {
+			err = fmt.Errorf("%w: synced source binding changed during read", ErrConflict)
+		}
+	}
+	if err != nil {
+		cleanup()
+		return object, noop, err
+	}
+	object.SourcePath = path
+	return object, cleanup, nil
 }

@@ -64,7 +64,8 @@ func TestDocumentSyncPlannerHonorsTransportAndRootLimits(t *testing.T) {
 		allowed     bool
 	}{
 		{8 << 20, 32 << 20, true}, {32 << 20, 32 << 20, true},
-		{32<<20 + 1, 64 << 20, false}, {2 << 20, 1 << 20, false},
+		{32<<20 + 1, 64 << 20, true}, {2 << 20, 1 << 20, false},
+		{1 << 30, 2 << 30, true}, {1<<30 + 1, 2 << 30, false},
 	} {
 		root := ValidatedRoot{Config: RootConfig{RootKey: "research", SyncPolicy: SyncPolicy{Mode: SyncModeSelectedFiles, MaxFileBytes: tc.limit}}}
 		state := PathState{Status: PathStatusIncluded, Kind: PathKindFile, RelativePath: "scan.pdf", ContentHashURI: "new-hash", SizeBytes: tc.size}
@@ -309,7 +310,7 @@ func TestPlanOutputsSkipsSyncObjectsAboveInlineLimit(t *testing.T) {
 	action := plan.Actions[0]
 	if action.ActionKind != OutputActionSkipped ||
 		action.ReasonCode != ReasonSkippedTooLarge ||
-		action.Reason != "path exceeds watched-root inline sync limit" {
+		action.Reason != "path exceeds watched-root sync file limit" {
 		t.Fatalf("unexpected skip action %#v", action)
 	}
 }

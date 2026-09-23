@@ -56,6 +56,9 @@ const (
 	RawBackupPolicyExcludedTemp     = "excluded_temp"
 
 	MaxInlineObjectUploadBytes = 32 * 1024 * 1024
+	// Streaming bounds disk use independently of the legacy in-memory JSON path.
+	MaxStreamObjectUploadBytes   = 1024 * 1024 * 1024
+	MaxObjectUploadMetadataBytes = 1024 * 1024
 	// Base64 payload plus bounded JSON metadata; other request limits are unchanged.
 	MaxInlineObjectUploadRequestBytes = ((MaxInlineObjectUploadBytes + 2) / 3 * 4) + 1024*1024
 	MaxPrivateBackupBytes             = 1024 * 1024

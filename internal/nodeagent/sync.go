@@ -605,11 +605,7 @@ func pushLocalSyncOnce(ctx context.Context, store Store, config Config, state St
 		if !ok {
 			return LocalSyncPushRun{}, fmt.Errorf("local sync object not found for outbox item %s", outboxItem.LocalRef)
 		}
-		input, err := buildSyncedObjectInput(state, outboxItem, object)
-		if err != nil {
-			return LocalSyncPushRun{}, err
-		}
-		envelope, err := client.UploadSyncedObject(ctx, correlationID, input.IdempotencyKey, input)
+		envelope, err := uploadQueuedSyncObject(ctx, client, correlationID, state, outboxItem, object)
 		if err != nil {
 			objectUploadErrors = append(objectUploadErrors, fmt.Errorf("upload local sync object %s: %w", outboxItem.LocalRef, err))
 			continue
@@ -823,7 +819,7 @@ func (s Store) CreateLocalSyncObject(config Config, state State, input LocalSync
 	if strings.TrimSpace(input.ProjectRef) != "" && strings.TrimSpace(input.ScopeRef) != "" {
 		return LocalSyncObject{}, fmt.Errorf("provide either --project or --scope, not both")
 	}
-	content, finalInfo, err := readStableInlineFile(sourcePath, loomsync.MaxInlineObjectUploadBytes)
+	content, finalInfo, hashURI, err := inspectSyncFile(sourcePath)
 	if err != nil {
 		return LocalSyncObject{}, err
 	}
@@ -868,7 +864,7 @@ func (s Store) CreateLocalSyncObject(config Config, state State, input LocalSync
 		SourceCreatedBasis:   sourceCreatedBasis,
 		SizeBytes:            finalInfo.Size(),
 		MimeType:             mimeType,
-		HashURI:              "sha256:" + rawBytesHashHex(content),
+		HashURI:              hashURI,
 		IndexPolicy:          indexPolicy,
 		RawBackupPolicy:      rawBackupPolicy,
 		FileClass:            classification.FileClass,
@@ -944,11 +940,10 @@ func (s Store) QueueWatchedRootObject(config Config, state State, action watched
 	if info.IsDir() {
 		return LocalSyncObject{}, LocalSyncOutboxItem{}, fmt.Errorf("watched-root source path is a directory")
 	}
-	content, finalInfo, err := readStableInlineFile(contentPath, loomsync.MaxInlineObjectUploadBytes)
+	content, finalInfo, hashURI, err := inspectSyncFile(contentPath)
 	if err != nil {
 		return LocalSyncObject{}, LocalSyncOutboxItem{}, err
 	}
-	hashURI := "sha256:" + rawBytesHashHex(content)
 	if action.ContentHashURI != "" && hashURI != action.ContentHashURI {
 		return LocalSyncObject{}, LocalSyncOutboxItem{}, fmt.Errorf("watched-root file hash changed for %s: expected %s got %s", action.RelativePath, action.ContentHashURI, hashURI)
 	}
@@ -1826,6 +1821,12 @@ func buildSyncedObjectInput(state State, outboxItem LocalSyncOutboxItem, object 
 	if hashURI != object.HashURI {
 		return loomsync.SyncedObjectInput{}, fmt.Errorf("local file hash changed for %s: expected %s got %s", contentPath, object.HashURI, hashURI)
 	}
+	input := syncedObjectMetadata(state, outboxItem, object, contentPath, content, finalInfo)
+	input.ContentBase64 = base64.StdEncoding.EncodeToString(content)
+	return input, nil
+}
+
+func syncedObjectMetadata(state State, outboxItem LocalSyncOutboxItem, object LocalSyncObject, contentPath string, content []byte, finalInfo os.FileInfo) loomsync.SyncedObjectInput {
 	sourceMtime := object.SourceMtime
 	mimeType := object.MimeType
 	if strings.TrimSpace(mimeType) == "" {
@@ -1856,10 +1857,9 @@ func buildSyncedObjectInput(state State, outboxItem LocalSyncOutboxItem, object 
 		ClassificationSource: classification.ClassificationSource,
 		IndexingState:        classification.IndexingState,
 		IndexingReason:       classification.Reason,
-		ContentBase64:        base64.StdEncoding.EncodeToString(content),
 		Metadata:             localSyncItemMetadata(object.Metadata, outboxItem),
 	}
-	return input, nil
+	return input
 }
 
 func syncObjectIdempotencyKey(nodeID string, object LocalSyncObject, outboxItem LocalSyncOutboxItem) string {

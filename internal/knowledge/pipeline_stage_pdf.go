@@ -150,7 +150,8 @@ func (handler PDFOCRStageHandler) Execute(ctx context.Context, item PipelineWork
 	if pipelineFileFamily(item.Object) != "pdf" {
 		return HeavyStageObservation{}, nil, fmt.Errorf("%w: PDF OCR cannot process %s", ErrInvalid, pipelineFileFamily(item.Object))
 	}
-	object, cleanup, err := handler.Service.preparePathBackedExtractionObject(ctx, item.Object, policy.MaxInputBytes)
+	// The OCR budget applies to rendered pages, not the compressed PDF container.
+	object, cleanup, err := handler.Service.preparePathBackedExtractionObject(ctx, item.Object, DefaultPDFMaxSourceBytes)
 	if err != nil {
 		return HeavyStageObservation{}, nil, err
 	}

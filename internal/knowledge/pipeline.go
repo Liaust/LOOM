@@ -214,15 +214,7 @@ func (s *Service) ExtractObject(ctx context.Context, input TextPipelineInput) (E
 func (s *Service) preparePathBackedExtractionObject(ctx context.Context, object KnowledgeObject, maxBytes int64) (KnowledgeObject, func(), error) {
 	cleanup := func() {}
 	if isSyncedKnowledgeObject(object) {
-		payload, err := s.readSyncedObjectSource(ctx, object, maxBytes)
-		if err != nil {
-			return object, cleanup, err
-		}
-		path, cleanup, err := writeExtractionTempFile(object, payload)
-		if err == nil {
-			object.SourcePath = path
-		}
-		return object, cleanup, err
+		return s.prepareSyncedExtractionFile(ctx, object, maxBytes)
 	}
 	sourcePath := strings.TrimSpace(object.SourcePath)
 	if sourcePath == "" {

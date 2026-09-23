@@ -188,8 +188,8 @@ func TestProjectionRefreshCopyBudgetAndSizeDrift(t *testing.T) {
 	size := int64(64*1024*1024 + 1)
 	provider := fakeProjectionSources{sources: []SourceObject{{RootKind: RootKindBoxNotes, SourceNodeKey: "main", RelativePath: "note.md", SourcePath: source, SizeBytes: &size}}}
 	svc := NewService(provider, root)
-	if _, err := svc.Refresh(t.Context()); err == nil || !strings.Contains(err.Error(), "copy budget") {
-		t.Fatalf("oversized copy: %v", err)
+	if _, err := svc.Refresh(t.Context()); err == nil || !strings.Contains(err.Error(), "size changed") {
+		t.Fatalf("declared size mismatch: %v", err)
 	}
 	if _, _, err := ReadManifest(root); err != nil {
 		t.Fatal(err)
@@ -212,6 +212,47 @@ func TestProjectionRefreshCopyBudgetAndSizeDrift(t *testing.T) {
 		}
 	}
 	assertProjectionFile(t, filepath.Join(root, "nodes/main/Notes/note.md"), "abc")
+}
+
+func TestProjectionRefreshLargeFilesProgressIncrementally(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "generated")
+	defer makeProjectionWritableForCleanup(t, root)
+	size := int64(64<<20 + 1)
+	sources := []SourceObject{}
+	for _, name := range []string{"a.pdf", "b.pdf"} {
+		path := filepath.Join(t.TempDir(), name)
+		f, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Truncate(size); err != nil {
+			t.Fatal(err)
+		}
+		_ = f.Close()
+		sources = append(sources, SourceObject{KnowledgeObjectID: "knowledge_object_" + name, NotesSourceRootID: "notes_source_root_large", RootKind: RootKindBoxNotes, SourceNodeKey: "main", RelativePath: name, SourcePath: path, SizeBytes: &size, SourceHash: name, SourceRevision: name})
+	}
+	svc := NewService(fakeProjectionSources{sources: sources}, root)
+	for i := 0; i < 2; i++ {
+		if changed, err := svc.Refresh(t.Context()); err != nil || !changed {
+			t.Fatalf("refresh %d: %t %v", i, changed, err)
+		}
+		manifest, _, err := ReadManifest(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		materialized := 0
+		for _, e := range manifest.Entries {
+			if e.Status == ProjectionStatusMaterialized {
+				materialized++
+			}
+		}
+		if materialized != i+1 {
+			t.Fatalf("refresh %d materialized %d", i, materialized)
+		}
+	}
+	if changed, err := svc.Refresh(t.Context()); err != nil || changed {
+		t.Fatalf("converged refresh: %t %v", changed, err)
+	}
 }
 
 func TestRebuildMaterializesReadOnlyProjectionAndManifest(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -367,7 +368,20 @@ func (s Service) ListReplicas(ctx context.Context, filter ListFilter) ([]SyncRep
 }
 
 func (s Service) IngestSyncedObject(ctx context.Context, req requestctx.Context, objectService objects.Service, searchService search.Service, input SyncedObjectInput) (SyncedObjectResult, error) {
-	input, err := normalizeSyncedObjectInput(input)
+	return s.ingestSyncedObject(ctx, req, objectService, searchService, input, nil)
+}
+
+// IngestSyncedObjectStream uses the same identities and lifecycle as JSON uploads.
+// Authenticate and check replay before reading the potentially large body.
+func (s Service) IngestSyncedObjectStream(ctx context.Context, req requestctx.Context, objectService objects.Service, searchService search.Service, input SyncedObjectInput, content io.Reader) (SyncedObjectResult, error) {
+	if content == nil {
+		return SyncedObjectResult{}, fmt.Errorf("content stream is required")
+	}
+	return s.ingestSyncedObject(ctx, req, objectService, searchService, input, content)
+}
+
+func (s Service) ingestSyncedObject(ctx context.Context, req requestctx.Context, objectService objects.Service, searchService search.Service, input SyncedObjectInput, content io.Reader) (SyncedObjectResult, error) {
+	input, err := normalizeSyncedObjectUpload(input, content != nil)
 	if err != nil {
 		return SyncedObjectResult{}, err
 	}
@@ -401,25 +415,20 @@ func (s Service) IngestSyncedObject(ctx context.Context, req requestctx.Context,
 		return SyncedObjectResult{}, err
 	}
 
-	content, err := base64.StdEncoding.DecodeString(input.ContentBase64)
+	if content == nil {
+		content = base64.NewDecoder(base64.StdEncoding, strings.NewReader(input.ContentBase64))
+	}
+	tempPath, got, cleanup, err := writeSyncedObjectStream(ctx, content, input.LogicalName, input.SizeBytes)
 	if err != nil {
-		return SyncedObjectResult{}, fmt.Errorf("content_base64 is invalid: %w", err)
+		return SyncedObjectResult{}, err
 	}
-	if int64(len(content)) != input.SizeBytes {
-		return SyncedObjectResult{}, fmt.Errorf("size_bytes does not match decoded content length")
-	}
-	if got := hashBytes(content); got != input.HashURI {
+	defer cleanup()
+	if got != input.HashURI {
 		return s.recordConflictedSyncedObject(ctx, node.NodeID, input, payload, objectOrDefault(mustJSON(map[string]any{
 			"declared_hash_uri": input.HashURI,
 			"computed_hash_uri": got,
 		})), ConflictObjectHashMismatch, "uploaded content hash does not match hash_uri")
 	}
-
-	tempPath, cleanup, err := writeSyncedObjectTemp(content, input.LogicalName)
-	if err != nil {
-		return SyncedObjectResult{}, err
-	}
-	defer cleanup()
 
 	objectReq := req
 	objectReq.OriginNodeID = node.NodeID
@@ -1745,6 +1754,10 @@ func normalizePushBatchInput(input PushBatchInput) (PushBatchInput, error) {
 }
 
 func normalizeSyncedObjectInput(input SyncedObjectInput) (SyncedObjectInput, error) {
+	return normalizeSyncedObjectUpload(input, false)
+}
+
+func normalizeSyncedObjectUpload(input SyncedObjectInput, stream bool) (SyncedObjectInput, error) {
 	input.NodeRef = strings.TrimSpace(input.NodeRef)
 	input.CredentialToken = strings.TrimSpace(input.CredentialToken)
 	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
@@ -1807,8 +1820,15 @@ func normalizeSyncedObjectInput(input SyncedObjectInput) (SyncedObjectInput, err
 	if input.SourcePath == "" {
 		return SyncedObjectInput{}, fmt.Errorf("source_path is required")
 	}
-	if input.SizeBytes < 0 || input.SizeBytes > MaxInlineObjectUploadBytes {
-		return SyncedObjectInput{}, fmt.Errorf("size_bytes must be between 0 and %d", MaxInlineObjectUploadBytes)
+	maxBytes := int64(MaxInlineObjectUploadBytes)
+	if stream {
+		maxBytes = MaxStreamObjectUploadBytes
+		if input.ContentBase64 != "" {
+			return SyncedObjectInput{}, fmt.Errorf("stream metadata must not contain content_base64")
+		}
+	}
+	if input.SizeBytes < 0 || input.SizeBytes > maxBytes {
+		return SyncedObjectInput{}, fmt.Errorf("size_bytes must be between 0 and %d", maxBytes)
 	}
 	if len(input.ContentBase64) > base64.StdEncoding.EncodedLen(int(input.SizeBytes)) {
 		return SyncedObjectInput{}, fmt.Errorf("content_base64 exceeds the declared size_bytes")
@@ -1851,7 +1871,7 @@ func normalizeSyncedObjectInput(input SyncedObjectInput) (SyncedObjectInput, err
 			input.IndexingReason = classification.Reason
 		}
 	}
-	if input.ContentBase64 == "" && input.SizeBytes != 0 {
+	if !stream && input.ContentBase64 == "" && input.SizeBytes != 0 {
 		return SyncedObjectInput{}, fmt.Errorf("content_base64 is required")
 	}
 	return input, nil
@@ -2192,24 +2212,6 @@ func resolveMainReplicaNodeIDTx(ctx context.Context, tx *sql.Tx) (string, error)
 		LIMIT 1
 	`).Scan(&nodeID)
 	return nodeID, err
-}
-
-func writeSyncedObjectTemp(content []byte, logicalName string) (string, func(), error) {
-	dir, err := os.MkdirTemp("", "loom-sync-object-*")
-	if err != nil {
-		return "", func() {}, err
-	}
-	cleanup := func() { _ = os.RemoveAll(dir) }
-	name := filepath.Base(logicalName)
-	if name == "." || name == "/" || name == "" {
-		name = "object"
-	}
-	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, content, 0o600); err != nil {
-		cleanup()
-		return "", func() {}, err
-	}
-	return path, cleanup, nil
 }
 
 func hashBytes(content []byte) string {

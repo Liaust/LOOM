@@ -733,7 +733,7 @@ func (builder *watchPolicyBuilder) items() []ProjectWatchedRootItem {
 		if root.metadata["knowledge_source"] != nil {
 			config.Scan.FullRescanInterval = "1m"
 			if config.SyncPolicy.MaxFileBytes == 0 {
-				config.SyncPolicy.MaxFileBytes = loomsync.MaxInlineObjectUploadBytes
+				config.SyncPolicy.MaxFileBytes = loomsync.MaxStreamObjectUploadBytes
 			}
 		}
 		if config.SyncPolicy.Mode == watchedroots.SyncModeNone {

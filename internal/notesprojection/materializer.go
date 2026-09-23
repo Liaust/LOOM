@@ -134,6 +134,8 @@ func (m materializer) run(ctx context.Context) (_ Manifest, _ []Change, _ []Find
 	for _, entry := range previous.Entries {
 		old[entry.ProjectedPath] = entry
 	}
+	var copiedBytes int64
+	copiedFiles := 0
 	for i := range entries {
 		if err := ctx.Err(); err != nil {
 			return Manifest{}, changes, findings, err
@@ -142,11 +144,25 @@ func (m materializer) run(ctx context.Context) (_ Manifest, _ []Change, _ []Find
 			entries[i] = old[entries[i].ProjectedPath]
 			continue
 		}
+		// Make bounded progress on each refresh, including one oversized file.
+		// Deferred replacements retain their old manifest identity, never a false
+		// claim that old bytes match the newly observed source revision.
+		if m.reuse && copiedFiles > 0 && entries[i].SizeBytes != nil && *entries[i].SizeBytes > 64*1024*1024-copiedBytes {
+			findings = append(findings, Finding{Severity: SeverityInfo, Kind: "copy_pending", Path: entries[i].ProjectedPath, Summary: "Generated copy queued for the next automatic refresh."})
+			if prior, ok := old[entries[i].ProjectedPath]; ok {
+				entries[i] = prior
+			}
+			continue
+		}
 		entry, change, entryFindings, err := m.materializeEntry(entries[i])
 		if err != nil {
 			return Manifest{}, changes, findings, err
 		}
 		entries[i] = entry
+		if change.Action == "copy" && entry.SizeBytes != nil {
+			copiedBytes += *entry.SizeBytes
+			copiedFiles++
+		}
 		if change.Action != "" {
 			changes = append(changes, change)
 		}

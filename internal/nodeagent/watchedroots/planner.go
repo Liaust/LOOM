@@ -184,7 +184,7 @@ func planSyncOutputAction(root ValidatedRoot, state PathState) (OutputAction, bo
 		base.ActionKind = OutputActionSkipped
 		base.Status = OutputStatusSkipped
 		base.ReasonCode = ReasonSkippedTooLarge
-		base.Reason = "path exceeds watched-root inline sync limit"
+		base.Reason = "path exceeds watched-root sync file limit"
 		return base, true
 	}
 	if state.ContentHashURI == state.LastSyncedHashURI &&
@@ -212,7 +212,7 @@ func planSyncOutputAction(root ValidatedRoot, state PathState) (OutputAction, bo
 }
 
 func effectiveSyncMaxFileBytes(configured int64) int64 {
-	inlineLimit := int64(loomsync.MaxInlineObjectUploadBytes)
+	inlineLimit := int64(loomsync.MaxStreamObjectUploadBytes)
 	if configured <= 0 || configured > inlineLimit {
 		return inlineLimit
 	}

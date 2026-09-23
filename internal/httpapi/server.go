@@ -1119,6 +1119,10 @@ func (s Server) handleNodeAgentSyncObjectUpload(w http.ResponseWriter, r *http.R
 		s.writeError(w, correlationID, http.StatusMethodNotAllowed, "method.not_allowed", "sync", r.URL.Path, "Method is not allowed.", nil)
 		return
 	}
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+		s.handleNodeAgentSyncObjectStream(w, r)
+		return
+	}
 	var input loomsync.SyncedObjectInput
 	r.Body = http.MaxBytesReader(w, r.Body, loomsync.MaxInlineObjectUploadRequestBytes)
 	decoder := json.NewDecoder(r.Body)

@@ -35,10 +35,13 @@ Notes reads. Ignores/formats still apply; no implied backup or Provenance accept
 External allocations are not relative folders; do not substitute absolute paths
 or symlinks.
 
-Declared knowledge folders default to a 32 MiB per-file sync limit; existing
+Declared knowledge folders default to a 1 GiB per-file sync limit; existing
 roots adopt compiler changes through reviewed plan/apply. Explicit smaller
-limits remain effective. PDF binary input is also bounded at 32 MiB, separately
-from extracted text/page/chunk limits. Polling is once per minute; heavy work
+limits remain effective. Files above 32 MiB stream to the existing upload route
+without base64 or a whole-file memory buffer. PDF binary input is bounded at
+1 GiB, separately from extracted text/page/chunk limits (currently 250 PDF pages).
+Generated copies converge incrementally; a large batch is not an intake failure.
+Polling is once per minute; heavy work
 waits for the normal ten-minute stability window. A saved file is not proof of
 completed indexing: inspect `loom notes pipelines` and retrieve an exact passage.
 

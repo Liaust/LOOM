@@ -18,7 +18,7 @@ const (
 	ExtractorKeyPDF          = "pdf_poppler"
 	ExtractorVersionPDF      = "pdf_poppler_extractor_v1"
 	DefaultPDFMaxPages       = 250
-	DefaultPDFMaxSourceBytes = 32 << 20
+	DefaultPDFMaxSourceBytes = 1 << 30
 	defaultPDFCommandTimout  = 30 * time.Second
 )
 

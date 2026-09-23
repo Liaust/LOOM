@@ -139,15 +139,13 @@ func (s Service) rebuild(ctx context.Context, input RebuildInput, refresh bool) 
 		for _, entry := range previous.Entries {
 			old[entry.ProjectedPath] = entry
 		}
-		var copyBytes int64
 		for _, entry := range entries {
 			if reusableProjectionEntry(root, old[entry.ProjectedPath], entry) {
 				continue
 			}
-			if entry.SizeBytes == nil || *entry.SizeBytes < 0 || *entry.SizeBytes > 64*1024*1024-copyBytes {
-				return RebuildResult{}, fmt.Errorf("automatic Notes projection copy budget is unknown or exceeds 64 MiB; explicit reviewed rebuild required")
+			if entry.SizeBytes == nil || *entry.SizeBytes < 0 {
+				return RebuildResult{}, fmt.Errorf("automatic Notes projection source size is unknown")
 			}
-			copyBytes += *entry.SizeBytes
 		}
 	}
 	materializer := materializer{

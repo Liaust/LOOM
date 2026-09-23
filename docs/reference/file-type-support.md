@@ -148,6 +148,11 @@ PDF extraction and OCR use local command-line tools:
 
 Important limits and states:
 
+- declared project knowledge folders transfer files up to 1 GiB by default;
+  files above the 32 MiB inline threshold use streaming upload, and smaller
+  explicit watched-root limits remain effective;
+- PDF source preparation is disk-backed with a separate 1 GiB input ceiling;
+  this does not raise the extracted-text, rendered-page, pixel, or concurrency budgets;
 - maximum default page count is 250;
 - encrypted/password-protected PDFs become `password_required`;
 - PDFs over the page limit become `too_large`;
