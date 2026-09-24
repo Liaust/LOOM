@@ -3,6 +3,8 @@ package knowledge
 import (
 	"encoding/json"
 	"fmt"
+
+	"loom.local/loom/internal/projectcontracts"
 )
 
 type CompiledPipelineStage struct {
@@ -21,11 +23,13 @@ type CompiledPipelineStage struct {
 }
 
 type CompiledPipelinePlan struct {
-	SchemaVersion     string                  `json:"schema_version"`
-	DefinitionKey     string                  `json:"definition_key"`
-	DefinitionVersion string                  `json:"definition_version"`
-	FileFamily        string                  `json:"file_family"`
-	Stages            []CompiledPipelineStage `json:"stages"`
+	SchemaVersion     string                                  `json:"schema_version"`
+	DefinitionKey     string                                  `json:"definition_key"`
+	DefinitionVersion string                                  `json:"definition_version"`
+	FileFamily        string                                  `json:"file_family"`
+	Stages            []CompiledPipelineStage                 `json:"stages"`
+	SourcePolicy      *projectcontracts.KnowledgeSourcePolicy `json:"source_policy,omitempty"`
+	EffectivePolicy   *PipelinePolicy                         `json:"effective_policy,omitempty"`
 }
 
 func CompilePipelinePlan(object KnowledgeObject, policy PipelinePolicy) (CompiledPipelinePlan, error) {
@@ -34,6 +38,14 @@ func CompilePipelinePlan(object KnowledgeObject, policy PipelinePolicy) (Compile
 		return CompiledPipelinePlan{}, err
 	}
 	plan := CompiledPipelinePlan{SchemaVersion: "knowledge.pipeline_plan.v1", DefinitionKey: definition.Key, DefinitionVersion: definition.Version, FileFamily: definition.FileFamily}
+	source, err := knowledgeSourcePolicy(object)
+	if err != nil {
+		return CompiledPipelinePlan{}, err
+	}
+	if source != nil {
+		policy = effectiveSourcePipelinePolicy(policy, source)
+		plan.SourcePolicy, plan.EffectivePolicy = source, &policy
+	}
 	for index, stage := range definition.Stages {
 		compiled := CompiledPipelineStage{
 			StageKey: stage.StageKey, ContractVersion: stage.ContractVersion, Ordinal: index + 1,
@@ -62,6 +74,17 @@ func CompilePipelinePlan(object KnowledgeObject, policy PipelinePolicy) (Compile
 			if !compiled.Selected {
 				compiled.SkipReason = "disabled_by_policy"
 			}
+		}
+		if source != nil && !compiled.Selected {
+			compiled.SkipReason = "disabled_by_host"
+			if sourceStageDisabled(stage.StageKey, source) {
+				compiled.SkipReason = "disabled_by_source"
+			}
+		}
+		if source != nil && source.Refresh != nil {
+			// Whole-refresh debounce is paid once, at metadata admission, rather
+			// than imposing another quiet interval on each expensive stage.
+			compiled.QuietWindow = stage.StageKey == FilePipelineStageMetadata
 		}
 		plan.Stages = append(plan.Stages, compiled)
 	}

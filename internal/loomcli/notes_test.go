@@ -31,6 +31,36 @@ func TestNotesPipelineRetryPreservesBackendError(t *testing.T) {
 	}
 }
 
+func TestNotesPipelineInspectSourcePolicy(t *testing.T) {
+	deadline := time.Date(2026, 9, 25, 12, 1, 0, 0, time.UTC)
+	detail := knowledge.PipelineInspect{
+		Run: knowledge.PipelineRun{KnowledgePipelineRunID: "pipeline", QuietWindowEligibleAt: &deadline,
+			PlanSnapshot: json.RawMessage(`{"source_policy":{"refresh":{"quiet_for_seconds":60,"max_wait_seconds":180},"processing":{"embeddings":true}},"effective_policy":{"embeddings_enabled":false},"stages":[{"stage_key":"embedding","selected":false,"skip_reason":"disabled_by_host"}]}`)},
+		Stages: []knowledge.PipelineStageRun{{StageKey: "embedding", Status: "skipped_by_policy"}},
+	}
+	socket, stop := startStorageCommandServer(t, func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodGet || req.URL.Path != "/v1/knowledge/notes/pipelines/pipeline" {
+			t.Errorf("unexpected request: %s %s", req.Method, req.URL.Path)
+		}
+		response.WriteJSON(w, http.StatusOK, response.Success("inspect", detail))
+	})
+	defer stop()
+	out, _, err := executeRootCommand("--socket", socket, "notes", "pipelines", "inspect", "pipeline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Source policy:", `"embeddings":true`, "Effective processing:", "embeddings=false", "2026-09-25T12:01:00Z", "disabled_by_host"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q: %s", want, out)
+		}
+	}
+	out, _, err = executeRootCommand("--json", "--socket", socket, "notes", "pipelines", "inspect", "pipeline")
+	var got knowledge.PipelineInspect
+	if err != nil || json.Unmarshal([]byte(out), &got) != nil || !got.Run.QuietWindowEligibleAt.Equal(deadline) {
+		t.Fatalf("JSON inspection lost deadline or is not one document: %s %v", out, err)
+	}
+}
+
 func TestNotesSearchFollowupCommandRoundtrip(t *testing.T) {
 	input := knowledge.NotesPassageInput{KnowledgeObjectID: ids.NewKnowledgeObjectID(), KnowledgeObjectVersionID: ids.NewKnowledgeObjectVersionID(), KnowledgeChunkID: ids.NewKnowledgeChunkID(), SourceHash: "sha256:" + strings.Repeat("a", 64), SourceLifecycle: knowledge.SourceLifecycleFilterArchived}
 	result := knowledge.NotesSearchResult{SourceKind: knowledge.KnowledgeSearchSourceKind, KnowledgeObjectID: input.KnowledgeObjectID, KnowledgeObjectVersionID: input.KnowledgeObjectVersionID, KnowledgeChunkID: input.KnowledgeChunkID, PassageFollowup: &input, NotesCustodyContext: knowledge.NotesCustodyContext{SourceLifecycle: knowledge.SourceLifecycleArchived}}

@@ -1,7 +1,5 @@
 # Project Commands And Gates
 
-Choose the requested effect; these are not prerequisites for ordinary edits.
-
 ## Create source
 
 ```sh
@@ -9,17 +7,16 @@ loom project create <name> --owner-node <node> --directory <parent> --dry-run
 loom project create <name> --owner-node <node> --directory <parent>
 ```
 
-Creates `.loom/project.yaml`, `.project/`, `AGENTS.md`, notes/ and repos/.
-No Git initialization or resource activation. Local creation stays source-only;
-`--backend` creates and automatically connects the source on the configured backend.
-`--register` is backend-only compatibility.
-Dry-run never registers. On `source_created/context_pending`, resolve the reported
-prerequisite and retry the same command; existing identity/files are preserved.
+Creates `.loom/project.yaml`, `.project/`, `AGENTS.md`, notes/ and repos/; no Git or
+resource activation. Local creation is source-only; `--backend` automatically
+connects source on the configured backend.
+`--register` is backend-only compatibility; dry-run never registers.
+For `source_created/context_pending`, resolve the prerequisite and retry;
+identity/files are preserved.
 
 ## Declare and reconcile when requested
 
-Edit the existing `.loom/project.yaml`, preserving schema and project identity;
-there is no separate declare command. Example, with an ordinary journal folder:
+Edit `.loom/project.yaml`, preserving identity/schema; no separate declare command:
 
 ```yaml
 resources:
@@ -28,25 +25,32 @@ resources:
     knowledge: {path: journal, category: notes}
 ```
 
-Select any project-relative folder; eligible new/changed files enter Notes
-automatically after apply. Categories: notes/docs/research. An application's
-relative data folder or explicit child can be selected: the app owns writes,
-Notes reads. Ignores/formats still apply; no implied backup or Provenance acceptance.
-External allocations are not relative folders; do not substitute absolute paths
-or symlinks.
+Select project-relative folders, including application-written data.
+Categories: notes/docs/research. Notes reads eligible files after apply;
+ignores/formats still apply. No implied backup or Provenance acceptance.
+External allocations cannot be substituted with absolute paths or symlinks.
 
-Declared knowledge folders default to a 1 GiB per-file sync limit; existing
-roots adopt compiler changes through reviewed plan/apply. Explicit smaller
-limits remain effective. Files above 32 MiB stream to the existing upload route
-without base64 or a whole-file memory buffer. PDF binary input is bounded at
-1 GiB, separately from extracted text/page/chunk limits (currently 250 PDF pages).
-Generated copies converge incrementally; a large batch is not an intake failure.
-Polling is once per minute; heavy work
-waits for the normal ten-minute stability window. A saved file is not proof of
-completed indexing: inspect `loom notes pipelines` and retrieve an exact passage.
+Defaults: 1 GiB/file, 250 PDF pages, minute polling; smaller limits remain.
+Apply to update existing roots. Uploads stream above 32 MiB; views converge incrementally.
 
-Saving source does not enroll it. Review a plan against source visible on the
-selected owner node; resolve unmet prerequisites before applying supported effects:
+Optional knowledge fields:
+
+```yaml
+refresh: {quiet_for: 10m, max_wait: 30m}
+processing: {ocr: auto, embeddings: true, image_descriptions: false}
+```
+
+Refresh waits once before processing, capped by max_wait; unchanged polling
+does not reset it. Whole seconds only: quiet 0s..24h; maximum positive, >=quiet,
+<=24h. Omission retains prompt native work / ten-minute heavy quiet time.
+OCR: auto/off. Processing omission inherits Main; false opts out, true cannot
+override host disablement. Models/sync remain host/application-owned.
+
+Use `loom notes pipelines inspect <ref>` for policy/deadline/skip reasons;
+verify indexing by exact passage retrieval. New revisions still supersede work;
+last-published search during continuous edits is not implemented yet.
+
+Saving source does not enroll it. Plan against the selected owner node:
 
 ```sh
 loom project plan <ref-or-path> --node <node> --json
@@ -55,17 +59,14 @@ loom project status <ref> --node <node> --json
 loom project operation <operation-id> --json
 ```
 
-Supply required existing approvals using repeatable `--approval` references.
-Historical operation inspection does not resume it. Resume through apply with
-`--resume <operation-id>`, preserving original selectors, effects, plan, key and
-approval references. Do not blindly retry stale plans or unmet prerequisites.
+Supply required repeatable `--approval` references. Historical operation inspection
+does not resume it. Apply `--resume <operation-id>`, preserving original selectors,
+effects, plan, key and approval references. Resolve stale plans/prerequisites first.
 
-The parsed `--refresh-projections` flag is rejected by the real owner resolver.
-This is separate from automatic `.project` refresh
-and the existing `loom provenance project sync` diagnostic. Do not work around absent composition with manual
-owner calls. Declaration reconciliation does not activate every facet;
-activation has no general dry-run. Runtime/archive/migration actions retain
-their separate authorization and storage review.
+The parsed `--refresh-projections` flag is rejected, unlike automatic `.project` refresh
+and `loom provenance project sync`. Do not work around absent composition with
+manual owner calls. Activation has no general dry-run; runtime/archive/migration
+retain separate authorization.
 
 ## Managed applications
 
@@ -85,11 +86,9 @@ Do not manufacture a Git wrapper.
 
 ## Export custody
 
-Use `loom project export <path> --mode <human|portable|archival> --out <archive.tar>`;
-`<ref> --backend` downloads backend source to caller-local output. Preserve existing
-output unless overwrite is reviewed. Human omits portable controls, `.loom-acceptance`
-and LOOM's managed root AGENTS; portable keeps contracts; archival adds bounded
-registration references, never credential values. Nested `.loomignore` is
-Gitignore-style, last-match-wins, without implicit `.gitignore`. Keep `.git` unless
-excluded. Rules cannot re-include `.loom/state/` or `.loom/tmp/`; reject escaping
-paths/symlinks. Edit canonical source, never generated views.
+`loom project export <path> --mode <human|portable|archival> --out <archive.tar>`;
+`<ref> --backend` downloads locally. Review overwrites. Human omits controls,
+managed AGENTS and `.loom-acceptance`; portable keeps contracts; archival adds
+non-secret registration references. `.loomignore`: nested, last-match-wins,
+no implicit `.gitignore`. Keep Git unless excluded; never re-include `.loom/state/`
+or `.loom/tmp/`; reject escaping paths/symlinks. Edit source, not generated views.

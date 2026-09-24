@@ -157,6 +157,7 @@ func (s Store) UpsertKnowledgeObject(ctx context.Context, object KnowledgeObject
 	var out KnowledgeObject
 	var contentChanged bool
 	if existingID == "" {
+		object = observeSourceRefresh(nil, object, time.Now().UTC())
 		out, err = insertKnowledgeObjectTx(ctx, tx, object)
 		contentChanged = true
 	} else {
@@ -173,6 +174,7 @@ func (s Store) UpsertKnowledgeObject(ctx context.Context, object KnowledgeObject
 		contentChanged = knowledgeObjectContentChanged(existing, object)
 		object.KnowledgeObjectID = existingID
 		object = preserveKnowledgeObjectProcessing(existing, object)
+		object = observeSourceRefresh(&existing, object, time.Now().UTC())
 		out, err = updateKnowledgeObjectTx(ctx, tx, object)
 	}
 	if err != nil {

@@ -503,6 +503,9 @@ func declarationKnowledgeMetadata(metadata json.RawMessage) (map[string]any, boo
 		return nil, false
 	}
 	allowed := []string{"schema_version", "root_kind", "category", "declaration", "enabled", "root_relative_path", "include", "exclude", "project_id", "project_root", "owner_node", "resource_key", "local_root_key", "backend_root_key", "source_ref", "source_hash", "config_hash"}
+	if _, present := source["policy"]; present {
+		allowed = append(allowed, "policy")
+	}
 	if len(source) != len(allowed) {
 		return nil, false
 	}
@@ -551,6 +554,21 @@ func declarationKnowledgeMetadata(metadata json.RawMessage) (map[string]any, boo
 	}
 	if resource.Protection == "" && localKey != key {
 		return nil, false
+	}
+	policy, err := projectcontracts.NormalizeKnowledgeSourcePolicy(*resource)
+	if err != nil {
+		return nil, false
+	}
+	actualPolicy, present := source["policy"]
+	if (policy != nil) != present {
+		return nil, false
+	}
+	if present {
+		actual, err := json.Marshal(actualPolicy)
+		expected, expectedErr := json.Marshal(policy)
+		if err != nil || expectedErr != nil || !pipelinePlanSnapshotsEqual(actual, expected) {
+			return nil, false
+		}
 	}
 	for _, field := range []string{"include", "exclude"} {
 		values, ok := source[field].([]any)

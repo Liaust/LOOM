@@ -261,6 +261,18 @@ func (s *Service) ClaimPipelineRuns(ctx context.Context, executionClass, workerR
 			}
 			return nil, fmt.Errorf("%w: pipeline stage was not claimable", ErrConflict)
 		}
+		if run.CurrentStageKey == FilePipelineStageMetadata {
+			// Only selection of the observed revision consumes its pending clock.
+			// A newer source admitted concurrently keeps its own pending deadline.
+			if _, err := tx.ExecContext(ctx, `UPDATE knowledge.knowledge_objects
+				SET metadata=jsonb_set(metadata,'{source_refresh}',
+				(metadata->'source_refresh')-'pending_since')
+				WHERE knowledge_object_id=$1 AND source_hash=$2 AND source_revision=$3
+				AND jsonb_typeof(metadata->'source_refresh')='object'`,
+				run.KnowledgeObjectID, run.SourceHash, run.SourceRevision); err != nil {
+				return nil, err
+			}
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err

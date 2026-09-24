@@ -10,7 +10,7 @@ import (
 	"loom.local/loom/internal/projectcontracts"
 )
 
-func declarationKnowledgeAnalysis(t *testing.T) projectcontracts.Analysis {
+func declarationKnowledgeAnalysis(t *testing.T, policy ...string) projectcontracts.Analysis {
 	t.Helper()
 	root := t.TempDir()
 	for _, folder := range []string{".loom", "journal", "notes", "repos", "unrelated"} {
@@ -19,6 +19,9 @@ func declarationKnowledgeAnalysis(t *testing.T) projectcontracts.Analysis {
 		}
 	}
 	source := "kind: loom.project\nschema_version: project.contract.v0.5\nproject:\n  id: " + ids.NewProjectID() + "\n  slug: declaration-proof\n  name: Declaration proof\n  owner_node: main\nresources:\n  reading:\n    kind: knowledge\n    knowledge: {path: journal, category: notes}\n"
+	if len(policy) > 0 {
+		source = strings.Replace(source, "category: notes}", "category: notes, "+policy[0]+"}", 1)
+	}
 	if err := os.WriteFile(filepath.Join(root, ".loom/project.yaml"), []byte(source), 0600); err != nil {
 		t.Fatal(err)
 	}

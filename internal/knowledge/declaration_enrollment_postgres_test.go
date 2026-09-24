@@ -76,13 +76,13 @@ func TestDeclarationReportAutomaticallyEnablesNotesPostgres(t *testing.T) {
 	}
 }
 
-func declarationEnrollmentDB(t *testing.T) *declarationEnrollmentDBFixture {
+func declarationEnrollmentDB(t *testing.T, policy ...string) *declarationEnrollmentDBFixture {
 	t.Helper()
 	db, url := boxSourcesDatabase(t)
 	if _, err := migrations.Up(t.Context(), url, filepath.Join("..", "..", "migrations")); err != nil {
 		t.Fatal(err)
 	}
-	f := &declarationEnrollmentDBFixture{db: db, service: NewService(db), projects: projects.NewService(db), req: requestctx.Context{ActorID: ids.NewActorID()}, analysis: declarationKnowledgeAnalysis(t)}
+	f := &declarationEnrollmentDBFixture{db: db, service: NewService(db), projects: projects.NewService(db), req: requestctx.Context{ActorID: ids.NewActorID()}, analysis: declarationKnowledgeAnalysis(t, policy...)}
 	if _, err := db.ExecContext(t.Context(), `INSERT INTO identity.actors(actor_id,actor_key,display_name,actor_kind,status) VALUES($1,'d2-fixture','D2 fixture','human','active')`, f.req.ActorID); err != nil {
 		t.Fatal(err)
 	}

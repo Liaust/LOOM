@@ -142,7 +142,7 @@ func (s *Service) ensureLockedPipelineRunTx(ctx context.Context, tx *sql.Tx, obj
 		run.CurrentStageKey = plan.Stages[startIndex].StageKey
 		run.CurrentExecutionClass = plan.Stages[startIndex].ExecutionClass
 	}
-	quietNow := retryIndex >= 0 && plan.Stages[startIndex].QuietWindow && run.QuietWindowEligibleAt != nil && run.QuietWindowEligibleAt.After(now)
+	quietNow := len(plan.Stages) > startIndex && plan.Stages[startIndex].QuietWindow && run.QuietWindowEligibleAt != nil && run.QuietWindowEligibleAt.After(now)
 	run.Status = waitingPipelineStatus(run.CurrentExecutionClass, quietNow)
 	if err := ValidatePipelineRun(run); err != nil {
 		return PipelineRun{}, false, err
@@ -554,6 +554,9 @@ func pipelinePlanSnapshotsEqual(left, right json.RawMessage) bool {
 }
 
 func pipelineQuietWindowEligibleAt(object KnowledgeObject, plan CompiledPipelinePlan, now time.Time) (time.Time, bool) {
+	if plan.SourcePolicy != nil && plan.SourcePolicy.Refresh != nil {
+		return sourceRefreshEligibleAt(object, *plan.SourcePolicy.Refresh, now), true
+	}
 	hasQuietStage := false
 	for _, stage := range plan.Stages {
 		if stage.Selected && stage.QuietWindow {

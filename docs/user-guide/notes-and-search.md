@@ -49,11 +49,10 @@ syntax, read [[Notes Search And Indexes CLI Reference]].
 
 LOOM Notes does not make one giant writable folder the source of truth.
 
-The source of truth stays in notes roots:
-
-- LOOM Box Notes on each node;
-- project `notes/` facets;
-- future notes roots explicitly registered by LOOM.
+The source of truth stays in admitted source folders, including configured Box
+Topics and Library roots and project folders explicitly declared as knowledge.
+A folder named `notes/` is not automatically enrolled just because of its name.
+Older registered Notes roots remain supported.
 
 LOOM reconciles those roots into knowledge objects, extracts text where
 supported, chunks that text, writes lexical search documents, optionally writes
@@ -62,6 +61,60 @@ embeddings, and builds a read-only `loom-notes` projection.
 The projection is for reading and browsing. It is not the current write path.
 At verification time, `loom notes projection status` reported
 `read_only=true` and `raw_writes_supported=false`.
+
+## Declare A Changing Source Folder
+
+A project can choose how a folder's documents are processed in its existing
+`.loom/project.yaml` declaration. For example:
+
+```yaml
+resources:
+  notebooks:
+    kind: knowledge
+    knowledge:
+      path: notes/notebooks
+      category: notes
+      refresh:
+        quiet_for: 10m
+        max_wait: 30m
+      processing:
+        ocr: auto
+        embeddings: true
+        image_descriptions: false
+```
+
+Use the ordinary project plan/apply workflow to enroll or change the source.
+This does not install a notebook app or synchronize documents from it: the
+application or sync tool delivers files, then LOOM processes admitted revisions.
+Notes does not automatically accept their contents into Provenance.
+
+An explicit `refresh` block delays the start of the whole pipeline until the
+file has stopped changing for `quiet_for`, or the first pending change reaches
+`max_wait`, whichever comes first. Repeated discovery of identical content does
+not restart the timer. The wait is paid once, before extraction, not again before
+OCR and embeddings. An empty block defaults to 10 minutes quiet / 30 minutes
+maximum. Durations use whole seconds up to 24 hours; maximum wait must be positive
+and at least the quiet interval. `quiet_for: 0s` makes a revision immediately
+eligible. Capacity and execution time are additional waits, not part of this
+deadline.
+
+Omitting `refresh` preserves the existing prompt native/lexical processing and
+Main's heavy-stage quiet window. Omitting `processing` inherits Main's settings.
+`ocr: auto` uses the existing native-text-first PDF processing and optional image
+OCR; `off` disables OCR for the source. `embeddings` and `image_descriptions`
+accept booleans. A source can opt out but cannot enable a stage disabled by Main.
+Models, token limits, file/page limits and worker capacity remain host settings.
+
+`loom notes pipelines inspect <object-or-pipeline-ref>` shows the requested and
+effective policy, wait deadline and stage skip reasons. JSON inspection retains
+the same policy in the run's `plan_snapshot`. Disabled stages are not successful
+extractions. Changing the declaration still requires a fresh reviewed apply.
+
+These controls bound waiting before work starts. Continuing a captured revision
+despite later edits, keeping the previous published index searchable during a
+refresh, and a strict-current search option are separate planned improvements;
+they are not supplied by these declaration fields yet. The current pipeline may
+supersede work when a newer source revision arrives.
 
 ## Open The Portal
 

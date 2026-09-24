@@ -83,9 +83,34 @@ const (
 )
 
 type KnowledgeDeclaration struct {
-	Path       string            `json:"path" yaml:"path"`
-	Category   KnowledgeCategory `json:"category" yaml:"category"`
-	Protection ResourceKey       `json:"protection,omitempty" yaml:"protection,omitempty"`
+	Path       string                       `json:"path" yaml:"path"`
+	Category   KnowledgeCategory            `json:"category" yaml:"category"`
+	Protection ResourceKey                  `json:"protection,omitempty" yaml:"protection,omitempty"`
+	Refresh    *KnowledgeRefreshDeclaration `json:"refresh,omitempty" yaml:"refresh,omitempty"`
+	Processing *KnowledgeProcessingPolicy   `json:"processing,omitempty" yaml:"processing,omitempty"`
+}
+
+type KnowledgeRefreshDeclaration struct {
+	QuietFor string `json:"quiet_for,omitempty" yaml:"quiet_for,omitempty"`
+	MaxWait  string `json:"max_wait,omitempty" yaml:"max_wait,omitempty"`
+}
+
+type KnowledgeProcessingPolicy struct {
+	OCR               string `json:"ocr,omitempty" yaml:"ocr,omitempty"`
+	Embeddings        *bool  `json:"embeddings,omitempty" yaml:"embeddings,omitempty"`
+	ImageDescriptions *bool  `json:"image_descriptions,omitempty" yaml:"image_descriptions,omitempty"`
+}
+
+// KnowledgeSourcePolicy is the normalized policy captured in enrollment evidence.
+// A nil policy preserves the encoding of declarations predating these options.
+type KnowledgeSourcePolicy struct {
+	Refresh    *KnowledgeRefreshPolicy    `json:"refresh,omitempty"`
+	Processing *KnowledgeProcessingPolicy `json:"processing,omitempty"`
+}
+
+type KnowledgeRefreshPolicy struct {
+	QuietForSeconds int64 `json:"quiet_for_seconds"`
+	MaxWaitSeconds  int64 `json:"max_wait_seconds"`
 }
 
 // ProtectionDeclaration references a project-relative backup.policy.v0.3 file,

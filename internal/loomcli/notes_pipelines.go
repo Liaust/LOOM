@@ -163,8 +163,24 @@ func newNotesPipelineInspectCommand(opts *options) *cobra.Command {
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(envelope.Data)
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Pipeline: %s\nObject: %s\nStatus: %s\nCurrent stage: %s (%s)\nGeneration: %d\n", envelope.Data.Run.KnowledgePipelineRunID, envelope.Data.Run.KnowledgeObjectID, envelope.Data.Run.Status, envelope.Data.Run.CurrentStageKey, envelope.Data.Run.CurrentExecutionClass, envelope.Data.Run.Generation)
+		var plan knowledge.CompiledPipelinePlan
+		if json.Unmarshal(envelope.Data.Run.PlanSnapshot, &plan) == nil && plan.SourcePolicy != nil {
+			requested, _ := json.Marshal(plan.SourcePolicy)
+			fmt.Fprintf(cmd.OutOrStdout(), "Source policy: %s\n", requested)
+			if p := plan.EffectivePolicy; p != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Effective processing: pdf_ocr=%t image_ocr=%t embeddings=%t image_descriptions=%t\n", p.PDFOCREnabled, p.ImageOCREnabled, p.EmbeddingsEnabled, p.ImageDescriptionsEnabled)
+			}
+		}
+		if deadline := envelope.Data.Run.QuietWindowEligibleAt; deadline != nil {
+			fmt.Fprintf(cmd.OutOrStdout(), "Quiet-window eligibility: %s\n", deadline.UTC().Format(time.RFC3339))
+		}
 		for _, stage := range envelope.Data.Stages {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %02d %-22s %s attempts=%d progress=%d/%d\n", stage.Ordinal, stage.StageKey, stage.Status, stage.AttemptCount, stage.ProgressCompleted, stage.ProgressTotal)
+			for _, planned := range plan.Stages {
+				if planned.StageKey == stage.StageKey && planned.SkipReason != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "     %s\n", planned.SkipReason)
+				}
+			}
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Artifacts: %d (bodies omitted)\n", len(envelope.Data.Artifacts))
 		return nil

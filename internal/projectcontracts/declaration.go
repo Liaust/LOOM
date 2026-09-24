@@ -24,6 +24,15 @@ import (
 // It does not resolve target ownership or grant execution authority.
 func ParseProjectDeclaration(raw []byte) (ProjectDeclaration, error) {
 	d, code := parseDeclarationShape(raw)
+	if code == "declaration.knowledge_policy" {
+		for _, key := range declarationKeys(d.Resources) {
+			if source := d.Resources[key].Knowledge; source != nil {
+				if _, err := NormalizeKnowledgeSourcePolicy(*source); err != nil {
+					return d, fmt.Errorf("%s: resources.%s.%w", code, key, err)
+				}
+			}
+		}
+	}
 	if code != "" {
 		return d, fmt.Errorf("%s: invalid project declaration", code)
 	}
@@ -145,6 +154,9 @@ func parseDeclarationShape(raw []byte) (ProjectDeclaration, string) {
 			}
 			p = r.Knowledge.Path
 			protection = r.Knowledge.Protection
+			if _, err := NormalizeKnowledgeSourcePolicy(*r.Knowledge); err != nil {
+				return d, "declaration.knowledge_policy"
+			}
 			switch r.Knowledge.Category {
 			case KnowledgeCategoryNotes, KnowledgeCategoryDocs, KnowledgeCategoryResearch:
 			default:
@@ -1184,6 +1196,13 @@ func CompileDeclarationEnrollment(loaded LoadedProject, c DeclarationCompilation
 			"project_id": d.Project.ID, "project_root": loaded.RootPath, "owner_node": d.Project.OwnerNode,
 			"resource_key": string(key), "local_root_key": localKey, "backend_root_key": ProjectWatchedRootKey(d.Project.Slug, localKey),
 			"source_ref": rootSource.Ref, "source_hash": rootSource.Hash,
+		}
+		policy, err := NormalizeKnowledgeSourcePolicy(*knowledge)
+		if err != nil {
+			return nil, err
+		}
+		if policy != nil {
+			acc.metadata["knowledge_source"].(map[string]any)["policy"] = policy
 		}
 	}
 	items := builder.items()
