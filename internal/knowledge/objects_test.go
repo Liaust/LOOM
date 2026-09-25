@@ -384,6 +384,44 @@ func TestBuildKnowledgeObjectCandidatesPrefersCurrentStorageEntryForSamePath(t *
 	}
 }
 
+func TestBuildKnowledgeObjectCandidatesPreferLiveSyncedRevision(t *testing.T) {
+	service := NewService(nil)
+	nodeID := ids.NewNodeID()
+	root := SourceRoot{NotesSourceRootID: ids.NewNotesSourceRootID(), RootKind: RootKindBoxNotes,
+		NodeID: &nodeID, NodeKey: "main", BackendRootKey: "loom_box__notes",
+		SourcePath: "/fixture", Status: SourceRootStatusActive, Metadata: json.RawMessage(`{"box_id":"box-test"}`)}
+	entry := storagecatalog.Entry{StorageEntryID: ids.NewStorageEntryID(),
+		SourceArea: storagecatalog.SourceAreaNotes, OriginNodeID: &nodeID, OriginNodeKey: "main",
+		WatchedRootKey: root.BackendRootKey, LogicalPath: "note.md", OriginalSourcePath: "note.md",
+		FileClass: storagecatalog.FileClassMarkdown, AvailabilityState: storagecatalog.AvailabilityStateAvailable}
+	synced := SyncedObjectEntry{NotesSourceRootID: root.NotesSourceRootID, BackendRootKey: root.BackendRootKey,
+		ScopeKey:     "loom_box:box-test:notes",
+		SourceNodeID: nodeID, SourceNodeKey: "main", ObjectID: ids.NewObjectID(), ObjectVersionID: ids.NewObjectVersionID(),
+		SourcePath: "watched-root://loom_box__notes/note.md", LogicalName: "note.md",
+		FileClass: storagecatalog.FileClassMarkdown, SourceHash: "sha256:" + strings.Repeat("a", 64)}
+	candidates, skipped := service.BuildKnowledgeObjectCandidates([]SourceRoot{root}, []storagecatalog.Entry{entry},
+		[]SyncedObjectEntry{synced, synced})
+	if len(skipped) != 0 || len(candidates) != 1 || candidates[0].Origin != KnowledgeObjectOriginSyncedObject {
+		t.Fatalf("duplicate or wrong admission: candidates=%+v skipped=%+v", candidates, skipped)
+	}
+	current := candidates[0].Object
+	for range 3 {
+		next, _ := service.BuildKnowledgeObjectCandidates([]SourceRoot{root}, []storagecatalog.Entry{entry}, []SyncedObjectEntry{synced})
+		current = preserveKnowledgeObjectProcessing(current, next[0].Object)
+		if current.SourceRevision != "object_version:"+synced.ObjectVersionID || current.StorageEntryID != nil {
+			t.Fatalf("poll reverted to storage identity: %+v", current)
+		}
+	}
+	other := synced
+	other.NotesSourceRootID = "not-this-root"
+	other.BackendRootKey = "not-this-root"
+	other.SourcePath = "watched-root://not-this-root/note.md"
+	candidates, _ = service.BuildKnowledgeObjectCandidates([]SourceRoot{root}, []storagecatalog.Entry{entry}, []SyncedObjectEntry{other})
+	if len(candidates) != 1 || candidates[0].Origin != KnowledgeObjectOriginStorageCatalog {
+		t.Fatal("unrelated replica displaced storage candidate")
+	}
+}
+
 func TestBuildKnowledgeObjectCandidatesMapsProjectSyncedObjects(t *testing.T) {
 	fixed := time.Date(2026, 7, 4, 10, 45, 0, 0, time.UTC)
 	service := NewService(nil, WithClock(func() time.Time { return fixed }))

@@ -240,13 +240,24 @@ func (s *Service) BuildKnowledgeObjectCandidates(roots []SourceRoot, entries []s
 				continue
 			}
 			syncedCopy := synced
-			candidates = append(candidates, KnowledgeObjectCandidate{
+			candidate := KnowledgeObjectCandidate{
 				Origin:    KnowledgeObjectOriginSyncedObject,
 				OriginRef: syncedObjectRef(synced),
 				Root:      root,
 				Synced:    &syncedCopy,
 				Object:    object,
-			})
+			}
+			// The current verified replica owns live revision identity. Do not
+			// alternately admit its retained storage view at the same path.
+			key := storageKnowledgeCandidateKey{root.NotesSourceRootID, relativePath}
+			if index, exists := storageCandidateIndexes[key]; exists {
+				if candidates[index].Origin != KnowledgeObjectOriginSyncedObject {
+					candidates[index] = candidate
+				}
+			} else {
+				storageCandidateIndexes[key] = len(candidates)
+				candidates = append(candidates, candidate)
+			}
 		}
 	}
 	return candidates, skipped
