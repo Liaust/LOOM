@@ -434,6 +434,9 @@ func renderNotesSearchResultRow(builder *strings.Builder, row int, selected int,
 		"source=" + notesSearchResultSourceLabel(result),
 		"extraction=" + notesSearchResultExtractionLabel(result),
 	}
+	if result.Freshness.IndexedSourceRevision != "" {
+		contextParts = append([]string{fmt.Sprintf("current=%t refresh=%s semantic_lag=%t", result.Freshness.Current, result.Freshness.RefreshState, result.Freshness.SemanticLag)}, contextParts...)
+	}
 	fmt.Fprintf(builder, "  %s %s\n",
 		renderSelectedMarker(row, selected),
 		trimForWidth(title, usableWidth(portalRenderContext().Width, 32)),

@@ -25,6 +25,15 @@ func TestNotesArchivePortalRequestIdentity(t *testing.T) {
 	}
 }
 
+func TestNotesPortalLabelsPublishedRefresh(t *testing.T) {
+	result := knowledge.NotesSearchResult{Title: "Notebook", Freshness: knowledge.NotesSearchFreshness{IndexedSourceRevision: "v1", LatestSourceRevision: "v2", RefreshState: "waiting_heavy", SemanticLag: true}}
+	data := NotesSearchData{Query: "notebook", Status: ScreenLoadLoaded, ResultSet: knowledge.NotesSearchResultSet{Results: []knowledge.NotesSearchResult{result}, ResultCount: 1}}
+	out := RenderNotesSearchWithSelection(testMode(), data.Query, data, 0, 160, 60)
+	if !strings.Contains(out, "current=false refresh=waiting_heavy semantic_lag=true") {
+		t.Fatalf("published revision was not labelled: %s", out)
+	}
+}
+
 func TestNotesArchivePortalLabelsInspectAndScroll(t *testing.T) {
 	when := time.Date(2026, 9, 10, 1, 2, 3, 0, time.UTC)
 	active := knowledge.NotesSearchResult{KnowledgeObjectID: "object_active", Title: "Active title", NotesCustodyContext: knowledge.NotesCustodyContext{SourceLifecycle: knowledge.SourceLifecycleActive}}

@@ -172,7 +172,7 @@ func buildSemanticNotesSearchQuery(input NotesSearchInput, settings EmbeddingSet
 			       kc.knowledge_chunk_id,
 			       root.notes_source_root_id,
 			       root.root_kind,
-			       ` + notesReadContextSQL("root", "ko") + ` AS source_context_root,
+			       ` + notesSearchReadContextSQL("root", "ko", "kov", true) + ` AS source_context_root,
 			       ko.source_node_key,
 			       COALESCE(ko.project_id, '') AS project_id,
 			       ko.relative_path,
@@ -216,7 +216,8 @@ func buildSemanticNotesSearchQuery(input NotesSearchInput, settings EmbeddingSet
 			  AND ko.deleted_at IS NULL
 			  AND ` + visibleNotesCustodyObjectSQL("ko", true) + `
 			  AND ` + notesLifecycleSelectionSQL("ko", input.SourceLifecycle) + `
-			  AND (kc.knowledge_object_version_id IS NULL OR (kov.source_hash = ko.source_hash AND kov.source_revision = ko.source_revision))
+			  AND ` + notesPublishedVersionSQL("ko", "kc", "kov", true, input.RequireCurrent) + `
+			  AND ` + notesHybridVersionSQL(input.Mode) + `
 			  AND kc.status IN ('created', 'indexed')
 			  AND (
 				ce.knowledge_object_version_id IS NULL
@@ -552,6 +553,7 @@ func (s Store) CountActiveCurrentEmbeddings(ctx context.Context, settings Embedd
 		JOIN knowledge.knowledge_objects ko
 		  ON ko.knowledge_object_id = kc.knowledge_object_id
 		 AND ko.knowledge_object_id = ce.knowledge_object_id
+		LEFT JOIN knowledge.knowledge_object_versions kov ON kov.knowledge_object_version_id=kc.knowledge_object_version_id
 		WHERE ce.active = true
 		  AND ce.status = 'active'
 		  AND ce.knowledge_chunk_id IS NOT NULL
@@ -559,6 +561,7 @@ func (s Store) CountActiveCurrentEmbeddings(ctx context.Context, settings Embedd
 		  AND ce.model_key = $2
 		  AND ce.dimensions = $3
 		  AND ko.deleted_at IS NULL
+		  AND `+notesPublishedVersionSQL("ko", "kc", "kov", true, false)+`
 		  AND (
 			ce.knowledge_object_version_id IS NULL
 			OR kc.knowledge_object_version_id IS NULL

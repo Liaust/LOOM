@@ -171,9 +171,9 @@ func (s Store) UpsertKnowledgeObject(ctx context.Context, object KnowledgeObject
 		if err := requireNotesCustodyWriteTx(ctx, tx, existing); err != nil {
 			return KnowledgeObject{}, err
 		}
-		contentChanged = knowledgeObjectContentChanged(existing, object)
 		object.KnowledgeObjectID = existingID
 		object = preserveKnowledgeObjectProcessing(existing, object)
+		contentChanged = knowledgeObjectContentChanged(existing, object)
 		object = observeSourceRefresh(&existing, object, time.Now().UTC())
 		out, err = updateKnowledgeObjectTx(ctx, tx, object)
 	}

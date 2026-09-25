@@ -376,6 +376,7 @@ func newNotesSearchCommand(opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&input.Path, "path", "", "filter by relative path substring")
 	cmd.Flags().StringArrayVar(&input.Tags, "tag", nil, "filter by frontmatter tag; can be repeated")
 	cmd.Flags().StringVar(&input.Mode, "mode", "", "search mode: lexical, semantic, or hybrid")
+	cmd.Flags().BoolVar(&input.RequireCurrent, "require-current", false, "exclude published results whose source has a newer revision")
 	cmd.Flags().StringVar(&input.After, "after", "", "include results at or after an RFC3339 timestamp or YYYY-MM-DD date")
 	cmd.Flags().StringVar(&input.Before, "before", "", "include results before an RFC3339 timestamp or YYYY-MM-DD date")
 	cmd.Flags().StringVar(&input.Sort, "sort", "", "result order: relevance, newest, or oldest")
@@ -385,6 +386,7 @@ func newNotesSearchCommand(opts *options) *cobra.Command {
 }
 
 func mergeNotesSearchCommandInput(parsed knowledge.NotesSearchInput, flags knowledge.NotesSearchInput) knowledge.NotesSearchInput {
+	parsed.RequireCurrent = parsed.RequireCurrent || flags.RequireCurrent
 	if flags.SourceLifecycle != "" {
 		parsed.SourceLifecycle = flags.SourceLifecycle
 	}
@@ -990,6 +992,9 @@ func renderNotesSearchResults(cmd *cobra.Command, opts *options, results knowled
 			fmt.Fprintf(tw, "\toriginal=%s canonical=%s archived_at=%s archive=%s\n", result.OriginalPath, result.CanonicalPath, timePtrOrDash(result.ArchivedAt), result.ArchiveOperationID)
 		}
 		fmt.Fprint(tw, followups[index])
+		if result.Freshness.IndexedSourceRevision != "" {
+			fmt.Fprintf(tw, "\tindexed=%s latest=%s current=%t refresh=%s semantic_lag=%t\n", result.Freshness.IndexedSourceRevision, result.Freshness.LatestSourceRevision, result.Freshness.Current, result.Freshness.RefreshState, result.Freshness.SemanticLag)
+		}
 	}
 	_ = tw.Flush()
 }
@@ -1015,6 +1020,9 @@ func notesSearchSelectedDateLabel(result knowledge.NotesSearchResult) string {
 }
 
 func renderNotesSearchSummary(cmd *cobra.Command, results knowledge.NotesSearchResultSet) {
+	if results.RefreshingMatchesOmitted > 0 || results.RefreshingMatchesOmittedTruncated {
+		fmt.Fprintf(cmd.OutOrStdout(), "Refreshing matches omitted=%d truncated=%t\n", results.RefreshingMatchesOmitted, results.RefreshingMatchesOmittedTruncated)
+	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Source lifecycle: %s; archived matches omitted=%d truncated=%t\n", dashIfEmpty(string(results.SourceLifecycle)), results.ArchivedMatchesOmitted, results.ArchivedMatchesOmittedTruncated)
 	mode := strings.TrimSpace(results.Mode)
 	if mode == "" {

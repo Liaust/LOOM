@@ -104,6 +104,10 @@ func (s *Service) getOrCreateKnowledgeObjectVersionTx(ctx context.Context, tx *s
 	if err != nil {
 		return KnowledgeObjectVersion{}, err
 	}
+	return s.createKnowledgeObjectVersionTx(ctx, tx, version)
+}
+
+func (s *Service) createKnowledgeObjectVersionTx(ctx context.Context, tx *sql.Tx, version KnowledgeObjectVersion) (KnowledgeObjectVersion, error) {
 	row := tx.QueryRowContext(ctx, `
 		INSERT INTO knowledge.knowledge_object_versions (
 			knowledge_object_version_id, knowledge_object_id, version_number,

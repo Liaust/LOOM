@@ -23,10 +23,12 @@ type notesQueryEmbedding struct {
 }
 
 type notesSearchPartition struct {
-	results   []NotesSearchResult
-	matches   int
-	truncated bool
-	fallback  string
+	results          []NotesSearchResult
+	matches          int
+	truncated        bool
+	omitted          int
+	omittedTruncated bool
+	fallback         string
 }
 
 func (s *Service) searchNotesLifecycles(ctx context.Context, input NotesSearchInput, mode, requested string, semanticAvailable bool, fallback string, settings EmbeddingSettings) (NotesSearchResultSet, error) {
@@ -81,6 +83,14 @@ func (s *Service) searchNotesLifecycles(ctx context.Context, input NotesSearchIn
 		out.ArchivedMatchesOmitted, out.ArchivedMatchesOmittedTruncated = archived.matches, archived.truncated
 	}
 	out.ResultCount = len(out.Results)
+	if input.SourceLifecycle != SourceLifecycleFilterArchived {
+		out.RefreshingMatchesOmitted += active.omitted
+		out.RefreshingMatchesOmittedTruncated = active.omittedTruncated
+	}
+	if input.SourceLifecycle != SourceLifecycleFilterActive {
+		out.RefreshingMatchesOmitted += archived.omitted
+		out.RefreshingMatchesOmittedTruncated = out.RefreshingMatchesOmittedTruncated || archived.omittedTruncated
+	}
 	if err := tx.Commit(); err != nil {
 		return NotesSearchResultSet{}, err
 	}
@@ -103,6 +113,22 @@ func notesLifecycleGroupLimits(active, archived, limit int) (int, int) {
 
 func (s *Service) searchNotesPartition(ctx context.Context, input NotesSearchInput, mode string, settings EmbeddingSettings, fallback string, now time.Time) (notesSearchPartition, error) {
 	part := notesSearchPartition{results: []NotesSearchResult{}, fallback: fallback}
+	if input.RequireCurrent {
+		all := input
+		all.RequireCurrent = false
+		all.Limit = 50
+		unrestricted, err := s.searchNotesPartition(ctx, all, mode, settings, fallback, now)
+		if err != nil {
+			return part, err
+		}
+		for _, r := range unrestricted.results {
+			if !r.Freshness.Current {
+				part.omitted++
+			}
+		}
+		part.omittedTruncated = unrestricted.truncated || len(unrestricted.results) == 50
+	}
+	input.Mode = mode
 	var lexicalResults, semanticResults []NotesSearchResult
 	var err error
 	if mode != NotesSearchModeSemantic {
@@ -151,6 +177,13 @@ func notesPartitionMatchCount(lexical, semantic []NotesSearchResult, candidateLi
 }
 
 func decodeNotesSearchCustody(raw []byte, result *NotesSearchResult) error {
+	var additional struct {
+		Freshness NotesSearchFreshness `json:"freshness"`
+	}
+	if err := json.Unmarshal(raw, &additional); err != nil {
+		return err
+	}
+	result.Freshness = additional.Freshness
 	custody, err := decodeNotesReadCustody(raw, result.SourcePath)
 	if err != nil {
 		return err

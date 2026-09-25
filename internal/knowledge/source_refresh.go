@@ -23,10 +23,6 @@ func objectRefreshClock(object KnowledgeObject) sourceRefreshClock {
 }
 
 func observeSourceRefresh(existing *KnowledgeObject, next KnowledgeObject, now time.Time) KnowledgeObject {
-	policy, err := knowledgeSourcePolicy(next)
-	if err != nil || policy == nil || policy.Refresh == nil {
-		return next
-	}
 	// Eligibility is persisted as a PostgreSQL timestamp; keep the JSON clock
 	// on the same precision so inspection and replay agree exactly.
 	now = now.UTC().Truncate(time.Microsecond)

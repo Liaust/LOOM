@@ -213,6 +213,9 @@ func (s *Service) ExtractObject(ctx context.Context, input TextPipelineInput) (E
 
 func (s *Service) preparePathBackedExtractionObject(ctx context.Context, object KnowledgeObject, maxBytes int64) (KnowledgeObject, func(), error) {
 	cleanup := func() {}
+	if object.pipelineSource != nil {
+		return s.prepareSelectedPipelineSource(ctx, object, maxBytes)
+	}
 	if isSyncedKnowledgeObject(object) {
 		return s.prepareSyncedExtractionFile(ctx, object, maxBytes)
 	}
@@ -282,6 +285,16 @@ func (s *Service) materializeRetainedSourceForExtraction(ctx context.Context, ob
 }
 
 func (s *Service) readKnowledgeObjectSource(ctx context.Context, object KnowledgeObject, maxBytes int64) (string, error) {
+	if object.pipelineSource != nil {
+		var content strings.Builder
+		if err := s.readSelectedPipelineSource(ctx, object, maxBytes, &content); err != nil {
+			return "", err
+		}
+		if !utf8.ValidString(content.String()) {
+			return "", fmt.Errorf("%w: selected source is not valid UTF-8", ErrInvalid)
+		}
+		return normalizeTextNewlines(content.String()), nil
+	}
 	if isSyncedKnowledgeObject(object) {
 		payload, err := s.readSyncedObjectSource(ctx, object, maxBytes)
 		if err != nil {

@@ -80,6 +80,10 @@ func (s *Service) executeCoordinatorStage(ctx context.Context, item PipelineWork
 	if item.Stage.ExecutionClass != PipelineExecutionCoordinator {
 		return nil, fmt.Errorf("%w: stage %q is not coordinator work", ErrInvalid, item.Stage.StageKey)
 	}
+	item, err := s.capturePipelineSource(ctx, item)
+	if err != nil {
+		return nil, err
+	}
 	version, err := s.store.getKnowledgeObjectVersion(ctx, item.Run.KnowledgeObjectVersionID)
 	if err != nil {
 		return nil, err
@@ -158,21 +162,8 @@ func (s *Service) executeCoordinatorStage(ctx context.Context, item PipelineWork
 		if found {
 			return nil, s.publishConsolidatedLexical(ctx, item, version, artifact)
 		}
-		if pipelineFileFamily(item.Object) == "metadata_only" || pipelineFileFamily(item.Object) == "image" {
-			tx, err := s.store.db.BeginTx(ctx, nil)
-			if err != nil {
-				return nil, err
-			}
-			defer tx.Rollback()
-			if err = lockPipelineClaimTx(ctx, tx, item); err != nil {
-				return nil, err
-			}
-			if err = replaceKnowledgeMetadataSearchDocumentForObjectTx(ctx, tx, item.Object); err != nil {
-				return nil, err
-			}
-			return nil, tx.Commit()
-		}
-		return nil, nil
+		// An empty replacement is a publication too; it must retire the old body.
+		return nil, s.publishConsolidatedLexical(ctx, item, version, DerivedArtifact{})
 	case FilePipelineStageFinalize:
 		tx, err := s.store.db.BeginTx(ctx, nil)
 		if err != nil {
@@ -182,7 +173,7 @@ func (s *Service) executeCoordinatorStage(ctx context.Context, item PipelineWork
 		if err = lockPipelineClaimTx(ctx, tx, item); err != nil {
 			return nil, err
 		}
-		result, err := tx.ExecContext(ctx, `UPDATE knowledge.knowledge_objects SET processing_state=CASE WHEN processing_state='embedded' THEN 'embedded' ELSE 'indexed' END, pipeline_key=$2, pipeline_version=$3, last_processed_at=now(), last_error_code='', last_error_message='', updated_at=now() WHERE knowledge_object_id=$1`, item.Object.KnowledgeObjectID, item.Run.PipelineDefinitionKey, item.Run.PipelineDefinitionVersion)
+		result, err := tx.ExecContext(ctx, `UPDATE knowledge.knowledge_objects SET processing_state=CASE WHEN source_hash<>$4 OR source_revision<>$5 THEN 'stale' WHEN processing_state='embedded' THEN 'embedded' ELSE 'indexed' END, pipeline_key=$2, pipeline_version=$3, last_processed_at=now(), last_error_code='', last_error_message='', updated_at=now() WHERE knowledge_object_id=$1`, item.Object.KnowledgeObjectID, item.Run.PipelineDefinitionKey, item.Run.PipelineDefinitionVersion, item.Run.SourceHash, item.Run.SourceRevision)
 		if err != nil {
 			return nil, err
 		}
@@ -304,16 +295,19 @@ func (s *Service) publishConsolidatedLexical(ctx context.Context, item PipelineW
 	if _, _, err = s.replaceKnowledgeSearchDocumentsTx(ctx, tx, item.Object, version, chunks); err != nil {
 		return err
 	}
-	object := item.Object
-	now := s.currentTime()
-	object.ProcessingState = ProcessingStateIndexed
-	object.PipelineKey = item.Run.PipelineDefinitionKey
-	object.PipelineVersion = item.Run.PipelineDefinitionVersion
-	object.LastProcessedAt = &now
-	object.LastErrorCode = ""
-	object.LastErrorMessage = ""
-	object.UpdatedAt = now
-	if _, err = updateKnowledgeObjectTx(ctx, tx, object); err != nil {
+	if len(chunks) == 0 {
+		current, readErr := scanKnowledgeObject(tx.QueryRowContext(ctx, `SELECT `+knowledgeObjectColumns()+` FROM knowledge.knowledge_objects WHERE knowledge_object_id=$1`, item.Object.KnowledgeObjectID))
+		if readErr != nil {
+			return readErr
+		}
+		// Metadata describes the current source, never a superseded capture.
+		if err = replaceKnowledgeMetadataSearchDocumentForObjectTx(ctx, tx, current); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE knowledge.knowledge_objects SET lexical_version_id=$2,lexical_published_at=$3,
+		processing_state=CASE WHEN source_hash=$4 AND source_revision=$5 THEN 'indexed' ELSE 'stale' END,
+		last_processed_at=$3,updated_at=$3 WHERE knowledge_object_id=$1`, item.Object.KnowledgeObjectID, version.KnowledgeObjectVersionID, s.currentTime(), item.Run.SourceHash, item.Run.SourceRevision); err != nil {
 		return err
 	}
 	return tx.Commit()

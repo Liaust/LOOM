@@ -60,11 +60,15 @@ func dxObserve(t *testing.T, s *Service, root SourceRoot, object KnowledgeObject
 		t.Fatal(e)
 	}
 	blob, version, hash := ids.NewBlobID(), ids.NewObjectVersionID(), hashArtifactValue(body)
+	if e = s.store.db.QueryRow(`INSERT INTO files.blobs(blob_id,hash_algorithm,hash_hex,hash_uri,size_bytes,storage_path,status)
+	 VALUES ($1,'sha256',$2,$3,$4,$5,'verified') ON CONFLICT(hash_uri) DO UPDATE SET hash_uri=EXCLUDED.hash_uri
+	 RETURNING blob_id`, blob, strings.TrimPrefix(hash, "sha256:"), hash, len(body), file).Scan(&blob); e != nil {
+		t.Fatal(e)
+	}
 	for _, stmt := range []struct {
 		q string
 		a []any
 	}{
-		{`INSERT INTO files.blobs(blob_id,hash_algorithm,hash_hex,hash_uri,size_bytes,storage_path,status) VALUES ($1,'sha256',$2,$3,$4,$5,'verified')`, []any{blob, strings.TrimPrefix(hash, "sha256:"), hash, len(body), file}},
 		{`INSERT INTO objects.object_versions(object_version_id,object_id,version_number,blob_id,content_hash,source_node_id,source_path,size_bytes,mime_type,status,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'text/markdown','active','{"file_class":"markdown"}')`, []any{version, old.ObjectID, number, blob, hash, old.SourceNodeID, old.SourcePath, len(body)}},
 		{`UPDATE files.file_metadata SET latest_version_id=$1 WHERE object_id=$2`, []any{version, old.ObjectID}},
 		{`UPDATE objects.object_versions SET status='superseded' WHERE object_version_id=$1`, []any{old.ObjectVersionID}},

@@ -47,8 +47,8 @@ OCR: auto/off. Processing omission inherits Main; false opts out, true cannot
 override host disablement. Models/sync remain host/application-owned.
 
 Use `loom notes pipelines inspect <ref>` for policy/deadline/skip reasons;
-verify indexing by exact passage retrieval. New revisions still supersede work;
-last-published search during continuous edits is not implemented yet.
+selected revisions finish; newer edits coalesce. Search labels last-published
+content during refresh. Use `--require-current` to exclude lag; preserve exact citations.
 
 Saving source does not enroll it. Plan against the selected owner node:
 

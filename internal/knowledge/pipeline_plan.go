@@ -23,13 +23,14 @@ type CompiledPipelineStage struct {
 }
 
 type CompiledPipelinePlan struct {
-	SchemaVersion     string                                  `json:"schema_version"`
-	DefinitionKey     string                                  `json:"definition_key"`
-	DefinitionVersion string                                  `json:"definition_version"`
-	FileFamily        string                                  `json:"file_family"`
-	Stages            []CompiledPipelineStage                 `json:"stages"`
-	SourcePolicy      *projectcontracts.KnowledgeSourcePolicy `json:"source_policy,omitempty"`
-	EffectivePolicy   *PipelinePolicy                         `json:"effective_policy,omitempty"`
+	HeavyQuietWindowSeconds int                                     `json:"heavy_quiet_window_seconds,omitempty"`
+	SchemaVersion           string                                  `json:"schema_version"`
+	DefinitionKey           string                                  `json:"definition_key"`
+	DefinitionVersion       string                                  `json:"definition_version"`
+	FileFamily              string                                  `json:"file_family"`
+	Stages                  []CompiledPipelineStage                 `json:"stages"`
+	SourcePolicy            *projectcontracts.KnowledgeSourcePolicy `json:"source_policy,omitempty"`
+	EffectivePolicy         *PipelinePolicy                         `json:"effective_policy,omitempty"`
 }
 
 func CompilePipelinePlan(object KnowledgeObject, policy PipelinePolicy) (CompiledPipelinePlan, error) {

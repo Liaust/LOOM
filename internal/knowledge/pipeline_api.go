@@ -20,9 +20,10 @@ type PipelineListInput struct {
 	Limit        int    `json:"limit,omitempty"`
 }
 type PipelineInspect struct {
-	Run       PipelineRun        `json:"run"`
-	Stages    []PipelineStageRun `json:"stages"`
-	Artifacts []DerivedArtifact  `json:"artifacts"`
+	Refresh   PipelineRefreshStatus `json:"refresh"`
+	Run       PipelineRun           `json:"run"`
+	Stages    []PipelineStageRun    `json:"stages"`
+	Artifacts []DerivedArtifact     `json:"artifacts"`
 }
 type PipelineOverallStatus struct {
 	Counts     map[string]int           `json:"counts"`
@@ -124,7 +125,11 @@ func (s *Service) InspectPipeline(ctx context.Context, ref string) (PipelineInsp
 	for index := range stages {
 		stages[index].Error = redactPipelineStageError(stages[index].Error)
 	}
-	return PipelineInspect{Run: redactPipelineRun(run), Stages: stages, Artifacts: artifacts}, nil
+	refresh, err := s.pipelineRefreshStatus(ctx, run)
+	if err != nil {
+		return PipelineInspect{}, err
+	}
+	return PipelineInspect{Run: redactPipelineRun(run), Stages: stages, Artifacts: artifacts, Refresh: refresh}, nil
 }
 
 func redactPipelineRun(run PipelineRun) PipelineRun {

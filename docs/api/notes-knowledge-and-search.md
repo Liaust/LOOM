@@ -113,6 +113,7 @@ Notes search accepts:
 - `after`;
 - `before`;
 - `sort`;
+- `require_current` (optional boolean, default false);
 - `limit`.
 
 The local CLI can parse scoped query tokens into this shape. For example:
@@ -151,6 +152,20 @@ Each result can include:
 `indexed_at` is not a recency source. A fallback selected from observation time
 is explicitly labelled with `recency_basis=observed_at_fallback`.
 
+Each result's `freshness` reports `current`, `indexed_source_revision`,
+`indexed_source_hash`, `latest_source_revision`, `latest_source_hash`,
+`published_at` when known, `refresh_state`, and `semantic_lag`. Default retrieval
+can return the previous published revision while newer input waits or processes.
+Hybrid retrieval only combines lexical and semantic evidence from the same
+revision. Semantic publication changes atomically after all required vectors
+exist; partial output is not searchable.
+
+`require_current: true` filters lagging results before ranking. The response
+reports `refreshing_matches_omitted` and
+`refreshing_matches_omitted_truncated`; these are bounded matching-document
+counts, not a complete inventory. Source lifecycle filtering remains independent
+of freshness, and current access restrictions apply to every publication.
+
 Invalid date syntax returns a different user-facing summary from an empty
 query. Unknown JSON fields remain rejected.
 
@@ -178,6 +193,11 @@ the CLI or portal confirmation workflow instead of raw HTTP.
 Pipeline status and inspection return operational metadata only. Derived
 artifact text and payload references are stripped from inspect responses.
 Retry, policy update, and backfill apply use idempotency handling.
+
+Inspection also returns `refresh`: latest revision/hash, selected revision,
+pending state/time, lexical and semantic version IDs/publication times, and
+requested source policy. The run's plan snapshot contains its effective policy;
+the private captured input is not serialized in API responses.
 
 `GET /v1/knowledge/notes/pipelines/backfill` is always a dry-run. `POST` needs
 `{"confirm":true}`. Apply creates at most one unified pipeline for each current

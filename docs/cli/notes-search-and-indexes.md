@@ -180,6 +180,7 @@ loom notes search "query" --tag osint
 loom notes search "query" --mode lexical
 loom notes search "query" --after 2026-01-01 --before 2026-02-01
 loom notes search "query" --sort newest
+loom notes search "query" --require-current
 ```
 
 Search modes:
@@ -190,6 +191,15 @@ Search modes:
 
 Hybrid is the default requested mode. If embeddings are disabled or unavailable,
 LOOM falls back to lexical search and reports the reason.
+
+By default, the last published revision remains searchable during refresh or
+failure. Results report indexed/latest source identity, currentness, refresh
+state and semantic lag. `--require-current` excludes lagging publications and
+reports bounded omitted-match counts. It does not change source lifecycle or
+access rules. Hybrid mode avoids mixing lexical and semantic revisions; explicit
+semantic mode may return a labelled older publication until embeddings finish.
+Use `loom notes pipelines inspect <object-ref>` for selected/latest/pending
+state, publication IDs, effective policy and the wait deadline.
 
 Absolute-time controls:
 

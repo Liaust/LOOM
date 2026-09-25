@@ -13,9 +13,14 @@ type Clock func() time.Time
 type Option func(*Service)
 
 type Service struct {
-	store            Store
-	now              Clock
-	embeddingRuntime EmbeddingRuntime
+	store             Store
+	now               Clock
+	embeddingRuntime  EmbeddingRuntime
+	sourceStagingRoot string
+}
+
+func WithSourceStagingRoot(path string) Option {
+	return func(s *Service) { s.sourceStagingRoot = path }
 }
 
 func NewService(db *sql.DB, opts ...Option) *Service {

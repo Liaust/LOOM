@@ -26,6 +26,7 @@ const (
 )
 
 type NotesSearchInput struct {
+	RequireCurrent    bool                  `json:"require_current,omitempty"`
 	SourceLifecycle   SourceLifecycleFilter `json:"source_lifecycle,omitempty"`
 	queryEmbedding    *notesQueryEmbedding
 	readTx            *sql.Tx
@@ -48,20 +49,23 @@ type NotesSearchInput struct {
 }
 
 type NotesSearchResultSet struct {
-	SourceLifecycle                 SourceLifecycleFilter       `json:"source_lifecycle"`
-	LifecycleGroups                 []NotesSearchLifecycleGroup `json:"lifecycle_groups"`
-	ArchivedMatchesOmitted          int                         `json:"archived_matches_omitted"`
-	ArchivedMatchesOmittedTruncated bool                        `json:"archived_matches_omitted_truncated"`
-	Query                           string                      `json:"query"`
-	Mode                            string                      `json:"mode,omitempty"`
-	RequestedMode                   string                      `json:"requested_mode,omitempty"`
-	FallbackReason                  string                      `json:"fallback_reason,omitempty"`
-	SemanticAvailable               bool                        `json:"semantic_available,omitempty"`
-	ResultCount                     int                         `json:"result_count"`
-	Results                         []NotesSearchResult         `json:"results"`
+	RefreshingMatchesOmitted          int                         `json:"refreshing_matches_omitted"`
+	RefreshingMatchesOmittedTruncated bool                        `json:"refreshing_matches_omitted_truncated"`
+	SourceLifecycle                   SourceLifecycleFilter       `json:"source_lifecycle"`
+	LifecycleGroups                   []NotesSearchLifecycleGroup `json:"lifecycle_groups"`
+	ArchivedMatchesOmitted            int                         `json:"archived_matches_omitted"`
+	ArchivedMatchesOmittedTruncated   bool                        `json:"archived_matches_omitted_truncated"`
+	Query                             string                      `json:"query"`
+	Mode                              string                      `json:"mode,omitempty"`
+	RequestedMode                     string                      `json:"requested_mode,omitempty"`
+	FallbackReason                    string                      `json:"fallback_reason,omitempty"`
+	SemanticAvailable                 bool                        `json:"semantic_available,omitempty"`
+	ResultCount                       int                         `json:"result_count"`
+	Results                           []NotesSearchResult         `json:"results"`
 }
 
 type NotesSearchResult struct {
+	Freshness NotesSearchFreshness `json:"freshness"`
 	SourceContext
 	NotesCustodyContext
 	PassageFollowup          *NotesPassageInput  `json:"passage_followup,omitempty"`
@@ -521,7 +525,7 @@ func buildNotesSearchQuery(input NotesSearchInput) (notesSearchQuery, error) {
 			       COALESCE(kc.knowledge_chunk_id, '') AS knowledge_chunk_id,
 			       root.notes_source_root_id,
 			       root.root_kind,
-			       ` + notesReadContextSQL("root", "ko") + ` AS source_context_root,
+			       ` + notesSearchReadContextSQL("root", "ko", "kov", false) + ` AS source_context_root,
 			       ko.source_node_key,
 			       COALESCE(ko.project_id, '') AS project_id,
 			       ko.relative_path,
@@ -556,7 +560,7 @@ func buildNotesSearchQuery(input NotesSearchInput) (notesSearchQuery, error) {
 			  AND ko.deleted_at IS NULL
 			  AND ` + visibleNotesCustodyObjectSQL("ko", true) + `
 			  AND ` + notesLifecycleSelectionSQL("ko", input.SourceLifecycle) + `
-			  AND (kc.knowledge_object_version_id IS NULL OR (kov.source_hash = ko.source_hash AND kov.source_revision = ko.source_revision))
+			  AND ` + notesPublishedVersionSQL("ko", "kc", "kov", false, input.RequireCurrent) + `
 			  AND ` + visibleNotesKnowledgeRelativePathSQL("ko.relative_path") + `
 	`
 	args := []any{strings.TrimSpace(input.Query), termsJSON, phrasesJSON}
@@ -984,15 +988,8 @@ func (s *Service) replaceKnowledgeSearchDocumentsTx(ctx context.Context, tx *sql
 		DELETE FROM search.search_documents
 		WHERE source_kind = $1
 		  AND index_version = $2
-		  AND (
-		      source_version_id = $3
-		      OR source_id IN (
-		          SELECT knowledge_chunk_id
-		          FROM knowledge.knowledge_chunks
-		          WHERE knowledge_object_id = $4
-		      )
-		  )
-	`, KnowledgeSearchSourceKind, KnowledgeSearchIndexKey, version.KnowledgeObjectVersionID, object.KnowledgeObjectID); err != nil {
+		  AND source_version_id = $3
+	`, KnowledgeSearchSourceKind, KnowledgeSearchIndexKey, version.KnowledgeObjectVersionID); err != nil {
 		return nil, 0, err
 	}
 	indexed := make([]KnowledgeChunk, 0, len(chunks))

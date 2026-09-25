@@ -460,14 +460,15 @@ func TestMergeNotesSearchCommandInputKeepsParsedFiltersAndAppliesFlags(t *testin
 	merged := mergeNotesSearchCommandInput(
 		knowledge.ParseNotesSearchInput(`tag:osint "exact phrase" threat intel`),
 		knowledge.NotesSearchInput{
-			ProjectRef:    "osint-tools",
-			SourceNodeKey: "main",
-			Tags:          []string{"loom"},
-			Mode:          knowledge.NotesSearchModeSemantic,
-			After:         "2026-01-01",
-			Before:        "2026-02-01",
-			Sort:          knowledge.NotesSearchSortNewest,
-			Limit:         7,
+			ProjectRef:     "osint-tools",
+			SourceNodeKey:  "main",
+			Tags:           []string{"loom"},
+			Mode:           knowledge.NotesSearchModeSemantic,
+			After:          "2026-01-01",
+			Before:         "2026-02-01",
+			Sort:           knowledge.NotesSearchSortNewest,
+			Limit:          7,
+			RequireCurrent: true,
 		},
 	)
 
@@ -480,7 +481,7 @@ func TestMergeNotesSearchCommandInputKeepsParsedFiltersAndAppliesFlags(t *testin
 	if strings.Join(merged.Tags, ",") != "osint,loom" {
 		t.Fatalf("tags = %#v, want parsed and flag tags", merged.Tags)
 	}
-	if merged.Limit != 7 {
+	if merged.Limit != 7 || !merged.RequireCurrent {
 		t.Fatalf("limit = %d, want 7", merged.Limit)
 	}
 	if merged.After != "2026-01-01" || merged.Before != "2026-02-01" || merged.Sort != knowledge.NotesSearchSortNewest {

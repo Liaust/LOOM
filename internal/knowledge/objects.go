@@ -299,6 +299,11 @@ func (s *Service) knowledgeObjectFromStorageEntry(root SourceRoot, entry storage
 }
 
 func preserveKnowledgeObjectProcessing(existing, next KnowledgeObject) KnowledgeObject {
+	// Preserve legacy hash-based citations for an unchanged Objects version.
+	// New observations use version identity, including identical-byte re-exports.
+	if sameSyncedSourceVersion(existing, next) {
+		next.SourceRevision = existing.SourceRevision
+	}
 	if strings.TrimSpace(existing.SourceRevision) != "" && strings.TrimSpace(existing.SourceRevision) == strings.TrimSpace(next.SourceRevision) {
 		_, nextSequence, fresh := currentSyncedMetadataObservation(next)
 		_, previousSequence, _ := currentSyncedMetadataObservation(existing)
@@ -804,13 +809,27 @@ func sourceHashFromSyncedObject(entry SyncedObjectEntry) string {
 }
 
 func sourceRevisionFromSyncedObject(entry SyncedObjectEntry, sourceHash string) string {
-	if sourceHash != "" {
-		return sourceHash
-	}
 	if strings.TrimSpace(entry.ObjectVersionID) != "" {
 		return "object_version:" + strings.TrimSpace(entry.ObjectVersionID)
 	}
+	if sourceHash != "" {
+		return sourceHash
+	}
 	return "sync_replica:" + strings.TrimSpace(entry.ReplicaID)
+}
+
+func sameSyncedSourceVersion(a, b KnowledgeObject) bool {
+	if a.SourceRevision == "" || a.SourceHash != b.SourceHash || !isSyncedKnowledgeObject(a) || !isSyncedKnowledgeObject(b) {
+		return false
+	}
+	var x, y struct {
+		Synced struct {
+			ObjectID  string `json:"object_id"`
+			VersionID string `json:"object_version_id"`
+		} `json:"synced_object"`
+	}
+	return json.Unmarshal(a.Metadata, &x) == nil && json.Unmarshal(b.Metadata, &y) == nil &&
+		x.Synced.ObjectID != "" && x.Synced.VersionID != "" && x.Synced == y.Synced
 }
 
 func knowledgeObjectMetadata(root SourceRoot, entry storagecatalog.Entry, textReady bool) json.RawMessage {

@@ -49,8 +49,8 @@ func TestSourceRefreshWaitOnceAndLegacyTiming(t *testing.T) {
 		t.Fatalf("eligibility: %s %t", when, ok)
 	}
 	object.Metadata = json.RawMessage(`{}`)
-	if got := observeSourceRefresh(nil, object, now); string(got.Metadata) != "{}" {
-		t.Fatal("legacy admission metadata changed")
+	if got := observeSourceRefresh(nil, object, now); objectRefreshClock(got).LastContentChangeAt.IsZero() {
+		t.Fatal("legacy admission needs a content clock for bounded heavy-stage waits")
 	}
 	legacy, err := CompilePipelinePlan(object, DefaultPipelinePolicy())
 	if err != nil || legacy.Stages[0].QuietWindow {
@@ -64,5 +64,20 @@ func TestSourceRefreshPreservesUnrelatedMetadata(t *testing.T) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(object.Metadata, &fields); err != nil || string(fields["inode"]) != "9007199254740993" {
 		t.Fatalf("unrelated metadata lost precision: %s %v", object.Metadata, err)
+	}
+}
+
+func TestSourceRefreshVersionIdentityAndLegacyReplay(t *testing.T) {
+	a := KnowledgeObject{SourceHash: "same", SourceRevision: "same", ProcessingState: ProcessingStateIndexed,
+		Metadata: json.RawMessage(`{"origin":"sync.object_replica","synced_object":{"object_id":"object-a","object_version_id":"version-a"}}`)}
+	b := a
+	b.SourceRevision = sourceRevisionFromSyncedObject(SyncedObjectEntry{ObjectVersionID: "version-a"}, "same")
+	if got := preserveKnowledgeObjectProcessing(a, b); got.SourceRevision != a.SourceRevision || got.ProcessingState != ProcessingStateIndexed {
+		t.Fatalf("legacy upgrade reprocessed unchanged input: %+v", got)
+	}
+	b.Metadata = json.RawMessage(`{"origin":"sync.object_replica","synced_object":{"object_id":"object-a","object_version_id":"version-b"}}`)
+	b.SourceRevision = sourceRevisionFromSyncedObject(SyncedObjectEntry{ObjectVersionID: "version-b"}, "same")
+	if got := preserveKnowledgeObjectProcessing(a, b); got.SourceRevision == a.SourceRevision {
+		t.Fatal("identical bytes aliased distinct source versions")
 	}
 }

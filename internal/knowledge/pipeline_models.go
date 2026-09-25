@@ -68,6 +68,8 @@ const (
 )
 
 type PipelineRun struct {
+	// SourceSnapshot is private worker state, never a public path-bearing receipt.
+	SourceSnapshot            json.RawMessage `json:"-"`
 	KnowledgePipelineRunID    string          `json:"knowledge_pipeline_run_id"`
 	KnowledgeObjectID         string          `json:"knowledge_object_id"`
 	KnowledgeObjectVersionID  string          `json:"knowledge_object_version_id"`

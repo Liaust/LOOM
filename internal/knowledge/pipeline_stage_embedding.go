@@ -57,13 +57,13 @@ func (handler EmbeddingStageHandler) Execute(ctx context.Context, item PipelineW
 			return HeavyStageObservation{}, nil, err
 		}
 	}
-	if err = handler.Service.publishUnifiedEmbeddingObjectState(ctx, item); err != nil {
+	if err = handler.Service.publishUnifiedEmbeddingObjectState(ctx, item, settings); err != nil {
 		return HeavyStageObservation{}, nil, err
 	}
 	return observedHeavy(policy, len(chunks), inputBytes), nil, nil
 }
 
-func (s *Service) publishUnifiedEmbeddingObjectState(ctx context.Context, item PipelineWorkItem) error {
+func (s *Service) publishUnifiedEmbeddingObjectState(ctx context.Context, item PipelineWorkItem, settings EmbeddingSettings) error {
 	tx, err := s.store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -72,11 +72,32 @@ func (s *Service) publishUnifiedEmbeddingObjectState(ctx context.Context, item P
 	if err = lockPipelineClaimTx(ctx, tx, item); err != nil {
 		return err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE knowledge.knowledge_objects SET processing_state='embedded',updated_at=now() WHERE knowledge_object_id=$1`, item.Object.KnowledgeObjectID)
+	var missing bool
+	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM knowledge.knowledge_chunks c
+	 WHERE c.knowledge_object_version_id=$1 AND NOT EXISTS (SELECT 1 FROM knowledge.chunk_embeddings e
+	 WHERE e.knowledge_chunk_id=c.knowledge_chunk_id AND e.chunk_hash=c.chunk_hash
+	 AND e.chunker_version=c.chunker_version AND e.active AND e.status='active'
+	 AND e.runtime_key=$2 AND e.model_key=$3 AND e.dimensions=$4))`, item.Run.KnowledgeObjectVersionID, settings.RuntimeKey, settings.ModelKey, settings.Dimensions).Scan(&missing); err != nil {
+		return err
+	}
+	if missing {
+		return fmt.Errorf("%w: semantic publication is incomplete", ErrConflict)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE knowledge.knowledge_objects SET semantic_version_id=$2,semantic_published_at=now(),semantic_runtime_key=$5,semantic_model_key=$6,semantic_dimensions=$7,processing_state=CASE WHEN source_hash=$3 AND source_revision=$4 THEN 'embedded' ELSE 'stale' END,updated_at=now() WHERE knowledge_object_id=$1`, item.Object.KnowledgeObjectID, item.Run.KnowledgeObjectVersionID, item.Run.SourceHash, item.Run.SourceRevision, settings.RuntimeKey, settings.ModelKey, settings.Dimensions)
 	if err != nil {
 		return err
 	}
 	if err = requireOneRow(result, "embedding object publication fence is stale"); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE knowledge.chunk_embeddings e
+	 SET active=false,status='historical',deactivated_at=now()
+	 WHERE e.knowledge_object_id=$1 AND e.active AND NOT EXISTS (
+	 SELECT 1 FROM knowledge.knowledge_objects o WHERE o.knowledge_object_id=e.knowledge_object_id
+	 AND e.knowledge_object_version_id IN (o.lexical_version_id,o.semantic_version_id))
+	 AND NOT EXISTS (SELECT 1 FROM knowledge.pipeline_runs r
+	 WHERE r.knowledge_object_version_id=e.knowledge_object_version_id
+	 AND r.status IN ('processing','queued','waiting_coordinator','waiting_heavy','waiting_quiet_window'))`, item.Object.KnowledgeObjectID); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {

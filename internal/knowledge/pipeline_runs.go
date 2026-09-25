@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"loom.local/loom/internal/ids"
+	"loom.local/loom/internal/projectcontracts"
 	"loom.local/loom/internal/storagecatalog"
 )
 
@@ -51,6 +52,9 @@ func (s *Service) ensurePipelineRunWithRetry(ctx context.Context, object Knowled
 	if err = tx.Commit(); err != nil {
 		return PipelineRun{}, false, err
 	}
+	if created {
+		s.cleanupSupersededPipelineInputs(ctx, object.KnowledgeObjectID)
+	}
 	return run, created, nil
 }
 
@@ -71,6 +75,28 @@ func (s *Service) ensurePipelineRunTx(ctx context.Context, tx *sql.Tx, objectID 
 }
 
 func (s *Service) ensureLockedPipelineRunTx(ctx context.Context, tx *sql.Tx, object KnowledgeObject, plan CompiledPipelinePlan, snapshot json.RawMessage, force bool, priority int, retry *pipelineRetrySpec) (PipelineRun, bool, error) {
+	if plan.SourcePolicy == nil || plan.SourcePolicy.Refresh == nil {
+		seconds := DefaultEmbeddingQuietWindowSec
+		err := tx.QueryRowContext(ctx, `SELECT quiet_window_seconds FROM knowledge.embedding_settings WHERE embedding_settings_id=$1`, EmbeddingSettingsID).Scan(&seconds)
+		if err != nil && err != sql.ErrNoRows {
+			return PipelineRun{}, false, err
+		}
+		plan.HeavyQuietWindowSeconds = seconds
+		snapshot, err = plan.Snapshot()
+		if err != nil {
+			return PipelineRun{}, false, err
+		}
+	}
+	if err := withdrawIncompatiblePublicationsTx(ctx, tx, object.KnowledgeObjectID, plan); err != nil {
+		return PipelineRun{}, false, err
+	}
+	selected, keep, err := selectedPipelineRunTx(ctx, tx, object, snapshot)
+	if err != nil {
+		return PipelineRun{}, false, err
+	}
+	if keep && !force {
+		return selected, false, nil
+	}
 	retryIndex := -1
 	if retry != nil {
 		if retry.Source.Run.KnowledgeObjectID != object.KnowledgeObjectID || !isRetryablePipelineRunStatus(retry.Source.Run.Status) {
@@ -106,13 +132,52 @@ func (s *Service) ensureLockedPipelineRunTx(ctx context.Context, tx *sql.Tx, obj
 		if findErr != nil {
 			return PipelineRun{}, false, findErr
 		}
-		if found && pipelinePlanSnapshotsEqual(existing.PlanSnapshot, snapshot) {
+		compatible := true
+		if found && len(existing.SourceSnapshot) > 0 && existing.Status != FilePipelineStatusComplete && existing.Status != FilePipelineStatusCompleteWithWarning {
+			captured, e := capturedPipelineObject(existing, object)
+			compatible = e == nil && pipelineAdmissionMatches(captured, object)
+		}
+		if found && compatible && pipelineExecutionPlansEqual(existing.PlanSnapshot, snapshot) {
+			if !pipelinePlanSnapshotsEqual(existing.PlanSnapshot, snapshot) && existing.StartedAt == nil {
+				existing, err = refreshQueuedPipelineTimingTx(ctx, tx, existing, object, plan, snapshot, s.currentTime())
+				if err != nil {
+					return PipelineRun{}, false, err
+				}
+			}
 			return existing, false, nil
 		}
 	}
 	now := s.currentTime()
 	if err = supersedePipelineRunsTx(ctx, tx, object.KnowledgeObjectID, now); err != nil {
 		return PipelineRun{}, false, err
+	}
+	// New trajectories never replace chunks belonging to a published revision.
+	forkOutput := retry == nil
+	if retry != nil {
+		for _, stage := range plan.Stages {
+			if stage.StageKey == FilePipelineStageLexicalIndex {
+				forkOutput = plan.Stages[retryIndex].Ordinal <= stage.Ordinal
+			}
+		}
+	}
+	if forkOutput {
+		var used bool
+		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM knowledge.pipeline_runs WHERE knowledge_object_version_id=$1)`, version.KnowledgeObjectVersionID).Scan(&used); err != nil {
+			return PipelineRun{}, false, err
+		}
+		if used {
+			version.KnowledgeObjectVersionID = ids.NewKnowledgeObjectVersionID()
+			if err = tx.QueryRowContext(ctx, `SELECT COALESCE(max(version_number),0)+1 FROM knowledge.knowledge_object_versions WHERE knowledge_object_id=$1`, object.KnowledgeObjectID).Scan(&version.VersionNumber); err != nil {
+				return PipelineRun{}, false, err
+			}
+			if retry == nil {
+				version.Metadata = json.RawMessage(`{"schema_version":"knowledge.pipeline_source_version.v1"}`)
+			}
+			version, err = s.createKnowledgeObjectVersionTx(ctx, tx, version)
+			if err != nil {
+				return PipelineRun{}, false, err
+			}
+		}
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE knowledge.pipeline_statuses SET status='stale', claimed_by_worker_run_id=NULL, claim_expires_at=NULL, updated_at=$2
 		WHERE knowledge_object_id=$1 AND knowledge_object_version_id IS NULL
@@ -293,7 +358,9 @@ func supersedePipelineRunsTx(ctx context.Context, tx *sql.Tx, objectID string, n
 	// Ownership and normalized outputs are cleared from the leaves upward before
 	// the parent run becomes stale, preserving every migration 00060 claim
 	// invariant at each statement boundary.
-	predicate := `r.knowledge_object_id=$1 AND r.status NOT IN ('stale','cancelled')`
+	predicate := `r.knowledge_object_id=$1 AND r.status NOT IN ('stale','cancelled')
+	 AND NOT EXISTS (SELECT 1 FROM knowledge.knowledge_objects o WHERE o.knowledge_object_id=r.knowledge_object_id
+	 AND r.knowledge_object_version_id IN (o.lexical_version_id,o.semantic_version_id) AND r.status IN ('complete','complete_with_warnings'))`
 	if _, err := tx.ExecContext(ctx, `UPDATE knowledge.pipeline_stage_units u
 		SET status='stale', claimed_by_worker_run_id='', claim_generation=0,
 		    completed_at=COALESCE(u.completed_at,$2), updated_at=$2
@@ -518,6 +585,7 @@ func cloneRetryUpstreamArtifactsTx(ctx context.Context, tx *sql.Tx, source Pipel
 		}
 		artifact.KnowledgeDerivedArtifactID = ids.NewKnowledgeDerivedArtifactID()
 		artifact.KnowledgePipelineRunID = run.KnowledgePipelineRunID
+		artifact.KnowledgeObjectVersionID = run.KnowledgeObjectVersionID
 		artifact.KnowledgePipelineStageRunID = newStage.KnowledgePipelineStageRunID
 		artifact.Generation = run.Generation
 		artifact.State = ArtifactStateReusable
@@ -567,14 +635,22 @@ func pipelineQuietWindowEligibleAt(object KnowledgeObject, plan CompiledPipeline
 	if !hasQuietStage {
 		return time.Time{}, false
 	}
-	changedAt := object.UpdatedAt
+	changedAt := objectRefreshClock(object).LastContentChangeAt
 	if changedAt.IsZero() {
 		changedAt = object.LastSeenAt
 	}
 	if changedAt.IsZero() {
 		changedAt = now
 	}
-	return changedAt.Add(time.Duration(DefaultEmbeddingQuietWindowSec) * time.Second), true
+	copy := object
+	if objectRefreshClock(copy).LastContentChangeAt.IsZero() {
+		copy = observeSourceRefresh(nil, copy, changedAt)
+	}
+	quiet := plan.HeavyQuietWindowSeconds
+	if quiet <= 0 {
+		quiet = DefaultEmbeddingQuietWindowSec
+	}
+	return sourceRefreshEligibleAt(copy, projectcontracts.KnowledgeRefreshPolicy{QuietForSeconds: int64(quiet), MaxWaitSeconds: int64(max(1800, quiet))}, now), true
 }
 
 func waitingPipelineStatus(executionClass string, quiet bool) string {

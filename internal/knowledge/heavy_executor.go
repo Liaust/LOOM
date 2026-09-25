@@ -63,7 +63,13 @@ func (s *Service) ExecuteClaimedHeavyStage(ctx context.Context, item PipelineWor
 	}
 	bounded, cancel := context.WithTimeout(ctx, policy.Timeout())
 	defer cancel()
-	observation, warnings, err := handler.Execute(bounded, item, policy)
+	var observation HeavyStageObservation
+	var warnings []string
+	selected, err := s.capturePipelineSource(bounded, item)
+	if err == nil {
+		item = selected
+		observation, warnings, err = handler.Execute(bounded, item, policy)
+	}
 	result.Observation = observation
 	if err != nil {
 		if failErr := s.FailPipelineStage(ctx, item, err, RetryableKnowledgeError(err)); failErr != nil {

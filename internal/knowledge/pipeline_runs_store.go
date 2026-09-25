@@ -84,7 +84,7 @@ func pipelineRunColumns() string {
 	        current_stage_key, current_execution_class, priority, source_revision, source_hash,
 	        quiet_window_eligible_at, claimed_by_worker_run_id, claim_generation, claim_expires_at,
 	        last_error_code, last_error_message, warning_count, plan_snapshot, resource_totals,
-	        metadata, created_at, started_at, updated_at, completed_at`
+	        metadata, created_at, started_at, updated_at, completed_at, source_snapshot`
 }
 
 func pipelineRunColumnsQualified(alias string) string {
@@ -108,18 +108,20 @@ func scanPipelineRun(scanner interface{ Scan(dest ...any) error }) (PipelineRun,
 	var run PipelineRun
 	var quiet, claimExpiry, started, completed sql.NullTime
 	var plan, totals, metadata []byte
+	var source []byte
 	err := scanner.Scan(&run.KnowledgePipelineRunID, &run.KnowledgeObjectID, &run.KnowledgeObjectVersionID,
 		&run.PipelineDefinitionKey, &run.PipelineDefinitionVersion, &run.Generation, &run.Status,
 		&run.CurrentStageKey, &run.CurrentExecutionClass, &run.Priority, &run.SourceRevision,
 		&run.SourceHash, &quiet, &run.ClaimedByWorkerRunID, &run.ClaimGeneration, &claimExpiry,
 		&run.LastErrorCode, &run.LastErrorMessage, &run.WarningCount, &plan, &totals, &metadata,
-		&run.CreatedAt, &started, &run.UpdatedAt, &completed)
+		&run.CreatedAt, &started, &run.UpdatedAt, &completed, &source)
 	if err != nil {
 		return PipelineRun{}, err
 	}
 	run.QuietWindowEligibleAt, run.ClaimExpiresAt = nullTimePtr(quiet), nullTimePtr(claimExpiry)
 	run.StartedAt, run.CompletedAt = nullTimePtr(started), nullTimePtr(completed)
 	run.PlanSnapshot, run.ResourceTotals, run.Metadata = jsonObjectOrEmpty(plan), jsonObjectOrEmpty(totals), jsonObjectOrEmpty(metadata)
+	run.SourceSnapshot = source
 	return run, nil
 }
 

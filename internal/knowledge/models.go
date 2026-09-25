@@ -200,6 +200,7 @@ type SourceRoot struct {
 }
 
 type KnowledgeObject struct {
+	pipelineSource *pipelineSourceSnapshot
 	SourceContext
 	*NotesCustodyContext
 	KnowledgeObjectID    string          `json:"knowledge_object_id"`

@@ -1554,7 +1554,7 @@ func TestSourceIdentityFencesAllWorkerPublicationPostgres(t *testing.T) {
 			_, callErr := service.reuseUnifiedChunkEmbedding(context.Background(), claim, chunk, settings)
 			return callErr
 		}},
-		{"object state", func() error { return service.publishUnifiedEmbeddingObjectState(context.Background(), claim) }},
+		{"object state", func() error { return service.publishUnifiedEmbeddingObjectState(context.Background(), claim, settings) }},
 		{"observation", func() error {
 			return service.storePipelineStageObservation(context.Background(), claim, HeavyStageObservation{Observed: json.RawMessage(`{"stale":true}`)})
 		}},

@@ -34,16 +34,17 @@ func lockPipelineClaimTx(ctx context.Context, tx *sql.Tx, item PipelineWorkItem)
 	var runGeneration, runClaimGeneration, stageClaimGeneration int64
 	var runWorker, runStatus, currentStage, stageWorker, stageStatus string
 	var objectID, runSourceHash, runSourceRevision string
+	var sourceSnapshot []byte
 	err := tx.QueryRowContext(ctx, `SELECT r.generation,r.claim_generation,r.claimed_by_worker_run_id,r.status,
 		r.current_stage_key,s.claim_generation,s.claimed_by_worker_run_id,s.status,
-		r.knowledge_object_id,r.source_hash,r.source_revision
+		r.knowledge_object_id,r.source_hash,r.source_revision,r.source_snapshot
 		FROM knowledge.pipeline_runs r
 		JOIN knowledge.pipeline_stage_runs s ON s.knowledge_pipeline_run_id=r.knowledge_pipeline_run_id
 		WHERE r.knowledge_pipeline_run_id=$1 AND s.knowledge_pipeline_stage_run_id=$2
 		FOR UPDATE OF r,s`, item.Run.KnowledgePipelineRunID, item.Stage.KnowledgePipelineStageRunID).Scan(
 		&runGeneration, &runClaimGeneration, &runWorker, &runStatus, &currentStage,
 		&stageClaimGeneration, &stageWorker, &stageStatus,
-		&objectID, &runSourceHash, &runSourceRevision)
+		&objectID, &runSourceHash, &runSourceRevision, &sourceSnapshot)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return fmt.Errorf("%w: pipeline claim rows no longer exist", ErrConflict)
@@ -76,11 +77,24 @@ func lockPipelineClaimTx(ctx context.Context, tx *sql.Tx, item PipelineWorkItem)
 		}
 		return err
 	}
-	if currentSourceHash != runSourceHash || currentSourceRevision != runSourceRevision ||
+	if (len(sourceSnapshot) == 0 && (currentSourceHash != runSourceHash || currentSourceRevision != runSourceRevision)) ||
 		item.Object.SourceHash != runSourceHash || item.Object.SourceRevision != runSourceRevision {
 		return fmt.Errorf("%w: pipeline source identity is stale", ErrConflict)
 	}
 	var visible, writable bool
+	if len(sourceSnapshot) > 0 {
+		current, err := scanKnowledgeObject(tx.QueryRowContext(ctx, `SELECT `+knowledgeObjectColumns()+` FROM knowledge.knowledge_objects WHERE knowledge_object_id=$1`, objectID))
+		if err != nil {
+			return err
+		}
+		selected, err := capturedPipelineObject(PipelineRun{KnowledgeObjectID: objectID, SourceHash: runSourceHash, SourceRevision: runSourceRevision, SourceSnapshot: sourceSnapshot}, KnowledgeObject{})
+		if err != nil {
+			return err
+		}
+		if !pipelineAdmissionMatches(selected, current) {
+			return fmt.Errorf("%w: selected source admission changed", ErrConflict)
+		}
+	}
 	if err := tx.QueryRowContext(ctx, `SELECT (`+visibleNotesKnowledgeObjectSQL("o")+`),`+notesCustodyWriteAllowedSQL("o")+` FROM knowledge.knowledge_objects o WHERE o.knowledge_object_id=$1`, objectID).Scan(&visible, &writable); err != nil {
 		return err
 	}
@@ -287,6 +301,10 @@ func (s *Service) ClaimPipelineRuns(ctx context.Context, executionClass, workerR
 		if err != nil {
 			return nil, err
 		}
+		object, err = capturedPipelineObject(run, object)
+		if err != nil {
+			return nil, err
+		}
 		items = append(items, PipelineWorkItem{Run: run, Stage: stage, Object: object})
 	}
 	return items, nil
@@ -371,7 +389,11 @@ func (s *Service) CompletePipelineStage(ctx context.Context, item PipelineWorkIt
 	if err = tx.Commit(); err != nil {
 		return PipelineRun{}, err
 	}
-	return s.store.GetPipelineRun(ctx, item.Run.KnowledgePipelineRunID)
+	completed, err := s.store.GetPipelineRun(ctx, item.Run.KnowledgePipelineRunID)
+	if err == nil && (completed.Status == FilePipelineStatusComplete || completed.Status == FilePipelineStatusCompleteWithWarning) {
+		cleanupSelectedPipelineInput(completed)
+	}
+	return completed, err
 }
 
 func nextPendingPipelineStageTx(ctx context.Context, tx *sql.Tx, runID string, ordinal int) (PipelineStageRun, bool, error) {

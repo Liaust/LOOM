@@ -110,11 +110,32 @@ effective policy, wait deadline and stage skip reasons. JSON inspection retains
 the same policy in the run's `plan_snapshot`. Disabled stages are not successful
 extractions. Changing the declaration still requires a fresh reviewed apply.
 
-These controls bound waiting before work starts. Continuing a captured revision
-despite later edits, keeping the previous published index searchable during a
-refresh, and a strict-current search option are separate planned improvements;
-they are not supplied by these declaration fields yet. The current pipeline may
-supersede work when a newer source revision arrives.
+Once processing selects a revision, it finishes against those captured bytes.
+Further edits coalesce into the newest pending revision instead of repeatedly
+cancelling extraction. The pending deadline starts when those changes arrive,
+not when the previous run finishes. A maximum wait bounds debouncing, not model
+runtime or queue capacity. Withdrawal, deletion and source-policy changes still
+take precedence over finishing old work.
+
+Search keeps the last published content available during a refresh or failure.
+Every result identifies its indexed and latest observed revision and hash,
+publication time, refresh state and whether it is current. Lexical results can
+advance before embeddings; hybrid search never combines different revisions of
+the same document. Semantic search may still return the older, explicitly
+labelled semantic publication until the replacement vector set is complete.
+
+Use `loom notes search "query" --require-current` when lagging content is not
+acceptable. It excludes older publications and reports bounded omitted-match
+counts; an empty result does not prove that no relevant document exists. Exact
+passage citations retain their original revision and remain readable subject to
+current access. The read-only Notes projection represents source material,
+not a promise that its latest bytes have already reached every search index.
+
+Pipeline inspection's `refresh` object separates latest source, selected work,
+pending changes and lexical/semantic publications. Failed extraction does not
+erase the previous publication. A successfully processed empty replacement does
+retire its previous searchable body. Compatible unchanged chunks can reuse
+vectors; changed-page-only PDF OCR caching is not implemented.
 
 ## Open The Portal
 

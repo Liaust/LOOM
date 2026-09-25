@@ -174,6 +174,8 @@ func newNotesPipelineInspectCommand(opts *options) *cobra.Command {
 		if deadline := envelope.Data.Run.QuietWindowEligibleAt; deadline != nil {
 			fmt.Fprintf(cmd.OutOrStdout(), "Quiet-window eligibility: %s\n", deadline.UTC().Format(time.RFC3339))
 		}
+		refresh := envelope.Data.Refresh
+		fmt.Fprintf(cmd.OutOrStdout(), "Refresh: selected=%s latest=%s pending=%t\nPublished: lexical=%s semantic=%s\n", dashIfEmpty(refresh.SelectedSourceRevision), dashIfEmpty(refresh.LatestSourceRevision), refresh.Pending, dashIfEmpty(refresh.LexicalVersionID), dashIfEmpty(refresh.SemanticVersionID))
 		for _, stage := range envelope.Data.Stages {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %02d %-22s %s attempts=%d progress=%d/%d\n", stage.Ordinal, stage.StageKey, stage.Status, stage.AttemptCount, stage.ProgressCompleted, stage.ProgressTotal)
 			for _, planned := range plan.Stages {

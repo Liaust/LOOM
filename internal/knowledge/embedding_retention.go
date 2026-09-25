@@ -29,6 +29,12 @@ func (s *Service) PruneEmbeddingRetention(ctx context.Context, historyPerLineage
 			FROM knowledge.chunk_embeddings
 			WHERE active = false
 			  AND status IN ('historical', 'reusable', 'stale')
+			  AND NOT EXISTS (SELECT 1 FROM knowledge.knowledge_objects o
+			    WHERE o.knowledge_object_id=knowledge.chunk_embeddings.knowledge_object_id
+			    AND knowledge.chunk_embeddings.knowledge_object_version_id IN (o.lexical_version_id,o.semantic_version_id))
+			  AND NOT EXISTS (SELECT 1 FROM knowledge.pipeline_runs r
+			    WHERE r.knowledge_object_version_id=knowledge.chunk_embeddings.knowledge_object_version_id
+			    AND r.status IN ('processing','queued','waiting_coordinator','waiting_heavy','waiting_quiet_window'))
 		),
 		victims AS (
 			SELECT knowledge_chunk_embedding_id

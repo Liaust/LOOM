@@ -170,12 +170,14 @@ func TestSearchKnowledgeNotesCarriesAbsoluteTimeContract(t *testing.T) {
 		if err := json.NewDecoder(req.Body).Decode(&input); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		if input.After != "2026-01-01" || input.Before != "2026-02-01" || input.Sort != knowledge.NotesSearchSortNewest {
+		if input.After != "2026-01-01" || input.Before != "2026-02-01" || input.Sort != knowledge.NotesSearchSortNewest || !input.RequireCurrent {
 			t.Fatalf("absolute-time request = %#v", input)
 		}
 		return okEnvelope(`{
 			"query":"loom",
 			"result_count":1,
+			"refreshing_matches_omitted":2,
+			"refreshing_matches_omitted_truncated":true,
 			"results":[{
 				"search_document_id":"search_document_test",
 				"knowledge_object_id":"knowledge_object_test",
@@ -184,6 +186,7 @@ func TestSearchKnowledgeNotesCarriesAbsoluteTimeContract(t *testing.T) {
 				"root_kind":"box_notes",
 				"relative_path":"Notes/loom.md",
 				"file_class":"markdown",
+				"freshness":{"current":true,"indexed_source_revision":"v2","latest_source_revision":"v2","semantic_lag":false,"refresh_state":"complete"},
 				"source_created_at":"2025-12-31T09:00:00Z",
 				"source_modified_at":"2026-01-02T10:00:00Z",
 				"recency_at":"2026-01-02T10:00:00Z",
@@ -197,12 +200,15 @@ func TestSearchKnowledgeNotesCarriesAbsoluteTimeContract(t *testing.T) {
 		}`), nil
 	})}}
 	envelope, err := client.SearchKnowledgeNotes(context.Background(), "corr_test", knowledge.NotesSearchInput{
-		Query: "loom", After: "2026-01-01", Before: "2026-02-01", Sort: knowledge.NotesSearchSortNewest,
+		Query: "loom", After: "2026-01-01", Before: "2026-02-01", Sort: knowledge.NotesSearchSortNewest, RequireCurrent: true,
 	})
 	if err != nil {
 		t.Fatalf("SearchKnowledgeNotes returned error: %v", err)
 	}
 	result := envelope.Data.Results[0]
+	if !result.Freshness.Current || result.Freshness.IndexedSourceRevision != "v2" || envelope.Data.RefreshingMatchesOmitted != 2 || !envelope.Data.RefreshingMatchesOmittedTruncated {
+		t.Fatalf("publication metadata lost: %+v", envelope.Data)
+	}
 	if result.SourceCreatedAt == nil || result.SourceModifiedAt == nil || result.RecencyBasis != knowledge.AbsoluteTimeBasisSourceFilesystemMtime || result.RecencyRank != 1 || result.ObservedAt.IsZero() || result.IndexedAt.IsZero() {
 		t.Fatalf("absolute-time response = %#v", result)
 	}

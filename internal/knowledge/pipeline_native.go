@@ -55,26 +55,29 @@ func (s *Service) applyUnifiedNativeExtraction(ctx context.Context, item Pipelin
 		extraction.AbsoluteTimeWarnings = existing.Warnings
 	}
 
-	object.SourceCreatedAt = refinedObject.SourceCreatedAt
-	object.SourceModifiedAt = refinedObject.SourceModifiedAt
-	object.RecencyAt = refinedObject.RecencyAt
-	object.RecencyBasis = refinedObject.RecencyBasis
-	object.AbsoluteTimeMetadata = append(json.RawMessage(nil), refinedObject.AbsoluteTimeMetadata...)
-	object.Metadata = extractionPipelineObjectMetadata(object.Metadata, version, extraction)
-	if extractionHasBodyText(extraction) {
-		object.ProcessingState = ProcessingStateTextExtracted
-	} else {
-		object.ProcessingState = ProcessingStateMetadataOnly
-	}
-	object.PipelineKey = item.Run.PipelineDefinitionKey
-	object.PipelineVersion = item.Run.PipelineDefinitionVersion
-	object.UpdatedAt = s.currentTime()
-	object, err = updateKnowledgeObjectTx(ctx, tx, object)
-	if err != nil {
-		return KnowledgeObjectVersion{}, nil, err
-	}
-	if _, err = s.replaceObjectLinksTx(ctx, tx, object, extraction.Links); err != nil {
-		return KnowledgeObjectVersion{}, nil, err
+	current := object.SourceHash == item.Run.SourceHash && object.SourceRevision == item.Run.SourceRevision
+	if current {
+		object.SourceCreatedAt = refinedObject.SourceCreatedAt
+		object.SourceModifiedAt = refinedObject.SourceModifiedAt
+		object.RecencyAt = refinedObject.RecencyAt
+		object.RecencyBasis = refinedObject.RecencyBasis
+		object.AbsoluteTimeMetadata = append(json.RawMessage(nil), refinedObject.AbsoluteTimeMetadata...)
+		object.Metadata = extractionPipelineObjectMetadata(object.Metadata, version, extraction)
+		if extractionHasBodyText(extraction) {
+			object.ProcessingState = ProcessingStateTextExtracted
+		} else {
+			object.ProcessingState = ProcessingStateMetadataOnly
+		}
+		object.PipelineKey = item.Run.PipelineDefinitionKey
+		object.PipelineVersion = item.Run.PipelineDefinitionVersion
+		object.UpdatedAt = s.currentTime()
+		object, err = updateKnowledgeObjectTx(ctx, tx, object)
+		if err != nil {
+			return KnowledgeObjectVersion{}, nil, err
+		}
+		if _, err = s.replaceObjectLinksTx(ctx, tx, object, extraction.Links); err != nil {
+			return KnowledgeObjectVersion{}, nil, err
+		}
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE knowledge.derived_artifacts SET
 		source_created_at=$2,source_modified_at=$3,recency_at=$4,recency_basis=$5
