@@ -163,15 +163,36 @@ func notesSyncedCurrentSourceSQL(scope, object, version, file string) string {
 
 // Passage reads apply the same current-evidence fence to legacy roots too.
 func notesKnowledgeVisibilitySQL(object string, legacySearch bool) string {
-	return notesKnowledgeVisibilityPolicySQL(object, legacySearch, false)
+	return notesKnowledgeVisibilityPolicySQL(object, legacySearch, false, false)
 }
 
 func notesKnowledgeArchiveVisibilitySQL(object string) string {
-	return notesKnowledgeVisibilityPolicySQL(object, false, true)
+	return notesKnowledgeVisibilityPolicySQL(object, false, true, true)
 }
 
-func notesKnowledgeVisibilityPolicySQL(object string, legacySearch, archiveRead bool) string {
+func notesKnowledgeVisibilityPolicySQL(object string, legacySearch, archiveRead, publishedRead bool) string {
 	legacy := ""
+	replicaJoin := "visibility_replica.replica_id = " + object + ".metadata->'synced_object'->>'replica_id'"
+	observation := `visibility_file.latest_version_id = ` + object + `.metadata->'synced_object'->>'object_version_id'
+	 AND visibility_replica.replica_id = ` + object + `.metadata->'synced_object'->>'replica_id'
+	 AND visibility_file.metadata = COALESCE(` + object + `.metadata->'file_metadata','{}'::jsonb)
+	 AND visibility_object.metadata = COALESCE(` + object + `.metadata->'object_metadata','{}'::jsonb)
+	 AND visibility_version.metadata = COALESCE(` + object + `.metadata->'version_metadata','{}'::jsonb)`
+	if publishedRead {
+		// A new accepted revision may precede Notes admission. Only reads may
+		// bridge that window, using current access evidence for the same source.
+		replicaJoin = "visibility_replica.replicated_id = visibility_version.object_version_id"
+		refresh := `visibility_file.latest_version_id <> ` + object + `.metadata->'synced_object'->>'object_version_id'
+		 AND visibility_version.source_path = ` + object + `.metadata->'synced_object'->>'source_path'
+		 AND visibility_file.logical_name = ` + object + `.metadata->'synced_object'->>'logical_name'
+		 AND visibility_version.source_node_id = ` + object + `.source_node_id
+		 AND visibility_file.source_node_id = ` + object + `.source_node_id
+		 AND visibility_replica.source_node_id = ` + object + `.source_node_id`
+		for _, metadata := range []string{"visibility_file.metadata", "visibility_object.metadata", "visibility_version.metadata"} {
+			refresh += " AND jsonb_typeof(" + metadata + ") = 'object' AND (" + metadata + "->'private_no_index') IS DISTINCT FROM 'true'::jsonb AND (" + metadata + "->>'index_policy') IS DISTINCT FROM 'private_no_index'"
+		}
+		observation = "((" + observation + ") OR (" + refresh + "))"
+	}
 	declaration := "COALESCE(" + object + ".metadata->'source_root'->'knowledge_source','null'::jsonb) = COALESCE(visibility_root.metadata->'registration_metadata'->'knowledge_source','null'::jsonb)"
 	rootReadable := "visibility_root.status = 'active'"
 	scopeReadable := notesSyncedScopeSQL("visibility_root", "visibility_scope_owner")
@@ -211,9 +232,9 @@ func notesKnowledgeVisibilityPolicySQL(object string, legacySearch, archiveRead 
 	 JOIN objects.object_versions visibility_version ON visibility_version.object_version_id = visibility_file.latest_version_id
 	 JOIN objects.object_scope_links visibility_scope ON visibility_scope.object_id = visibility_object.object_id
 	 JOIN scopes.scopes visibility_scope_owner ON visibility_scope_owner.scope_id = visibility_scope.scope_id
-	 JOIN sync.replicas visibility_replica ON visibility_replica.replica_id = ` + object + `.metadata->'synced_object'->>'replica_id'
+	 JOIN sync.replicas visibility_replica ON ` + replicaJoin + `
 	 WHERE visibility_file.object_id = ` + object + `.metadata->'synced_object'->>'object_id'
-	 AND visibility_file.latest_version_id = ` + object + `.metadata->'synced_object'->>'object_version_id'
+	 AND ` + observation + `
 	 AND visibility_version.object_id = visibility_object.object_id
 	 AND visibility_file.index_policy IS DISTINCT FROM 'private_no_index'
 	 AND visibility_scope.relevance_status = 'active'
@@ -223,9 +244,6 @@ func notesKnowledgeVisibilityPolicySQL(object string, legacySearch, archiveRead 
 	 AND (visibility_root.root_kind NOT IN ('box_notes','box_topics','box_library') OR visibility_scope_owner.scope_key = ` + object + `.metadata->'synced_object'->>'scope_key')
 	 AND visibility_object.status = 'active' AND visibility_object.object_type = 'file' AND visibility_version.status = 'active'
 	 AND visibility_replica.replicated_kind = 'object_version' AND visibility_replica.replicated_id = visibility_version.object_version_id AND visibility_replica.freshness_state = 'fresh'
-	 AND visibility_file.metadata = COALESCE(` + object + `.metadata->'file_metadata','{}'::jsonb)
-	 AND visibility_object.metadata = COALESCE(` + object + `.metadata->'object_metadata','{}'::jsonb)
-	 AND visibility_version.metadata = COALESCE(` + object + `.metadata->'version_metadata','{}'::jsonb)
 	 )) OR EXISTS (
 	 SELECT 1 FROM storage.storage_entries visibility_entry
 	 WHERE visibility_entry.storage_entry_id = ` + object + `.storage_entry_id

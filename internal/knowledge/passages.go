@@ -82,7 +82,7 @@ func (s *Service) GetNotesPassage(ctx context.Context, input NotesPassageInput) 
 	 AND peer.metadata->'artifact_ids' IS NOT DISTINCT FROM c.metadata->'artifact_ids'
 	 AND peer.metadata->'source_locators' IS NOT DISTINCT FROM c.metadata->'source_locators')
 	 ELSE c.chunk_index END,c.structural_path,
-	 (v.source_hash<>o.source_hash OR v.source_revision<>o.source_revision OR
+	 (NOT `+notesPublicationCurrentSQL("o", "v")+` OR
 	 EXISTS (SELECT 1 FROM knowledge.knowledge_object_versions newer
 	 WHERE newer.knowledge_object_id=o.knowledge_object_id AND newer.version_number>v.version_number)),
 	 o.relative_path,o.metadata,`+notesReadContextSQL("r", "o")+`,o.source_path,
@@ -94,7 +94,6 @@ func (s *Service) GetNotesPassage(ctx context.Context, input NotesPassageInput) 
 	 JOIN nodes.nodes n ON n.node_id=r.node_id AND n.node_id=o.source_node_id AND n.node_key=o.source_node_key
 	 LEFT JOIN files.file_metadata current_file
 	 ON current_file.object_id=o.metadata->'synced_object'->>'object_id'
-	 AND current_file.latest_version_id=o.metadata->'synced_object'->>'object_version_id'
 	 LEFT JOIN objects.object_versions current_version
 	 ON current_version.object_version_id=current_file.latest_version_id
 	 AND current_version.object_id=current_file.object_id

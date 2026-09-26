@@ -72,7 +72,7 @@ func notesEffectiveDeclarationSQL(root, object, operation string) string {
 }
 
 func visibleNotesCustodyObjectSQL(object string, legacySearch bool) string {
-	return `(` + object + `.deleted_at IS NULL AND ` + notesCustodyReadCaughtUpSQL(object) + ` AND ((NOT ` + notesHasCustodySQL(object) + ` AND ` + notesKnowledgeVisibilitySQL(object, legacySearch) + `)
+	return `(` + object + `.deleted_at IS NULL AND ` + notesCustodyReadCaughtUpSQL(object) + ` AND ((NOT ` + notesHasCustodySQL(object) + ` AND ` + notesKnowledgeVisibilityPolicySQL(object, legacySearch, false, true) + `)
 	 OR (EXISTS (` + notesCurrentCustodySQL(object) + `) AND ` + notesKnowledgeArchiveVisibilitySQL(object) + `)))`
 }
 

@@ -2,6 +2,7 @@ package knowledge
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -131,6 +132,16 @@ func TestRefreshSemanticPublicationPostgres(t *testing.T) {
 		t.Fatal("migration promoted incomplete semantic output", err)
 	}
 	dxObserve(t, s, root, object, "# Next notebook\n"+strings.Repeat("An amber experiment replaces the previous notebook observation. ", 400))
+	for _, mode := range []string{NotesSearchModeSemantic, NotesSearchModeHybrid} {
+		results := search(mode)
+		if len(results) == 0 || results[0].Freshness.Current || results[0].Freshness.RefreshState != "pending" || results[0].Freshness.LatestSourceRevision == first.Run.SourceRevision {
+			t.Fatalf("%s pre-admission publication: %+v", mode, results)
+		}
+		strict, err := s.searchSemanticNotesVector(t.Context(), NotesSearchInput{Query: "observatory", Mode: mode, NotesSourceRootID: root.NotesSourceRootID, SourceLifecycle: SourceLifecycleFilterActive, RequireCurrent: true, Limit: 50}, settings, vector)
+		if err != nil || len(strict) != 0 {
+			t.Fatalf("%s pre-admission strict current: %+v %v", mode, strict, err)
+		}
+	}
 	reconcileBoxSyncedFixture(t, s, roots)
 	advanceBoxSyncedFixture(t, s)
 	next := claim()
@@ -170,6 +181,107 @@ func TestRefreshSemanticPublicationPostgres(t *testing.T) {
 	var oldActive bool
 	if err = s.store.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM knowledge.chunk_embeddings WHERE knowledge_object_version_id=$1 AND active)`, first.Run.KnowledgeObjectVersionID).Scan(&oldActive); err != nil || oldActive {
 		t.Fatal("unreferenced old vectors escaped existing history retention", err)
+	}
+}
+
+func TestRefreshPreAdmissionReadsPostgres(t *testing.T) {
+	s, roots := boxSyncedFixture(t)
+	objects := reconcileBoxSyncedFixture(t, s, roots)
+	object := objects[0]
+	var root SourceRoot
+	for _, r := range roots {
+		if r.NotesSourceRootID == object.NotesSourceRootID {
+			root = r
+		}
+	}
+	retainRefreshFixtureBlob(t, s, object)
+	advanceBoxSyncedFixture(t, s)
+	search := func(strict bool) NotesSearchResultSet {
+		t.Helper()
+		out, err := s.SearchNotes(t.Context(), NotesSearchInput{Query: "cobalt observatory", Mode: NotesSearchModeLexical, NotesSourceRootID: root.NotesSourceRootID, RequireCurrent: strict})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	old := search(false)
+	if len(old.Results) != 1 || !old.Results[0].Freshness.Current || old.Results[0].PassageFollowup == nil {
+		t.Fatalf("initial publication: %+v", old)
+	}
+	citation := *old.Results[0].PassageFollowup
+	want, err := s.GetNotesPassage(t.Context(), citation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dxObserve(t, s, root, object, "# Notebook\nNew amber experiment waiting for admission.\n")
+	// Real append observations have different incidental metadata from creation.
+	if _, err = s.store.db.Exec(`UPDATE objects.object_versions SET metadata=metadata||'{"appended_version":true}'::jsonb WHERE status='active'`); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := s.store.ListSyncedObjectEntriesForNotesRoots(t.Context(), root.NotesSourceRootID)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("latest evidence: %+v %v", entries, err)
+	}
+	latest := entries[0]
+	notesFollowupReadOnly(t, s, func() {
+		out := search(false)
+		if len(out.Results) != 1 {
+			t.Fatalf("pre-admission read gap: %+v", out)
+		}
+		fresh := out.Results[0].Freshness
+		if fresh.Current || fresh.RefreshState != "pending" || fresh.IndexedSourceRevision != object.SourceRevision || fresh.LatestSourceRevision != sourceRevisionFromSyncedObject(latest, latest.SourceHash) || fresh.LatestSourceHash != latest.SourceHash {
+			t.Fatalf("pre-admission freshness: %+v", fresh)
+		}
+		strict := search(true)
+		if len(strict.Results) != 0 || strict.RefreshingMatchesOmitted != 1 {
+			t.Fatalf("pre-admission strict current: %+v", strict)
+		}
+		got, err := s.GetNotesPassage(t.Context(), citation)
+		if err != nil || got.Text != want.Text || !got.Historical || got.NotesPassageInput != citation {
+			t.Fatalf("pre-admission exact citation: %+v %v", got, err)
+		}
+		var writable bool
+		if err = s.store.db.QueryRow(`SELECT `+notesKnowledgeVisibilitySQL("o", false)+` FROM knowledge.knowledge_objects o WHERE knowledge_object_id=$1`, object.KnowledgeObjectID).Scan(&writable); err != nil || writable {
+			t.Fatalf("read continuity weakened processing binding: %v %v", writable, err)
+		}
+	})
+	for name, change := range map[string][2]string{
+		"file_privacy":       {`UPDATE files.file_metadata SET index_policy='private_no_index'`, `UPDATE files.file_metadata SET index_policy='text_later'`},
+		"metadata_privacy":   {`UPDATE files.file_metadata SET metadata='{"private_no_index":true}'`, `UPDATE files.file_metadata SET metadata='{}'`},
+		"object_privacy":     {`UPDATE objects.objects SET metadata='{"index_policy":"private_no_index"}'`, `UPDATE objects.objects SET metadata='{}'`},
+		"version_privacy":    {`UPDATE objects.object_versions SET metadata='{"private_no_index":true}' WHERE status='active'`, `UPDATE objects.object_versions SET metadata='{"file_class":"markdown","appended_version":true}' WHERE status='active'`},
+		"invalid_metadata":   {`UPDATE objects.object_versions SET metadata='[]' WHERE status='active'`, `UPDATE objects.object_versions SET metadata='{"file_class":"markdown","appended_version":true}' WHERE status='active'`},
+		"moved_source":       {`UPDATE objects.object_versions SET source_path=source_path||'.moved' WHERE status='active'`, `UPDATE objects.object_versions SET source_path=replace(source_path,'.moved','') WHERE status='active'`},
+		"different_owner":    {`UPDATE files.file_metadata SET source_node_id=NULL`, `UPDATE files.file_metadata SET source_node_id=(SELECT node_id FROM nodes.nodes)`},
+		"scope_withdrawal":   {`UPDATE objects.object_scope_links SET relevance_status='inactive'`, `UPDATE objects.object_scope_links SET relevance_status='active'`},
+		"replica_stale":      {`UPDATE sync.replicas SET freshness_state='stale'`, `UPDATE sync.replicas SET freshness_state='fresh'`},
+		"root_disabled":      {`UPDATE knowledge.notes_source_roots SET status='disabled'`, `UPDATE knowledge.notes_source_roots SET status='active'`},
+		"declaration_change": {`UPDATE knowledge.notes_source_roots SET metadata=jsonb_set(metadata,'{registration_metadata,knowledge_source,exclude}','["**"]')`, `UPDATE knowledge.notes_source_roots SET metadata=metadata#-'{registration_metadata,knowledge_source,exclude}'`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if _, err := s.store.db.Exec(change[1]); err != nil {
+					t.Error(err)
+				}
+			}()
+			if _, err := s.store.db.Exec(change[0]); err != nil {
+				t.Fatal(err)
+			}
+			if out := search(false); len(out.Results) != 0 {
+				t.Fatalf("withdrawn source still searchable: %+v", out)
+			}
+			if _, err = s.GetNotesPassage(t.Context(), citation); !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("withdrawn exact citation accessible: %v", err)
+			}
+		})
+	}
+	reconcileBoxSyncedFixture(t, s, roots)
+	if out := search(false); len(out.Results) != 1 || out.Results[0].Freshness.Current {
+		t.Fatalf("admission removed prior publication: %+v", out)
+	}
+	advanceBoxSyncedFixture(t, s)
+	if out := search(false); len(out.Results) != 0 {
+		t.Fatalf("completed replacement retained old search result: %+v", out)
 	}
 }
 
