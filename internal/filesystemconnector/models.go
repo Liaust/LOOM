@@ -19,7 +19,9 @@ const (
 	EndpointIngestFile   = "ingest_file"
 )
 
-var rootKeyPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,62}$`)
+// Generated roots combine project identity with a resource key; they are not
+// DNS labels. Keep a bounded identifier without the former DNS-sized limit.
+var rootKeyPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,254}$`)
 
 type Config struct {
 	SafeRoots []SafeRoot `json:"safe_roots,omitempty"`
@@ -137,7 +139,7 @@ func ValidateSafeRoot(root SafeRoot) error {
 		return errors.New("filesystem safe root root_key is required")
 	}
 	if !rootKeyPattern.MatchString(root.RootKey) {
-		return fmt.Errorf("filesystem safe root %q must be a lowercase slug", root.RootKey)
+		return fmt.Errorf("filesystem safe root %q must be a lowercase slug of at most 255 characters", root.RootKey)
 	}
 	if root.AbsolutePath == "" {
 		return fmt.Errorf("filesystem safe root %q absolute_path is required", root.RootKey)

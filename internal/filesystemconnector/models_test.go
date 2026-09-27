@@ -45,6 +45,20 @@ func TestValidateConfigRejectsDuplicateRoots(t *testing.T) {
 	}
 }
 
+func TestValidateConfigGeneratedApplicationRoot(t *testing.T) {
+	for _, key := range []string{
+		"declaration_app_project_01m2d0v5r03mdcqycmdstxarwt_zotero_webdav_v2__allocation-notes-trial",
+		strings.Repeat("a", 255),
+	} {
+		if err := ValidateConfig(Config{SafeRoots: []SafeRoot{DefaultSafeRoot(key, t.TempDir())}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ValidateConfig(Config{SafeRoots: []SafeRoot{DefaultSafeRoot(strings.Repeat("a", 256), t.TempDir())}}) == nil {
+		t.Fatal("unbounded identifier accepted")
+	}
+}
+
 func TestPublicSummariesDoNotExposeAbsolutePaths(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
