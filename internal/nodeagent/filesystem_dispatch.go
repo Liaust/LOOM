@@ -31,6 +31,15 @@ type filesystemDispatchResult struct {
 }
 
 func executeFilesystemDispatch(ctx context.Context, config Config, state State, store Store, dispatch routing.RemoteDispatchPayload) (filesystemDispatchResult, error) {
+	// Declaration-owned application inputs are not general-purpose filesystem
+	// grants, including configurations retained from an earlier agent version.
+	roots := make([]filesystemconnector.SafeRoot, 0, len(config.Filesystem.SafeRoots))
+	for _, root := range config.Filesystem.SafeRoots {
+		if !strings.HasPrefix(root.RootKey, "declaration_app_") {
+			roots = append(roots, root)
+		}
+	}
+	config.Filesystem.SafeRoots = roots
 	switch filesystemEndpointName(dispatch) {
 	case filesystemconnector.EndpointSafeList:
 		var input filesystemconnector.SafeListInput

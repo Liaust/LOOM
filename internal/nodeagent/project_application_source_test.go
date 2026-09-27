@@ -2,11 +2,27 @@ package nodeagent
 
 import (
 	"golang.org/x/sys/unix"
+	"loom.local/loom/internal/filesystemconnector"
+	"loom.local/loom/internal/nodeagent/watchedroots"
 	"loom.local/loom/internal/projects"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestApplicationSourceDoesNotExposeGeneralFilesystemAccess(t *testing.T) {
+	root := applicationSourceSafeRoot(projects.DeclarationWatchGroup{}, projects.DeclarationWatchRoot{ApplicationData: &projects.DeclarationApplicationDataBinding{Path: t.TempDir()}}, watchedroots.RootConfig{SafeRootKey: "allocation"})
+	config := filesystemconnector.Config{SafeRoots: []filesystemconnector.SafeRoot{root}}
+	if len(filesystemconnector.AvailableSafeRoots(config)) != 0 {
+		t.Fatal("allocation was advertised as general filesystem access")
+	}
+	if _, err := filesystemconnector.SafeList(config, filesystemconnector.SafeListInput{Root: "allocation", Path: "."}); err == nil {
+		t.Fatal("general listing bypassed declaration enrollment")
+	}
+	if _, err := filesystemconnector.PrepareIngest(config, filesystemconnector.IngestFileInput{Root: "allocation", Path: "file.md"}); err == nil {
+		t.Fatal("general ingest bypassed declaration enrollment")
+	}
+}
 
 func TestApplicationSourceCustodySurvivesApplicationReconcile(t *testing.T) {
 	reviewed := projects.DeclarationApplicationDataBinding{Application: "app", Data: "files", Path: "/data/app", Device: 1, Inode: 2, PoolInode: 3, UID: 10, GID: 10, Mode: 0700, BindingRef: "app.files", InstallationRevision: "old", PolicyRevision: "old-policy", LocationRevision: "location"}

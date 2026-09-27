@@ -45,6 +45,23 @@ func TestExecuteFilesystemDispatchSafeList(t *testing.T) {
 	}
 }
 
+func TestExecuteFilesystemDispatchRejectsRetainedApplicationInput(t *testing.T) {
+	root := filesystemconnector.DefaultSafeRoot("declaration_app_retained", t.TempDir())
+	config := Config{Filesystem: filesystemconnector.Config{SafeRoots: []filesystemconnector.SafeRoot{root}}}
+	for _, endpoint := range []string{"safe_list", "read_metadata", "ingest_file"} {
+		_, err := executeFilesystemDispatch(t.Context(), config, State{}, Store{DataDir: t.TempDir()}, routing.RemoteDispatchPayload{
+			CapabilityAddress: "main/main@filesystem." + endpoint,
+			Input:             json.RawMessage(`{"root":"declaration_app_retained","path":"."}`),
+		})
+		if err == nil {
+			t.Fatalf("%s exposed a declaration-owned input", endpoint)
+		}
+	}
+	if len(config.Filesystem.SafeRoots) != 1 || !config.Filesystem.SafeRoots[0].AllowList {
+		t.Fatal("dispatch mutated the stored configuration")
+	}
+}
+
 func TestExecuteFilesystemDispatchIngestUploadsLogicalSourcePath(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

@@ -127,7 +127,10 @@ func applicationSourceSafeRoot(group projects.DeclarationWatchGroup, item projec
 	}
 	_ = json.Unmarshal(item.KnowledgeSource, &source)
 	m := applicationSourceMetadata{Source: "project.application_data", ProjectID: group.ProjectID, ProjectRoot: group.ProjectRoot, NodeID: group.NodeID, Resource: source.Resource, Binding: item.ApplicationData}
-	return filesystemconnector.SafeRoot{RootKey: cfg.SafeRootKey, DisplayName: item.LocalRootKey, AbsolutePath: item.ApplicationData.Path, AllowList: true, AllowMetadata: true, AllowIngest: true, MaxFileBytes: watchedRootRequiredSafeRootMaxFileBytes(cfg), Metadata: projectWatchJSON(m)}
+	// This root is private input to the declaration-owned watcher, not another
+	// general filesystem capability. The watcher validates current enrollment
+	// before scanning/uploading; direct filesystem dispatch must not bypass it.
+	return filesystemconnector.SafeRoot{RootKey: cfg.SafeRootKey, DisplayName: item.LocalRootKey, AbsolutePath: item.ApplicationData.Path, MaxFileBytes: watchedRootRequiredSafeRootMaxFileBytes(cfg), Metadata: projectWatchJSON(m)}
 }
 
 func validateQueuedApplicationSource(ctx context.Context, store Store, config Config, state State, object LocalSyncObject) error {
