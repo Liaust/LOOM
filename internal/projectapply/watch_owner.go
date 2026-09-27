@@ -93,6 +93,9 @@ func (o WatchOwner) Apply(ctx context.Context, call ActionCall) (Observation, er
 		return Observation{}, fail(pc.DeclarationPlanStale, "watch_prerequisite_changed")
 	}
 	group, err := projectwatch.BuildDeclarationWatchGroup(x.Analysis, x.Target.OwnerNodeID, x.Input.Project.OwnerNode, domain.Payload.Group.Contributors)
+	if err == nil {
+		err = o.Resolver.bindKnowledgeAllocations(ctx, x, &group)
+	}
 	desired := domain.Payload.Group
 	desired.Predecessor = nil
 	if err != nil || !same(group, desired) {

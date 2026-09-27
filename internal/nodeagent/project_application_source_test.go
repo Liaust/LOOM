@@ -8,6 +8,29 @@ import (
 	"testing"
 )
 
+func TestApplicationSourceCustodySurvivesApplicationReconcile(t *testing.T) {
+	reviewed := projects.DeclarationApplicationDataBinding{Application: "app", Data: "files", Path: "/data/app", Device: 1, Inode: 2, PoolInode: 3, UID: 10, GID: 10, Mode: 0700, BindingRef: "app.files", InstallationRevision: "old", PolicyRevision: "old-policy", LocationRevision: "location"}
+	current := reviewed
+	current.InstallationRevision = "new"
+	current.PolicyRevision = "new-policy"
+	if !sameApplicationSourceCustody(&current, &reviewed) {
+		t.Fatal("same allocation rejected after application reconcile")
+	}
+	for _, mutate := range []func(*projects.DeclarationApplicationDataBinding){
+		func(b *projects.DeclarationApplicationDataBinding) { b.Inode++ },
+		func(b *projects.DeclarationApplicationDataBinding) { b.Path = "/data/other" },
+		func(b *projects.DeclarationApplicationDataBinding) { b.UID++ },
+		func(b *projects.DeclarationApplicationDataBinding) { b.BindingRef = "other" },
+		func(b *projects.DeclarationApplicationDataBinding) { b.LocationRevision = "moved" },
+	} {
+		changed := current
+		mutate(&changed)
+		if sameApplicationSourceCustody(&changed, &reviewed) {
+			t.Fatal("changed custody accepted")
+		}
+	}
+}
+
 func TestApplicationSourceDirectoryIdentity(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {

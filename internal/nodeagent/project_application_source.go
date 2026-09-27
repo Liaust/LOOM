@@ -62,10 +62,23 @@ func validateApplicationSource(ctx context.Context, config Config, state State, 
 		return fmt.Errorf("application_data_owner_unavailable")
 	}
 	current, err := projectwatch.BindApplicationData(ref, b.BindingRef, m.ProjectID, m.NodeID, b.LocationRevision, facts)
-	if err != nil || !projectWatchSameJSON(projectWatchJSON(current), projectWatchJSON(b)) {
+	if err != nil || !sameApplicationSourceCustody(current, b) {
 		return fmt.Errorf("application_data_custody_changed")
 	}
 	return validateApplicationSourcePath(*b)
+}
+
+func sameApplicationSourceCustody(current, reviewed *projects.DeclarationApplicationDataBinding) bool {
+	if current == nil || reviewed == nil {
+		return false
+	}
+	// The current owner query has already checked active, committed custody.
+	// A normal application reconcile may advance these receipts without moving
+	// its data. Keep the reviewed receipts, but compare the actual allocation.
+	c := *current
+	c.InstallationRevision = reviewed.InstallationRevision
+	c.PolicyRevision = reviewed.PolicyRevision
+	return c == *reviewed
 }
 
 // Do not follow symlinks in the allocation or subfolder. Application write
