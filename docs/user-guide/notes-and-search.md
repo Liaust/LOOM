@@ -54,6 +54,43 @@ Topics and Library roots and project folders explicitly declared as knowledge.
 A folder named `notes/` is not automatically enrolled just because of its name.
 Older registered Notes roots remain supported.
 
+A managed application's files can live outside its project folder. To read those
+files, the project names the existing allocation instead of its physical path:
+
+```yaml
+resources:
+  papers:
+    kind: knowledge
+    knowledge:
+      application_data:
+        application: webdav
+        data: library
+        subpath: papers
+      category: research
+```
+
+`webdav` names an application declared in the same project; `library` names its
+managed data key. That allocation must already exist. The optional `subpath`
+selects a folder inside it; omitting it selects the whole allocation. Use this
+instead of `path`, not alongside it. The ordinary project plan/apply workflow
+enrolls the source and reports missing allocations as prerequisites.
+
+The application remains the writer and owns storage and backup policy. Notes
+only reads, checks current allocation ownership, and uses the same extraction,
+refresh and search pipeline as project folders. This is not a synchronization
+client. Cross-project references, arbitrary host paths and symlink substitutions
+are not sources. Removing the declaration or archiving the project stops intake
+and current search/read access without deleting retained versions. External data
+does not move with a project-folder archive and receives no implied archive
+custody. Re-enrollment requires current owner evidence again.
+
+On managed Linux hosts, the operator enables
+`loom.projectApplications.provisioning.notesSources` to let the node agent read
+private application files without changing their modes or ACLs. This grants
+daemon-wide `CAP_DAC_READ_SEARCH`, not a path-scoped kernel permission or write
+bypass. It does not enroll the allocation pool: each source still requires its
+own declaration and current owner evidence. The setting is off by default.
+
 LOOM reconciles those roots into knowledge objects, extracts text where
 supported, chunks that text, writes lexical search documents, optionally writes
 embeddings, and builds a read-only `loom-notes` projection.

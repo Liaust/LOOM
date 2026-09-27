@@ -153,6 +153,16 @@ func parseDeclarationShape(raw []byte) (ProjectDeclaration, string) {
 				return d, "declaration.union"
 			}
 			p = r.Knowledge.Path
+			if ref := r.Knowledge.ApplicationData; ref != nil {
+				if p != "" || r.Knowledge.Protection != "" || !declarationRef(d, ref.Application, DeclarationApplication) || d.Resources[ref.Application].Application == nil || !declarationKey(string(ref.Data)) {
+					return d, "declaration.application_data"
+				}
+				data, exists := d.Resources[ref.Application].Application.Data[ref.Data]
+				if !exists || data.BindingRef == "" || data.Path != "" || (ref.Subpath != "" && !declarationPath(ref.Subpath, false)) {
+					return d, "declaration.application_data"
+				}
+				p = KnowledgeLogicalPath(key, *r.Knowledge)
+			}
 			protection = r.Knowledge.Protection
 			if _, err := NormalizeKnowledgeSourcePolicy(*r.Knowledge); err != nil {
 				return d, "declaration.knowledge_policy"
@@ -663,7 +673,9 @@ func validateDeclaration(loaded LoadedProject) ValidationReport {
 			checkPath(v.Path)
 			c.Repositories = append(c.Repositories, RepoMemberSpec{ID: v.ID, Key: string(key), Path: v.Path, Role: v.Role, StateRoot: v.StateRoot})
 		case DeclarationKnowledge:
-			checkPath(r.Knowledge.Path)
+			if r.Knowledge.ApplicationData == nil {
+				checkPath(r.Knowledge.Path)
+			}
 		case DeclarationProtection:
 			if r.Protection.Path != "" {
 				checkPath(r.Protection.Path)
@@ -1161,6 +1173,7 @@ func CompileDeclarationEnrollment(loaded LoadedProject, c DeclarationCompilation
 			continue
 		}
 		localKey := string(key)
+		knowledgePath := KnowledgeLogicalPath(key, *knowledge)
 		include, exclude := append([]string{}, defaultNotesIncludes...), append([]string{}, defaultNotesExcludes...)
 		for _, selection := range selections {
 			if !selection.Enabled {
@@ -1182,20 +1195,23 @@ func CompileDeclarationEnrollment(loaded LoadedProject, c DeclarationCompilation
 		}
 		// Resource keys are stable identity; normalization must never collapse two
 		// declarations or overwrite a selected protection owner.
-		if existing := builder.roots[localKey]; existing != nil && (existing.path != knowledge.Path || existing.metadata["knowledge_source"] != nil) {
+		if existing := builder.roots[localKey]; existing != nil && (existing.path != knowledgePath || existing.metadata["knowledge_source"] != nil) {
 			return nil, fmt.Errorf("declaration.enrollment_key_conflict: %s", key)
 		}
-		builder.addNotes(NotesFacetItem{RootKey: localKey, ProjectPath: knowledge.Path, Status: "active", Sync: true, Index: true, Include: include, Exclude: exclude, MaterialCategory: string(knowledge.Category), ContractPath: loaded.ContractPath})
+		builder.addNotes(NotesFacetItem{RootKey: localKey, ProjectPath: knowledgePath, Status: "active", Sync: true, Index: true, Include: include, Exclude: exclude, MaterialCategory: string(knowledge.Category), ContractPath: loaded.ContractPath})
 		acc := builder.roots[localKey]
 		if acc == nil {
 			return nil, fmt.Errorf("declaration.enrollment_key_conflict: resource key %s is not a portable owner key", key)
 		}
 		acc.metadata["knowledge_source"] = map[string]any{
 			"schema_version": ProjectSchemaV05, "root_kind": "project_material", "category": "projects", "declaration": string(knowledge.Category),
-			"enabled": true, "root_relative_path": knowledge.Path, "include": include, "exclude": exclude,
+			"enabled": true, "root_relative_path": knowledgePath, "include": include, "exclude": exclude,
 			"project_id": d.Project.ID, "project_root": loaded.RootPath, "owner_node": d.Project.OwnerNode,
 			"resource_key": string(key), "local_root_key": localKey, "backend_root_key": ProjectWatchedRootKey(d.Project.Slug, localKey),
 			"source_ref": rootSource.Ref, "source_hash": rootSource.Hash,
+		}
+		if knowledge.ApplicationData != nil {
+			acc.metadata["knowledge_source"].(map[string]any)["application_data"] = knowledge.ApplicationData
 		}
 		policy, err := NormalizeKnowledgeSourcePolicy(*knowledge)
 		if err != nil {

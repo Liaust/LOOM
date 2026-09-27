@@ -156,6 +156,16 @@ func TestApplicationPrerequisitesBindingsAndPrivateProjection(t *testing.T) {
 	if !reflect.DeepEqual(before, applicationPrerequisitesTree(t, root)) {
 		t.Fatal("query mutated files/modes/times")
 	}
+	sourceQuery := q
+	sourceQuery.SourceData = "first"
+	source, sourceErr := r.QueryPrerequisites(t.Context(), 1234, sourceQuery)
+	if sourceErr != nil || source.Data["first"].Path != data || source.Data["first"].Identity.Device == 0 || source.Data["second"].Path != "" {
+		t.Fatalf("explicit source projection: %+v %v", source, sourceErr)
+	}
+	sourceRaw, _ := json.Marshal(source)
+	if _, sourceErr = decodeApplicationPrerequisiteSnapshot(sourceRaw, sourceQuery); sourceErr != nil {
+		t.Fatal(sourceErr)
+	}
 	startup.Current.ObservedAt = observed.Add(time.Hour)
 	applicationPrerequisitesWrite(t, filepath.Join(r.Store.Root, "startup-"+q.Owner.Instance()+".json"), startup)
 	b, e := r.QueryPrerequisites(t.Context(), 1234, q)
@@ -167,6 +177,10 @@ func TestApplicationPrerequisitesBindingsAndPrivateProjection(t *testing.T) {
 	b, e = r.QueryPrerequisites(t.Context(), 1234, q)
 	if e != nil || b.Data["first"].Custody != "conflict" {
 		t.Fatalf("custody substitution accepted: %+v %v", b, e)
+	}
+	source, sourceErr = r.QueryPrerequisites(t.Context(), 1234, sourceQuery)
+	if sourceErr != nil || source.Data["first"].Path != "" {
+		t.Fatalf("unowned path exposed: %+v %v", source, sourceErr)
 	}
 }
 func TestApplicationPrerequisitesUnsafeMetadata(t *testing.T) {

@@ -15,7 +15,7 @@ func applicationReportError(reason string) error { return applicationError("prer
 func DecodeApplicationPrerequisiteQuery(raw []byte) (ApplicationPrerequisiteQuery, error) {
 	var q ApplicationPrerequisiteQuery
 	if decodeClosedPrerequisite(raw, &q) != nil || q.SchemaVersion != ApplicationPrerequisiteSchema ||
-		!q.Owner.valid() {
+		!q.Owner.valid() || (q.SourceData != "" && !applicationKeyPattern.MatchString(q.SourceData)) {
 		return q, applicationReportError("query_invalid")
 	}
 	return q, nil
@@ -85,6 +85,9 @@ func decodeApplicationPrerequisiteSnapshot(raw []byte, q ApplicationPrerequisite
 	}
 	available := func(v string) bool { return v == "available" || v == "missing" || v == "unavailable" }
 	for alias, data := range s.Data {
+		if data.Path != "" && (q.SourceData != alias || data.Custody != "matches" || !applicationAbsolutePath(data.Path)) {
+			return s, applicationReportError("data_invalid")
+		}
 		if !applicationKeyPattern.MatchString(alias) || !available(data.Availability) || !applicationPrerequisiteBindingRef(data.BindingRef) {
 			return s, applicationReportError("data_invalid")
 		}

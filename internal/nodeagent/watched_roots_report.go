@@ -80,6 +80,13 @@ func reportWatchedRootRun(ctx context.Context, store Store, config Config, state
 			"root_relative_path": root.Config.RootRelativePath,
 		}),
 	}
+	var application applicationSourceMetadata
+	if json.Unmarshal(root.SafeRoot.Metadata, &application) == nil && application.Source == "project.application_data" {
+		var meta map[string]any
+		_ = json.Unmarshal(input.Metadata, &meta)
+		meta["application_data"] = application.Binding
+		input.Metadata = objectJSON(meta)
+	}
 	envelope, err := client.ReportWatchedRoot(ctx, correlationID, "node-agent.watched-root.report."+state.NodeID+"."+root.Config.RootKey, input)
 	if err != nil {
 		report.Status = watchedroots.OutputStatusFailed

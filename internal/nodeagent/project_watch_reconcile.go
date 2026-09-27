@@ -181,12 +181,25 @@ func reconcileProjectWatchLocked(ctx context.Context, store Store, config Config
 		if communication.DecodeStrictJSONObject(item.ConfigJSON, &cfg) != nil {
 			return failure("effective_config_invalid")
 		}
+		if item.ApplicationData != nil {
+			appRoot := applicationSourceSafeRoot(payload.Group, item, cfg)
+			if err := validateApplicationSource(ctx, config, state, appRoot, cfg); err != nil {
+				return failure(err.Error())
+			}
+			if prior, exists := filesystemconnector.FindSafeRoot(candidate.Filesystem, cfg.SafeRootKey); exists {
+				var owner applicationSourceMetadata
+				if !known || json.Unmarshal(prior.Metadata, &owner) != nil || owner.Source != "project.application_data" || owner.ProjectID != payload.Group.ProjectID || owner.Resource == "" {
+					return failure("application_safe_root_owner_conflict")
+				}
+			}
+			candidate.Filesystem = filesystemconnector.UpsertSafeRoot(candidate.Filesystem, appRoot)
+		}
 		if existing, loadErr := runtimeStore.LoadInstance(item.WorkerKey); loadErr == nil {
 			if !owned[item.BackendRootKey] {
 				return failure("worker_owner_conflict")
 			}
 			var prior watchedroots.RootConfig
-			if existing.Kind != noderuntime.KindWatchedRoot || json.Unmarshal(existing.ConfigJSON, &prior) != nil || prior.SafeRootKey != safeKey || prior.RootKey != item.BackendRootKey {
+			if existing.Kind != noderuntime.KindWatchedRoot || json.Unmarshal(existing.ConfigJSON, &prior) != nil || (prior.SafeRootKey != safeKey && prior.SafeRootKey != projectwatch.ApplicationDataSafeKey(payload.Group.ProjectID, item.BackendRootKey)) || prior.RootKey != item.BackendRootKey {
 				return failure("worker_binding_conflict")
 			}
 		} else if !errors.Is(loadErr, fs.ErrNotExist) {
@@ -259,7 +272,7 @@ func reconcileProjectWatchLocked(ctx context.Context, store Store, config Config
 			instance, loadErr := runtimeStore.LoadInstance(workerKey)
 			if loadErr == nil {
 				var cfg watchedroots.RootConfig
-				if json.Unmarshal(instance.ConfigJSON, &cfg) != nil || cfg.SafeRootKey != safeKey || cfg.RootKey != key {
+				if json.Unmarshal(instance.ConfigJSON, &cfg) != nil || (cfg.SafeRootKey != safeKey && cfg.SafeRootKey != projectwatch.ApplicationDataSafeKey(payload.Group.ProjectID, key)) || cfg.RootKey != key {
 					_ = release()
 					return failure("retirement_owner_conflict")
 				}
@@ -302,6 +315,11 @@ func verifyLocalProjectWatchSource(payload projectwatch.DeclarationWatchPayload)
 	}
 	desired := payload.Group
 	desired.Predecessor = nil
+	for i := range expected.Roots {
+		if i < len(desired.Roots) {
+			expected.Roots[i].ApplicationData = desired.Roots[i].ApplicationData
+		}
+	}
 	if p := payload.Group.Predecessor; p != nil {
 		intent, e := projectregistration.BuildDeclarationIntent(analysis, "project.declaration")
 		physical, pathErr := canonicalDirectoryPath(payload.Group.ProjectRoot)
@@ -531,7 +549,7 @@ func projectWatchDesiredApplied(runtimeStore noderuntime.Store, config Config, m
 		if _, validateErr := watchedroots.ValidateRootConfig(rootConfig, config.Filesystem); validateErr != nil {
 			return false
 		}
-		safeRoot, found := filesystemconnector.FindSafeRoot(config.Filesystem, safeKey)
+		safeRoot, found := filesystemconnector.FindSafeRoot(config.Filesystem, rootConfig.SafeRootKey)
 		if !found || safeRoot.MaxFileBytes < watchedRootRequiredSafeRootMaxFileBytes(rootConfig) {
 			return false
 		}

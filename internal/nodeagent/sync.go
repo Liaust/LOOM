@@ -605,6 +605,10 @@ func pushLocalSyncOnce(ctx context.Context, store Store, config Config, state St
 		if !ok {
 			return LocalSyncPushRun{}, fmt.Errorf("local sync object not found for outbox item %s", outboxItem.LocalRef)
 		}
+		if err := validateQueuedApplicationSource(ctx, store, config, state, object); err != nil {
+			objectUploadErrors = append(objectUploadErrors, err)
+			continue
+		}
 		envelope, err := uploadQueuedSyncObject(ctx, client, correlationID, state, outboxItem, object)
 		if err != nil {
 			objectUploadErrors = append(objectUploadErrors, fmt.Errorf("upload local sync object %s: %w", outboxItem.LocalRef, err))

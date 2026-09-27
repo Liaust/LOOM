@@ -17,6 +17,7 @@ import (
 const ApplicationPrerequisiteSchema = "application.prerequisites.v1"
 
 type ApplicationPrerequisiteQuery struct {
+	SourceData    string           `json:"source_data,omitempty"`
 	SchemaVersion string           `json:"schema_version"`
 	Owner         ApplicationOwner `json:"owner"`
 }
@@ -71,6 +72,7 @@ type ApplicationPrerequisiteInstallation struct {
 	Artifact   *ApplicationPrerequisiteArtifact `json:"artifact,omitempty"`
 }
 type ApplicationPrerequisiteData struct {
+	Path         string                               `json:"path,omitempty"`
 	BindingRef   string                               `json:"binding_ref,omitempty"`
 	Availability string                               `json:"availability"`
 	Custody      string                               `json:"custody"`
@@ -78,6 +80,7 @@ type ApplicationPrerequisiteData struct {
 	Identity     *ApplicationPrerequisiteDataIdentity `json:"identity,omitempty"`
 }
 type ApplicationPrerequisiteDataIdentity struct {
+	Device    uint64 `json:"device,omitempty"`
 	Inode     uint64 `json:"inode"`
 	PoolInode uint64 `json:"pool_inode"`
 	UID       uint32 `json:"uid"`
@@ -112,7 +115,7 @@ func (r ApplicationRuntime) QueryPrerequisites(ctx context.Context, peerUID uint
 // The inter-pass callback is an in-package fixture seam, absent on the public
 // query path. The runtime's effect/fault hook is deliberately not called.
 func (r ApplicationRuntime) queryPrerequisites(ctx context.Context, peerUID uint32, query ApplicationPrerequisiteQuery, between func()) (ApplicationPrerequisiteSnapshot, error) {
-	if query.SchemaVersion != ApplicationPrerequisiteSchema || !query.Owner.valid() || !applicationAbsolutePath(r.Store.Root) || !applicationAbsolutePath(r.PolicyPath) {
+	if query.SchemaVersion != ApplicationPrerequisiteSchema || !query.Owner.valid() || (query.SourceData != "" && !applicationKeyPattern.MatchString(query.SourceData)) || !applicationAbsolutePath(r.Store.Root) || !applicationAbsolutePath(r.PolicyPath) {
 		return ApplicationPrerequisiteSnapshot{}, applicationError("prerequisites.invalid")
 	}
 	for attempt := 0; attempt < 3; attempt++ {
@@ -251,6 +254,12 @@ func (r ApplicationRuntime) collectPrerequisites(ctx context.Context, peer uint3
 			return empty, "", e
 		}
 		data, identity := applicationPrerequisiteDataTrusted(r.Store.OwnerUID, p, installation.Data[alias], r.Store.TrustedParentOwners)
+		if q.SourceData != alias {
+			data.Path = ""
+			if data.Identity != nil {
+				data.Identity.Device = 0
+			}
+		}
 		out.Data[alias] = data
 		vector.Metadata["data:"+alias] = identity
 	}
@@ -491,11 +500,12 @@ func applicationPrerequisiteDataTrusted(uid uint32, p ApplicationDataPolicy, pri
 		Path, Filesystem string
 		Inode            uint64
 	}{p.Pool, identity.Filesystem, pst.Ino})
-	out.Identity = &ApplicationPrerequisiteDataIdentity{Inode: st.Ino, PoolInode: pst.Ino, UID: st.Uid, GID: st.Gid, Mode: uint32(st.Mode) & 07777}
+	out.Identity = &ApplicationPrerequisiteDataIdentity{Device: uint64(st.Dev), Inode: st.Ino, PoolInode: pst.Ino, UID: st.Uid, GID: st.Gid, Mode: uint32(st.Mode) & 07777}
 	if prior != (ApplicationDataIdentity{}) {
 		out.Custody = "conflict"
 		if applicationSameDataIdentity(identity, prior) {
 			out.Custody = "matches"
+			out.Path = p.Path
 		}
 	}
 	return out, applicationSHA(out)

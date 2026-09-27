@@ -285,6 +285,11 @@ func (s *Service) projectSourceRootCandidate(registration ProjectWatchedRootRegi
 			"source_kinds":                     sourceKinds,
 		}),
 	}
+	if adapter, ok := jsonObject(registration.Metadata)["declaration_adapter"].(map[string]any); ok {
+		if binding, ok := adapter["application_data"].(map[string]any); ok {
+			root.SourcePath = joinSourcePath(stringMapValue(binding, "path"), stringMapValue(binding, "subpath"))
+		}
+	}
 	prepared, err := s.PrepareSourceRoot(root)
 	if err != nil {
 		return SourceRootCandidate{}, false, "invalid_project_notes_root: " + err.Error()
@@ -506,6 +511,9 @@ func declarationKnowledgeMetadata(metadata json.RawMessage) (map[string]any, boo
 	if _, present := source["policy"]; present {
 		allowed = append(allowed, "policy")
 	}
+	if _, present := source["application_data"]; present {
+		allowed = append(allowed, "application_data")
+	}
 	if len(source) != len(allowed) {
 		return nil, false
 	}
@@ -546,7 +554,7 @@ func declarationKnowledgeMetadata(metadata json.RawMessage) (map[string]any, boo
 	localKey, _ := source["local_root_key"].(string)
 	configHash, _ := source["config_hash"].(string)
 	if resource == nil || source["project_id"] != document.Project.ID || source["owner_node"] != document.Project.OwnerNode ||
-		source["declaration"] != string(resource.Category) || source["root_relative_path"] != resource.Path ||
+		source["declaration"] != string(resource.Category) || source["root_relative_path"] != projectcontracts.KnowledgeLogicalPath(projectcontracts.ResourceKey(key), *resource) ||
 		!filepath.IsAbs(projectRoot) || filepath.Clean(projectRoot) != projectRoot || localKey == "" ||
 		source["backend_root_key"] != projectcontracts.ProjectWatchedRootKey(document.Project.Slug, localKey) ||
 		!declarationConfigHash.MatchString(configHash) {
@@ -554,6 +562,17 @@ func declarationKnowledgeMetadata(metadata json.RawMessage) (map[string]any, boo
 	}
 	if resource.Protection == "" && localKey != key {
 		return nil, false
+	}
+	actualApplication, hasApplication := source["application_data"]
+	if hasApplication != (resource.ApplicationData != nil) {
+		return nil, false
+	}
+	if hasApplication {
+		actual, _ := json.Marshal(actualApplication)
+		expected, _ := json.Marshal(resource.ApplicationData)
+		if !pipelinePlanSnapshotsEqual(actual, expected) {
+			return nil, false
+		}
 	}
 	policy, err := projectcontracts.NormalizeKnowledgeSourcePolicy(*resource)
 	if err != nil {

@@ -82,7 +82,7 @@ func declarationEnrollmentDB(t *testing.T, policy ...string) *declarationEnrollm
 	if _, err := migrations.Up(t.Context(), url, filepath.Join("..", "..", "migrations")); err != nil {
 		t.Fatal(err)
 	}
-	f := &declarationEnrollmentDBFixture{db: db, service: NewService(db), projects: projects.NewService(db), req: requestctx.Context{ActorID: ids.NewActorID()}, analysis: declarationKnowledgeAnalysis(t, policy...)}
+	f := &declarationEnrollmentDBFixture{db: db, service: NewService(db, WithSourceStagingRoot(t.TempDir())), projects: projects.NewService(db), req: requestctx.Context{ActorID: ids.NewActorID()}, analysis: declarationKnowledgeAnalysis(t, policy...)}
 	if _, err := db.ExecContext(t.Context(), `INSERT INTO identity.actors(actor_id,actor_key,display_name,actor_kind,status) VALUES($1,'d2-fixture','D2 fixture','human','active')`, f.req.ActorID); err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,8 @@ func (f *declarationEnrollmentDBFixture) publish(t *testing.T) KnowledgeObject {
 	for step := 0; step < 30; step++ {
 		r, err := f.service.RunPipelineCoordinatorOnce(t.Context(), PipelineCoordinatorRunInput{WorkerRunID: "d2-fixture", Limit: 10, Now: time.Now().UTC()})
 		if err != nil || r.Failed != 0 {
-			t.Fatalf("pipeline: %+v %v", r, err)
+			failed, _ := f.service.store.GetPipelineRun(t.Context(), r.LastRunID)
+			t.Fatalf("pipeline: %+v %v; stage=%s code=%s message=%s", r, err, failed.CurrentStageKey, failed.LastErrorCode, failed.LastErrorMessage)
 		}
 		if r.Claimed == 0 {
 			return objects[0]
@@ -440,7 +441,7 @@ func declarationBoundEnrollmentDB(t *testing.T, shared ...*declarationEnrollment
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &declarationEnrollmentDBFixture{db: db, service: NewService(db), projects: projects.NewService(db), req: req, analysis: declarationKnowledgeAnalysis(t)}
+	f := &declarationEnrollmentDBFixture{db: db, service: NewService(db, WithSourceStagingRoot(t.TempDir())), projects: projects.NewService(db), req: req, analysis: declarationKnowledgeAnalysis(t)}
 	if len(shared) > 0 {
 		raw := strings.Replace(string(f.analysis.Loaded.Raw), "slug: declaration-proof", "slug: declaration-proof-b", 1)
 		if err = os.WriteFile(f.analysis.Loaded.ContractPath, []byte(raw), 0600); err != nil {

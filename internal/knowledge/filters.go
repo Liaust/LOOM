@@ -322,7 +322,12 @@ func declarationEnrollmentEvidenceSQL(root, object string, archiveRead bool) str
 	 AND declared.project_id=` + root + `.project_id AND declared.node_id=` + root + `.node_id
 	 AND declared.owner_node_key=` + root + `.node_key AND declared_node.node_key=declared.owner_node_key
 	 AND declared.backend_root_key=` + root + `.backend_root_key AND declared.root_relative_path=` + root + `.root_relative_path
-	 AND ` + root + `.source_path=accepted.project_root || '/' || declared.root_relative_path
+	 AND ((NOT expected.value#>'{metadata,knowledge_source}' ? 'application_data'
+	 AND ` + root + `.source_path=accepted.project_root || '/' || declared.root_relative_path)
+	 OR (expected.value#>'{metadata,knowledge_source}' ? 'application_data'
+	 AND ` + root + `.source_path=declared.metadata#>>'{declaration_adapter,application_data,path}' || CASE WHEN coalesce(declared.metadata#>>'{declaration_adapter,application_data,subpath}','')='' THEN '' ELSE '/' || (declared.metadata#>>'{declaration_adapter,application_data,subpath}') END
+	 AND owner_report.metadata->'application_data'=declared.metadata#>'{declaration_adapter,application_data}'
+	 AND owner_report.metadata->>'root_reachable'='true'))
 	 AND expected.value->>'activation_status'='pending_agent_apply'
 	 AND declared.source_kinds_json=expected.value->'source_kinds' AND declared.source_kinds_json ? 'project_material'
 	 AND NOT declared.source_kinds_json ?| ARRAY['notes_contract','repos_contract']
@@ -333,7 +338,8 @@ func declarationEnrollmentEvidenceSQL(root, object string, archiveRead bool) str
 	 AND declared.backup_mode=expected.value->>'backup_mode' AND declared.delete_mode=expected.value->>'delete_mode'
 	 AND ((NOT declared.metadata ? 'declaration_adapter' AND declared.safe_root_key=expected.value->>'safe_root_key'
   AND declared.config_hash=expected.value->>'config_hash' AND declared.config_json=expected.value->'config_json')
-  OR projects.declaration_watch_binding_matches(expected.value,declared.metadata,declared.config_json,declared.config_hash,declared.safe_root_key,declared.project_id,declared.node_id,(` + archive + `)))
+  OR projects.declaration_watch_binding_matches(expected.value,declared.metadata,declared.config_json,declared.config_hash,declared.safe_root_key,declared.project_id,declared.node_id,(` + archive + `))
+  OR projects.declaration_application_data_matches(expected.value,declared.metadata,declared.config_json,declared.config_hash,declared.safe_root_key,declared.project_id,declared.node_id))
 	 AND owner_report.node_id=declared.node_id AND owner_report.root_key=declared.backend_root_key
 	 AND owner_report.config_hash=declared.config_hash AND owner_report.config_json=declared.config_json
 	 AND expected.value#>>'{metadata,knowledge_source,schema_version}'=accepted.contract_schema_version
@@ -343,7 +349,11 @@ func declarationEnrollmentEvidenceSQL(root, object string, archiveRead bool) str
 	 AND expected.value#>>'{metadata,knowledge_source,owner_node}'=accepted.contract_json#>>'{project,owner_node}'
 	 AND accepted.contract_json#>>'{project,id}'=declared.project_id
 	 AND (accepted.contract_json->'resources'->(expected.value#>>'{metadata,knowledge_source,resource_key}'))->>'kind'='knowledge'
-	 AND (accepted.contract_json->'resources'->(expected.value#>>'{metadata,knowledge_source,resource_key}'))#>>'{knowledge,path}'=declared.root_relative_path
+	 AND (((accepted.contract_json->'resources'->(expected.value#>>'{metadata,knowledge_source,resource_key}'))#>>'{knowledge,path}'=declared.root_relative_path
+	 AND NOT expected.value#>'{metadata,knowledge_source}' ? 'application_data')
+	 OR ((accepted.contract_json->'resources'->(expected.value#>>'{metadata,knowledge_source,resource_key}'))#>'{knowledge,application_data}'=expected.value#>'{metadata,knowledge_source,application_data}'
+	 AND declared.root_relative_path='application-data/'||(expected.value#>>'{metadata,knowledge_source,resource_key}')
+	 AND accepted.contract_json->'resources'->(expected.value#>>'{metadata,knowledge_source,application_data,application}')->'application'->'data'->(expected.value#>>'{metadata,knowledge_source,application_data,data}')->>'binding_ref'=declared.metadata#>>'{declaration_adapter,application_data,binding_ref}'))
 	 AND (accepted.contract_json->'resources'->(expected.value#>>'{metadata,knowledge_source,resource_key}'))#>>'{knowledge,category}'=expected.value#>>'{metadata,knowledge_source,declaration}'
 	 ))`
 }

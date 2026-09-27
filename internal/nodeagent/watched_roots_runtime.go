@@ -2,6 +2,7 @@ package nodeagent
 
 import (
 	"context"
+	"strings"
 
 	noderuntime "loom.local/loom/internal/nodeagent/runtime"
 	"loom.local/loom/internal/nodeagent/watchedroots"
@@ -24,6 +25,14 @@ func (watchedRootRuntime) RunOnce(ctx context.Context, runtimeStore noderuntime.
 	}
 	validated, err := watchedroots.ValidateRootConfigForRun(rootConfig, config.Filesystem)
 	if err != nil {
+		if strings.HasPrefix(rootConfig.SafeRootKey, "declaration_app_") {
+			for _, safe := range config.Filesystem.SafeRoots {
+				if safe.RootKey == rootConfig.SafeRootKey {
+					root := watchedroots.ValidatedRoot{Config: rootConfig, ConfigHash: watchedroots.ConfigHash(rootConfig), SafeRoot: safe}
+					_ = reportWatchedRootRun(ctx, store, config, state, instance, root, watchedroots.ScanResult{Status: watchedroots.RunStatusBlocked, Message: "application_data_path_unavailable"}, "")
+				}
+			}
+		}
 		return watchedRootRuntimeFailure(err), nil
 	}
 	result, err := runWatchedRootReconcileAndPlan(ctx, store, config, state, instance, validated, watchedroots.ScanModeAuto, true, true, true, "")

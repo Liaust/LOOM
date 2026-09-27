@@ -40,6 +40,7 @@
       maxMemoryBytes = 2147483648;
       maxPlannedBytes = 107374182400;
       cloudBackup = true;
+      notesSources = true;
       protonShareIDs = [];
       protonAllowGeneration = false;
     };

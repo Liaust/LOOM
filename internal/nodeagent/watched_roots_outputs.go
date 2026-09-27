@@ -11,6 +11,15 @@ import (
 )
 
 func runWatchedRootReconcileAndPlan(ctx context.Context, store Store, config Config, state State, instance noderuntime.WorkerInstance, root watchedroots.ValidatedRoot, mode string, planOutputs bool, flushOutputs bool, reportToMain bool, correlationID string) (watchedroots.ScanResult, error) {
+	if err := validateApplicationSource(ctx, config, state, root.SafeRoot, root.Config); err != nil {
+		root.RootReachable = false
+		result := watchedroots.ScanResult{Status: watchedroots.RunStatusBlocked, Message: err.Error()}
+		if reportToMain {
+			report := reportWatchedRootRun(ctx, store, config, state, instance, root, result, correlationID)
+			result.MainReport = &report
+		}
+		return result, nil
+	}
 	// A concurrent flush must not acknowledge into a path snapshot that this scan
 	// later replaces. Use the same cross-process lock as queue and acknowledgement.
 	store, unlock, err := store.lockLocalSync(ctx)
@@ -28,6 +37,15 @@ func runWatchedRootReconcileAndPlan(ctx context.Context, store Store, config Con
 		return watchedroots.ScanResult{}, err
 	}
 	if planOutputs && result.Status != watchedroots.RunStatusBlocked {
+		if err := validateApplicationSource(ctx, config, state, root.SafeRoot, root.Config); err != nil {
+			root.RootReachable = false
+			result.Status, result.Message = watchedroots.RunStatusBlocked, err.Error()
+			if reportToMain {
+				report := reportWatchedRootRun(ctx, store, config, state, instance, root, result, correlationID)
+				result.MainReport = &report
+			}
+			return result, nil
+		}
 		plan, err := watchedroots.PlanOutputs(watchedStore, root, instance.WorkerKey)
 		if err != nil {
 			return watchedroots.ScanResult{}, err

@@ -28,7 +28,7 @@ resources:
 Select project-relative folders, including application-written data.
 Categories: notes/docs/research. Notes reads eligible files after apply;
 ignores/formats still apply. No implied backup or Provenance acceptance.
-External allocations cannot be substituted with absolute paths or symlinks.
+Allocation sources: [reference](application-data-notes.md).
 
 Defaults: 1 GiB/file, 250 PDF pages, minute polling; smaller limits remain.
 Apply to update existing roots. Uploads stream above 32 MiB; views converge incrementally.

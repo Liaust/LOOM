@@ -307,6 +307,9 @@ func (r *LocalResolver) Resolve(ctx context.Context, p Principal, request pc.Dec
 			return Resolution{}, fail(pc.DeclarationInvalid, "watch_group_invalid")
 		}
 		group.Predecessor = predecessor
+		if err = r.bindKnowledgeAllocations(ctx, x, &group); err != nil {
+			return Resolution{}, err
+		}
 		if err = projectwatch.ValidateDeclarationWatchGroup(group); err != nil {
 			return Resolution{}, fail(pc.DeclarationInvalid, "watch_group_invalid")
 		}

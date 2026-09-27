@@ -81,6 +81,7 @@ in {
     trustedParentOwners = lib.mkOption { type = lib.types.attrsOf lib.types.ints.unsigned; default = {}; description = "Exact host-managed ancestor paths and operator UIDs. Other ancestors and allocation roots retain root custody; symlinks and group/world writes remain rejected."; };
     provisioning.enable = lib.mkEnableOption "node-policy-managed application grants";
     provisioning.cloudBackup = lib.mkOption { type = lib.types.bool; default = false; description = "Include the entire allocation pool in the existing cloud-history worker. Explicitly grants loomd daemon-wide CAP_DAC_READ_SEARCH so private application files retain their modes; not path-scoped, no write bypass, no new schedule, and not application-consistent database recovery."; };
+    provisioning.notesSources = lib.mkOption { type = lib.types.bool; default = false; description = "Allow declared application-data Notes sources. Grants the node agent daemon-wide CAP_DAC_READ_SEARCH, not path-scoped authority; no write bypass or application mode/ACL change. Declaration and current allocation custody still gate intake."; };
     provisioning.dataRoot = lib.mkOption { type = lib.types.str; default = ""; description = "Dedicated persistent application allocation root; never an agent-supplied path."; };
     provisioning.maxMemoryBytes = lib.mkOption { type = lib.types.ints.unsigned; default = 0; description = "Per-application memory ceiling; required when provisioning is enabled."; };
     provisioning.maxPlannedBytes = lib.mkOption { type = lib.types.ints.unsigned; default = 0; description = "Per-application aggregate planned data ceiling, not a quota or reservation."; };
@@ -104,6 +105,10 @@ in {
     ];
     environment.etc."loom/project-applications.json".text = builtins.toJSON policy;
     environment.etc."loom/project-applications-helper.json".text = builtins.toJSON helperConfig;
+    systemd.services.loom-node-agent = lib.mkIf (cfg.provisioning.enable && cfg.provisioning.notesSources) {
+      serviceConfig.AmbientCapabilities = [ "CAP_DAC_READ_SEARCH" ];
+      unitConfig.RequiresMountsFor = [ cfg.provisioning.dataRoot ];
+    };
     systemd.services.loomd = lib.mkIf backupEnabled {
       environment.LOOM_APPLICATION_DATA_BACKUP_ROOT = cfg.provisioning.dataRoot;
       # Reading private application data is a node-level authority decision.

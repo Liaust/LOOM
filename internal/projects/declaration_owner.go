@@ -770,17 +770,37 @@ type DeclarationWatchContributor struct {
 	Retire   bool   `json:"retire"`
 }
 type DeclarationWatchRoot struct {
-	LocalRootKey       string          `json:"local_root_key"`
-	BackendRootKey     string          `json:"backend_root_key"`
-	WorkerKey          string          `json:"worker_key"`
-	SourceKinds        []string        `json:"source_kinds"`
-	Enabled            bool            `json:"enabled"`
-	CompilerConfigHash string          `json:"compiler_config_hash"`
-	CompilerConfigJSON []byte          `json:"compiler_config_json"`
-	ConfigHash         string          `json:"config_hash"`
-	ConfigJSON         json.RawMessage `json:"config_json"`
-	KnowledgeSource    json.RawMessage `json:"knowledge_source,omitempty"`
-	Metadata           json.RawMessage `json:"metadata"`
+	ApplicationData    *DeclarationApplicationDataBinding `json:"application_data,omitempty"`
+	LocalRootKey       string                             `json:"local_root_key"`
+	BackendRootKey     string                             `json:"backend_root_key"`
+	WorkerKey          string                             `json:"worker_key"`
+	SourceKinds        []string                           `json:"source_kinds"`
+	Enabled            bool                               `json:"enabled"`
+	CompilerConfigHash string                             `json:"compiler_config_hash"`
+	CompilerConfigJSON []byte                             `json:"compiler_config_json"`
+	ConfigHash         string                             `json:"config_hash"`
+	ConfigJSON         json.RawMessage                    `json:"config_json"`
+	KnowledgeSource    json.RawMessage                    `json:"knowledge_source,omitempty"`
+	Metadata           json.RawMessage                    `json:"metadata"`
+}
+
+// This is observed allocation custody, never a caller-selected host path.
+type DeclarationApplicationDataBinding struct {
+	Application          string `json:"application"`
+	Data                 string `json:"data"`
+	Subpath              string `json:"subpath,omitempty"`
+	BindingRef           string `json:"binding_ref"`
+	Path                 string `json:"path"`
+	PoolIdentity         string `json:"pool_identity"`
+	Device               uint64 `json:"device"`
+	Inode                uint64 `json:"inode"`
+	PoolInode            uint64 `json:"pool_inode"`
+	UID                  uint32 `json:"uid"`
+	GID                  uint32 `json:"gid"`
+	Mode                 uint32 `json:"mode"`
+	InstallationRevision string `json:"installation_revision"`
+	PolicyRevision       string `json:"policy_revision"`
+	LocationRevision     string `json:"location_revision"`
 }
 type DeclarationWatchGroup struct {
 	ProjectID    string                        `json:"project_id"`
@@ -1411,6 +1431,12 @@ func persistDeclarationWatchRowsTx(ctx context.Context, tx *sql.Tx, req requestc
 			return fmt.Errorf("compiler metadata cannot supply adapter evidence")
 		}
 		meta["declaration_adapter"], err = json.Marshal(map[string]any{"schema_version": "project.watch.binding.v1", "project_id": group.ProjectID, "node_id": group.NodeID, "group_hash": payload.GroupHash, "safe_root_key": config.SafeRootKey, "compiler_config_json": root.CompilerConfigJSON, "compiler_config_hash": root.CompilerConfigHash, "effective_config_hash": root.ConfigHash})
+		if root.ApplicationData != nil {
+			var adapter map[string]any
+			_ = json.Unmarshal(meta["declaration_adapter"], &adapter)
+			adapter["application_data"] = root.ApplicationData
+			meta["declaration_adapter"], err = json.Marshal(adapter)
+		}
 		if err != nil {
 			return err
 		}
@@ -1423,10 +1449,16 @@ func persistDeclarationWatchRowsTx(ctx context.Context, tx *sql.Tx, req requestc
 			return err
 		}
 		stage := ProjectWatchedRootRegistrationStatusPendingAgentApply
+		var compiler struct {
+			RootRelativePath string `json:"root_relative_path"`
+		}
+		if !declarationDecode(root.CompilerConfigJSON, &compiler) {
+			return fmt.Errorf("invalid compiler root")
+		}
 		if !root.Enabled {
 			stage = ProjectWatchedRootRegistrationStatusDisabled
 		}
-		if _, err = upsertProjectWatchedRootRegistration(ctx, tx, req, UpsertProjectWatchedRootRegistrationInput{ProjectContractRegistrationID: registration.ProjectContractRegistrationID, ProjectID: group.ProjectID, NodeID: group.NodeID, OwnerNodeKey: group.NodeKey, LocalRootKey: root.LocalRootKey, BackendRootKey: root.BackendRootKey, WorkerKey: root.WorkerKey, SourceKinds: sourceKinds, SafeRootKey: config.SafeRootKey, RootRelativePath: config.RootRelativePath, DisplayName: config.DisplayName, SyncMode: config.Sync.Mode, BackupMode: config.Backup.Mode, IndexMode: config.Index.Mode, DeleteMode: config.Delete.Mode, ConfigHash: root.ConfigHash, ConfigJSON: root.ConfigJSON, CommandJSON: json.RawMessage(`[]`), ActivationStatus: stage, Metadata: metadata}, false); err != nil {
+		if _, err = upsertProjectWatchedRootRegistration(ctx, tx, req, UpsertProjectWatchedRootRegistrationInput{ProjectContractRegistrationID: registration.ProjectContractRegistrationID, ProjectID: group.ProjectID, NodeID: group.NodeID, OwnerNodeKey: group.NodeKey, LocalRootKey: root.LocalRootKey, BackendRootKey: root.BackendRootKey, WorkerKey: root.WorkerKey, SourceKinds: sourceKinds, SafeRootKey: config.SafeRootKey, RootRelativePath: compiler.RootRelativePath, DisplayName: config.DisplayName, SyncMode: config.Sync.Mode, BackupMode: config.Backup.Mode, IndexMode: config.Index.Mode, DeleteMode: config.Delete.Mode, ConfigHash: root.ConfigHash, ConfigJSON: root.ConfigJSON, CommandJSON: json.RawMessage(`[]`), ActivationStatus: stage, Metadata: metadata}, false); err != nil {
 			return err
 		}
 		keys = append(keys, root.BackendRootKey)

@@ -83,11 +83,27 @@ const (
 )
 
 type KnowledgeDeclaration struct {
-	Path       string                       `json:"path" yaml:"path"`
-	Category   KnowledgeCategory            `json:"category" yaml:"category"`
-	Protection ResourceKey                  `json:"protection,omitempty" yaml:"protection,omitempty"`
-	Refresh    *KnowledgeRefreshDeclaration `json:"refresh,omitempty" yaml:"refresh,omitempty"`
-	Processing *KnowledgeProcessingPolicy   `json:"processing,omitempty" yaml:"processing,omitempty"`
+	Path            string                       `json:"path" yaml:"path"`
+	ApplicationData *KnowledgeApplicationData    `json:"application_data,omitempty" yaml:"application_data,omitempty"`
+	Category        KnowledgeCategory            `json:"category" yaml:"category"`
+	Protection      ResourceKey                  `json:"protection,omitempty" yaml:"protection,omitempty"`
+	Refresh         *KnowledgeRefreshDeclaration `json:"refresh,omitempty" yaml:"refresh,omitempty"`
+	Processing      *KnowledgeProcessingPolicy   `json:"processing,omitempty" yaml:"processing,omitempty"`
+}
+
+// KnowledgeApplicationData selects an existing allocation owned by a declared
+// application. It is not a physical path or a request to allocate storage.
+type KnowledgeApplicationData struct {
+	Application ResourceKey `json:"application" yaml:"application"`
+	Data        ResourceKey `json:"data" yaml:"data"`
+	Subpath     string      `json:"subpath,omitempty" yaml:"subpath,omitempty"`
+}
+
+func KnowledgeLogicalPath(key ResourceKey, k KnowledgeDeclaration) string {
+	if k.ApplicationData != nil {
+		return "application-data/" + string(key)
+	}
+	return k.Path
 }
 
 type KnowledgeRefreshDeclaration struct {

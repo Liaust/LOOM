@@ -72,6 +72,22 @@ func BindDeclarationRoot(projectID string, item pc.ProjectWatchedRootItem) (proj
 	}
 	effective := original
 	effective.SafeRootKey = key
+	metadata, err := json.Marshal(item.Metadata)
+	if err != nil {
+		return projects.DeclarationWatchRoot{}, err
+	}
+	ref, err := ApplicationDataReference(metadata)
+	if err != nil {
+		return projects.DeclarationWatchRoot{}, err
+	}
+	if ref != nil {
+		effective.SafeRootKey = ApplicationDataSafeKey(projectID, item.BackendRootKey)
+		effective.RootRelativePath = ref.Subpath
+		if effective.RootRelativePath == "" {
+			effective.RootRelativePath = "."
+		}
+		effective.IgnorePolicy.PolicyRootRelativePath = "."
+	}
 	raw, err := json.Marshal(effective)
 	if err != nil {
 		return projects.DeclarationWatchRoot{}, err
@@ -83,7 +99,7 @@ func BindDeclarationRoot(projectID string, item pc.ProjectWatchedRootItem) (proj
 			return projects.DeclarationWatchRoot{}, err
 		}
 	}
-	metadata, err := json.Marshal(item.Metadata)
+	metadata, err = json.Marshal(item.Metadata)
 	if err != nil {
 		return projects.DeclarationWatchRoot{}, err
 	}
@@ -206,6 +222,9 @@ func ValidateDeclarationWatchGroup(group projects.DeclarationWatchGroup) error {
 		}
 		seen[root.BackendRootKey] = true
 		originalItem := pc.ProjectWatchedRootItem{Key: root.LocalRootKey, BackendRootKey: root.BackendRootKey, WorkerKey: root.WorkerKey, SourceKinds: root.SourceKinds, ConfigHash: root.CompilerConfigHash, ConfigJSON: root.CompilerConfigJSON}
+		if json.Unmarshal(root.Metadata, &originalItem.Metadata) != nil {
+			return fmt.Errorf("invalid root metadata")
+		}
 		bound, err := BindDeclarationRoot(group.ProjectID, originalItem)
 		if err != nil || bound.ConfigHash != root.ConfigHash || !declarationControlEqual(json.RawMessage(bound.ConfigJSON), json.RawMessage(root.ConfigJSON)) {
 			return fmt.Errorf("project safe-root binding differs from compiler")
@@ -238,6 +257,11 @@ func DecodeDeclarationWatchPayload(raw []byte) (DeclarationWatchPayload, error) 
 	}
 	if err := ValidateDeclarationWatchGroup(payload.Group); err != nil {
 		return payload, err
+	}
+	for _, root := range payload.Group.Roots {
+		if err := ValidateApplicationDataBinding(root); err != nil {
+			return payload, err
+		}
 	}
 	hash, err := DeclarationGroupHash(payload.Group)
 	if err != nil || hash != payload.GroupHash || payload.Evidence.ConfigHash != hash {
