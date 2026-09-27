@@ -24,6 +24,7 @@ const (
 	DeclarationKnowledge   DeclarationResourceKind = "knowledge"
 	DeclarationProtection  DeclarationResourceKind = "protection"
 	DeclarationApplication DeclarationResourceKind = "application"
+	DeclarationSchedule    DeclarationResourceKind = "schedule"
 )
 
 // ProjectDeclaration is the future .loom/project.yaml source document.
@@ -64,6 +65,23 @@ type ResourceDeclaration struct {
 	Knowledge   *KnowledgeDeclaration   `json:"knowledge,omitempty" yaml:"knowledge,omitempty"`
 	Protection  *ProtectionDeclaration  `json:"protection,omitempty" yaml:"protection,omitempty"`
 	Application *ApplicationDeclaration `json:"application,omitempty" yaml:"application,omitempty"`
+	Schedule    *ScheduleDeclaration    `json:"schedule,omitempty" yaml:"schedule,omitempty"`
+}
+
+// Timing has one owner: the ordinary automation scheduler. InputJSON is a JSON
+// object string so source numbers survive YAML/plan round trips unchanged.
+type ScheduleDeclaration struct {
+	Target                string `json:"target" yaml:"target"`
+	InputJSON             string `json:"input_json,omitempty" yaml:"input_json,omitempty"`
+	Cron                  string `json:"cron,omitempty" yaml:"cron,omitempty"`
+	Every                 string `json:"every,omitempty" yaml:"every,omitempty"`
+	At                    string `json:"at,omitempty" yaml:"at,omitempty"`
+	Timezone              string `json:"timezone,omitempty" yaml:"timezone,omitempty"`
+	Status                string `json:"status,omitempty" yaml:"status,omitempty"`
+	RunAs                 string `json:"run_as,omitempty" yaml:"run_as,omitempty"`
+	TimeoutSeconds        int    `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`
+	MaxAttempts           int    `json:"max_attempts,omitempty" yaml:"max_attempts,omitempty"`
+	LatenessWindowSeconds int    `json:"lateness_window_seconds,omitempty" yaml:"lateness_window_seconds,omitempty"`
 }
 
 type RepositoryDeclaration struct {
@@ -226,6 +244,7 @@ const (
 	DeclarationEnrollKnowledge     DeclarationActionKind = "enroll_knowledge"
 	DeclarationReconcileProtection DeclarationActionKind = "reconcile_protection"
 	DeclarationApplyApplication    DeclarationActionKind = "apply_application"
+	DeclarationReconcileSchedule   DeclarationActionKind = "reconcile_schedule"
 	DeclarationRefreshProjection   DeclarationActionKind = "refresh_projection"
 	DeclarationRetireResource      DeclarationActionKind = "retire_resource"
 )
@@ -237,6 +256,7 @@ const (
 	DeclarationOwnerKnowledge   DeclarationOwner = "knowledge"
 	DeclarationOwnerProtection  DeclarationOwner = "backupcontracts"
 	DeclarationOwnerApplication DeclarationOwner = "serviceregistry"
+	DeclarationOwnerAutomation  DeclarationOwner = "automation"
 	DeclarationOwnerNotes       DeclarationOwner = "notesprojection"
 	DeclarationOwnerProvenance  DeclarationOwner = "provenance"
 )

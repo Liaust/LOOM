@@ -58,8 +58,8 @@ func operationDatabase(t *testing.T) (*sql.DB, string) {
 		admin.Close()
 	})
 	result, e := migrations.Up(t.Context(), u.String(), filepath.Join("..", "..", "migrations"))
-	if e != nil || result.CurrentVersion != 71 {
-		t.Fatalf("migrate through 71: %+v %v", result, e)
+	if e != nil || result.CurrentVersion != result.LatestVersion || result.CurrentVersion < 76 {
+		t.Fatalf("migrate through declaration schedules: %+v %v", result, e)
 	}
 	_, e = db.Exec(`CREATE SCHEMA declaration_fixture;
  CREATE TABLE declaration_fixture.inputs(project_id text PRIMARY KEY,resolution jsonb NOT NULL,current_state jsonb NOT NULL);

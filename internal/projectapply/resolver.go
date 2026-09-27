@@ -43,6 +43,7 @@ type localDeclaration struct {
 	State          projects.DeclarationProjectState
 	Authority      projects.DeclarationAuthority
 	WatchStates    []projects.DeclarationWatchResourceState
+	ScheduleStates map[pc.ResourceKey]declarationScheduleState
 	LegacyContract json.RawMessage
 	PhysicalRoot   string
 }
@@ -156,6 +157,10 @@ func (r *LocalResolver) load(ctx context.Context, p Principal, projectRef, nodeR
 	if err != nil {
 		return out, fail(pc.DeclarationTargetUnavailable, "watch_owner_state_unavailable")
 	}
+	out.ScheduleStates, err = readDeclarationSchedules(ctx, r.DB, projectID)
+	if err != nil {
+		return out, err
+	}
 	return out, nil
 }
 func localPrerequisites(p Principal, x localDeclaration) Prerequisites {
@@ -195,6 +200,7 @@ func localPrerequisites(p Principal, x localDeclaration) Prerequisites {
 			prereq.Revisions[state.Owner+":"+state.Resource] = state.Revision
 		}
 	}
+	addSchedulePrerequisites(&prereq, x, nil)
 	return prereq
 }
 func declarationWatchOwner(kind pc.DeclarationResourceKind) string {
@@ -226,6 +232,7 @@ func localPrerequisitesFor(p Principal, x localDeclaration, original map[pc.Reso
 			}
 		}
 	}
+	addSchedulePrerequisites(&out, x, original)
 	return out
 }
 func declarationWatchContributors(x localDeclaration) ([]projects.DeclarationWatchContributor, error) {
@@ -338,6 +345,9 @@ func (r *LocalResolver) Resolve(ctx context.Context, p Principal, request pc.Dec
 		}
 	}
 	if err := r.appendApplications(ctx, x, &basis, payloads); err != nil {
+		return Resolution{}, err
+	}
+	if err := r.appendSchedules(ctx, p, x, &basis, payloads); err != nil {
 		return Resolution{}, err
 	}
 	return Resolution{Plan: pc.DeclarationPlan{SchemaVersion: pc.DeclarationPlanSchemaV05, Basis: basis, Errors: []pc.DeclarationError{}}, Payloads: payloads}, nil

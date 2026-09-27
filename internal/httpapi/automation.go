@@ -643,7 +643,8 @@ func (s Server) handleScheduleCreate(w http.ResponseWriter, r *http.Request) {
 	if input.DryRun {
 		detail, err := s.services.Automation.CreateSchedule(ctx, req, input)
 		if err != nil {
-			s.writeError(w, correlationID, http.StatusBadRequest, "schedule.create_failed", "automation", input.ScheduleKey, "Could not preview schedule.", err)
+			failure := scheduleResponseError(err, "schedule.create_failed", input.ScheduleKey, "Could not preview schedule.")
+			s.writeError(w, correlationID, http.StatusBadRequest, failure.Code, failure.Domain, failure.Target, failure.Summary, err)
 			return
 		}
 		response.WriteJSON(w, http.StatusOK, response.Success(correlationID, detail))
@@ -655,9 +656,9 @@ func (s Server) handleScheduleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	detail, err := s.services.Automation.CreateSchedule(ctx, req, input)
 	if err != nil {
-		idemErr := loomerrors.Wrap("schedule.create_failed", "automation", input.ScheduleKey, "Could not create schedule.", err)
+		idemErr := scheduleResponseError(err, "schedule.create_failed", input.ScheduleKey, "Could not create schedule.")
 		s.failIdempotency(ctx, idemRecord, idemErr.Code, response.FailureWithIdempotency(correlationID, idemRecord.Key, idemErr))
-		s.writeError(w, correlationID, http.StatusBadRequest, "schedule.create_failed", "automation", input.ScheduleKey, "Could not create schedule.", err)
+		s.writeError(w, correlationID, http.StatusBadRequest, idemErr.Code, idemErr.Domain, idemErr.Target, idemErr.Summary, err)
 		return
 	}
 	envelope := response.SuccessWithIdempotency(correlationID, idemRecord.Key, detail)
@@ -777,12 +778,12 @@ func (s Server) handleSchedule(w http.ResponseWriter, r *http.Request) {
 		}
 		result, err := s.services.Automation.FireScheduleNow(ctx, req, scheduleRef, input)
 		if err != nil {
-			idemErr := loomerrors.Wrap("schedule.fire_failed", "automation", scheduleRef, "Could not fire schedule.", err)
+			idemErr := scheduleResponseError(err, "schedule.fire_failed", scheduleRef, "Could not fire schedule.")
 			s.failIdempotency(ctx, idemRecord, idemErr.Code, response.FailureWithIdempotency(correlationID, idemRecord.Key, idemErr))
 			if s.writeProjectRuntimeArchivedError(w, correlationID, "automation", scheduleRef, err) {
 				return
 			}
-			s.writeError(w, correlationID, http.StatusBadRequest, "schedule.fire_failed", "automation", scheduleRef, "Could not fire schedule.", err)
+			s.writeError(w, correlationID, http.StatusBadRequest, idemErr.Code, idemErr.Domain, idemErr.Target, idemErr.Summary, err)
 			return
 		}
 		envelope := response.SuccessWithIdempotency(correlationID, idemRecord.Key, result)
@@ -800,6 +801,14 @@ func (s Server) handleSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.WriteJSON(w, http.StatusOK, response.Success(correlationID, detail))
+}
+
+func scheduleResponseError(err error, code, target, summary string) *loomerrors.Error {
+	var typed *loomerrors.Error
+	if errors.As(err, &typed) && typed.Domain == "automation" && strings.HasPrefix(typed.Code, "schedule.") {
+		return typed
+	}
+	return loomerrors.Wrap(code, "automation", target, summary, err)
 }
 
 func (s Server) handleScheduleFires(w http.ResponseWriter, r *http.Request) {

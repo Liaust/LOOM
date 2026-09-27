@@ -222,7 +222,7 @@ func normalizeJSONObject(raw json.RawMessage, name string) (json.RawMessage, err
 	if len(raw) == 0 || string(raw) == "null" {
 		return json.RawMessage(`{}`), nil
 	}
-	var object map[string]any
+	var object map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &object); err != nil {
 		return nil, fmt.Errorf("%s must be valid JSON object: %w", name, err)
 	}

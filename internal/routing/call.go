@@ -292,7 +292,7 @@ func (s Service) PlanRoute(ctx context.Context, req requestctx.Context, input Ca
 	planned.OriginScopeID = scopeID
 	planned.RuntimeNodeID = planned.TargetNodeID
 	planned.RouteKind = RouteKindLocal
-	if planned.TargetNodeID != originNodeID || projectArchiveSystemEndpointRequiresNodeDispatch(planned) || serviceManagerNodeEndpointRequiresNodeDispatch(planned) || applicationSystemEndpointRequiresNodeDispatch(planned) {
+	if planned.TargetNodeID != originNodeID || projectArchiveSystemEndpointRequiresNodeDispatch(planned) || serviceManagerNodeEndpointRequiresNodeDispatch(planned) || applicationSystemEndpointRequiresNodeDispatch(planned) || basicSystemEndpointRequiresNodeDispatch(planned) {
 		planned.RouteKind = RouteKindRemote
 		planned.ExecutionMode = ExecutionModeImmediate
 	}
@@ -325,6 +325,37 @@ func (s Service) PlanRoute(ctx context.Context, req requestctx.Context, input Ca
 	planned.RequestSummaryJSON = requestSummary
 	planned.ResultTargetJSON = objectOrDefault(input.ResultTarget)
 	return planned.RoutePlan, nil
+}
+
+// These advertised handlers live in node-agent, not loomd's runtime registry.
+func basicSystemEndpointRequiresNodeDispatch(target plannedTarget) bool {
+	if target.TargetNodeStatus != "active" || target.ProviderType != capabilities.ProviderTypeSystem ||
+		target.ProviderStatus != capabilities.ProviderStatusActive || target.EndpointStatus != capabilities.EndpointStatusActive ||
+		target.EndpointVersionStatus != capabilities.EndpointVersionStatusActive || target.ActiveEndpointVersionID == "" || target.RuntimeBindingID != "" ||
+		(target.EndpointName != "echo" && target.EndpointName != "status.read") {
+		return false
+	}
+	p, err := capabilities.ParseProviderAddress(target.ProviderAddress)
+	if err != nil || !strings.HasPrefix(p.ScopePath, "workspace/") || target.ProviderAddress != capabilities.NodeSystemProviderAddress(strings.TrimPrefix(p.ScopePath, "workspace/")) {
+		return false
+	}
+	a, err := capabilities.ParseAddress(target.CapabilityAddress)
+	if err != nil || a.ScopePath != p.ScopePath || a.ProviderKey != p.ProviderKey || a.CapabilityName != target.EndpointName {
+		return false
+	}
+	var marker struct {
+		Source       string `json:"source"`
+		Handler      string `json:"handler"`
+		Execution    string `json:"execution"`
+		SliceEnabled bool   `json:"slice_enabled"`
+	}
+	d := json.NewDecoder(bytes.NewReader(target.EndpointVersionManifest))
+	d.DisallowUnknownFields()
+	if d.Decode(&marker) != nil {
+		return false
+	}
+	var extra any
+	return d.Decode(&extra) == io.EOF && marker.Source == "loom-node-agent" && marker.Handler == "system."+target.EndpointName && marker.Execution == "remote_node" && marker.SliceEnabled
 }
 
 func (s Service) resolvePlannedTarget(ctx context.Context, target string) (plannedTarget, error) {

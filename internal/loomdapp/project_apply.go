@@ -27,6 +27,7 @@ func newProjectDeclarationService(db *sql.DB, current func() (config.Config, err
 		pc.DeclarationOwnerProjects:    projectapply.ProjectsOwner{Resolver: resolver, Projects: projects.NewService(db)},
 		pc.DeclarationOwnerKnowledge:   watch,
 		pc.DeclarationOwnerProtection:  watch,
+		pc.DeclarationOwnerAutomation:  projectapply.ScheduleOwner{Resolver: resolver},
 		pc.DeclarationOwnerApplication: projectapply.ApplicationOwner{Backup: projectapply.CloudApplicationBackupStatus{Operations: maintenance.NewService(db), Config: current}, Calls: routing.NewService(db), Inspector: serviceregistry.ApplicationHelperClient{SocketPath: serviceregistry.ApplicationSocketPath}, Preparer: projectapply.ManagedApplicationPreparer{Helper: serviceregistry.ApplicationHelperClient{SocketPath: serviceregistry.ApplicationSocketPath}, Registry: capabilities.NewService(db), Projects: projects.NewService(db)}},
 	})
 }

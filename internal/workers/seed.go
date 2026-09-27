@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"loom.local/loom/internal/events"
 	"loom.local/loom/internal/ids"
@@ -71,6 +72,11 @@ func (s Service) SeedBuiltins(ctx context.Context, req requestctx.Context, mainN
 		if err != nil {
 			return SeedResult{}, err
 		}
+		if instanceDescriptor.WorkerKey == "main.automation_scheduler" {
+			if err := initializeSchedulerOccurrence(ctx, tx, instanceID, time.Now().UTC()); err != nil {
+				return SeedResult{}, err
+			}
+		}
 		if created {
 			result.InstancesCreated++
 			if err := appendSeedEvent(ctx, tx, req, events.TypeWorkerInstanceRegistered, "worker_instance", instanceID, "registered", map[string]any{
@@ -97,6 +103,32 @@ func (s Service) SeedBuiltins(ctx context.Context, req requestctx.Context, mainN
 		return SeedResult{}, err
 	}
 	return result, nil
+}
+
+// An interval with run_on_startup=false still needs its first durable deadline.
+// Only repair the scheduler here; do not activate other never-run workers.
+func initializeSchedulerOccurrence(ctx context.Context, tx *sql.Tx, instanceID string, now time.Time) error {
+	var raw json.RawMessage
+	err := tx.QueryRowContext(ctx, `SELECT tick_policy_json FROM workers.worker_instances
+		WHERE worker_instance_id=$1 AND worker_key='main.automation_scheduler'
+		AND lifecycle_status='active' AND enabled AND NOT paused AND next_run_after IS NULL
+		FOR UPDATE`, instanceID).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	policy, err := ParseTickPolicy(raw)
+	if err != nil {
+		return err
+	}
+	if policy.Mode != TickModeInterval || policy.RunOnStartup {
+		return nil
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE workers.worker_instances SET next_run_after=$2, updated_at=now()
+		WHERE worker_instance_id=$1 AND next_run_after IS NULL`, instanceID, policy.NextAfter(now))
+	return err
 }
 
 func resolveSeedNode(ctx context.Context, db *sql.DB, req requestctx.Context, mainNodeRef string) (string, error) {

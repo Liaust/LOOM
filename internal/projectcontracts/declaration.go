@@ -105,13 +105,13 @@ func parseDeclarationShape(raw []byte) (ProjectDeclaration, string) {
 			return d, "declaration.key"
 		}
 		payloads := 0
-		for _, present := range []bool{r.Repository != nil, r.Knowledge != nil, r.Protection != nil, r.Application != nil} {
+		for _, present := range []bool{r.Repository != nil, r.Knowledge != nil, r.Protection != nil, r.Application != nil, r.Schedule != nil} {
 			if present {
 				payloads++
 			}
 		}
 		switch r.Kind {
-		case DeclarationRepository, DeclarationKnowledge, DeclarationProtection, DeclarationApplication:
+		case DeclarationRepository, DeclarationKnowledge, DeclarationProtection, DeclarationApplication, DeclarationSchedule:
 		default:
 			return d, "declaration.kind"
 		}
@@ -121,6 +121,13 @@ func parseDeclarationShape(raw []byte) (ProjectDeclaration, string) {
 		var p string
 		var protection ResourceKey
 		switch r.Kind {
+		case DeclarationSchedule:
+			if r.Schedule == nil {
+				return d, "declaration.union"
+			}
+			if _, err := ScheduleDeclarationInput(d.Project, key, *r.Schedule); err != nil {
+				return d, "declaration.schedule: " + err.Error()
+			}
 		case DeclarationRepository:
 			if r.Repository == nil {
 				return d, "declaration.union"
@@ -830,6 +837,9 @@ func declarationPlanActions(c *DeclarationCompilation) ([]PlanAction, []PlanUnsu
 		r := c.Document.Resources[key]
 		action, status, reason := "", "pending", ""
 		switch r.Kind {
+		case DeclarationSchedule:
+			action = "would_reconcile_schedule"
+			reason = "Reconcile this project's native schedule; omitted status defaults disabled."
 		case DeclarationRepository:
 			action = "would_register_repository"
 			reason = "Explicit repository membership awaits the declaration apply adapter."

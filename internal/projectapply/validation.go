@@ -124,7 +124,7 @@ func validBinding(b pc.DeclarationBinding) bool {
 		if b.RepositoryID != "" && ids.Validate("repo", b.RepositoryID) != nil {
 			return false
 		}
-	case pc.DeclarationKnowledge, pc.DeclarationProtection, pc.DeclarationApplication:
+	case pc.DeclarationKnowledge, pc.DeclarationProtection, pc.DeclarationApplication, pc.DeclarationSchedule:
 		if b.RepositoryID != "" {
 			return false
 		}
@@ -185,10 +185,12 @@ func actionOwner(a pc.DeclarationAction) bool {
 		return a.Owner == pc.DeclarationOwnerProtection
 	case pc.DeclarationApplyApplication:
 		return a.Owner == pc.DeclarationOwnerApplication
+	case pc.DeclarationReconcileSchedule:
+		return a.Owner == pc.DeclarationOwnerAutomation
 	case pc.DeclarationRefreshProjection:
 		return a.Owner == pc.DeclarationOwnerNotes || a.Owner == pc.DeclarationOwnerProvenance
 	case pc.DeclarationRetireResource:
-		return a.Owner == pc.DeclarationOwnerProjects || a.Owner == pc.DeclarationOwnerKnowledge || a.Owner == pc.DeclarationOwnerProtection || a.Owner == pc.DeclarationOwnerApplication
+		return a.Owner == pc.DeclarationOwnerProjects || a.Owner == pc.DeclarationOwnerKnowledge || a.Owner == pc.DeclarationOwnerProtection || a.Owner == pc.DeclarationOwnerApplication || a.Owner == pc.DeclarationOwnerAutomation
 	}
 	return false
 }
@@ -239,12 +241,12 @@ func (s *Service) validate(ctx context.Context, p Principal, x *Resolution, requ
 			if !ok {
 				return fail(pc.DeclarationInvalid, "action_binding_missing")
 			}
-			expected := map[pc.DeclarationActionKind]pc.DeclarationResourceKind{pc.DeclarationRegisterRepository: pc.DeclarationRepository, pc.DeclarationEnrollKnowledge: pc.DeclarationKnowledge, pc.DeclarationReconcileProtection: pc.DeclarationProtection, pc.DeclarationApplyApplication: pc.DeclarationApplication}
+			expected := map[pc.DeclarationActionKind]pc.DeclarationResourceKind{pc.DeclarationRegisterRepository: pc.DeclarationRepository, pc.DeclarationEnrollKnowledge: pc.DeclarationKnowledge, pc.DeclarationReconcileProtection: pc.DeclarationProtection, pc.DeclarationApplyApplication: pc.DeclarationApplication, pc.DeclarationReconcileSchedule: pc.DeclarationSchedule}
 			if kind, ok := expected[a.Kind]; ok && kind != binding.Kind {
 				return fail(pc.DeclarationInvalid, "action_binding_kind")
 			}
 			if a.Kind == pc.DeclarationRetireResource {
-				owners := map[pc.DeclarationResourceKind]pc.DeclarationOwner{pc.DeclarationRepository: pc.DeclarationOwnerProjects, pc.DeclarationKnowledge: pc.DeclarationOwnerKnowledge, pc.DeclarationProtection: pc.DeclarationOwnerProtection, pc.DeclarationApplication: pc.DeclarationOwnerApplication}
+				owners := map[pc.DeclarationResourceKind]pc.DeclarationOwner{pc.DeclarationRepository: pc.DeclarationOwnerProjects, pc.DeclarationKnowledge: pc.DeclarationOwnerKnowledge, pc.DeclarationProtection: pc.DeclarationOwnerProtection, pc.DeclarationApplication: pc.DeclarationOwnerApplication, pc.DeclarationSchedule: pc.DeclarationOwnerAutomation}
 				if owners[binding.Kind] != a.Owner {
 					return fail(pc.DeclarationInvalid, "retirement_owner")
 				}

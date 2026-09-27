@@ -211,6 +211,39 @@ inspect its diff before an authorized
 Do not use overwrite or cleanup options to bypass a collision. Archived and
 restored-inactive guards may correctly refuse mutation.
 
+## Declare A Schedule
+
+A `schedule` resource uses normal project plan/apply and invokes an existing
+capability in the project's scope. It is not an arbitrary command executor or
+a Hermes conversation.
+
+```yaml
+resources:
+  health_check:
+    kind: schedule
+    schedule:
+      target: main@system.health.read
+      cron: "15 9,13,18 * * *"
+      timezone: Europe/Amsterdam
+      input_json: '{}'
+      status: disabled
+```
+
+Choose exactly one timing field: five-field `cron`, elapsed `every: 5m`, or
+absolute RFC3339 `at`. Calendars require an explicit timezone; other kinds
+default to UTC. `input_json` contains a JSON object string, never secrets.
+Status defaults to disabled. Apply an explicitly authorized `active` status
+to enroll it. The default actor is `scheduler:loom`, subject to normal policy.
+Optional `timeout_seconds`, `max_attempts` and `lateness_window_seconds` reuse
+the native scheduler; there is no additional execution service.
+
+Inspect the returned ID with `loom schedule inspect` and `loom schedule fires`.
+Unchanged timing does not postpone an interval or re-arm a completed one-shot.
+Unrelated declaration edits preserve an operator pause/disable. Removing the
+resource and applying disables future runs while retaining history; dispatched
+work is not cancelled. Archive/restore lifecycle fences still apply. A polling
+worker evaluates due times, so they are not hard real-time guarantees.
+
 ## Export A Copy Without Changing Lifecycle
 
 An export writes a caller-local tar. It is useful for a reviewed handoff or

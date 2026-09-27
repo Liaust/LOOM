@@ -16,7 +16,7 @@ identity/files are preserved.
 
 ## Declare and reconcile when requested
 
-Edit `.loom/project.yaml`, preserving identity/schema; no separate declare command:
+Edit `.loom/project.yaml`; preserve identity/schema:
 
 ```yaml
 resources:
@@ -25,7 +25,7 @@ resources:
     knowledge: {path: journal, category: notes}
 ```
 
-Select project-relative folders, including application-written data.
+Use project-relative folders, including application data.
 Categories: notes/docs/research. Notes reads eligible files after apply;
 ignores/formats still apply. No implied backup or Provenance acceptance.
 Allocation sources: [reference](application-data-notes.md).
@@ -59,8 +59,8 @@ loom project status <ref> --node <node> --json
 loom project operation <operation-id> --json
 ```
 
-Supply required repeatable `--approval` references. Historical operation inspection
-does not resume it. Apply `--resume <operation-id>`, preserving original selectors,
+Supply required `--approval` references. Inspection does not resume operations.
+Apply `--resume <operation-id>`, preserving original selectors,
 effects, plan, key and approval references. Resolve stale plans/prerequisites first.
 
 The parsed `--refresh-projections` flag is rejected, unlike automatic `.project` refresh
@@ -72,7 +72,9 @@ retain separate authorization.
 
 Prepared application installation uses the same plan/apply/status route within
 node policy. See [managed applications](managed-applications.md) for descriptor,
-data, credentials and public HTTPS beneath `apps.example.com`; no per-app host setup.
+data, credentials and public HTTPS beneath `apps.liaust.com`; no per-app host setup.
+
+[Schedules](project-schedules.md) use the same plan/apply route.
 
 ## ORCA ordinary folders
 

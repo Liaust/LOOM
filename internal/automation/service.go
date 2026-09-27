@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	loomerrors "loom.local/loom/internal/errors"
 	"loom.local/loom/internal/events"
 	"loom.local/loom/internal/ids"
 	"loom.local/loom/internal/requestctx"
@@ -111,6 +112,27 @@ func (s Service) EnsureSchedule(ctx context.Context, req requestctx.Context, inp
 		return ScheduleDetail{}, false, err
 	}
 	defer tx.Rollback()
+	detail, created, err := ensureScheduleTx(ctx, tx, req, normalized)
+	if err != nil {
+		return ScheduleDetail{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ScheduleDetail{}, false, err
+	}
+	return detail, created, nil
+}
+
+// EnsureScheduleTx lets the declaration owner commit the native schedule and
+// its existing operation receipt atomically. The caller owns commit/rollback.
+func (s Service) EnsureScheduleTx(ctx context.Context, tx *sql.Tx, req requestctx.Context, input CreateScheduleInput) (ScheduleDetail, bool, error) {
+	normalized, err := s.normalizeCreateSchedule(ctx, req, input)
+	if err != nil {
+		return ScheduleDetail{}, false, err
+	}
+	return ensureScheduleTx(ctx, tx, req, normalized)
+}
+
+func ensureScheduleTx(ctx context.Context, tx *sql.Tx, req requestctx.Context, normalized normalizedCreateSchedule) (ScheduleDetail, bool, error) {
 
 	existing, err := scanSchedule(tx.QueryRowContext(ctx, scheduleSelectSQL()+`
 		WHERE schedule_key = $1
@@ -121,13 +143,18 @@ func (s Service) EnsureSchedule(ctx context.Context, req requestctx.Context, inp
 		if err != nil {
 			return ScheduleDetail{}, false, err
 		}
-		if err := tx.Commit(); err != nil {
-			return ScheduleDetail{}, false, err
-		}
 		return detail, true, nil
 	}
 	if err != nil {
 		return ScheduleDetail{}, false, err
+	}
+	// Editing input/limits or replaying a declaration must not postpone an
+	// unchanged interval or re-arm a completed one-shot.
+	if existing.ScheduleKind == normalized.ScheduleKind && existing.ScheduleExpr == normalized.ScheduleExpr && existing.Timezone == normalized.Timezone {
+		normalized.StartAt, normalized.NextFireAt = existing.StartAt, existing.NextFireAt
+		if existing.Status == ScheduleStatusCompleted && normalized.Status == ScheduleStatusActive {
+			normalized.Status = ScheduleStatusCompleted
+		}
 	}
 
 	updatedAutomation, err := scanAutomation(tx.QueryRowContext(ctx, `
@@ -242,9 +269,6 @@ func (s Service) EnsureSchedule(ctx context.Context, req requestctx.Context, inp
 		"schedule_expr":     updatedSchedule.ScheduleExpr,
 		"target_capability": normalized.Target.CapabilityRef,
 	}); err != nil {
-		return ScheduleDetail{}, false, err
-	}
-	if err := tx.Commit(); err != nil {
 		return ScheduleDetail{}, false, err
 	}
 	return ScheduleDetail{Schedule: updatedSchedule, Automation: updatedAutomation}, false, nil
@@ -856,12 +880,29 @@ func (s Service) updateScheduleStatus(ctx context.Context, req requestctx.Contex
 	}
 	defer tx.Rollback()
 
+	updated, err := updateScheduleStatusTx(ctx, tx, req, ref, status, eventType, input.Reason, metadata)
+	if err != nil {
+		return ScheduleDetail{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ScheduleDetail{}, err
+	}
+	return s.GetSchedule(ctx, updated.ScheduleID)
+}
+
+// DisableScheduleTx preserves native lifecycle events while the declaration
+// owner atomically records withdrawal in its operation journal.
+func (s Service) DisableScheduleTx(ctx context.Context, tx *sql.Tx, req requestctx.Context, ref string, metadata json.RawMessage) (Schedule, error) {
+	return updateScheduleStatusTx(ctx, tx, req, ref, ScheduleStatusDisabled, events.TypeScheduleDisabled, "project declaration withdrawn", metadata)
+}
+
+func updateScheduleStatusTx(ctx context.Context, tx *sql.Tx, req requestctx.Context, ref, status, eventType, reason string, metadata json.RawMessage) (Schedule, error) {
 	schedule, err := scanSchedule(tx.QueryRowContext(ctx, scheduleSelectSQL()+`
 		WHERE schedule_id = $1 OR schedule_key = $1
 		FOR UPDATE
 	`, strings.TrimSpace(ref)))
 	if err != nil {
-		return ScheduleDetail{}, err
+		return Schedule{}, err
 	}
 	updated, err := scanSchedule(tx.QueryRowContext(ctx, `
 		UPDATE automation.schedules
@@ -881,13 +922,13 @@ func (s Service) updateScheduleStatus(ctx context.Context, req requestctx.Contex
 		          metadata_json
 	`, schedule.ScheduleID, status, metadata))
 	if err != nil {
-		return ScheduleDetail{}, err
+		return Schedule{}, err
 	}
 	if err := appendLifecycleEventTx(ctx, tx, req, eventType, "schedule", updated.ScheduleID, updated.Status, map[string]any{
 		"schedule_key": updated.ScheduleKey,
-		"reason":       strings.TrimSpace(input.Reason),
+		"reason":       strings.TrimSpace(reason),
 	}); err != nil {
-		return ScheduleDetail{}, err
+		return Schedule{}, err
 	}
 	if status == ScheduleStatusPaused || status == ScheduleStatusDisabled || status == ScheduleStatusActive {
 		automationStatus := AutomationStatusActive
@@ -905,19 +946,16 @@ func (s Service) updateScheduleStatus(ctx context.Context, req requestctx.Contex
 			SET status = $2, updated_at = now()
 			WHERE automation_id = $1
 		`, updated.AutomationID, automationStatus); err != nil {
-			return ScheduleDetail{}, err
+			return Schedule{}, err
 		}
 		if err := appendLifecycleEventTx(ctx, tx, req, automationEvent, "automation", updated.AutomationID, automationStatus, map[string]any{
 			"schedule_id": updated.ScheduleID,
-			"reason":      strings.TrimSpace(input.Reason),
+			"reason":      strings.TrimSpace(reason),
 		}); err != nil {
-			return ScheduleDetail{}, err
+			return Schedule{}, err
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return ScheduleDetail{}, err
-	}
-	return s.GetSchedule(ctx, updated.ScheduleID)
+	return updated, nil
 }
 
 func (s Service) getAutomation(ctx context.Context, ref string) (Automation, error) {
@@ -954,6 +992,9 @@ func (s Service) validateTargetCapability(ctx context.Context, ref string) error
 		  AND endpoint.status = 'active'
 		  AND provider.status = 'active'
 	`, ref).Scan(&endpointID)
+	if err == sql.ErrNoRows {
+		return loomerrors.New("schedule.target_unavailable", "automation", ref, "Schedule target is missing or inactive; select an active capability with loom capabilities search.")
+	}
 	if err != nil {
 		return fmt.Errorf("target capability is not active or does not exist: %s: %w", ref, err)
 	}

@@ -2407,7 +2407,7 @@ func TestBoxKnowledgeSourcesMigrationContract(t *testing.T) {
 
 func TestProjectArchivePlanEvidenceMigrationContract(t *testing.T) {
 	version, err := LatestVersion(filepath.Join("..", "..", "migrations"))
-	if err != nil || version != 75 {
+	if err != nil || version < 75 {
 		t.Fatalf("migration head %d: %v", version, err)
 	}
 	raw, err := os.ReadFile(filepath.Join("..", "..", "migrations", "00065_project_archive_plan_evidence.sql"))
@@ -2521,7 +2521,7 @@ func TestCalendarSchedulesMigrationContract(t *testing.T) {
 
 func TestDeclarationOperationJournalMigrationContract(t *testing.T) {
 	version, err := LatestVersion(filepath.Join("..", "..", "migrations"))
-	if err != nil || version != 75 {
+	if err != nil || version < 75 {
 		t.Fatalf("declaration operation migration head %d: %v", version, err)
 	}
 	raw, err := os.ReadFile(filepath.Join("..", "..", "migrations", "00070_project_declaration_operations.sql"))

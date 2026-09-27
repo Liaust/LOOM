@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	loomerrors "loom.local/loom/internal/errors"
 	"loom.local/loom/internal/events"
 	"loom.local/loom/internal/ids"
 	"loom.local/loom/internal/requestctx"
@@ -164,7 +165,7 @@ func (s Service) FireScheduleNow(ctx context.Context, req requestctx.Context, re
 		return FireScheduleResult{}, err
 	}
 	if schedule.Status == ScheduleStatusDisabled {
-		return FireScheduleResult{}, fmt.Errorf("schedule %s is disabled", schedule.ScheduleKey)
+		return FireScheduleResult{}, loomerrors.New("schedule.disabled", "automation", schedule.ScheduleKey, "Schedule is disabled. Resume it explicitly with loom schedule resume before requesting a manual fire.")
 	}
 	if err := ensureScheduleRuntimeActive(ctx, tx, schedule); err != nil {
 		return FireScheduleResult{}, err
