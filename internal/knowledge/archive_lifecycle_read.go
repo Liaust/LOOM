@@ -59,7 +59,7 @@ func notesProjectArchiveStopSQL(root, object, operation string) string {
 	 AND stopped_writer.last_applied_at >= (stopped_project.archive_state->>'started_at')::timestamptz
 	 AND stopped_writer.last_applied_at <= (stopped_project.archive_state->>'archived_at')::timestamptz
 	 AND stopped_writer.updated_at=stopped_writer.last_applied_at
-	 AND stopped_writer.metadata=jsonb_build_object('source','project.deactivate','project_id',stopped_project.project_id,
+	 AND stopped_writer.metadata @> jsonb_build_object('source','project.deactivate','project_id',stopped_project.project_id,
 	     'project_slug',stopped_project.slug,'facet','watched_roots','reason',stopped_archive.reason)
 	)`, root, object, operation)
 }

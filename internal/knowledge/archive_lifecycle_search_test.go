@@ -7,6 +7,19 @@ import (
 )
 
 func TestNotesArchiveSearchLifecycleQueryContracts(t *testing.T) {
+	stop := notesProjectArchiveStopSQL("r", "o", "archive_id")
+	// Deactivation preserves declaration ownership and knowledge-source metadata;
+	// only the audit fields identify the stop. Privacy and declaration gates stay.
+	for _, required := range []string{
+		"stopped_writer.metadata @> jsonb_build_object",
+		"stopped_writer.last_applied_by_actor_id=stopped_archive.actor_id",
+		"stopped_writer.updated_at=stopped_writer.last_applied_at",
+		"r.metadata->'registration_metadata'=stopped_writer.metadata",
+	} {
+		if !strings.Contains(stop, required) {
+			t.Fatalf("archive stop guard missing: %s", required)
+		}
+	}
 	for _, filter := range []SourceLifecycleFilter{"", "active", "archived", "all"} {
 		input := NotesSearchInput{Query: "cobalt", SourceLifecycle: filter, Limit: 2}
 		lexical, err := buildNotesSearchQuery(input)
