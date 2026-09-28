@@ -2043,14 +2043,15 @@ func (s Service) MarkProjectDirectEventRegistrationsDeactivated(ctx context.Cont
 
 func (s Service) MarkProjectWatchedRootsDeactivated(ctx context.Context, req requestctx.Context, projectID string, localRootKeys []string, metadata json.RawMessage) error {
 	return s.markProjectRowsDeactivated(ctx, req, projectRowDeactivateInput{
-		Table:       "projects.project_watched_root_registrations",
-		ProjectID:   projectID,
-		KeyColumn:   "local_root_key",
-		Keys:        localRootKeys,
-		Status:      ProjectWatchedRootRegistrationStatusDisabled,
-		ActorColumn: "last_applied_by_actor_id",
-		TimeColumn:  "last_applied_at",
-		Metadata:    metadata,
+		Table:            "projects.project_watched_root_registrations",
+		ProjectID:        projectID,
+		KeyColumn:        "local_root_key",
+		Keys:             localRootKeys,
+		Status:           ProjectWatchedRootRegistrationStatusDisabled,
+		ActorColumn:      "last_applied_by_actor_id",
+		TimeColumn:       "last_applied_at",
+		Metadata:         metadata,
+		PreserveMetadata: true,
 	})
 }
 
@@ -2094,14 +2095,15 @@ func (s Service) MarkProjectWorkflowRegistrationsDeactivated(ctx context.Context
 }
 
 type projectRowDeactivateInput struct {
-	Table       string
-	ProjectID   string
-	KeyColumn   string
-	Keys        []string
-	Status      string
-	ActorColumn string
-	TimeColumn  string
-	Metadata    json.RawMessage
+	Table            string
+	ProjectID        string
+	KeyColumn        string
+	Keys             []string
+	Status           string
+	ActorColumn      string
+	TimeColumn       string
+	Metadata         json.RawMessage
+	PreserveMetadata bool
 }
 
 func (s Service) markProjectRowsDeactivated(ctx context.Context, req requestctx.Context, input projectRowDeactivateInput) error {
@@ -2123,12 +2125,17 @@ func (s Service) markProjectRowsDeactivated(ctx context.Context, req requestctx.
 		args = append(args, key)
 		placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)))
 	}
+	metadataValue := "$4"
+	if input.PreserveMetadata {
+		// Stopping a watcher must not erase its declaration/source ownership.
+		metadataValue = "metadata || $4::jsonb"
+	}
 	_, err = s.DB.ExecContext(ctx, `
 		UPDATE `+input.Table+`
 		SET activation_status = $2,
 		    `+input.ActorColumn+` = nullif($3, ''),
 		    `+input.TimeColumn+` = now(),
-		    metadata = $4,
+		    metadata = `+metadataValue+`,
 		    updated_at = now()
 		WHERE project_id = $1
 		  AND `+input.KeyColumn+` IN (`+strings.Join(placeholders, ", ")+`)

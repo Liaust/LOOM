@@ -399,6 +399,14 @@ func TestDeclarationRealWatchPipelinePostgres(t *testing.T) {
 		t.Fatalf("replay=%+v %v", replay, err)
 	}
 	// Removal is another explicit desired snapshot; retirement keeps source bytes.
+	// Deactivation must preserve the adapter binding for later explicit reapply.
+	if err = projects.NewService(service.db).MarkProjectWatchedRootsDeactivated(t.Context(), declarationRequest(p), payload.Group.ProjectID, []string{item.LocalRootKey}, mustWatchJSON(map[string]string{"source": "project.deactivate", "project_id": payload.Group.ProjectID})); err != nil {
+		t.Fatal(err)
+	}
+	var owned bool
+	if err = service.db.QueryRow(`SELECT activation_status='disabled' AND metadata#>>'{declaration_adapter,project_id}'=$1 AND metadata->>'source'='project.deactivate' FROM projects.project_watched_root_registrations WHERE project_id=$1`, payload.Group.ProjectID).Scan(&owned); err != nil || !owned {
+		t.Fatalf("deactivation erased declaration ownership: %v", err)
+	}
 	var document map[string]any
 	_ = json.Unmarshal(sourceBefore, &document)
 	document["resources"] = map[string]any{}

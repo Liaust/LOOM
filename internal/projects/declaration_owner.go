@@ -1400,24 +1400,36 @@ func persistDeclarationWatchRowsTx(ctx context.Context, tx *sql.Tx, req requestc
 		if !declarationDecode(root.ConfigJSON, &config) || config.RootKey != root.BackendRootKey {
 			return fmt.Errorf("invalid effective watch root")
 		}
-		var node string
 		var metadata []byte
-		err := tx.QueryRowContext(ctx, `SELECT node_id,metadata FROM projects.project_watched_root_registrations WHERE project_id=$1 AND backend_root_key=$2 FOR UPDATE`, group.ProjectID, root.BackendRootKey).Scan(&node, &metadata)
+		current, err := scanProjectWatchedRootRegistration(tx.QueryRowContext(ctx, projectWatchedRootRegistrationSelectSQL()+` WHERE project_id=$1 AND backend_root_key=$2 FOR UPDATE`, group.ProjectID, root.BackendRootKey))
 		if err != nil && err != sql.ErrNoRows {
 			return err
 		}
 		if err == nil {
+			metadata = current.Metadata
 			var prior map[string]json.RawMessage
 			legacy := false
 			if group.Predecessor != nil {
 				for _, member := range group.Predecessor.Members {
 					r := member.Registration
-					if r.BackendRootKey == root.BackendRootKey && r.NodeID == node && declarationEqual(r.Metadata, json.RawMessage(metadata)) {
+					if r.BackendRootKey == root.BackendRootKey && r.NodeID == current.NodeID && declarationEqual(r.Metadata, json.RawMessage(metadata)) {
 						legacy = true
 					}
 				}
 			}
-			if !declarationDecode(metadata, &prior) || !declarationWatchOwnedMetadata(prior, group.ProjectID) && !legacy || node != group.NodeID {
+			owned := declarationDecode(metadata, &prior) && declarationWatchOwnedMetadata(prior, group.ProjectID)
+			if !owned && !legacy && deactivatedDeclarationWatch(current, group) {
+				// Older deactivation replaced metadata. Recover ownership only from
+				// the last ACK-proven group and the unchanged registered root.
+				var raw []byte
+				var hash string
+				err = tx.QueryRowContext(ctx, `SELECT o.resolution->'payloads'->i.action_id,i.group_hash FROM projects.declaration_watch_intents i JOIN projects.declaration_operations o USING(operation_id) WHERE i.project_id=$1 AND i.node_id=$2 AND i.final_intent AND i.stage='applied' ORDER BY i.created_at DESC,i.operation_id DESC LIMIT 1`, group.ProjectID, group.NodeID).Scan(&raw, &hash)
+				if err != nil && err != sql.ErrNoRows {
+					return err
+				}
+				owned = err == nil && completedDeclarationWatchOwns(current, group, raw, hash)
+			}
+			if !owned && !legacy || current.NodeID != group.NodeID {
 				return fmt.Errorf("existing watched root belongs to another source owner")
 			}
 		} else if group.Predecessor != nil {
@@ -1467,6 +1479,39 @@ func persistDeclarationWatchRowsTx(ctx context.Context, tx *sql.Tx, req requestc
 		return err
 	}
 	return nil
+}
+
+func deactivatedDeclarationWatch(current ProjectWatchedRootRegistration, group DeclarationWatchGroup) bool {
+	var metadata struct {
+		Source    string          `json:"source"`
+		ProjectID string          `json:"project_id"`
+		Adapter   json.RawMessage `json:"declaration_adapter"`
+	}
+	return current.ActivationStatus == ProjectWatchedRootRegistrationStatusDisabled &&
+		current.ProjectID == group.ProjectID && current.NodeID == group.NodeID &&
+		declarationDecode(current.Metadata, &metadata) && metadata.Source == "project.deactivate" &&
+		metadata.ProjectID == group.ProjectID && len(metadata.Adapter) == 0
+}
+
+func completedDeclarationWatchOwns(current ProjectWatchedRootRegistration, group DeclarationWatchGroup, raw []byte, hash string) bool {
+	var previous DeclarationWatchIntentPayload
+	if !deactivatedDeclarationWatch(current, group) || !declarationDecode(raw, &previous) ||
+		previous.GroupHash != hash || previous.Group.ProjectID != group.ProjectID ||
+		previous.Group.NodeID != group.NodeID || previous.Group.ProjectRoot != group.ProjectRoot {
+		return false
+	}
+	actual, err := declarationValueDigest(previous.Group)
+	if err != nil || actual != hash {
+		return false
+	}
+	for _, root := range previous.Group.Roots {
+		if root.Enabled && root.BackendRootKey == current.BackendRootKey &&
+			root.LocalRootKey == current.LocalRootKey && root.WorkerKey == current.WorkerKey &&
+			root.ConfigHash == current.ConfigHash && declarationEqual(root.ConfigJSON, current.ConfigJSON) {
+			return true
+		}
+	}
+	return false
 }
 
 func declarationWatchOwnedMetadata(metadata map[string]json.RawMessage, projectID string) bool {
