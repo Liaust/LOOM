@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"loom.local/loom/internal/capabilities"
 	"loom.local/loom/internal/localclient"
@@ -20,15 +21,38 @@ import (
 )
 
 type projectPhysicalHTTPFake struct {
-	calls  int
-	kind   storagearchive.WorkspaceOperationKind
-	req    requestctx.Context
-	result storagearchive.ProjectPhysicalMutationSummary
-	err    error
+	calls    int
+	kind     storagearchive.WorkspaceOperationKind
+	req      requestctx.Context
+	result   storagearchive.ProjectPhysicalMutationSummary
+	err      error
+	deadline time.Time
 }
 
-func (f *projectPhysicalHTTPFake) ProjectPhysicalScope(context.Context, string) (string, string, string, error) {
+func (f *projectPhysicalHTTPFake) ProjectPhysicalScope(ctx context.Context, _ string) (string, string, string, error) {
+	f.deadline, _ = ctx.Deadline()
 	return "project_test", "scope_project", "project:test", nil
+}
+
+func TestProjectPhysicalMutationDeadlineAllowsNodeRoundTrip(t *testing.T) {
+	for _, action := range []string{"plan", "apply", "recover"} {
+		f := &projectPhysicalHTTPFake{}
+		r := httptest.NewRequest(http.MethodPost, "/v1/projects/test/archive/"+action, strings.NewReader(`{}`))
+		projectHTTPServer(f, &projectHTTPPolicy{}).handleProjectPhysicalArchive(httptest.NewRecorder(), r, "test", storagearchive.WorkspaceOperationArchive, action)
+		want := 3 * time.Minute
+		if action == "plan" {
+			want = 30 * time.Second
+		}
+		if remaining := time.Until(f.deadline); remaining < want-time.Second || remaining > want {
+			t.Fatalf("%s deadline: %s, want %s", action, remaining, want)
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+		projectHTTPServer(f, &projectHTTPPolicy{}).handleProjectPhysicalArchive(httptest.NewRecorder(), r.WithContext(ctx), "test", storagearchive.WorkspaceOperationArchive, action)
+		if remaining := time.Until(f.deadline); remaining > time.Second || remaining <= 0 {
+			t.Fatalf("%s ignored caller deadline: %s", action, remaining)
+		}
+		cancel()
+	}
 }
 func projectHTTPReview(req requestctx.Context, kind storagearchive.WorkspaceOperationKind) storagearchive.ProjectPhysicalPlanReview {
 	w := workspaceArchiveHTTPReview(kind)

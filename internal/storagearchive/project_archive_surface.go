@@ -438,7 +438,7 @@ func (s ProjectRuntimeService) executePrivateProjectPlan(ctx context.Context, re
 		}
 	}
 	if err != nil {
-		return result, projectSurfaceError("operation_failed")
+		return result, ProjectPhysicalSurfaceError{Code: "operation_failed", cause: err}
 	}
 	return result, nil
 }

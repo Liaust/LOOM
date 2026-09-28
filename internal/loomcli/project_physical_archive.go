@@ -85,7 +85,7 @@ func addProjectPhysicalArchiveCommands(parent *cobra.Command, opts *options, res
 			if err != nil {
 				return renderError(cmd, opts, corr, err)
 			}
-			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), 4*time.Minute)
 			defer cancel()
 			var out response.Envelope[storagearchive.ProjectPhysicalMutationSummary]
 			if recover {
@@ -160,7 +160,7 @@ func renderProjectPhysicalFailure(cmd *cobra.Command, opts *options, corr string
 				response.ErrorEnvelope
 				Data storagearchive.ProjectPhysicalMutationSummary `json:"data"`
 			}{failure, result})
-			return err
+			return &renderedCLIError{err: err}
 		}
 		renderProjectPhysicalSummary(cmd.ErrOrStderr(), result)
 	}

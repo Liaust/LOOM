@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"time"
 
 	"loom.local/loom/internal/capabilities"
 	"loom.local/loom/internal/requestctx"
@@ -38,7 +39,13 @@ func projectPhysicalArchiveRoute(path string) (string, storagearchive.WorkspaceO
 }
 
 func (s Server) handleProjectPhysicalArchive(w http.ResponseWriter, r *http.Request, ref string, kind storagearchive.WorkspaceOperationKind, action string) {
-	corr, ctx, cancel := workspaceArchiveRequestMeta(r)
+	corr, ctx := requestMeta(r)
+	timeout := 30 * time.Second
+	if action == "apply" || action == "recover" {
+		// Owner-node quiescence includes dispatch and result polling (up to two minutes).
+		timeout = 3 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	fail := func(code string, status int) { s.writeProjectPhysicalFailure(w, corr, code, status, nil) }
 	if r.Method != http.MethodPost {

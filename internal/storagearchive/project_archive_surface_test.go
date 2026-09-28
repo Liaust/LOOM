@@ -249,15 +249,19 @@ func TestProjectPhysicalReviewEvidenceFailureAndCrashBeforeIntent(t *testing.T) 
 func TestProjectPhysicalReviewPartialRecoveryAndEvidenceTamper(t *testing.T) {
 	env, store, req := newProjectSurfaceEnvironment(t)
 	review := projectSurfaceReview(t, env, req)
+	cause := errors.New("fixture stop /private/path")
 	env.service.ArchiveFailureHook = func(b ProjectPhysicalArchiveFailureBoundary) error {
 		if b == ProjectArchiveBoundaryAfterWorkspaceMove {
-			return errors.New("fixture stop")
+			return cause
 		}
 		return nil
 	}
 	result, err := env.service.ApplyReviewedProjectPhysicalPlan(context.Background(), req, review.ProjectID, ProjectPhysicalApplyRequest{Plan: review, PlanDigest: review.PlanDigest, Confirm: true})
 	if err == nil || !result.Recoverable || !result.MutationBlocked {
 		t.Fatalf("partial truth: %+v %v", result, err)
+	}
+	if !errors.Is(err, cause) || strings.Contains(err.Error(), "/private/path") {
+		t.Fatalf("private execution cause lost or exposed: %v", err)
 	}
 	env.service.ArchiveFailureHook = nil
 	e := store.rows[review.Workspace.OperationID]

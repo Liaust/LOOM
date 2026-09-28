@@ -2,6 +2,7 @@ package loomcli
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -81,6 +82,10 @@ func TestProjectPhysicalCLIReviewApplyRecoverParity(t *testing.T) {
 				target = review.Workspace.OperationID
 			}
 			out, _, err = executeRootCommand(append(append([]string{}, prefix...), action, "test", target, "--plan-digest", review.PlanDigest, "--yes")...)
+			var rendered *renderedCLIError
+			if !errors.As(err, &rendered) {
+				t.Fatalf("partial output permits a second CLI error envelope: %v", err)
+			}
 			var failed struct {
 				OK    bool
 				Data  storagearchive.ProjectPhysicalMutationSummary
