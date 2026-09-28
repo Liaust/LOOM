@@ -1813,12 +1813,12 @@ func operationFromJournal(record storagecatalog.WorkspaceArchiveJournalRecord, p
 		Destination:            plan.Destination,
 		ActorID:                plan.ActorID,
 		Reason:                 plan.Reason,
-		PlannedAt:              record.PlannedAt,
-		IntentCommittedAt:      record.IntentCommittedAt,
-		PayloadMovedAt:         record.PayloadMovedAt,
-		ProjectionsCommittedAt: record.ProjectionsCommittedAt,
-		CompletedAt:            record.CompletedAt,
-		UpdatedAt:              record.UpdatedAt,
+		PlannedAt:              record.PlannedAt.UTC(),
+		IntentCommittedAt:      workspaceJournalTime(record.IntentCommittedAt),
+		PayloadMovedAt:         workspaceJournalTime(record.PayloadMovedAt),
+		ProjectionsCommittedAt: workspaceJournalTime(record.ProjectionsCommittedAt),
+		CompletedAt:            workspaceJournalTime(record.CompletedAt),
+		UpdatedAt:              record.UpdatedAt.UTC(),
 	}
 	for _, item := range record.Findings {
 		var evidence []WorkspaceArchiveEvidenceField
@@ -1837,13 +1837,23 @@ func operationFromJournal(record storagecatalog.WorkspaceArchiveJournalRecord, p
 			Summary:       item.Summary,
 			Repairable:    item.Repairable,
 			Evidence:      evidence,
-			CreatedAt:     item.CreatedAt,
+			CreatedAt:     item.CreatedAt.UTC(),
 		})
 	}
 	if err := ValidateWorkspaceArchiveOperation(operation); err != nil {
 		return WorkspaceArchiveOperation{}, fmt.Errorf("invalid durable workspace archive operation: %w", err)
 	}
 	return operation, nil
+}
+
+// PostgreSQL may return Local/fixed-zone times. Canonical evidence uses UTC;
+// preserve the exact instant and precision, without rounding invalid evidence.
+func workspaceJournalTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	utc := value.UTC()
+	return &utc
 }
 
 func (s WorkspaceMoveService) recordFailure(ctx context.Context, operation WorkspaceArchiveOperation, finding WorkspaceArchiveFinding, manual bool) (storagecatalog.WorkspaceArchiveJournalRecord, error) {

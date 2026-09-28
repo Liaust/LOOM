@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"loom.local/loom/internal/storagecatalog"
 )
@@ -55,6 +56,44 @@ func TestWorkspaceLifecycleEvidenceHistoricalReplay(t *testing.T) {
 type lifecycleEvidenceJournal struct {
 	WorkspaceMoveJournal
 	rewrite func(string, *storagecatalog.WorkspaceArchiveJournalRecord)
+}
+
+func TestWorkspaceLifecycleEvidenceCanonicalizesJournalTimeZones(t *testing.T) {
+	for _, zone := range []*time.Location{time.FixedZone("Local", 0), time.FixedZone("CEST", 2*60*60)} {
+		t.Run(zone.String(), func(t *testing.T) {
+			f, archive, _ := archivedRestoreFixture(t)
+			before, err := f.service.ReadLifecycleEvidence(t.Context(), archive.OperationID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			zonedJournal := lifecycleEvidenceJournal{WorkspaceMoveJournal: f.journal, rewrite: func(_ string, r *storagecatalog.WorkspaceArchiveJournalRecord) {
+				r.PlannedAt, r.UpdatedAt = r.PlannedAt.In(zone), r.UpdatedAt.In(zone)
+				for _, field := range []**time.Time{&r.IntentCommittedAt, &r.PayloadMovedAt, &r.ProjectionsCommittedAt, &r.CompletedAt} {
+					if *field != nil {
+						value := (*field).In(zone)
+						*field = &value
+					}
+				}
+			}}
+			f.service.Journal = zonedJournal
+			after, err := f.service.ReadLifecycleEvidence(t.Context(), archive.OperationID)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("same instant changed archive evidence: %v", err)
+			}
+			f.service.Journal = f.journal
+			restore := planRestore(t, f, archive.OperationID)
+			if _, err := f.service.ApplyRestore(t.Context(), restore, restore.PlanDigest); err != nil {
+				t.Fatal(err)
+			}
+			f.journal.record.ManifestJSON = append(json.RawMessage(nil), f.journal.restoreRecords[restore.OperationID].ManifestJSON...)
+			f.service.Journal = zonedJournal
+			for _, id := range []string{archive.OperationID, restore.OperationID} {
+				if _, err := f.service.ReadLifecycleEvidence(t.Context(), id); err != nil {
+					t.Fatalf("same instant changed restore chain: %v", err)
+				}
+			}
+		})
+	}
 }
 
 func (j lifecycleEvidenceJournal) LoadWorkspaceArchiveJournal(ctx context.Context, id string) (storagecatalog.WorkspaceArchiveJournalRecord, bool, error) {
