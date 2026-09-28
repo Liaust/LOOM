@@ -260,7 +260,7 @@ func (s WorkspaceMoveService) PlanArchive(ctx context.Context, input WorkspaceAr
 	if !workspacePathID(input.OperationID, workspaceOperationID) {
 		return WorkspaceArchivePlan{}, fmt.Errorf("invalid workspace archive operation_id")
 	}
-	source, destination, sourceAncestors, destinationAncestors, inventory, err := observeArchivePlanEvidence(ctx, s.Roots, paths, true)
+	source, destination, sourceAncestors, destinationAncestors, inventory, err := observeArchivePlanEvidence(ctx, s.Roots, paths, false)
 	if err != nil {
 		return WorkspaceArchivePlan{}, err
 	}
@@ -285,6 +285,10 @@ func (s WorkspaceMoveService) PlanArchive(ctx context.Context, input WorkspaceAr
 		ActorID:              strings.TrimSpace(input.ActorID),
 		Reason:               strings.TrimSpace(input.Reason),
 		PlannedAt:            normalizedPlannedAt(input.PlannedAt, s.now()),
+	}
+	plan.PreviousCycle, err = s.previousArchiveCycle(ctx, plan)
+	if err != nil {
+		return WorkspaceArchivePlan{}, err
 	}
 	if err := SealWorkspaceArchivePlan(&plan); err != nil {
 		return WorkspaceArchivePlan{}, err
@@ -435,6 +439,9 @@ func (s WorkspaceMoveService) recoverArchive(ctx context.Context, record storage
 	if err := s.validateExecutablePlan(plan); err != nil {
 		return WorkspaceArchiveInspection{}, err
 	}
+	if manifest, ok := activeManifestFromRecord(record); ok {
+		return s.inspectRestoredArchiveHistory(ctx, record, plan, manifest)
+	}
 	operation, err := operationFromJournal(record, plan)
 	if err != nil {
 		return WorkspaceArchiveInspection{}, err
@@ -448,6 +455,9 @@ func (s WorkspaceMoveService) recoverArchive(ctx context.Context, record storage
 	}
 	if lastSafe == PhaseArchiveComplete {
 		return s.inspectJournal(ctx, record, plan)
+	}
+	if err := s.retainPreviousArchiveCycle(ctx, plan); err != nil {
+		return WorkspaceArchiveInspection{}, err
 	}
 	custody, manifest, finding, err := s.inspectCustody(ctx, plan)
 	if err != nil {
@@ -797,18 +807,12 @@ func (s WorkspaceMoveService) compareLivePlanEvidence(ctx context.Context, plan 
 		findings = append(findings, newWorkspaceFinding(plan.OperationID, FindingSourceDrift, PhaseArchivePlanned, "storage catalog references changed after plan review", true))
 	}
 	if requireNoContainer {
-		category := path.Dir(paths.Mapping.ArchiveContainerPath)
-		chain, err := openHeldDirectoryChain(s.Roots.StorageRoot, category, plan.DestinationAncestors)
+		previous, err := s.previousArchiveCycle(ctx, plan)
 		if err != nil {
 			return nil, err
 		}
-		defer chain.Close()
-		present, err := namePresentNoFollow(chain.ParentFD(), path.Base(paths.Mapping.ArchiveContainerPath))
-		if err != nil {
-			return nil, err
-		}
-		if present {
-			findings = append(findings, newWorkspaceFinding(plan.OperationID, FindingDestinationCollision, PhaseArchivePlanned, "archive container exists at the reviewed-absent destination", true))
+		if !samePreviousCycle(previous, plan.PreviousCycle) {
+			findings = append(findings, newWorkspaceFinding(plan.OperationID, FindingDestinationCollision, PhaseArchivePlanned, "archive container history changed after review", true))
 		}
 	}
 	return uniqueFindings(findings), nil

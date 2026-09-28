@@ -212,6 +212,7 @@ func newSyncCommand(opts *rootOptions) *cobra.Command {
 	cmd.AddCommand(newSyncPushCommand(opts))
 	cmd.AddCommand(newSyncStatusCommand(opts))
 	cmd.AddCommand(newSyncRepairCommand(opts))
+	cmd.AddCommand(newSyncRetryObjectCommand(opts))
 	return cmd
 }
 
@@ -465,6 +466,10 @@ func (opts *rootOptions) pushLocalSync(ctx context.Context, maxItems int, includ
 }
 
 func pushLocalSyncOnce(ctx context.Context, store Store, config Config, state State, correlationID string, maxItems int, includeSynced bool) (LocalSyncPushRun, error) {
+	return pushLocalSyncRootOnce(ctx, store, config, state, correlationID, maxItems, includeSynced, "")
+}
+
+func pushLocalSyncRootOnce(ctx context.Context, store Store, config Config, state State, correlationID string, maxItems int, includeSynced bool, rootKey string) (LocalSyncPushRun, error) {
 	store, unlock, err := store.lockLocalSync(ctx)
 	if err != nil {
 		return LocalSyncPushRun{}, err
@@ -496,13 +501,13 @@ func pushLocalSyncOnce(ctx context.Context, store Store, config Config, state St
 	if err != nil {
 		return LocalSyncPushRun{}, err
 	}
-	pending := eligibleOutboxItems(items, includeSynced)
+	pending := eligibleOutboxItems(syncOutboxForRoot(items, objectsByRef, objectsByVersion, rootKey), includeSynced)
 	if maxItems <= 0 || maxItems > len(pending) {
 		maxItems = len(pending)
 	}
 	pending = pending[:maxItems]
 	if len(pending) == 0 {
-		status, statusErr := store.LocalSyncStatus(config, state)
+		status, statusErr := store.localSyncRootStatus(config, state, rootKey)
 		if statusErr != nil {
 			return LocalSyncPushRun{}, statusErr
 		}
@@ -611,6 +616,9 @@ func pushLocalSyncOnce(ctx context.Context, store Store, config Config, state St
 		}
 		envelope, err := uploadQueuedSyncObject(ctx, client, correlationID, state, outboxItem, object)
 		if err != nil {
+			if recordErr := store.recordSyncUploadError(outboxItem, err); recordErr != nil {
+				return LocalSyncPushRun{}, recordErr
+			}
 			objectUploadErrors = append(objectUploadErrors, fmt.Errorf("upload local sync object %s: %w", outboxItem.LocalRef, err))
 			continue
 		}
@@ -635,7 +643,7 @@ func pushLocalSyncOnce(ctx context.Context, store Store, config Config, state St
 			return LocalSyncPushRun{}, err
 		}
 	}
-	status, err := store.LocalSyncStatus(config, state)
+	status, err := store.localSyncRootStatus(config, state, rootKey)
 	if err != nil {
 		return LocalSyncPushRun{}, err
 	}

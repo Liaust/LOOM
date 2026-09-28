@@ -611,6 +611,15 @@ func (s WorkspaceMoveService) inspectRestoreJournal(ctx context.Context, record 
 	if err != nil {
 		return WorkspaceArchiveInspection{}, err
 	}
+	if operation.Phase == PhaseRestoreComplete {
+		m, err := s.retainedRestoreHistory(ctx, plan)
+		if err != nil {
+			return WorkspaceArchiveInspection{}, err
+		}
+		if m != nil {
+			return WorkspaceArchiveInspection{Operation: operation, Plan: plan, Custody: CustodyHistorical, Manifest: m}, nil
+		}
+	}
 	archivePlan, archiveOperation, archivedManifest, err := s.loadCompletedArchiveEvidence(ctx, plan.ArchiveOperationID)
 	if err != nil {
 		return WorkspaceArchiveInspection{}, err

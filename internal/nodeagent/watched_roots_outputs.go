@@ -60,7 +60,7 @@ func runWatchedRootReconcileAndPlan(ctx context.Context, store Store, config Con
 			result.Message = "watched-root scan completed with output queue failures"
 		}
 		if flushOutputs {
-			flush := flushWatchedRootOutputs(ctx, store, config, state, correlationID)
+			flush := flushWatchedRootOutputs(ctx, store, config, state, correlationID, root.Config.RootKey)
 			result.OutputFlush = &flush
 			if flush.Status == watchedroots.OutputStatusFailed && result.Status == watchedroots.RunStatusHealthy {
 				result.Status = watchedroots.RunStatusDegraded
@@ -88,8 +88,8 @@ func runWatchedRootReconcileAndPlan(ctx context.Context, store Store, config Con
 	return result, nil
 }
 
-func flushWatchedRootOutputs(ctx context.Context, store Store, config Config, state State, correlationID string) watchedroots.OutputFlush {
-	before, err := store.LocalSyncStatus(config, state)
+func flushWatchedRootOutputs(ctx context.Context, store Store, config Config, state State, correlationID, rootKey string) watchedroots.OutputFlush {
+	before, err := store.localSyncRootStatus(config, state, rootKey)
 	if err != nil {
 		return watchedroots.OutputFlush{Attempted: false, Status: watchedroots.OutputStatusFailed, Error: err.Error()}
 	}
@@ -109,17 +109,20 @@ func flushWatchedRootOutputs(ctx context.Context, store Store, config Config, st
 	}
 	if before.Counts.Pending == 0 {
 		flush.Status = watchedroots.OutputStatusAlreadyCurrent
+		if before.Counts.Failed > 0 || before.Counts.Conflicted > 0 {
+			flush.Status = watchedroots.OutputStatusFailed
+		}
 		flush.PendingAfter = before.Counts.Pending
 		flush.AcceptedAfter = before.Counts.Accepted
 		flush.ConflictedAfter = before.Counts.Conflicted
 		flush.FailedAfter = before.Counts.Failed
 		return flush
 	}
-	push, err := pushLocalSyncOnce(ctx, store, config, state, correlationID, before.Counts.Pending, false)
+	push, err := pushLocalSyncRootOnce(ctx, store, config, state, correlationID, before.Counts.Pending, false, rootKey)
 	if err != nil {
 		flush.Status = watchedroots.OutputStatusFailed
 		flush.Error = err.Error()
-		if after, statusErr := store.LocalSyncStatus(config, state); statusErr == nil {
+		if after, statusErr := store.localSyncRootStatus(config, state, rootKey); statusErr == nil {
 			flush.PendingAfter = after.Counts.Pending
 			flush.AcceptedAfter = after.Counts.Accepted
 			flush.ConflictedAfter = after.Counts.Conflicted

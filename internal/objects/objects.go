@@ -19,6 +19,8 @@ import (
 	"loom.local/loom/internal/requestctx"
 )
 
+var ErrProjectNotFound = errors.New("object project does not exist")
+
 type Object struct {
 	ObjectID     string          `json:"object_id"`
 	ObjectType   string          `json:"object_type"`
@@ -637,6 +639,9 @@ func (s Service) resolveTargetScope(ctx context.Context, projectRef, scopeRef st
 	if projectRef != "" {
 		project, err := projects.NewService(s.DB).ResolveProjectRef(ctx, projectRef)
 		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return "", fmt.Errorf("%w: %s", ErrProjectNotFound, projectRef)
+			}
 			return "", fmt.Errorf("resolve project: %w", err)
 		}
 		return project.ProjectScopeID, nil

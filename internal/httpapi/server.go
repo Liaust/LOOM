@@ -1138,7 +1138,7 @@ func (s Server) handleNodeAgentSyncObjectUpload(w http.ResponseWriter, r *http.R
 	}
 	result, err := s.services.Sync.IngestSyncedObject(ctx, req, s.services.Objects, s.services.Search, input)
 	if err != nil {
-		s.writeError(w, correlationID, http.StatusBadRequest, "sync.object_upload_failed", "sync", input.LocalObjectRef, "Could not ingest synced object.", err)
+		s.writeSyncObjectError(w, correlationID, input.LocalObjectRef, err)
 		return
 	}
 	response.WriteJSON(w, http.StatusCreated, response.Success(correlationID, result))

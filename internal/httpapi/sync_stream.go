@@ -2,11 +2,13 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 
+	"loom.local/loom/internal/objects"
 	"loom.local/loom/internal/requestctx"
 	"loom.local/loom/internal/response"
 	loomsync "loom.local/loom/internal/sync"
@@ -27,10 +29,18 @@ func (s Server) handleNodeAgentSyncObjectStream(w http.ResponseWriter, r *http.R
 	}
 	result, err := s.services.Sync.IngestSyncedObjectStream(ctx, req, s.services.Objects, s.services.Search, input, content)
 	if err != nil {
-		s.writeError(w, correlationID, http.StatusBadRequest, "sync.object_upload_failed", "sync", input.LocalObjectRef, "Could not ingest streamed object.", err)
+		s.writeSyncObjectError(w, correlationID, input.LocalObjectRef, err)
 		return
 	}
 	response.WriteJSON(w, http.StatusCreated, response.Success(correlationID, result))
+}
+
+func (s Server) writeSyncObjectError(w http.ResponseWriter, correlationID, ref string, err error) {
+	if errors.Is(err, objects.ErrProjectNotFound) {
+		s.writeError(w, correlationID, http.StatusUnprocessableEntity, "sync.project_not_found", "sync", ref, "The queued object's project does not exist. Repair the project binding before explicitly retrying the retained queue item.", err)
+		return
+	}
+	s.writeError(w, correlationID, http.StatusBadRequest, "sync.object_upload_failed", "sync", ref, "Could not ingest synced object.", err)
 }
 
 func decodeSyncedObjectStream(r *http.Request) (loomsync.SyncedObjectInput, io.Reader, error) {

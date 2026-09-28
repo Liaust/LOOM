@@ -270,25 +270,32 @@ type NoFollowInventory struct {
 }
 
 type WorkspaceArchivePlan struct {
-	SchemaVersion         string                     `json:"schema_version"`
-	EvidenceKind          string                     `json:"evidence_kind"`
-	OperationID           string                     `json:"operation_id"`
-	OperationKind         WorkspaceOperationKind     `json:"operation_kind"`
-	ArchiveOperationID    string                     `json:"archive_operation_id,omitempty"`
-	ArchiveManifestDigest string                     `json:"archive_manifest_digest,omitempty"`
-	Kind                  WorkspaceKind              `json:"kind"`
-	ObjectID              string                     `json:"object_id"`
-	Slug                  string                     `json:"slug"`
-	Source                WorkspacePathBinding       `json:"source"`
-	Destination           WorkspacePathBinding       `json:"destination"`
-	SourceAncestors       []WorkspaceAncestorBinding `json:"source_ancestors,omitempty"`
-	DestinationAncestors  []WorkspaceAncestorBinding `json:"destination_ancestors,omitempty"`
-	Inventory             NoFollowInventory          `json:"inventory"`
-	CatalogRebinds        []WorkspaceCatalogRebind   `json:"catalog_rebinds,omitempty"`
-	ActorID               string                     `json:"actor_id"`
-	Reason                string                     `json:"reason"`
-	PlannedAt             time.Time                  `json:"planned_at"`
-	PlanDigest            string                     `json:"plan_digest"`
+	SchemaVersion         string                         `json:"schema_version"`
+	EvidenceKind          string                         `json:"evidence_kind"`
+	OperationID           string                         `json:"operation_id"`
+	OperationKind         WorkspaceOperationKind         `json:"operation_kind"`
+	ArchiveOperationID    string                         `json:"archive_operation_id,omitempty"`
+	ArchiveManifestDigest string                         `json:"archive_manifest_digest,omitempty"`
+	PreviousCycle         *WorkspaceArchivePreviousCycle `json:"previous_cycle,omitempty"`
+	Kind                  WorkspaceKind                  `json:"kind"`
+	ObjectID              string                         `json:"object_id"`
+	Slug                  string                         `json:"slug"`
+	Source                WorkspacePathBinding           `json:"source"`
+	Destination           WorkspacePathBinding           `json:"destination"`
+	SourceAncestors       []WorkspaceAncestorBinding     `json:"source_ancestors,omitempty"`
+	DestinationAncestors  []WorkspaceAncestorBinding     `json:"destination_ancestors,omitempty"`
+	Inventory             NoFollowInventory              `json:"inventory"`
+	CatalogRebinds        []WorkspaceCatalogRebind       `json:"catalog_rebinds,omitempty"`
+	ActorID               string                         `json:"actor_id"`
+	Reason                string                         `json:"reason"`
+	PlannedAt             time.Time                      `json:"planned_at"`
+	PlanDigest            string                         `json:"plan_digest"`
+}
+
+type WorkspaceArchivePreviousCycle struct {
+	RestoreOperationID string       `json:"restore_operation_id"`
+	ManifestDigest     string       `json:"manifest_digest"`
+	ContainerIdentity  PathIdentity `json:"container_identity"`
 }
 
 type WorkspaceArchiveEvidenceField struct {
@@ -512,8 +519,16 @@ func ValidateWorkspaceArchivePlan(plan WorkspaceArchivePlan, roots TrustedWorksp
 		if plan.ArchiveOperationID != "" || plan.ArchiveManifestDigest != "" {
 			return fmt.Errorf("archive plan cannot bind prior archive evidence")
 		}
+		if p := plan.PreviousCycle; p != nil {
+			if !workspaceOperationID.MatchString(p.RestoreOperationID) || p.RestoreOperationID == plan.OperationID || !sha256DigestPattern.MatchString(p.ManifestDigest) || p.ContainerIdentity.Presence != PathPresent || p.ContainerIdentity.DeviceID != plan.Source.Identity.DeviceID {
+				return fmt.Errorf("invalid previous archive cycle binding")
+			}
+		}
 		source, destination = paths.Active, paths.ArchivePayload
 	case WorkspaceOperationRestore:
+		if plan.PreviousCycle != nil {
+			return fmt.Errorf("restore plan cannot retire an archive cycle")
+		}
 		if !workspaceOperationID.MatchString(plan.ArchiveOperationID) || plan.ArchiveOperationID == plan.OperationID || !sha256DigestPattern.MatchString(plan.ArchiveManifestDigest) {
 			return fmt.Errorf("restore plan requires a distinct archive operation and authenticated manifest digest")
 		}
