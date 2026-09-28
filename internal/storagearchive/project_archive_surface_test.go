@@ -162,6 +162,59 @@ func TestProjectPhysicalReviewPreservesArchiveAndRestoreAcrossServices(t *testin
 	if err != nil || !recovered.Replay || recovered.ActivationState != WorkspaceActivationInactive {
 		t.Fatalf("restore recovery replay: %+v %v", recovered, err)
 	}
+	restoreReq.ScopeKey = env.projects.detail.Project.Project.ProjectScopeKey
+	input := ProjectReactivationRequest{RestoreOperationID: restore.Workspace.OperationID, Confirm: true}
+	if _, err := env.service.ReactivateProject(context.Background(), restoreReq, review.ProjectID, ProjectReactivationRequest{RestoreOperationID: input.RestoreOperationID}); err == nil {
+		t.Fatal("unconfirmed reactivation ran")
+	}
+	wrong := input
+	wrong.RestoreOperationID = review.Workspace.OperationID
+	if _, err := env.service.ReactivateProject(context.Background(), restoreReq, review.ProjectID, wrong); err == nil {
+		t.Fatal("wrong restore reactivated")
+	}
+	activated, err := env.service.ReactivateProject(context.Background(), restoreReq, review.ProjectID, input)
+	if err != nil || activated.Replay || activated.RuntimeStarted || activated.MutationBlocked {
+		t.Fatalf("reactivation: %+v %v", activated, err)
+	}
+	calls := env.quiescence.calls
+	again, err := env.service.ReactivateProject(context.Background(), restoreReq, review.ProjectID, input)
+	if err != nil || !again.Replay || !reflect.DeepEqual(activated.Receipt, again.Receipt) || calls != env.quiescence.calls {
+		t.Fatalf("reactivation replay: %+v %v", again, err)
+	}
+	if err := projects.EnsureProjectMutable(env.projects.detail.Project.Project, "write", "test"); err != nil {
+		t.Fatal(err)
+	}
+	observed := env.service.inspectProjectPhysicalArchive(context.Background(), env.projects.detail)
+	if observed.MutationBlocked || observed.Status != "reactivated" {
+		t.Fatalf("reactivated inspection: %+v", observed)
+	}
+}
+
+func (s *projectArchivePlanProjectService) CompleteProjectReactivation(_ context.Context, req requestctx.Context, expected projects.ProjectPhysicalArchiveState, digest string) (projects.ProjectReactivationState, error) {
+	current, ok := projects.ParseProjectPhysicalArchiveState(s.detail.Project.Project.ArchiveState)
+	if !ok || !reflect.DeepEqual(current, expected) {
+		return projects.ProjectReactivationState{}, errors.New("state changed")
+	}
+	if current.Restore.Reactivation != nil {
+		return *current.Restore.Reactivation, nil
+	}
+	r := projects.ProjectReactivationState{Request: req, ActivatedAt: current.Restore.RestoredAt.Add(time.Second), ReleaseDigest: digest, EventID: "event_01ARZ3NDEKTSV4RRFFQ69G5FB0"}
+	current.Restore.Reactivation = &r
+	if err := projects.ValidateProjectPhysicalArchiveState(current); err != nil {
+		return r, err
+	}
+	s.detail.Project.Project.ArchiveState, _ = json.Marshal(current)
+	s.detail.Registration.ActivationStatus = projects.ProjectActivationStatusBaseActive
+	return r, nil
+}
+
+func (s *projectArchiveTestRuntimeQuiescence) ReleaseProjectArchiveRuntimeFences(ctx context.Context, req requestctx.Context, input ProjectRuntimeQuiescenceRequest) (ProjectRuntimeQuiescenceReceipt, error) {
+	out, err := s.VerifyProjectArchiveRuntimeQuiescence(ctx, req, input)
+	for i := range out.Evidence {
+		out.Evidence[i].FenceState = "released"
+		out.Evidence[i].ObservedAt = time.Date(2026, 9, 9, 10, 0, 0, 0, time.UTC)
+	}
+	return out, err
 }
 
 func TestProjectPhysicalCanonicalScopeResolution(t *testing.T) {

@@ -24,6 +24,45 @@ func TestApplicationPublicationSeparatesInstallerAndPublisher(t *testing.T) {
 	}
 }
 
+func TestApplicationArchiveReleaseLeavesStoppedAndRequiresNewApply(t *testing.T) {
+	r, h, q, p := applicationTestRuntime(t)
+	ctx := context.Background()
+	if _, err := r.Execute(ctx, 1234, q); err != nil {
+		t.Fatal(err)
+	}
+	target := projectquiescence.Target{Facet: "services", Kind: projectquiescence.TargetKindService, OwnerNode: "fixture", ProviderID: "provider-fixture", ProviderAddress: "workspace/fixture@app", ProviderKey: "app", RuntimeProfileDigest: "sha256:" + strings.Repeat("3", 64), AllowlistKey: q.Owner.AllowlistKey(), Manager: "systemd", Unit: q.Owner.Unit()}
+	p.ExpectedRevision, p.Revision, p.ArchiveTarget = p.Revision, "revision-b", &target
+	if err := r.Publish(ctx, 0, p); err != nil {
+		t.Fatal(err)
+	}
+	control := ApplicationArchiveControl{Target: target, Operation: OperationArchiveRelease}
+	if _, err := r.ArchiveControl(ctx, 1234, control); err == nil {
+		t.Fatal("release adopted unfenced running service")
+	}
+	control.Operation = OperationStop
+	if _, err := r.ArchiveControl(ctx, 1234, control); err != nil {
+		t.Fatal(err)
+	}
+	control.Operation = OperationArchiveRelease
+	for i := 0; i < 2; i++ {
+		out, err := r.ArchiveControl(ctx, 1234, control)
+		if err != nil || !out.Success || h.process.State != "inactive" {
+			t.Fatalf("release: %+v %v", out, err)
+		}
+	}
+	var installed ApplicationInstallation
+	if err := r.Store.read("installation-"+q.Owner.Instance(), &installed); err != nil || installed.Fenced || installed.Applied || installed.Retired {
+		t.Fatalf("installation: %+v %v", installed, err)
+	}
+	installed.Retired = true
+	if err := r.Store.write("installation-"+q.Owner.Instance(), installed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ArchiveControl(ctx, 1234, control); err == nil {
+		t.Fatal("revived retired installation")
+	}
+}
+
 func TestApplicationArchiveRevokedInstallerWhileWaiting(t *testing.T) {
 	r, h, q, p := applicationTestRuntime(t)
 	ctx := context.Background()

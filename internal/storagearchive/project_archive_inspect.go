@@ -81,7 +81,15 @@ func (s ProjectRuntimeService) inspectProjectPhysicalArchive(ctx context.Context
 		terminal = restore.Phase == projects.ProjectRestorePhaseComplete
 		if terminal {
 			wantProject, wantRegistration = "active", projects.ProjectRegistrationStatusRegistered
-			result.NextAction = "activation_not_available"
+			result.NextAction = "reactivate_project"
+			if restore.Reactivation != nil && project.Status == "active" && detail.Registration != nil && detail.Registration.RegistrationStatus == projects.ProjectRegistrationStatusRegistered {
+				// The completed restore is history, not an inventory constraint on
+				// subsequent ordinary edits or a claim that runtimes are running.
+				result.MutationBlocked = false
+				result.ActivationState = ""
+				result.Status, result.EvidenceStatus, result.NextAction = "reactivated", "historical", "apply_selected_project_resources"
+				return result
+			}
 		}
 	}
 	if project.Status != wantProject || detail.Registration == nil ||
@@ -151,7 +159,7 @@ func (s ProjectRuntimeService) inspectProjectPhysicalArchive(ctx context.Context
 		result.EvidenceStatus = "verified"
 		result.NextAction = "review_restore_plan"
 		if wantKind == WorkspaceOperationRestore {
-			result.NextAction = "activation_not_available"
+			result.NextAction = "reactivate_project"
 		}
 	}
 	return result

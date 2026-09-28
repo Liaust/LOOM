@@ -86,6 +86,23 @@ Registration neither creates missing directories nor validates existence.
 Create the directory first. Native polling may convert its kind if Git appears.
 Do not manufacture a Git wrapper.
 
+## Restored projects
+
+Physical restore returns the files and registration but deliberately leaves the
+project inactive. Inspect it with `loom project archive inspect <project>`, then
+explicitly release that completed restore:
+
+```sh
+loom project archive reactivate <project> --restore-operation <restore-operation-id> --yes
+```
+
+Reactivation makes the project editable again; it does not start watchers,
+services or schedules. Review `loom project plan` before `loom project apply`
+to resume selected declarations. Deliberately paused or completed schedules stay
+stopped. Archive and restore receipts remain historical evidence, not a claim
+that runtime is running. The same reactivation command is safe to retry after a
+lost response; it must refer to the exact completed restore.
+
 ## Export custody
 
 `loom project export <path> --mode <human|portable|archival> --out <archive.tar>`;

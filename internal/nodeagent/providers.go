@@ -277,6 +277,16 @@ func buildSystemProviderAdvertisement(config Config, state State) capabilities.P
 						Body:  "Use only for an authenticated, reviewed physical-project archive operation. The request must bind this node and every exact watched-root or service target.",
 					}},
 				},
+				{
+					EndpointName: "project.archive.release", CompactAddress: providerAddress + ".project.archive.release",
+					ClassNamespace: "system", ClassName: "project.archive.release", DisplayName: "Release Project Archive Fences",
+					Description: "Release exact archive fences after an explicitly confirmed completed restore; leave runtimes stopped.",
+					Form:        capabilities.CapabilityFormCommand, InputSchemaJSON: projectArchiveReleaseInputSchema(), OutputSchemaJSON: projectArchiveReleaseOutputSchema(),
+					RiskLevel: capabilities.RiskLevelHigh, ExecutionAuthorizationLevel: 5,
+					SideEffectsJSON: json.RawMessage(`{"side_effects":["project_archive.fence.release","project_archive.receipt.write"]}`),
+					VersionLabel:    version.Current().Version,
+					ManifestJSON:    objectJSON(map[string]any{"source": "loom-node-agent", "handler": "system.project.archive.release", "execution": "remote_node", "explicit_authorization": true, "slice_enabled": true}),
+				},
 			}, applicationCapabilities(providerAddress)...),
 			UsageDocuments: []capabilities.AdvertisedUsageDocument{
 				{

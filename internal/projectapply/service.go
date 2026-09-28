@@ -451,6 +451,9 @@ func (s *Service) checkCurrent(ctx context.Context, p Principal, x Resolution, r
 }
 func publicError(err error, o *operation, action string) pc.DeclarationError {
 	e := safeError(err, pc.DeclarationOwnerFailed, "execution_failed").(*Failure)
+	if e.Cause == "project_restored_inactive" {
+		return pc.DeclarationError{Code: e.Code, ActionID: action, CauseCode: e.Cause, Message: "Restore completed. Inspect the restore operation, then use loom project archive reactivate <project> --restore-operation <id> --yes. Runtime resources remain stopped until explicitly applied.", Retryable: false, CompletedEffects: []string{}}
+	}
 	done := []string{}
 	if o != nil {
 		for _, a := range o.Resolution.Plan.Basis.Actions {

@@ -17,6 +17,10 @@ import (
 func (c Client) ReviewProjectPhysicalArchive(ctx context.Context, corr, ref, reason string) (response.Envelope[storagearchive.ProjectPhysicalPlanReview], error) {
 	return projectArchiveJSON[storagearchive.ProjectPhysicalPlanReview](c, ctx, corr, ref, "plan", map[string]string{"reason": reason})
 }
+
+func (c Client) ReactivateProject(ctx context.Context, corr, ref string, input storagearchive.ProjectReactivationRequest) (response.Envelope[storagearchive.ProjectReactivationResult], error) {
+	return projectArchiveJSON[storagearchive.ProjectReactivationResult](c, ctx, corr, ref, "reactivate", input)
+}
 func (c Client) ReviewProjectPhysicalRestore(ctx context.Context, corr, ref, reason string) (response.Envelope[storagearchive.ProjectPhysicalPlanReview], error) {
 	return projectArchiveJSON[storagearchive.ProjectPhysicalPlanReview](c, ctx, corr, ref, "restore/plan", map[string]string{"reason": reason})
 }

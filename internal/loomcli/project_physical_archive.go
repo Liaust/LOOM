@@ -20,6 +20,34 @@ import (
 )
 
 func addProjectPhysicalArchiveCommands(parent *cobra.Command, opts *options, restore bool) {
+	if !restore {
+		var operation string
+		var yes bool
+		command := &cobra.Command{Use: "reactivate <project-ref>", Short: "Release a completed restore for editing; do not start runtime resources", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+			corr := correlation.Normalize(opts.correlationID)
+			if !yes || operation == "" {
+				return renderError(cmd, opts, corr, loomerrors.Wrap("project_archive.review_confirmation_required", "project_archive", "reactivate", "The exact --restore-operation and --yes are required.", nil))
+			}
+			cc, err := resolveCommandContext(opts)
+			if err != nil {
+				return renderError(cmd, opts, corr, err)
+			}
+			ctx, cancel := context.WithTimeout(cmd.Context(), 4*time.Minute)
+			defer cancel()
+			out, err := cc.Client.ReactivateProject(ctx, cc.CorrelationID, args[0], storagearchive.ProjectReactivationRequest{RestoreOperationID: operation, Confirm: true})
+			if err != nil {
+				return renderError(cmd, opts, cc.CorrelationID, err)
+			}
+			if opts.jsonOutput {
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(out)
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "Project reactivated. Runtime resources remain stopped; use project plan/apply for selected resources.")
+			return nil
+		}}
+		command.Flags().StringVar(&operation, "restore-operation", "", "exact completed restore operation")
+		command.Flags().BoolVar(&yes, "yes", false, "confirm release of this restore's project fences")
+		parent.AddCommand(command)
+	}
 	var reason string
 	plan := &cobra.Command{Use: "plan <project-ref>", Short: "Review a physical project move; runtime remains inactive", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		cc, err := resolveCommandContext(opts)

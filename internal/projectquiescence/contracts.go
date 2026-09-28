@@ -24,6 +24,7 @@ const (
 	FacetServices         = "services"
 	TargetStateStopped    = "stopped"
 	FenceStateActive      = "active"
+	FenceStateReleased    = "released"
 
 	MaxRequestBytes = 256 * 1024
 	MaxReceiptBytes = 512 * 1024
@@ -64,14 +65,28 @@ type ProjectRuntimeQuiescenceTarget struct {
 type Target = ProjectRuntimeQuiescenceTarget
 
 type Request struct {
-	SchemaVersion string   `json:"schema_version"`
-	ProjectID     string   `json:"project_id"`
-	ProjectSlug   string   `json:"project_slug"`
-	OperationID   string   `json:"operation_id"`
-	PlanDigest    string   `json:"plan_digest"`
-	NodeKey       string   `json:"node_key,omitempty"`
-	Targets       []Target `json:"targets"`
-	RequestDigest string   `json:"request_digest,omitempty"`
+	SchemaVersion string          `json:"schema_version"`
+	ProjectID     string          `json:"project_id"`
+	ProjectSlug   string          `json:"project_slug"`
+	OperationID   string          `json:"operation_id"`
+	PlanDigest    string          `json:"plan_digest"`
+	NodeKey       string          `json:"node_key,omitempty"`
+	Targets       []Target        `json:"targets"`
+	RequestDigest string          `json:"request_digest,omitempty"`
+	Release       *ReleaseBinding `json:"release,omitempty"`
+}
+
+// Release binds fence removal to one completed restore, never to a new target.
+type ReleaseBinding struct {
+	OperationID string `json:"operation_id"`
+	PlanDigest  string `json:"plan_digest"`
+}
+
+func ExpectedFenceState(request Request) string {
+	if request.Release != nil {
+		return FenceStateReleased
+	}
+	return FenceStateActive
 }
 
 type Evidence struct {
@@ -197,6 +212,9 @@ func ValidateRequest(request Request) error {
 }
 
 func validateRequestIdentity(request Request, requireDigest bool) error {
+	if request.Release != nil && (!boundedToken(request.Release.OperationID) || request.Release.OperationID == request.OperationID || !digestPattern.MatchString(request.Release.PlanDigest)) {
+		return fmt.Errorf("fence release requires an exact distinct restore binding")
+	}
 	if request.SchemaVersion != RequestSchemaVersion || !boundedToken(request.ProjectID) || !slugPattern.MatchString(request.ProjectSlug) || !boundedToken(request.OperationID) || !digestPattern.MatchString(request.PlanDigest) || !boundedToken(request.NodeKey) {
 		return fmt.Errorf("quiescence request identity is invalid")
 	}
@@ -222,14 +240,15 @@ func validateRequestIdentity(request Request, requireDigest bool) error {
 
 func requestIdentityDigest(request Request) (string, error) {
 	identity := struct {
-		SchemaVersion string   `json:"schema_version"`
-		ProjectID     string   `json:"project_id"`
-		ProjectSlug   string   `json:"project_slug"`
-		OperationID   string   `json:"operation_id"`
-		PlanDigest    string   `json:"plan_digest"`
-		NodeKey       string   `json:"node_key"`
-		Targets       []Target `json:"targets"`
-	}{request.SchemaVersion, request.ProjectID, request.ProjectSlug, request.OperationID, request.PlanDigest, request.NodeKey, request.Targets}
+		SchemaVersion string          `json:"schema_version"`
+		ProjectID     string          `json:"project_id"`
+		ProjectSlug   string          `json:"project_slug"`
+		OperationID   string          `json:"operation_id"`
+		PlanDigest    string          `json:"plan_digest"`
+		NodeKey       string          `json:"node_key"`
+		Targets       []Target        `json:"targets"`
+		Release       *ReleaseBinding `json:"release,omitempty"`
+	}{request.SchemaVersion, request.ProjectID, request.ProjectSlug, request.OperationID, request.PlanDigest, request.NodeKey, request.Targets, request.Release}
 	raw, err := json.Marshal(identity)
 	if err != nil {
 		return "", err
@@ -281,7 +300,7 @@ func validateReceiptIdentity(request Request, receipt Receipt, floor, now time.T
 	}
 	for index, target := range request.Targets {
 		evidence := receipt.Evidence[index]
-		if evidence.ProjectRuntimeQuiescenceTarget != target || evidence.State != TargetStateStopped || evidence.FenceState != FenceStateActive || !boundedReceiptIdentity(evidence.TargetReceiptID) || evidence.ReceiptID != "" {
+		if evidence.ProjectRuntimeQuiescenceTarget != target || evidence.State != TargetStateStopped || evidence.FenceState != ExpectedFenceState(request) || !boundedReceiptIdentity(evidence.TargetReceiptID) || evidence.ReceiptID != "" {
 			return fmt.Errorf("quiescence receipt target evidence is not exact")
 		}
 		if evidence.ObservedAt.IsZero() || evidence.ObservedAt.Location() != time.UTC || (!floor.IsZero() && evidence.ObservedAt.Before(floor)) || (!now.IsZero() && evidence.ObservedAt.After(now)) {
@@ -307,6 +326,9 @@ func receiptIdentityDigest(receipt Receipt) string {
 }
 
 func NewFence(request Request, target Target, fencedAt time.Time) (Fence, error) {
+	if request.Release != nil {
+		return Fence{}, fmt.Errorf("release cannot create a fence")
+	}
 	if err := ValidateRequest(request); err != nil {
 		return Fence{}, err
 	}

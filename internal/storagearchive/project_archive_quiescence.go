@@ -63,6 +63,20 @@ func NewRoutedProjectRuntimeQuiescenceVerifier(service ProjectArchiveQuiescenceR
 }
 
 func (v *RoutedProjectRuntimeQuiescenceVerifier) VerifyProjectArchiveRuntimeQuiescence(ctx context.Context, original requestctx.Context, request ProjectRuntimeQuiescenceRequest) (ProjectRuntimeQuiescenceReceipt, error) {
+	if request.Release != nil {
+		return ProjectRuntimeQuiescenceReceipt{}, fmt.Errorf("quiescence cannot release fences")
+	}
+	return v.routeProjectRuntimeFences(ctx, original, request)
+}
+
+func (v *RoutedProjectRuntimeQuiescenceVerifier) ReleaseProjectArchiveRuntimeFences(ctx context.Context, original requestctx.Context, request ProjectRuntimeQuiescenceRequest) (ProjectRuntimeQuiescenceReceipt, error) {
+	if request.Release == nil {
+		return ProjectRuntimeQuiescenceReceipt{}, fmt.Errorf("restore release binding is required")
+	}
+	return v.routeProjectRuntimeFences(ctx, original, request)
+}
+
+func (v *RoutedProjectRuntimeQuiescenceVerifier) routeProjectRuntimeFences(ctx context.Context, original requestctx.Context, request ProjectRuntimeQuiescenceRequest) (ProjectRuntimeQuiescenceReceipt, error) {
 	aggregate := ProjectRuntimeQuiescenceReceipt{
 		SchemaVersion: request.SchemaVersion, ProjectID: request.ProjectID, ProjectSlug: request.ProjectSlug,
 		OperationID: request.OperationID, PlanDigest: request.PlanDigest, Evidence: []ProjectRuntimeQuiescenceEvidence{},
@@ -98,7 +112,7 @@ func (v *RoutedProjectRuntimeQuiescenceVerifier) VerifyProjectArchiveRuntimeQuie
 	for _, node := range nodes {
 		nodeRequest := ProjectRuntimeQuiescenceRequest{
 			ProjectID: request.ProjectID, ProjectSlug: request.ProjectSlug, OperationID: request.OperationID,
-			PlanDigest: request.PlanDigest, NodeKey: node, Targets: grouped[node],
+			PlanDigest: request.PlanDigest, NodeKey: node, Targets: grouped[node], Release: request.Release,
 		}
 		if err := projectquiescence.SealRequest(&nodeRequest); err != nil {
 			return aggregate, fmt.Errorf("seal project archive quiescence request for node %s: %w", node, err)
@@ -131,6 +145,9 @@ func (v *RoutedProjectRuntimeQuiescenceVerifier) VerifyProjectArchiveRuntimeQuie
 
 func (v *RoutedProjectRuntimeQuiescenceVerifier) executeNode(ctx context.Context, original requestctx.Context, request ProjectRuntimeQuiescenceRequest, attemptID string) (ProjectRuntimeQuiescenceReceipt, error) {
 	endpoint, err := projectArchiveQuiescenceEndpoint(request.NodeKey)
+	if request.Release != nil {
+		endpoint = strings.TrimSuffix(endpoint, "quiesce") + "release"
+	}
 	if err != nil {
 		return ProjectRuntimeQuiescenceReceipt{}, err
 	}
@@ -460,7 +477,7 @@ func validateProjectRuntimeQuiescenceReceipt(request ProjectRuntimeQuiescenceReq
 		return fmt.Errorf("project archive aggregate quiescence receipt carries node-only identity")
 	}
 	for _, evidence := range receipt.Evidence {
-		if evidence.FenceState != projectquiescence.FenceStateActive || !canonicalSHA256(evidence.ReceiptID) || strings.TrimSpace(evidence.TargetReceiptID) == "" || evidence.ObservedAt.Location() != time.UTC {
+		if evidence.FenceState != projectquiescence.ExpectedFenceState(request) || !canonicalSHA256(evidence.ReceiptID) || strings.TrimSpace(evidence.TargetReceiptID) == "" || evidence.ObservedAt.Location() != time.UTC {
 			return fmt.Errorf("project archive runtime target lacks exact fenced node receipt evidence")
 		}
 	}

@@ -435,7 +435,7 @@ func (s Service) resolvePlannedTarget(ctx context.Context, target string) (plann
 func projectArchiveSystemEndpointRequiresNodeDispatch(target plannedTarget) bool {
 	if target.ProviderType != capabilities.ProviderTypeSystem || target.ProviderStatus != capabilities.ProviderStatusActive ||
 		target.EndpointStatus != capabilities.EndpointStatusActive || target.EndpointVersionStatus != capabilities.EndpointVersionStatusActive ||
-		target.ActiveEndpointVersionID == "" || target.EndpointName != "project.archive.quiesce" {
+		target.ActiveEndpointVersionID == "" || (target.EndpointName != "project.archive.quiesce" && target.EndpointName != "project.archive.release") {
 		return false
 	}
 	providerAddress, err := capabilities.ParseProviderAddress(target.ProviderAddress)
@@ -443,7 +443,7 @@ func projectArchiveSystemEndpointRequiresNodeDispatch(target plannedTarget) bool
 		return false
 	}
 	capabilityAddress, err := capabilities.ParseAddress(target.CapabilityAddress)
-	if err != nil || capabilityAddress.ScopePath != providerAddress.ScopePath || capabilityAddress.ProviderKey != providerAddress.ProviderKey || capabilityAddress.CapabilityName != "project.archive.quiesce" {
+	if err != nil || capabilityAddress.ScopePath != providerAddress.ScopePath || capabilityAddress.ProviderKey != providerAddress.ProviderKey || capabilityAddress.CapabilityName != target.EndpointName {
 		return false
 	}
 	var marker struct {
@@ -462,7 +462,7 @@ func projectArchiveSystemEndpointRequiresNodeDispatch(target plannedTarget) bool
 	if decoder.Decode(&extra) != io.EOF {
 		return false
 	}
-	return marker.Source == "loom-node-agent" && marker.Handler == "system.project.archive.quiesce" &&
+	return marker.Source == "loom-node-agent" && marker.Handler == "system."+target.EndpointName &&
 		marker.Execution == "remote_node" && marker.ExplicitAuthorization && marker.SliceEnabled
 }
 

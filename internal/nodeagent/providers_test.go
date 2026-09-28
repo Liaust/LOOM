@@ -44,10 +44,10 @@ func TestBuildProviderAdvertisementDefaultsToSystem(t *testing.T) {
 	if input.Provider.ProviderKey != "system" {
 		t.Fatalf("expected system provider, got %q", input.Provider.ProviderKey)
 	}
-	if len(input.Provider.Capabilities) != 7 {
-		t.Fatalf("expected 7 system capabilities, got %d", len(input.Provider.Capabilities))
+	if len(input.Provider.Capabilities) != 8 {
+		t.Fatalf("expected 8 system capabilities, got %d", len(input.Provider.Capabilities))
 	}
-	prerequisite := input.Provider.Capabilities[6]
+	prerequisite := input.Provider.Capabilities[7]
 	if prerequisite.EndpointName != "project.application.prerequisites" || prerequisite.CompactAddress != "workspace/workspace-test@system.project.application.prerequisites" || prerequisite.ExecutionAuthorizationLevel != 1 || prerequisite.Form != "query" || prerequisite.RiskLevel != "low" || string(prerequisite.SideEffectsJSON) != `{"side_effects":[]}` {
 		t.Fatalf("prerequisite endpoint declaration = %#v", prerequisite)
 	}

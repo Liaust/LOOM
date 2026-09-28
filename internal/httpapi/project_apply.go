@@ -357,6 +357,10 @@ func (s Server) writeDeclarationError(w http.ResponseWriter, r *http.Request, er
 	}
 	cid, _ := requestMeta(r)
 	detail := pc.DeclarationError{Code: code, CauseCode: cause, Message: string(code) + ": " + cause, Retryable: status == http.StatusServiceUnavailable, CompletedEffects: []string{}}
+	if cause == "project_restored_inactive" {
+		detail.Message = "Restore completed. Use loom project archive inspect <project>, then loom project archive reactivate <project> --restore-operation <id> --yes. Runtime resources remain stopped until explicitly applied."
+		detail.Retryable = false
+	}
 	if cause == "application_preflight_blocked" {
 		detail.Preflight = f.PublicPreflight()
 		detail.Retryable = false

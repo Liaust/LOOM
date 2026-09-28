@@ -291,6 +291,36 @@ func (s Store) PublishProjectArchiveFence(kind, targetIdentity string, raw []byt
 	return s.writeSecureDurableFile(location, raw, projectquiescence.MaxFenceBytes)
 }
 
+// Caller holds the target lock and has persisted exact release intent.
+func (s Store) RemoveProjectArchiveFence(kind, targetIdentity string, expected []byte) error {
+	location, err := s.projectArchiveFenceLocation(kind, targetIdentity)
+	if err != nil {
+		return err
+	}
+	defer location.directory.close()
+	raw, identity, err := s.readSecureBoundedFile(location, projectquiescence.MaxFenceBytes)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(raw, expected) {
+		return fmt.Errorf("project archive fence changed")
+	}
+	var current unix.Stat_t
+	if err := unix.Fstatat(location.directory.fd, location.name, &current, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return err
+	}
+	if uint64(current.Dev) != identity.Dev || uint64(current.Ino) != identity.Ino || uint64(current.Nlink) != 1 {
+		return fmt.Errorf("project archive fence identity changed")
+	}
+	if err := location.directory.verify(); err != nil {
+		return err
+	}
+	if err := unix.Unlinkat(location.directory.fd, location.name, 0); err != nil {
+		return err
+	}
+	return unix.Fsync(location.directory.fd)
+}
+
 func (s Store) ReadProjectArchiveReceipt(operationID string) ([]byte, SecureFileIdentity, error) {
 	location, err := s.projectArchiveReceiptLocation(operationID)
 	if err != nil {

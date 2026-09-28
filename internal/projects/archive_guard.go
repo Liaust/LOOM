@@ -485,7 +485,7 @@ func IsProjectRuntimeArchived(err error) bool {
 }
 
 func EnsureProjectMutable(project Project, resourceKind, resourceRef string) error {
-	if state, ok := ParseProjectPhysicalArchiveState(project.ArchiveState); ok && state.Restore != nil {
+	if state, ok := ParseProjectPhysicalArchiveState(project.ArchiveState); ok && state.Restore != nil && state.Restore.Reactivation == nil {
 		return ProjectRestoreBlockedError{ProjectID: project.ProjectID, OperationID: state.Restore.OperationID, Phase: state.Restore.Phase}
 	}
 	if state, ok := ParseProjectPhysicalArchiveState(project.ArchiveState); ok && state.Status == ProjectPhysicalArchiveStatusInProgress {
@@ -618,7 +618,7 @@ func scanRuntimeStatus(row *sql.Row) (runtimeStatus, error) {
 }
 
 func (s runtimeStatus) archivedError(ref RuntimeRef) error {
-	if state, ok := ParseProjectPhysicalArchiveState(s.ArchiveState); ok && state.Restore != nil {
+	if state, ok := ParseProjectPhysicalArchiveState(s.ArchiveState); ok && state.Restore != nil && state.Restore.Reactivation == nil {
 		return ProjectRestoreBlockedError{ProjectID: s.ProjectID, OperationID: state.Restore.OperationID, Phase: state.Restore.Phase}
 	}
 	if state, ok := ParseProjectPhysicalArchiveState(s.ArchiveState); ok && state.Status == ProjectPhysicalArchiveStatusInProgress {

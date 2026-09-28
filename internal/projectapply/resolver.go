@@ -130,6 +130,9 @@ func (r *LocalResolver) load(ctx context.Context, p Principal, projectRef, nodeR
 			return out, fail(pc.DeclarationTargetUnavailable, "project_lifecycle_unavailable")
 		}
 		if projects.EnsureProjectMutable(currentProject, "project_declaration", projectID) != nil {
+			if state, ok := projects.ParseProjectPhysicalArchiveState(currentProject.ArchiveState); ok && state.Restore != nil && state.Restore.Phase == projects.ProjectRestorePhaseComplete {
+				return out, fail(pc.DeclarationTargetUnavailable, "project_restored_inactive")
+			}
 			return out, fail(pc.DeclarationTargetUnavailable, "project_archive_recovery_required")
 		}
 	}

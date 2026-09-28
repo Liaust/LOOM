@@ -42,8 +42,13 @@ type ProjectArchiveQuiescenceError struct {
 }
 
 func isProjectArchiveQuiescenceDispatch(config Config, dispatch routing.RemoteDispatchPayload) bool {
-	address := capabilities.NodeSystemProviderAddress(addressSegment(config.NodeKey)) + ".project.archive.quiesce"
-	return dispatch.CapabilityAddress == address && (dispatch.Operation == address || dispatch.Operation == "capability:"+address)
+	for _, action := range []string{"quiesce", "release"} {
+		address := capabilities.NodeSystemProviderAddress(addressSegment(config.NodeKey)) + ".project.archive." + action
+		if dispatch.CapabilityAddress == address && (dispatch.Operation == address || dispatch.Operation == "capability:"+address) {
+			return true
+		}
+	}
+	return false
 }
 
 func executeProjectArchiveQuiescenceDispatch(ctx context.Context, config Config, store Store, dispatch routing.RemoteDispatchPayload) (json.RawMessage, error) {
@@ -54,7 +59,13 @@ func executeProjectArchiveQuiescenceDispatch(ctx context.Context, config Config,
 	if err != nil {
 		return nil, quiescenceFailure("node_agent.project_archive_quiescence.invalid_request")
 	}
-	receipt, err := (ProjectArchiveQuiescenceService{Config: config, Store: store}).Quiesce(ctx, request)
+	service := ProjectArchiveQuiescenceService{Config: config, Store: store}
+	var receipt projectquiescence.Receipt
+	if strings.HasSuffix(dispatch.CapabilityAddress, ".release") {
+		receipt, err = service.Release(ctx, request)
+	} else {
+		receipt, err = service.Quiesce(ctx, request)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +89,7 @@ func (err ProjectArchiveQuiescenceError) Error() string {
 }
 
 func (service ProjectArchiveQuiescenceService) Quiesce(ctx context.Context, request projectquiescence.Request) (projectquiescence.Receipt, error) {
-	if err := projectquiescence.ValidateRequest(request); err != nil {
+	if err := projectquiescence.ValidateRequest(request); err != nil || request.Release != nil {
 		return projectquiescence.Receipt{}, quiescenceFailure("node_agent.project_archive_quiescence.invalid_request")
 	}
 	if request.NodeKey != service.Config.NodeKey {
@@ -90,6 +101,9 @@ func (service ProjectArchiveQuiescenceService) Quiesce(ctx context.Context, requ
 		return projectquiescence.Receipt{}, quiescenceContextOr("node_agent.project_archive_quiescence.operation_lock_failed", err)
 	}
 	defer func() { _ = release() }()
+	if _, _, err := runtimeStore.ReadProjectArchiveReceipt(request.OperationID + "-release-intent"); !errors.Is(err, fs.ErrNotExist) {
+		return projectquiescence.Receipt{}, quiescenceFailure("node_agent.project_archive_quiescence.already_released")
+	}
 
 	now := service.now()
 	raw, _, err := runtimeStore.ReadProjectArchiveReceipt(request.OperationID)

@@ -34,6 +34,33 @@ func (f *projectPhysicalHTTPFake) ProjectPhysicalScope(ctx context.Context, _ st
 	return "project_test", "scope_project", "project:test", nil
 }
 
+func (f *projectPhysicalHTTPFake) ReactivateProject(_ context.Context, req requestctx.Context, ref string, input storagearchive.ProjectReactivationRequest) (storagearchive.ProjectReactivationResult, error) {
+	f.calls++
+	f.req = req
+	return storagearchive.ProjectReactivationResult{ProjectID: ref, RestoreOperationID: input.RestoreOperationID}, f.err
+}
+
+func TestProjectReactivationHTTPClientConfirmationAndAuthorization(t *testing.T) {
+	f, p := &projectPhysicalHTTPFake{}, &projectHTTPPolicy{}
+	s := httptest.NewServer(projectHTTPServer(f, p).Handler())
+	defer s.Close()
+	c, _ := localclient.NewHTTP(s.URL)
+	input := storagearchive.ProjectReactivationRequest{RestoreOperationID: "restore-exact"}
+	if _, err := c.ReactivateProject(context.Background(), "corr", "test", input); err == nil || f.calls != 0 {
+		t.Fatal("unconfirmed release ran")
+	}
+	input.Confirm = true
+	p.denied = capabilities.WorkspaceArchiveRestoreApplyCapability
+	if _, err := c.ReactivateProject(context.Background(), "corr", "test", input); err == nil || f.calls != 0 {
+		t.Fatal("unauthorized release ran")
+	}
+	p.denied = ""
+	out, err := c.ReactivateProject(context.Background(), "corr", "test", input)
+	if err != nil || f.calls != 1 || out.Data.RestoreOperationID != input.RestoreOperationID || f.req.ScopeID != "scope_project" || f.req.ActorID != workspaceHTTPActorID {
+		t.Fatalf("release: %+v %v", out, err)
+	}
+}
+
 func TestProjectPhysicalMutationDeadlineAllowsNodeRoundTrip(t *testing.T) {
 	for _, action := range []string{"plan", "apply", "recover"} {
 		f := &projectPhysicalHTTPFake{}

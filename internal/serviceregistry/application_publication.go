@@ -103,9 +103,11 @@ type ApplicationArchiveControl struct {
 	Operation Operation                `json:"operation"`
 }
 
+const OperationArchiveRelease Operation = "release"
+
 func (r ApplicationRuntime) ArchiveControl(ctx context.Context, peerUID uint32, q ApplicationArchiveControl) (ManagerResult, error) {
 	out := ManagerResult{Operation: q.Operation, ProcessState: ProcessStateUnknown}
-	if q.Operation != OperationStop && q.Operation != OperationStatus {
+	if q.Operation != OperationStop && q.Operation != OperationStatus && q.Operation != OperationArchiveRelease {
 		return out, applicationError("archive.operation_denied")
 	}
 	policy, e := r.policy()
@@ -176,6 +178,19 @@ func (r ApplicationRuntime) ArchiveControl(ctx context.Context, peerUID uint32, 
 		out.ProcessState = ProcessStateStopped
 	} else if observed.State == "active" {
 		out.ProcessState = ProcessStateRunning
+	}
+	if q.Operation == OperationArchiveRelease {
+		stop := q
+		stop.Operation = OperationStop
+		if installed.Retired || observed.State != "inactive" || (installed.Fenced && installed.Revision != applicationSHA(stop)) || (!installed.Fenced && installed.Revision != applicationSHA(q)) {
+			return out, applicationError("archive.release_conflict")
+		}
+		installed.Fenced = false
+		installed.Applied = false
+		installed.Revision = applicationSHA(q)
+		if e = r.Store.write("installation-"+owner.Instance(), installed); e != nil {
+			return out, e
+		}
 	}
 	out.Success = true
 	out.Message = "exact owned application manager observation"

@@ -349,11 +349,14 @@ func (s Service) TransitionProjectPhysicalArchive(ctx context.Context, req reque
 	}
 
 	currentState, hasCurrentState := ParseProjectPhysicalArchiveState(project.ArchiveState)
-	if hasCurrentState && currentState.Restore != nil {
-		return ProjectPhysicalArchiveTransitionResult{}, fmt.Errorf("project archive has entered restore; archive replay is read-only history")
-	}
 	if projectPhysicalArchiveStateRawPresent(project.ArchiveState) && !hasCurrentState {
 		return ProjectPhysicalArchiveTransitionResult{}, fmt.Errorf("project physical archive state is corrupt")
+	}
+	if hasCurrentState && currentState.Restore != nil {
+		if currentState.Restore.Reactivation == nil || currentState.OperationID == input.State.OperationID {
+			return ProjectPhysicalArchiveTransitionResult{}, fmt.Errorf("project archive has entered restore; archive replay is read-only history")
+		}
+		hasCurrentState = false
 	}
 	var scopeStatus string
 	if err := tx.QueryRowContext(ctx, `SELECT status FROM scopes.scopes WHERE scope_id = $1 FOR UPDATE`, input.ExpectedScopeID).Scan(&scopeStatus); err != nil {

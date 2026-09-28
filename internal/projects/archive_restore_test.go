@@ -65,6 +65,29 @@ func TestProjectPhysicalRestoreStateAndHistory(t *testing.T) {
 	}
 }
 
+func TestProjectReactivationOpensOnlyCompletedRestore(t *testing.T) {
+	archive, states := projectRestoreStates()
+	for i, state := range states {
+		state.Reactivation = &ProjectReactivationState{Request: requestctx.Context{ActorID: "actor_test", OriginNodeID: "node_main", CorrelationID: "corr", ScopeID: "scope_test"}, ActivatedAt: *states[2].RestoredAt, ReleaseDigest: archive.PlanDigest, EventID: "event_01ARZ3NDEKTSV4RRFFQ69G5FAY"}
+		archive.Restore = &state
+		raw, _ := json.Marshal(archive)
+		err := EnsureProjectMutable(Project{ProjectID: archive.ProjectID, Status: "active", ArchiveState: raw}, "write", "fixture")
+		if (i == 2) != (err == nil) {
+			t.Fatalf("phase %s: %v", state.Phase, err)
+		}
+		if i == 2 {
+			if err := (runtimeStatus{ProjectID: archive.ProjectID, ProjectStatus: "active", ScopeStatus: "active", ArchiveState: raw}).archivedError(RuntimeRef{}); err != nil {
+				t.Fatal(err)
+			}
+			state.Reactivation.EventID = ""
+			raw, _ = json.Marshal(archive)
+			if EnsureProjectMutable(Project{Status: "active", ArchiveState: raw}, "write", "fixture") == nil {
+				t.Fatal("incomplete reactivation opened project")
+			}
+		}
+	}
+}
+
 func TestProjectPhysicalRestoreStateRejectsInvalidEvidence(t *testing.T) {
 	archive, states := projectRestoreStates()
 	mutations := map[string]func(*ProjectPhysicalRestoreState){

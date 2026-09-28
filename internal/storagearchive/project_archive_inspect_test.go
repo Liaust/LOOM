@@ -46,7 +46,7 @@ func TestProjectPhysicalArchiveInspectCurrentCustody(t *testing.T) {
 					t.Fatal(err)
 				}
 				payloadPath = plan.Workspace.Destination.Path.AbsolutePath
-				wantNext = "activation_not_available"
+				wantNext = "reactivate_project"
 			}
 			before := snapshotWorkspacePayload(t, payloadPath)
 			transitions, events, activation, quiescence := env.projects.transitions, env.projects.eventCount, len(env.activation.inputs), env.quiescence.calls

@@ -127,7 +127,10 @@ func (s ProjectRuntimeService) applyProjectPhysicalArchive(ctx context.Context, 
 		return result, err
 	}
 	if state.Restore != nil {
-		return result, fmt.Errorf("project archive has entered restore; archive replay is read-only history")
+		if state.Restore.Reactivation == nil || state.OperationID == plan.Workspace.OperationID || recoveryOnly {
+			return result, fmt.Errorf("project archive has entered restore; archive replay is read-only history")
+		}
+		state, hasState = projects.ProjectPhysicalArchiveState{}, false
 	}
 
 	existingWorkspace, workspaceExists, err := inspectOptionalProjectWorkspaceArchive(ctx, executor, plan.Workspace.OperationID)

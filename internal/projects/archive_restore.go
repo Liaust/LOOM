@@ -42,6 +42,7 @@ type ProjectPhysicalRestoreState struct {
 	ActiveManifestDigest string                      `json:"active_manifest_digest,omitempty"`
 	RestoredAt           *time.Time                  `json:"restored_at,omitempty"`
 	EventID              string                      `json:"event_id,omitempty"`
+	Reactivation         *ProjectReactivationState   `json:"reactivation,omitempty"`
 }
 
 type ProjectPhysicalRestoreTransitionInput struct {
@@ -108,6 +109,13 @@ func validateProjectPhysicalRestoreState(archive ProjectPhysicalArchiveState, st
 		}
 	} else if state.Status != "in_progress" || state.RestoredAt != nil || state.EventID != "" {
 		return fmt.Errorf("project restore terminal evidence precedes completion")
+	}
+	if r := state.Reactivation; r != nil {
+		if state.Phase != ProjectRestorePhaseComplete || !projectRestoreTimeValid(r.ActivatedAt) || r.ActivatedAt.Before(*state.RestoredAt) ||
+			!projectArchiveContractDigestPattern.MatchString(r.ReleaseDigest) || !projectRestoreEventIDValid(r.EventID) ||
+			r.Request.ActorID == "" || r.Request.OriginNodeID == "" || r.Request.CorrelationID == "" || r.Request.ScopeID == "" {
+			return fmt.Errorf("invalid project reactivation receipt")
+		}
 	}
 	return nil
 }
