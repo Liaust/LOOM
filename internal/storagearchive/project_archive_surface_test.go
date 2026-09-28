@@ -89,6 +89,40 @@ func TestProjectPhysicalReviewKeepsPlannerCausePrivate(t *testing.T) {
 	}
 }
 
+func TestProjectPhysicalReviewSurvivesWatcherReportButBindsConfiguration(t *testing.T) {
+	for _, change := range []string{"heartbeat", "configuration", "activation", "metadata"} {
+		t.Run(change, func(t *testing.T) {
+			env, store, req := newProjectSurfaceEnvironment(t)
+			if len(env.projects.detail.WatchedRootRegistrations) == 0 {
+				t.Fatal("fixture needs a watched root")
+			}
+			before := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
+			root := &env.projects.detail.WatchedRootRegistrations[0]
+			root.LastReportedAt, root.UpdatedAt = &before, before
+			root.Metadata = json.RawMessage(`{"declaration_adapter":{"owner":"fixture"}}`)
+			review := projectSurfaceReview(t, env, req)
+			after := before.Add(time.Minute)
+			root.LastReportedAt, root.UpdatedAt = &after, after
+			switch change {
+			case "configuration":
+				root.ConfigHash = "sha256:" + strings.Repeat("b", 64)
+			case "activation":
+				root.ActivationStatus = projects.ProjectWatchedRootRegistrationStatusDisabled
+			case "metadata":
+				root.Metadata = json.RawMessage(`{"changed":true}`)
+			}
+			_, err := env.service.ApplyReviewedProjectPhysicalPlan(context.Background(), req, review.ProjectID, ProjectPhysicalApplyRequest{Plan: review, PlanDigest: review.PlanDigest, Confirm: true})
+			if change == "heartbeat" {
+				if err != nil {
+					t.Fatalf("heartbeat invalidated review: %v", err)
+				}
+			} else if err == nil || len(store.rows) != 0 || env.projects.transitions != 0 {
+				t.Fatalf("changed %s accepted or mutated persistence: %v", change, err)
+			}
+		})
+	}
+}
+
 func applyProjectSurfaceReview(t *testing.T, env projectArchivePlanEnvironment, req requestctx.Context, review ProjectPhysicalPlanReview) ProjectPhysicalMutationSummary {
 	t.Helper()
 	result, err := env.service.ApplyReviewedProjectPhysicalPlan(context.Background(), req, review.ProjectID, ProjectPhysicalApplyRequest{Plan: review, PlanDigest: review.PlanDigest, Confirm: true})

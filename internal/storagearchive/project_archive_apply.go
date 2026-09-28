@@ -480,6 +480,10 @@ func validateCurrentProjectArchiveSnapshots(plan ProjectPhysicalArchivePlan, cur
 		return err
 	}
 	if state == nil {
+		currentCanonical, err = canonicalProjectArchiveRegistration(currentCanonical, plan.StableWatcherReports)
+		if err != nil {
+			return err
+		}
 		if !reflect.DeepEqual(currentCanonical, plan.Registration) || !reflect.DeepEqual(repositoryCanonical, plan.Repository) {
 			return fmt.Errorf("project registration, runtime, or repository state changed since the reviewed archive plan")
 		}
@@ -572,6 +576,12 @@ func normalizeAllowedProjectArchiveRegistrationLifecycle(plan ProjectPhysicalArc
 	}
 	for index := range actual.WatchedRootRegistrations {
 		row, planned := &actual.WatchedRootRegistrations[index], want.WatchedRootRegistrations[index]
+		if plan.StableWatcherReports {
+			row.LastReportedAt = planned.LastReportedAt
+			if row.ActivationStatus == planned.ActivationStatus {
+				row.UpdatedAt = planned.UpdatedAt
+			}
+		}
 		unchanged := reflect.DeepEqual(*row, planned)
 		if unchanged {
 			if requireDeactivated && row.ActivationStatus != projects.ProjectWatchedRootRegistrationStatusDisabled {
@@ -579,7 +589,15 @@ func normalizeAllowedProjectArchiveRegistrationLifecycle(plan ProjectPhysicalArc
 			}
 			continue
 		}
-		if row.ActivationStatus != projects.ProjectWatchedRootRegistrationStatusDisabled || row.LastAppliedByActorID == nil || *row.LastAppliedByActorID != plan.Request.ActorID || row.LastAppliedAt == nil || row.LastAppliedAt.Before(state.StartedAt) || row.UpdatedAt.Before(*row.LastAppliedAt) || !equalProjectArchiveJSON(row.Metadata, projectArchiveDeactivationMetadata(plan, "watched_roots")) {
+		expectedMetadata, err := projectArchiveWatchedRootMetadata(plan, planned.Metadata)
+		if err != nil {
+			return err
+		}
+		metadataMatches := equalProjectArchiveJSON(row.Metadata, expectedMetadata)
+		if !plan.StableWatcherReports {
+			metadataMatches = metadataMatches || equalProjectArchiveJSON(row.Metadata, projectArchiveDeactivationMetadata(plan, "watched_roots"))
+		}
+		if row.ActivationStatus != projects.ProjectWatchedRootRegistrationStatusDisabled || row.LastAppliedByActorID == nil || *row.LastAppliedByActorID != plan.Request.ActorID || row.LastAppliedAt == nil || row.LastAppliedAt.Before(state.StartedAt) || row.UpdatedAt.Before(*row.LastAppliedAt) || !metadataMatches {
 			return fmt.Errorf("project archive watched root %s changed outside reviewed deactivation lifecycle", row.LocalRootKey)
 		}
 		row.ActivationStatus, row.LastAppliedByActorID, row.LastAppliedAt, row.Metadata, row.UpdatedAt = planned.ActivationStatus, planned.LastAppliedByActorID, planned.LastAppliedAt, planned.Metadata, planned.UpdatedAt
@@ -680,6 +698,25 @@ func projectArchiveDeactivationMetadata(plan ProjectPhysicalArchivePlan, facet s
 		"facet": facet, "reason": plan.Workspace.Reason,
 	})
 	return payload
+}
+
+func projectArchiveWatchedRootMetadata(plan ProjectPhysicalArchivePlan, original json.RawMessage) (json.RawMessage, error) {
+	// Match MarkProjectWatchedRootsDeactivated's top-level JSONB merge, retaining
+	// declaration ownership rather than expecting the old destructive overwrite.
+	merged := map[string]json.RawMessage{}
+	if len(original) > 0 && string(original) != "null" {
+		if err := json.Unmarshal(original, &merged); err != nil {
+			return nil, err
+		}
+	}
+	var audit map[string]json.RawMessage
+	if err := json.Unmarshal(projectArchiveDeactivationMetadata(plan, "watched_roots"), &audit); err != nil {
+		return nil, err
+	}
+	for key, value := range audit {
+		merged[key] = value
+	}
+	return json.Marshal(merged)
 }
 
 func equalProjectArchiveJSON(left, right json.RawMessage) bool {

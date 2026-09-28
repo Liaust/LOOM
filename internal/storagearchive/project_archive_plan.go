@@ -54,6 +54,7 @@ type ProjectArchiveDeactivationPlan struct {
 // filesystem-move plan. Building or validating this value performs no mutation.
 type ProjectPhysicalArchivePlan struct {
 	InspectRegisteredServices bool                                  `json:"inspect_registered_services,omitempty"`
+	StableWatcherReports      bool                                  `json:"stable_watcher_reports,omitempty"`
 	SchemaVersion             string                                `json:"schema_version"`
 	Request                   requestctx.Context                    `json:"request"`
 	WorkspaceRequest          ProjectArchiveWorkspaceRequest        `json:"workspace_request"`
@@ -133,7 +134,7 @@ func (s ProjectRuntimeService) PlanProjectPhysicalArchive(ctx context.Context, r
 		return ProjectPhysicalArchivePlan{}, err
 	}
 
-	canonicalDetail, err := canonicalProjectRegistrationDetail(detail)
+	canonicalDetail, err := canonicalProjectArchiveRegistration(detail, true)
 	if err != nil {
 		return ProjectPhysicalArchivePlan{}, err
 	}
@@ -154,7 +155,7 @@ func (s ProjectRuntimeService) PlanProjectPhysicalArchive(ctx context.Context, r
 		if err != nil {
 			return ProjectPhysicalArchivePlan{}, fmt.Errorf("plan project deactivation %s: %w", facet, err)
 		}
-		resultDetail, err := canonicalProjectRegistrationDetail(result.Detail)
+		resultDetail, err := canonicalProjectArchiveRegistration(result.Detail, true)
 		if err != nil {
 			return ProjectPhysicalArchivePlan{}, fmt.Errorf("canonicalize project deactivation %s: %w", facet, err)
 		}
@@ -175,7 +176,7 @@ func (s ProjectRuntimeService) PlanProjectPhysicalArchive(ctx context.Context, r
 	if err != nil {
 		return ProjectPhysicalArchivePlan{}, fmt.Errorf("re-read project archive registration: %w", err)
 	}
-	finalCanonicalDetail, err := canonicalProjectRegistrationDetail(finalDetail)
+	finalCanonicalDetail, err := canonicalProjectArchiveRegistration(finalDetail, true)
 	if err != nil || !reflect.DeepEqual(finalCanonicalDetail, canonicalDetail) {
 		return ProjectPhysicalArchivePlan{}, fmt.Errorf("project registration or runtime state changed while planning archive")
 	}
@@ -190,6 +191,7 @@ func (s ProjectRuntimeService) PlanProjectPhysicalArchive(ctx context.Context, r
 
 	plan := ProjectPhysicalArchivePlan{
 		InspectRegisteredServices: inspectServices,
+		StableWatcherReports:      true,
 		SchemaVersion:             ProjectPhysicalArchivePlanSchemaVersion,
 		Request:                   req,
 		WorkspaceRequest:          workspaceRequest,
@@ -241,7 +243,7 @@ func ValidateProjectPhysicalArchivePlanEnvelope(plan ProjectPhysicalArchivePlan,
 	if err := validateProjectArchiveContractInventory(plan.Custody, plan.Workspace); err != nil {
 		return err
 	}
-	canonicalDetail, err := canonicalProjectRegistrationDetail(plan.Registration)
+	canonicalDetail, err := canonicalProjectArchiveRegistration(plan.Registration, plan.StableWatcherReports)
 	if err != nil || !reflect.DeepEqual(canonicalDetail, plan.Registration) {
 		return fmt.Errorf("project archive registration snapshot is not canonical")
 	}
@@ -372,6 +374,20 @@ func SealProjectPhysicalArchivePlan(plan *ProjectPhysicalArchivePlan) error {
 	}
 	plan.PlanDigest = digest
 	return nil
+}
+
+func canonicalProjectArchiveRegistration(detail projects.ProjectRegistrationDetail, stableReports bool) (projects.ProjectRegistrationDetail, error) {
+	canonical, err := canonicalProjectRegistrationDetail(detail)
+	if err != nil || !stableReports {
+		return canonical, err
+	}
+	// Heartbeats update these two observation times without changing any reviewed
+	// ownership, configuration or activation state. Keep old plan encoding intact.
+	for i := range canonical.WatchedRootRegistrations {
+		canonical.WatchedRootRegistrations[i].LastReportedAt = nil
+		canonical.WatchedRootRegistrations[i].UpdatedAt = time.Time{}
+	}
+	return canonical, nil
 }
 
 func canonicalProjectRegistrationDetail(detail projects.ProjectRegistrationDetail) (projects.ProjectRegistrationDetail, error) {

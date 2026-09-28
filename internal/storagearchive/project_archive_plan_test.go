@@ -104,6 +104,38 @@ func TestProjectPhysicalArchivePlanFixtureMatrix(t *testing.T) {
 	}
 }
 
+func TestProjectArchiveHistoricalWatcherTimestampEncoding(t *testing.T) {
+	env, _, req := newProjectSurfaceEnvironment(t)
+	at := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
+	env.projects.detail.WatchedRootRegistrations[0].LastReportedAt = &at
+	env.projects.detail.WatchedRootRegistrations[0].UpdatedAt = at
+	plan, err := env.service.PlanProjectPhysicalArchive(context.Background(), req, "canonical-many", ProjectPhysicalArchivePlanInput{Reason: "historical encoding"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.StableWatcherReports = false
+	plan.Registration, err = canonicalProjectRegistrationDetail(env.projects.detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SealProjectPhysicalArchivePlan(&plan); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(plan)
+	if err != nil || strings.Contains(string(raw), "stable_watcher_reports") {
+		t.Fatal("historical encoding changed")
+	}
+	if err := json.Unmarshal(raw, &plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateProjectPhysicalArchivePlanEnvelope(plan, env.service.WorkspaceRoots); err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Registration.WatchedRootRegistrations[0].LastReportedAt.Equal(at) {
+		t.Fatal("historical timestamp discarded")
+	}
+}
+
 func TestProjectPhysicalArchivePlanDigestBindsEveryEvidenceClass(t *testing.T) {
 	environment := newProjectArchivePlanEnvironment(t, projectArchiveAdapterFixture{
 		Key: "canonical-many", OwnerNode: "main", RootKind: "canonical", RepositoryCount: 3,
@@ -684,7 +716,20 @@ func setProjectArchiveFixtureFacetDisabled(detail *projects.ProjectRegistrationD
 		for index := range detail.WatchedRootRegistrations {
 			row := &detail.WatchedRootRegistrations[index]
 			actor := req.ActorID
-			row.ActivationStatus, row.LastAppliedByActorID, row.LastAppliedAt, row.Metadata, row.UpdatedAt = projects.ProjectWatchedRootRegistrationStatusDisabled, &actor, &at, metadata, at
+			merged := map[string]json.RawMessage{}
+			if len(row.Metadata) > 0 {
+				_ = json.Unmarshal(row.Metadata, &merged)
+			}
+			if merged == nil {
+				merged = map[string]json.RawMessage{}
+			}
+			var audit map[string]json.RawMessage
+			_ = json.Unmarshal(metadata, &audit)
+			for key, value := range audit {
+				merged[key] = value
+			}
+			retained, _ := json.Marshal(merged)
+			row.ActivationStatus, row.LastAppliedByActorID, row.LastAppliedAt, row.Metadata, row.UpdatedAt = projects.ProjectWatchedRootRegistrationStatusDisabled, &actor, &at, retained, at
 		}
 	case "modules":
 		for index := range detail.ModuleRegistrations {
