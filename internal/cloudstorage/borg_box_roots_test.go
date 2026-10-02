@@ -176,7 +176,7 @@ func fetchAndRestoreRawBoxFixture(t *testing.T, backend BorgSnapshotBackend, fix
 			if name != "psql" {
 				return nil, fmt.Errorf("unexpected verification command %q", name)
 			}
-			return []byte(`{"nodes":1,"worker_instances":1}`), nil
+			return []byte(`{"migration":61,"nodes":1,"worker_instances":1}`), nil
 		},
 	}
 	if restored, err := backup.RunDirectArchiveRestoreDrill(context.Background(), input); err != nil || restored.Status != SnapshotStatusSucceeded {
