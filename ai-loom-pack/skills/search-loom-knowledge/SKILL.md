@@ -39,6 +39,39 @@ Use `--require-current` when only latest-source results are acceptable, and
 report `refreshing_matches_omitted` plus its truncation flag. Pipeline inspection
 explains pending/selected work. Never substitute the latest hash in an old citation.
 
+To locate a result in the enrolled writable workspace, use the same complete
+tuple with `loom --json notes passage locate <chunk-id> --object <object-id>
+--version <version-id> --source-hash sha256:<digest> --source-lifecycle <lifecycle>`.
+Only `available` supplies a verified current binding. Use `binding.path` within
+that workspace, not the source's physical path as an assumed Mac path.
+`stale_citation`, `archived`, `unbound` and `unavailable` are not writable targets.
+For sync/recovery distinctions, read the citation reference. Navigation is
+read-only and does not authorize editing a retrieved note.
+
+## Selected Enrichment
+
+When explicitly asked to extract more from an admitted file, preview first:
+
+```sh
+loom --json notes enrich <knowledge-object-id> --ocr
+loom --json notes enrich <knowledge-object-id> --ocr --yes
+loom --json notes enrich <knowledge-object-id> --embeddings --yes
+```
+
+`--vision` describes images, not PDF pages. OCR uses the existing PDF sparse-page
+or image engine. Select flags independently; an embeddings-only request reuses
+compatible text/chunks without enabling OCR/vision. Host policy and size limits
+still apply. A source's automatic opt-out is not changed by this one-version request.
+Use `--source-revision` and `--source-hash` to bind a prior single-file preview.
+
+For a folder, use `--folder`, explicitly add `--recursive` for descendants, save
+the `--json` preview, and apply with `--preview-file <file> --yes`. Each preview
+covers at most100 admitted entries; follow `next_after` with `--after` separately.
+This is not a disk scan. Later arrivals are excluded and changed versions fail.
+Inspect `loom --json notes pipelines inspect <object-id>` for completion. Repeated
+intent returns existing work; use `notes pipelines retry` for a failed run rather
+than reprocess, which resets to automatic defaults. Future revisions use defaults.
+
 ## Technical Custody: Objects
 
 ```sh
@@ -95,13 +128,20 @@ to `loom project`; a Git checkout is not automatically a registered project or
 Provenance card. Empty repository awareness can be correct before registration
 and explicit project synchronization. Do not create a dummy project to fill it.
 
+Check `owning_project.lifecycle` and `current_state` on repository cards: the
+current repository list can include archived projects. An archived card is not
+active work, and a missing old Box member path does not prove its archive is
+lost. Read retained files via the project's archive receipt. General lifecycle
+history/as-of reconstruction is not an installed Provenance search feature.
+
 ## Output And Write Boundary
 
 Answer with the relevant source text or qualified conclusion, exact IDs/citation,
 scope and posture, and any remaining gap. Prefer a few exact hits over broad
 search fan-out. `search-loom-docs` is for how LOOM works, not source retrieval.
 
-This skill is inspect-only. For relevant durable capture during authorized work,
+Retrieval is inspect-only; enrichment above queues work only when requested.
+For relevant durable capture during authorized work,
 load the shared `use-loom-provenance` skill and its registration recipe. Use the
 actual producer and source evidence; capture creates a pending candidate, not
 acceptance. For reconciliation, follow the workspace's Provenance protocol. Do not run the

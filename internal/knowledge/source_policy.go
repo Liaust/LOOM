@@ -3,7 +3,9 @@ package knowledge
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 
+	"loom.local/loom/internal/nodeagent/watchedroots"
 	"loom.local/loom/internal/projectcontracts"
 )
 
@@ -27,6 +29,19 @@ func knowledgeSourcePolicy(object KnowledgeObject) (*projectcontracts.KnowledgeS
 	policy, err := projectcontracts.DecodeKnowledgeSourcePolicy(metadata.Root.Source.Policy)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", ErrInvalid, err)
+	}
+	if p := policy.Processing; p != nil {
+		if len(p.Paths) > 0 {
+			matched, _ := watchedroots.MatchAny(p.Paths, object.RelativePath)
+			if !matched {
+				policy.Processing = nil
+				return &policy, nil
+			}
+		}
+		if len(p.EmbeddingFileTypes) > 0 && !slices.Contains(p.EmbeddingFileTypes, PipelineDefinitionForObject(object).FileFamily) {
+			disabled := false
+			p.Embeddings = &disabled
+		}
 	}
 	return &policy, nil
 }

@@ -179,10 +179,19 @@ func TestNotesCustodyFenceCatalogPathReusePostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.s.ReconcileKnowledgeObjects(t.Context(), KnowledgeObjectReconcileInput{SourceRoots: []SourceRoot{f.root}, StorageEntries: []storagecatalog.Entry{entry}}); err != nil {
+	// Model an already catalog-bound object. Current admission deliberately keeps
+	// a live synced owner instead of replacing it with a catalog observation.
+	if _, err := f.s.store.db.ExecContext(t.Context(), `UPDATE knowledge.knowledge_objects SET storage_entry_id=$2 WHERE knowledge_object_id=$1`, object.KnowledgeObjectID, entry.StorageEntryID); err != nil {
 		t.Fatal(err)
 	}
-	object = notesFenceObject(t, f, "topic-one/source.md")
+	var boundEntry string
+	if err := f.s.store.db.QueryRowContext(t.Context(), `SELECT storage_entry_id FROM knowledge.knowledge_objects WHERE knowledge_object_id=$1`, object.KnowledgeObjectID).Scan(&boundEntry); err != nil {
+		t.Fatal(err)
+	}
+	if boundEntry != entry.StorageEntryID {
+		t.Fatal("fixture did not establish the catalog binding")
+	}
+	object.StorageEntryID = &boundEntry
 	f.plan, err = f.p.Workspace.PlanArchive(t.Context(), storagearchive.WorkspaceArchivePlanInput{
 		Kind: f.plan.Kind, ObjectID: f.plan.ObjectID, Slug: f.plan.Slug, ActorID: f.actor, Reason: f.plan.Reason})
 	if err != nil {

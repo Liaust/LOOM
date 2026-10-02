@@ -45,8 +45,18 @@ func TestNormalizeKnowledgeIndexerRunInputDefaults(t *testing.T) {
 	if input.MaxExtractedTextBytes != 10*1024*1024 {
 		t.Fatalf("max extracted bytes = %d, want 10 MiB", input.MaxExtractedTextBytes)
 	}
+	if input.MaxChunksPerObject != 2048 {
+		t.Fatalf("max chunks = %d, want 2048", input.MaxChunksPerObject)
+	}
 	if input.RetryMaxAttempts != defaultKnowledgeRetryMaxAttempts {
 		t.Fatalf("retry attempts = %d, want %d", input.RetryMaxAttempts, defaultKnowledgeRetryMaxAttempts)
+	}
+}
+
+func TestNormalizeKnowledgeIndexerRetainsExplicitChunkLimit(t *testing.T) {
+	input := normalizeKnowledgeIndexerRunInput(KnowledgeIndexerRunInput{MaxChunksPerObject: 1000})
+	if input.MaxChunksPerObject != 1000 {
+		t.Fatal("explicit chunk limit changed", input.MaxChunksPerObject)
 	}
 }
 

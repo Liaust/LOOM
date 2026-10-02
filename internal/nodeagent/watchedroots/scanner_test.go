@@ -176,7 +176,7 @@ func TestIgnoredDirtyHintDoesNotTriggerAutomaticScan(t *testing.T) {
 	root := testScanRoot(t, dir, RootConfig{RootKey: "documents", SafeRootKey: "slice09", IgnorePolicy: IgnorePolicy{Profile: "managed", DiscoverUserRules: true}})
 	store := NewStore(t.TempDir())
 	previous := time.Now().UTC()
-	if err := store.SaveCheckpoint("documents", RootCheckpoint{SchemaVersion: CheckpointSchemaVersion, RootKey: "documents", LastFullRescanAt: &previous}); err != nil {
+	if err := store.SaveCheckpoint("documents", RootCheckpoint{SchemaVersion: CheckpointSchemaVersion, RootKey: "documents", ConfigHash: root.ConfigHash, StoredCounts: &ScanCounts{}, LastFullRescanAt: &previous}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.AddDirtyHint("documents", DirtyHint{RelativePath: "node_modules/cache.js", HintKind: DirtyHintModified}); err != nil {
@@ -188,6 +188,141 @@ func TestIgnoredDirtyHintDoesNotTriggerAutomaticScan(t *testing.T) {
 	}
 	if result.Mode != RunStatusSkipped || result.Counts.IgnoredDirtyHints != 1 {
 		t.Fatalf("ignored churn triggered scan: %#v", result)
+	}
+}
+
+func TestAutomaticScanReusesHashWithBoundedIntegrityVerification(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "note.md")
+	if err := os.WriteFile(path, []byte("first"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := testScanRoot(t, dir, RootConfig{RootKey: "notes", SafeRootKey: "slice09", Include: []string{"**/*.md"}, Scan: ScanConfig{StabilityWindow: "0s", FullRescanInterval: "1ns"}})
+	store := NewStore(t.TempDir())
+	scan := func(req ScanRequest) ScanResult {
+		t.Helper()
+		req.Root = root
+		if req.Mode == "" {
+			req.Mode = ScanModeAuto
+		}
+		result, err := Reconcile(t.Context(), store, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	if first := scan(ScanRequest{}); first.Counts.HashBytesRead != 5 || first.Counts.HashComputed != 1 {
+		t.Fatalf("first verification: %+v", first.Counts)
+	}
+	statePath := store.pathStatePath("notes", PathKey("notes", "note.md"))
+	info, err := os.Stat(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idle := scan(ScanRequest{}); idle.Counts.HashReused != 1 || idle.Counts.HashBytesRead != 0 || idle.Counts.Changed != 0 {
+		t.Fatalf("unchanged scan: %+v", idle.Counts)
+	}
+	after, err := os.Stat(statePath)
+	if err != nil || !os.SameFile(info, after) || !info.ModTime().Equal(after.ModTime()) {
+		t.Fatal("unchanged path record was rewritten", err)
+	}
+	if forced := scan(ScanRequest{Force: true}); forced.Counts.HashBytesRead != 5 || forced.Counts.HashUnchanged != 1 {
+		t.Fatalf("forced verification: %+v", forced.Counts)
+	}
+	state, err := store.LoadPathState("notes", "note.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldHash := state.ContentHashURI
+	oldMtime := *state.ModifiedAt
+	if err := os.WriteFile(path, []byte("other"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, oldMtime, oldMtime); err != nil {
+		t.Fatal(err)
+	}
+	aged := time.Now().Add(-25 * time.Hour)
+	state.HashVerifiedAt = &aged
+	if err := store.SavePathState(state); err != nil {
+		t.Fatal(err)
+	}
+	if audit := scan(ScanRequest{}); audit.Counts.HashComputed != 1 || audit.Counts.HashBytesRead != 5 || audit.ChangedPaths[0].CurrentHash == oldHash {
+		t.Fatalf("expired verification: %+v", audit)
+	}
+	if err := store.AddDirtyHint("notes", DirtyHint{RelativePath: "note.md", HintKind: DirtyHintModified}); err != nil {
+		t.Fatal(err)
+	}
+	if dirty := scan(ScanRequest{}); dirty.Mode != ScanModeDirty || dirty.Counts.HashBytesRead != 5 {
+		t.Fatalf("dirty verification: %+v", dirty)
+	}
+	if err := os.WriteFile(path, []byte("changed-size"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if changed := scan(ScanRequest{}); changed.Counts.HashComputed != 1 || changed.Counts.HashReused != 0 {
+		t.Fatalf("metadata change: %+v", changed.Counts)
+	}
+	state, _ = store.LoadPathState("notes", "note.md")
+	state.HashVerifiedAt = nil
+	if err := store.SavePathState(state); err != nil {
+		t.Fatal(err)
+	}
+	if legacy := scan(ScanRequest{}); legacy.Counts.HashBytesRead != 0 || legacy.Counts.HashReused != 1 {
+		t.Fatalf("legacy record: %+v", legacy.Counts)
+	}
+	state, _ = store.LoadPathState("notes", "note.md")
+	state.HashVerifiedAt, state.LastScannedAt = nil, time.Time{}
+	if err := writeJSONFile(statePath, state, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if unknown := scan(ScanRequest{}); unknown.Counts.HashUnchanged != 1 || unknown.Counts.HashReused != 0 {
+		t.Fatalf("unverified legacy record: %+v", unknown.Counts)
+	}
+}
+
+func TestAutomaticScanAggregateHashBudgetMakesProgress(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	for _, name := range []string{"a.md", "b.md", "c.md"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("12345"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root := testScanRoot(t, dir, RootConfig{RootKey: "notes", SafeRootKey: "slice09", Include: []string{"**/*.md"}, Scan: ScanConfig{StabilityWindow: "0s", MaxHashFileBytes: 5, MaxHashBytesPerRun: 6}})
+	store := NewStore(t.TempDir())
+	for i := 0; i < 3; i++ {
+		result, err := Reconcile(t.Context(), store, ScanRequest{Mode: ScanModeAuto, Root: root})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Counts.HashBytesRead != 5 || result.Counts.HashComputed != 1 || result.Counts.HashReused != i || result.Checkpoint.PendingRescan != (i < 2) {
+			t.Fatalf("pass %d: %+v", i, result)
+		}
+	}
+}
+
+func TestSkippedScanUsesInventoryCheckpointAndPreservesLastFull(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "note.md"), []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := testScanRoot(t, dir, RootConfig{RootKey: "notes", SafeRootKey: "slice09", Include: []string{"**/*.md"}, Scan: ScanConfig{StabilityWindow: "0s", FullRescanInterval: "6h"}})
+	store := NewStore(t.TempDir())
+	first, err := Reconcile(t.Context(), store, ScanRequest{Mode: ScanModeAuto, Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A skipped poll must not decode path records. A real full scan still does.
+	if err := os.WriteFile(store.pathStatePath("notes", PathKey("notes", "note.md")), []byte("invalid JSON"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	idle, err := Reconcile(t.Context(), store, ScanRequest{Mode: ScanModeAuto, Root: root})
+	if err != nil || idle.Mode != RunStatusSkipped || idle.Counts.Files != 1 || idle.Counts.Included != 1 || idle.Counts.HashBytesRead != 0 || idle.Checkpoint.PathStateSnapshotHash != first.Checkpoint.PathStateSnapshotHash || !idle.Summary.LastFullScanAt.Equal(first.Summary.LastFullScanAt) {
+		t.Fatalf("idle checkpoint: %+v, %v", idle, err)
+	}
+	if _, err := Reconcile(t.Context(), store, ScanRequest{Mode: ScanModeAuto, Root: root, Force: true}); err == nil {
+		t.Fatal("forced scan did not read path state")
 	}
 }
 
@@ -886,4 +1021,191 @@ func testScanRoot(t *testing.T, dir string, config RootConfig) ValidatedRoot {
 		t.Fatalf("ValidateRootConfig failed: %v", err)
 	}
 	return root
+}
+
+func TestStabilityDefersWithoutSleepingAndResumesPersistedObservation(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "note.md")
+	if err := os.WriteFile(path, []byte("first"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := testScanRoot(t, dir, RootConfig{RootKey: "notes", SafeRootKey: "slice09", Include: []string{"**/*.md"}, Scan: ScanConfig{StabilityWindow: "5s", FullRescanInterval: "6h"}})
+	store := NewStore(t.TempDir())
+	scan := func() ScanResult {
+		t.Helper()
+		result, err := Reconcile(t.Context(), store, ScanRequest{Mode: ScanModeAuto, Root: root})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	first := scan()
+	if first.Counts.HashDeferred != 1 || !first.Checkpoint.PendingRescan || first.Counts.Deleted != 0 || first.DurationMS >= 2000 {
+		t.Fatalf("first scan: %+v", first)
+	}
+	state, err := store.LoadPathState("notes", "note.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ContentHashURI != "" || state.HashObservedAt == nil {
+		t.Fatalf("premature hash: %+v", state)
+	}
+	observed := *state.HashObservedAt
+	second := scan()
+	state, err = store.LoadPathState("notes", "note.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Counts.HashDeferred != 1 || !state.HashObservedAt.Equal(observed) {
+		t.Fatal("retry reset stable observation")
+	}
+	// Advance only the stored observation clock; no sleeps or background runner.
+	aged := observed.Add(-2 * time.Hour)
+	state.HashObservedAt = &aged
+	if err := store.SavePathState(state); err != nil {
+		t.Fatal(err)
+	}
+	ready := scan()
+	if ready.Counts.HashComputed != 1 || ready.Checkpoint.PendingRescan {
+		t.Fatalf("eligible observation: %+v", ready)
+	}
+	state, err = store.LoadPathState("notes", "note.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldHash := state.ContentHashURI
+	// Verify actual bytes even when size/mtime match, rather than trusting metadata.
+	mtime := *state.ModifiedAt
+	if err := os.WriteFile(path, []byte("other"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Reconcile(t.Context(), store, ScanRequest{Mode: ScanModeFull, Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err = store.LoadPathState("notes", "note.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Counts.HashComputed != 1 || state.ContentHashURI == oldHash {
+		t.Fatal("content verification was skipped")
+	}
+	// An atomic replacement with identical size/mtime starts a new window and
+	// retains the last published hash; it must not look deleted or acknowledged.
+	replacement := filepath.Join(dir, "replacement")
+	if err := os.WriteFile(replacement, []byte("third"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(replacement, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+	oldHash = state.ContentHashURI
+	result, err = Reconcile(t.Context(), store, ScanRequest{Mode: ScanModeFull, Root: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err = store.LoadPathState("notes", "note.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Counts.HashDeferred != 1 || result.Counts.Deleted != 0 || state.ContentHashURI != oldHash || !state.HashObservedAt.After(aged) {
+		t.Fatalf("replacement: %+v", state)
+	}
+	plan, err := PlanOutputs(store, root, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Counts.SyncObjects != 0 || plan.Counts.BackupFiles != 0 {
+		t.Fatalf("deferred content queued: %+v", plan)
+	}
+	// Old JSON path states lack the optional timestamp and establish one safely.
+	state.HashObservedAt = nil
+	if err := store.SavePathState(state); err != nil {
+		t.Fatal(err)
+	}
+	if legacy := scan(); legacy.Counts.HashDeferred != 1 {
+		t.Fatalf("legacy state: %+v", legacy)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	removed := scan()
+	if removed.Counts.Deleted != 1 || removed.Checkpoint.PendingRescan {
+		t.Fatalf("deleted deferred input kept retrying: %+v", removed)
+	}
+	if idle := scan(); idle.Mode != RunStatusSkipped || idle.Checkpoint.PendingRescan {
+		t.Fatalf("deleted input forced another scan: %+v", idle)
+	}
+}
+
+func TestHashFileInfoRejectsMutationAndReplacement(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "note.md")
+	if err := os.WriteFile(path, []byte("first"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameHashFileInfo(before, before, before) {
+		t.Fatal("stable file rejected")
+	}
+	if err := os.WriteFile(path, []byte("changed size"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sameHashFileInfo(before, before, after) {
+		t.Fatal("post-hash mutation accepted")
+	}
+	replacement := path + ".new"
+	if err := os.WriteFile(replacement, []byte("first"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(replacement, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+	after, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sameHashFileInfo(before, before, after) {
+		t.Fatal("post-hash replacement accepted")
+	}
+}
+
+func TestStabilityObservationResetsOnSizeOrMtimeChange(t *testing.T) {
+	t.Parallel()
+	device, inode := int64(1), int64(2)
+	mtime := time.Now().Add(-time.Hour)
+	observed := mtime.Add(time.Minute)
+	now := time.Now()
+	fidelity := &filesystemmeta.Observation{DeviceID: &device, Inode: &inode}
+	previous := PathState{Kind: PathKindFile, SizeBytes: 10, ModifiedAt: &mtime, Fidelity: fidelity, HashObservedAt: &observed}
+	obs := PathObservation{Kind: PathKindFile, Exists: true, Safe: true, SizeBytes: 10, ModifiedAt: mtime, Fidelity: fidelity}
+	if got := hashObservationSince(previous, obs, now); !got.Equal(observed) {
+		t.Fatal("stable observation reset")
+	}
+	obs.SizeBytes++
+	if got := hashObservationSince(previous, obs, now); !got.Equal(now) {
+		t.Fatal("size change did not reset")
+	}
+	obs.SizeBytes--
+	obs.ModifiedAt = mtime.Add(time.Second)
+	if got := hashObservationSince(previous, obs, now); !got.Equal(now) {
+		t.Fatal("mtime change did not reset")
+	}
 }

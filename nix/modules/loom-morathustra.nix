@@ -124,6 +124,15 @@ let
       workspaceRoot = "/srv/loom/agents/${name}";
       hermesHome = "${workspaceRoot}/.hermes";
       recoverySigningKeyFile = "/var/lib/loom/${name}-recovery/signing.key";
+      scheduleBinding = pkgs.writeText "loom-${name}-schedule-binding.json" (builtins.toJSON {
+        source = {
+          host = config.loom.nodeId;
+          profile = name;
+          revision = profileCfg.package.upstreamRevision or "";
+        };
+        home = hermesHome;
+        caller = config.loom.user;
+      });
     in {
       browserEnabled = lib.mkEnableOption "Nix-managed local Chromium and native agent-browser for agents and Hermes";
       externalAccountsEnabled = lib.mkEnableOption "verified ${name} native account entry points (existing operator auth required)";
@@ -142,6 +151,41 @@ let
         description = "Operator-verified public account identifiers, not tokens. Required when enabling named external account tools; the Basecamp profile remains bound to this runtime's identity.";
       };
       enable = lib.mkEnableOption "the native ${name} Hermes gateway";
+      projectSchedulesEnabled = lib.mkEnableOption "project-owned native MINA schedule reconciliation (requires lifecycle hook)";
+      projectSchedulesHelper = lib.mkOption {
+        type = lib.types.package;
+        readOnly = true;
+        default = pkgs.writeTextFile {
+          name = "loom-${name}-project-schedules";
+          destination = "/bin/loom-hermes-project-schedules";
+          executable = true;
+          text = ''
+            #!${profileCfg.package.projectSchedulePython}
+            import json, os, sys
+            os.environ.clear()
+            os.environ["HOME"] = ${builtins.toJSON workspaceRoot}
+            os.environ["HERMES_HOME"] = ${builtins.toJSON hermesHome}
+            os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+            sys.path.insert(0, "${profileCfg.package}/share/loom-hermes-native")
+            sys.path.insert(0, "${../../internal/hermesschedules}")
+            from native_project import serve
+            with open("${scheduleBinding}") as stream:
+                serve(json.load(stream))
+          '';
+        };
+      };
+      scheduleObservationEnabled = lib.mkEnableOption "fixed owner-scoped read-only observation of the selected native cron store";
+      scheduleObservationPackage = lib.mkOption {
+        type = lib.types.package;
+        readOnly = true;
+        default = self.packages.${pkgs.stdenv.hostPlatform.system}.loom.overrideAttrs (old: {
+          pname = "loom-${name}-hermes-schedules";
+          subPackages = [ "cmd/loom-hermes-schedules" ];
+          ldflags = (old.ldflags or [ ]) ++ [ "-X main.bindingPath=${scheduleBinding}" ];
+          postInstall = "";
+        });
+        description = "No-argument observer linked to an immutable selected-profile binding; returns sanitized inventory only.";
+      };
       macComputerUseEnabled = lib.mkEnableOption "the selected runtime's operator-bound native Mac computer use";
 
       macComputerUseBindingSHA256 = lib.mkOption {
@@ -337,6 +381,14 @@ in
           message = "Named external account tools require an explicit externalAccountBinding verified by the operator.";
         }
         {
+          assertion = !config.loom.morathustra.scheduleObservationEnabled || !minaSelected;
+          message = "Morathustra schedule observation requires its selected runtime.";
+        }
+        {
+          assertion = !config.loom.mina.scheduleObservationEnabled || minaSelected;
+          message = "MINA schedule observation requires explicit MINA selection.";
+        }
+        {
           assertion = !config.loom.morathustra.macComputerUseEnabled || (!minaSelected && config.loom.morathustra.enable);
           message = "Morathustra Mac computer use requires its sole selected enabled runtime.";
         }
@@ -395,6 +447,119 @@ in
         "${environmentPrefix}_ENABLED" = lib.boolToString cfg.enable;
         "${environmentPrefix}_RECOVERY_ENABLED" = lib.boolToString cfg.recoveryEnabled;
       };
+    })
+
+    (lib.mkIf cfg.scheduleObservationEnabled {
+      assertions = [
+        {
+          assertion = cfg.enable;
+          message = "Hermes schedule observation requires the selected configured Hermes runtime (not proof of gateway liveness).";
+        }
+        {
+          assertion = cfg.package ? upstreamRevision;
+          message = "Hermes schedule observation requires the installed package's upstreamRevision evidence.";
+        }
+      ];
+      # Reuse the existing Accept=true project-applications helper pattern.
+      # The daemon retains NoNewPrivileges and never gains native-home access.
+      systemd.tmpfiles.rules = [ "d /run/loom-${identity}-schedules 0755 root root -" ];
+      systemd.sockets."loom-${identity}-schedules" = {
+        wantedBy = [ "sockets.target" ];
+        socketConfig = {
+          ListenStream = "/run/loom-${identity}-schedules/observe.sock";
+          Accept = true;
+          SocketUser = config.loom.user;
+          SocketMode = "0600";
+          DirectoryMode = "0755";
+          MaxConnections = 4;
+          Backlog = 4;
+          RemoveOnStop = true;
+        };
+      };
+      systemd.services."loom-${identity}-schedules@" = {
+        description = "One bounded read-only ${label} schedule observation";
+        unitConfig.RequiresMountsFor = [ cfg.hermesHome ];
+        serviceConfig = {
+          Type = "exec";
+          User = "agents";
+          Group = "agents";
+          ExecStart = "${cfg.scheduleObservationPackage}/bin/loom-hermes-schedules";
+          StandardInput = "socket";
+          StandardOutput = "socket";
+          StandardError = "null";
+          RuntimeMaxSec = 6;
+          TimeoutStopSec = 1;
+          KillMode = "control-group";
+          NoNewPrivileges = true;
+          UMask = "0077";
+          ProtectSystem = "strict";
+          ProtectHome = true;
+          ReadOnlyPaths = [ cfg.hermesHome ];
+          PrivateTmp = true;
+          PrivateDevices = true;
+          PrivateNetwork = true;
+          RestrictAddressFamilies = [ "AF_UNIX" ];
+          RestrictSUIDSGID = true;
+          CapabilityBoundingSet = "";
+        };
+      };
+      # Bind to the SAME package/home used by loom-${identity}; helper and
+      # daemon both carry the same public identity, checked again on IPC read.
+      systemd.services.loomd.environment = {
+        LOOM_HERMES_SCHEDULES_PROFILE = identity;
+        LOOM_HERMES_SCHEDULES_HOME = cfg.hermesHome;
+        LOOM_HERMES_SCHEDULES_REVISION = cfg.package.upstreamRevision or "";
+        LOOM_HERMES_SCHEDULES_SOCKET = "/run/loom-${identity}-schedules/observe.sock";
+      };
+    })
+
+    (lib.mkIf cfg.projectSchedulesEnabled {
+      assertions = [{
+        assertion = minaSelected && cfg.enable && cfg.scheduleObservationEnabled
+          && cfg.package.upstreamRevision == "29112bef099274229cadff79cdff7bf7b99c4b77";
+        message = "Project schedules require the pinned selected MINA runtime and S1 observation.";
+      }];
+      systemd.sockets."loom-${identity}-project-schedules" = {
+        wantedBy = [ "sockets.target" ];
+        socketConfig = {
+          ListenStream = "/run/loom-${identity}-schedules/project.sock";
+          Accept = true;
+          SocketUser = config.loom.user;
+          SocketMode = "0600";
+          DirectoryMode = "0755";
+          MaxConnections = 4;
+          Backlog = 4;
+          RemoveOnStop = true;
+        };
+      };
+      systemd.services."loom-${identity}-project-schedules@" = {
+        description = "One bounded project-owned MINA native schedule request";
+        unitConfig.RequiresMountsFor = [ cfg.hermesHome ];
+        serviceConfig = {
+          Type = "exec";
+          User = "agents";
+          Group = "agents";
+          ExecStart = "${cfg.projectSchedulesHelper}/bin/loom-hermes-project-schedules";
+          StandardInput = "socket";
+          StandardOutput = "socket";
+          StandardError = "null";
+          RuntimeMaxSec = 15;
+          TimeoutStopSec = 1;
+          KillMode = "control-group";
+          NoNewPrivileges = true;
+          UMask = "0077";
+          ProtectSystem = "strict";
+          ProtectHome = true;
+          ReadWritePaths = [ "${cfg.hermesHome}/cron" ];
+          PrivateTmp = true;
+          PrivateDevices = true;
+          PrivateNetwork = true;
+          RestrictAddressFamilies = [ "AF_UNIX" ];
+          RestrictSUIDSGID = true;
+          CapabilityBoundingSet = "";
+        };
+      };
+      systemd.services.loomd.environment.LOOM_HERMES_PROJECT_SCHEDULES = "1";
     })
 
     (lib.mkIf cfg.recoveryEnabled {

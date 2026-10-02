@@ -457,6 +457,7 @@ func renderAutomations(builder *strings.Builder, state ScreenState) {
 	renderOperationalActionGroups(builder, state, records, &row)
 
 	renderAutomationFailures(builder, state, &row)
+	renderHermesSchedules(builder, data.HermesSchedules)
 
 	renderPrimarySection(builder, "Active Automations")
 	if len(data.Automations) == 0 {

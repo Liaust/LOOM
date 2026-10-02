@@ -30,6 +30,41 @@ func writeRecoveryReadme(t *testing.T, workspace string) string {
 	return name
 }
 
+func TestRecoveryDailyCoveragePreservesCreationFreshness(t *testing.T) {
+	in, policy := fixture(t)
+	evidence, err := Publish(t.Context(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, age := range []time.Duration{6 * time.Hour, 26 * time.Hour} {
+		got, err := CheckDailyCoverage(t.Context(), policy, in.CreatedAt.Add(age))
+		if err != nil || !reflect.DeepEqual(got, []Evidence{evidence}) {
+			t.Fatalf("daily coverage at %s: %+v %v", age, got, err)
+		}
+		if _, err := Check(t.Context(), policy, in.CreatedAt.Add(age)); err == nil {
+			t.Fatal("daily coverage relaxed backup creation freshness")
+		}
+	}
+	for _, age := range []time.Duration{-time.Second, 26*time.Hour + time.Second} {
+		if _, err := CheckDailyCoverage(t.Context(), policy, in.CreatedAt.Add(age)); err == nil {
+			t.Fatal("invalid coverage age admitted", age)
+		}
+	}
+	manifestPath := filepath.Join(evidence.Path, ManifestFile)
+	if err := os.Chmod(manifestPath, 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, []byte("tampered"), 0440); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(manifestPath, 0440); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CheckDailyCoverage(t.Context(), policy, in.CreatedAt.Add(6*time.Hour)); err == nil {
+		t.Fatal("daily coverage skipped package authentication")
+	}
+}
+
 func TestRecoveryCheckRealScaffoldReadmeAndExactPackages(t *testing.T) {
 	in, policy := fixture(t)
 	pack, err := agentpack.LoadFromPath("../../ai-loom-pack")

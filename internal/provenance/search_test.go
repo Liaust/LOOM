@@ -359,6 +359,52 @@ func TestSearchCompactAcceptedFixtureResultsFitWithoutChangingIdentityOrPosture(
 	}
 }
 
+func TestSearchCompactLongTemporalQualification(t *testing.T) {
+	observed := time.Date(2026, 9, 14, 21, 56, 45, 166000000, time.UTC)
+	for _, qualification := range []string{
+		"Historical local implementation choice documented at commit f990d22cc3b186480ae3d49e8acda170f3d4e6e4, captured on 2026-09-14 and reviewed on 2026-09-29. Not a claim about current deployment or new runtime validation.",
+		strings.Repeat("Historical <evidence> \"not current\" 日本語. ", 50),
+	} {
+		exactTemporal := TemporalInterpretation{Interpretation: qualification, ObservedAt: &observed}
+		before, err := json.Marshal(exactTemporal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		match := newSearchCompactMatch([]string{"apache", "rclone"}, []searchField{{name: "claim", value: "Apache instead of Rclone"}},
+			"Historical Apache instead of Rclone choice", "accepted_record", nil, false,
+			"source_claim", exactTemporal.Interpretation, observed, exactTemporal.ObservedAt, nil, nil,
+			[]string{"project_01M2D0V5R03MDCQYCMSDTXARWT"}, nil)
+		id := SemanticID("bc789beb-8f72-4d1c-b6ec-79c50764346a")
+		exact := SearchExactGet{Resource: "record", ID: string(id), Path: "/v1/provenance/records/" + string(id)}
+		item := AcceptedRecordSearchResult{RecordID: id, Match: match, ExactGet: exact}
+		if err := fitSearchCompactResult(&item.Match, func() any { return item }); err != nil {
+			t.Fatal(err)
+		}
+		if jsonRuneCount(item) > MaximumSearchCompactResult || !item.Match.CompactTruncated || !item.Match.Freshness.CurrentnessTruncated {
+			t.Fatalf("unbounded or unmarked temporal preview: %#v", item)
+		}
+		preview := item.Match.Freshness.Currentness
+		if !strings.HasSuffix(preview, "…") || !strings.HasPrefix(qualification, strings.TrimSuffix(preview, "…")) || utf8.RuneCountInString(preview) < 32 {
+			t.Fatalf("qualification erased or reinterpreted: %q", preview)
+		}
+		if item.RecordID != id || item.ExactGet != exact || item.Match.AssertionPosture != "source_claim" || !item.Match.Freshness.ObservedAt.Equal(observed) {
+			t.Fatalf("protected provenance fields changed: %#v", item)
+		}
+		after, _ := json.Marshal(exactTemporal)
+		if string(before) != string(after) {
+			t.Fatal("stored qualification changed")
+		}
+		first, _ := json.Marshal(item)
+		if err := fitSearchCompactResult(&item.Match, func() any { return item }); err != nil {
+			t.Fatal(err)
+		}
+		replay, _ := json.Marshal(item)
+		if string(first) != string(replay) {
+			t.Fatal("repeated compaction changed the preview")
+		}
+	}
+}
+
 func TestSearchCompactResultFailsClosedWhenProtectedFieldsCannotFit(t *testing.T) {
 	id := SemanticID("11111111-1111-4111-8111-111111111111")
 	protectedPosture := strings.Repeat("p", MaximumSearchCompactResult)

@@ -10,7 +10,7 @@ import (
 	"loom.local/loom/internal/storagecatalog"
 )
 
-const defaultProjectionSourceLimit = 5000
+const projectionSourcePageSize = 256
 
 func (s *Service) ListProjectionSources(ctx context.Context, input notesprojection.SourceListInput) ([]notesprojection.SourceObject, error) {
 	if s == nil {
@@ -23,16 +23,31 @@ func (s Store) ListProjectionSources(ctx context.Context, input notesprojection.
 	if s.db == nil {
 		return nil, fmt.Errorf("knowledge store is not configured")
 	}
-	limit := input.Limit
-	if limit <= 0 {
-		limit = defaultProjectionSourceLimit
+	// Keep membership, custody joins and mutable ordering fields in one snapshot.
+	// A cursor bounds each database fetch without OFFSET rescans or a global cap.
+	// End the transaction before any payload copying or filesystem pruning.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return nil, err
 	}
-	// One extra row lets automatic refresh refuse a truncated inventory before
-	// the materializer prunes anything from the generated view.
-	if limit > maxListKnowledgeObjectsLimit+1 {
-		limit = maxListKnowledgeObjectsLimit + 1
+	defer tx.Rollback()
+	if err := declareProjectionSources(ctx, tx); err != nil {
+		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	sources, err := collectProjectionSources(ctx, input.Limit, func(ctx context.Context) ([]notesprojection.SourceObject, error) {
+		return fetchProjectionSources(ctx, tx)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return sources, nil
+}
+
+func declareProjectionSources(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, `DECLARE notes_projection_sources NO SCROLL CURSOR FOR
 		SELECT o.knowledge_object_id,
 		       o.notes_source_root_id,
 		       root.root_kind,
@@ -96,8 +111,7 @@ func (s Store) ListProjectionSources(ctx context.Context, input notesprojection.
 		         COALESCE(NULLIF(o.source_node_key, ''), root.node_key, ''),
 		         COALESCE(project.slug, o.project_id, ''),
 		         o.relative_path,
-		         o.knowledge_object_id
-		LIMIT $9`,
+		         o.knowledge_object_id`,
 		SourceRootStatusActive,
 		storagecatalog.FileClassDirectory,
 		storagecatalog.PhysicalRefKindLocalPath,
@@ -105,8 +119,12 @@ func (s Store) ListProjectionSources(ctx context.Context, input notesprojection.
 		storagecatalog.PhysicalRefKindLaneFile,
 		storagecatalog.PhysicalRefKindRetentionPayload,
 		storagecatalog.PhysicalRefKindArchiveFile,
-		storagecatalog.PhysicalRefKindBackupArtifact,
-		limit)
+		storagecatalog.PhysicalRefKindBackupArtifact)
+	return err
+}
+
+func fetchProjectionSources(ctx context.Context, tx *sql.Tx) ([]notesprojection.SourceObject, error) {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf("FETCH FORWARD %d FROM notes_projection_sources", projectionSourcePageSize))
 	if err != nil {
 		return nil, err
 	}
@@ -120,6 +138,42 @@ func (s Store) ListProjectionSources(ctx context.Context, input notesprojection.
 		sources = append(sources, source)
 	}
 	return sources, rows.Err()
+}
+
+// A short page proves exhaustion only for this single cursor, never for a series
+// of independently executed queries. On any failure discard the entire inventory.
+func collectProjectionSources(ctx context.Context, limit int, fetch func(context.Context) ([]notesprojection.SourceObject, error)) ([]notesprojection.SourceObject, error) {
+	var sources []notesprojection.SourceObject
+	seen := make(map[string]struct{})
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		page, err := fetch(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if len(page) > projectionSourcePageSize {
+			return nil, fmt.Errorf("notes projection source page exceeds fetch bound")
+		}
+		for _, source := range page {
+			id := strings.TrimSpace(source.KnowledgeObjectID)
+			if _, duplicate := seen[id]; id == "" || duplicate {
+				return nil, fmt.Errorf("notes projection source inventory has empty or duplicate identity %q", id)
+			}
+			seen[id] = struct{}{}
+			if limit > 0 && len(sources) >= limit {
+				return nil, fmt.Errorf("notes projection source inventory exceeds explicit limit %d; refusing incomplete inventory", limit)
+			}
+			sources = append(sources, source)
+		}
+		if len(page) < projectionSourcePageSize {
+			return sources, nil
+		}
+	}
 }
 
 func scanProjectionSource(scanner interface{ Scan(dest ...any) error }) (notesprojection.SourceObject, error) {

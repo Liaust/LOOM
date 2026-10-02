@@ -31,6 +31,7 @@ type OutputCounts struct {
 	Skipped               int `json:"skipped"`
 	AlreadyCurrent        int `json:"already_current"`
 	Failed                int `json:"failed"`
+	Deferred              int `json:"deferred,omitempty"`
 }
 
 type OutputAction struct {

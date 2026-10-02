@@ -622,6 +622,50 @@ func TestApplyFailedHealthCheckWritesFailedManifest(t *testing.T) {
 	}
 }
 
+func TestHealthCheckWaitsOnlyForStartupTransport(t *testing.T) {
+	calls := 0
+	err := runHealthCheckUntilReady(context.Background(), func(context.Context, string, ...string) ([]byte, error) {
+		calls++
+		if calls < 3 {
+			return []byte(`{"ok":false,"error":{"code":"transport.unavailable"}}`), errors.New("not listening")
+		}
+		return []byte(`{"ok":true,"data":{"status":"ok"}}`), nil
+	}, time.Second, time.Millisecond)
+	if err != nil || calls != 3 {
+		t.Fatalf("readiness calls=%d error=%v", calls, err)
+	}
+	for _, output := range []string{`{"ok":false,"data":{"status":"unhealthy"}}`, `not json`, `{"error":{"code":"auth.denied"}}`} {
+		calls = 0
+		err = runHealthCheckUntilReady(context.Background(), func(context.Context, string, ...string) ([]byte, error) {
+			calls++
+			return []byte(output), nil
+		}, time.Second, time.Millisecond)
+		if err == nil || calls != 1 {
+			t.Fatalf("permanent failure %q calls=%d error=%v", output, calls, err)
+		}
+	}
+}
+
+func TestHealthCheckReadinessDeadlineAndCancellation(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		ctx, cancel := context.WithCancel(context.Background())
+		if cancelled {
+			cancel()
+		}
+		err := runHealthCheckUntilReady(ctx, func(context.Context, string, ...string) ([]byte, error) {
+			return []byte(`{"error":{"code":"transport.unavailable"}}`), errors.New("not listening")
+		}, 5*time.Millisecond, time.Millisecond)
+		cancel()
+		want := context.DeadlineExceeded
+		if cancelled {
+			want = context.Canceled
+		}
+		if !errors.Is(err, want) {
+			t.Fatalf("cancelled=%t error=%v, want %v", cancelled, err, want)
+		}
+	}
+}
+
 func TestApplyFailureAfterMaintenancePauseMarksResumeRequired(t *testing.T) {
 	root := t.TempDir()
 	_, target, current := prepareUpdateReleases(t, root, false)

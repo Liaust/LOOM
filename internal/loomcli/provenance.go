@@ -25,6 +25,7 @@ func newProvenanceCommand(opts *options) *cobra.Command {
 	command.AddCommand(newProvenanceRecordCommand(opts))
 	command.AddCommand(newProvenanceCandidateCommand(opts))
 	command.AddCommand(newProvenanceCaseCommand(opts))
+	command.AddCommand(newProvenanceOperationsCommand(opts))
 	return command
 }
 
@@ -313,6 +314,7 @@ func newProvenanceRecordGetCommand(opts *options) *cobra.Command {
 func newProvenanceCandidateCommand(opts *options) *cobra.Command {
 	command := &cobra.Command{Use: "candidate", Short: "Load exact provenance candidates across lifecycle states"}
 	command.AddCommand(newProvenanceCandidateGetCommand(opts))
+	command.AddCommand(newProvenanceCandidateListCommand(opts))
 	return command
 }
 

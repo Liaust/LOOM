@@ -13,6 +13,22 @@ import (
 	"testing"
 )
 
+func TestNixOrcaPreservesNotesRecoveryJournals(t *testing.T) {
+	module := readRepoFile(t, "nix/modules/loom-orca.nix")
+	start := strings.Index(module, "grant_agent_read_write()")
+	if start < 0 {
+		t.Fatal("missing agent access function")
+	}
+	end := strings.Index(module[start:], "grant_agent_read_only()")
+	if end < 0 {
+		t.Fatal("missing agent access functions")
+	}
+	grant := module[start : start+end]
+	if strings.Count(grant, "-regex '.*/[.]loom-notes-[0-9a-f]{64}'") != 3 || strings.Count(grant, "-regextype posix-extended") != 3 {
+		t.Fatal("each directory/executable/file pass must prune Notes journals")
+	}
+}
+
 func TestNixBaseExposesSetupIdentityAndBoxOptions(t *testing.T) {
 	base := readRepoFile(t, "nix/modules/loom-base.nix")
 

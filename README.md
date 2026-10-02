@@ -7,14 +7,14 @@ qualified project context, background jobs, application deployment, and recovery
 The aim is to give people and agents one understandable system to work with,
 without making an agent harness the owner of everything.
 
-**Developer preview.** This is an actively developed, working personal system,
-not a finished appliance. The first public source baseline exposes the code,
+**v0.9.0 Public beta.** This is an actively developed, working personal system,
+not a finished appliance or a stable 1.0 API. The source release exposes the code,
 documentation, limitations, and roadmap. Installation is still hands-on;
 interfaces and migrations can change. There is no hosted LOOM service or
 one-command installer yet.
 
 [Documentation](docs/README.md) · [Current State](.project/STATE.md) ·
-[Roadmap](.project/ROADMAP.md) · [Contributing](CONTRIBUTING.md) ·
+[Roadmap](.project/ROADMAP.md) · [Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) ·
 [Security](SECURITY.md)
 
 ## Why LOOM Exists
@@ -37,16 +37,17 @@ being flattened into one opaque "memory" database.
 | Projects | Minimal folders, explicit resource declarations, development context, resumable plan/apply/status operations, and repository discovery. |
 | Execution | Typed capabilities exposed by providers, routed jobs, permission policy, durable events, schedules, and background workers. |
 | Files and recovery | Box workspaces, node synchronization, storage catalogs, physical archive/restore workflows, operational database packages, and Borg cloud history. |
-| Knowledge | Notes ingestion and source citations, lexical/semantic retrieval infrastructure, and separate technical object inspection. |
+| Knowledge | Queued Notes ingestion, source citations, indexed lexical/semantic retrieval, selective OCR/vision/embeddings, and separate technical object inspection. |
+| Notes workspace | A unified source-backed Obsidian vault, encrypted native LiveSync transport, offline text editing, and explicit source-checked conflict resolution. |
 | Provenance | Source-backed candidates, accepted records, reconciliation cases, supersession, and project/repository state projections. |
 | Applications | A managed application path that composes host grants, storage, credential references, startup readiness, and optional public HTTPS. |
 | Interfaces | CLI, terminal Portal, HTTP API, node agent, and a small status dashboard. |
-| Agent integration | Portable skills and protocols, optional Hermes/MINA runtime configuration, ORCA integration, and an operator-paired Mac computer-use bridge. |
+| Agent integration | Portable skills and protocols, optional Hermes/MINA runtime configuration and native schedule adapter, ORCA integration, and separate authorized Mac SSH and computer-use paths. |
 
 These are implemented surfaces, not a claim that every combination has completed
 real-world acceptance. See [current state](.project/STATE.md) for the remaining
-gaps, especially installation, full document-processing coverage, and larger
-project lifecycle tests.
+limits, especially manual installation, compatible client versions, large-import
+performance, and application-specific recovery guarantees.
 
 ## How The Pieces Fit
 
@@ -56,7 +57,7 @@ reasoning loop, model provider, conversation interface, or native tools.
 | Component | Owns |
 | --- | --- |
 | **LOOM** | Project/resource declarations, coordination, capability policy, technical state, knowledge/provenance services, storage and recovery integrations. |
-| **Hermes** | Its agent loop, sessions, conversational memory, tools, skill runtime, and messaging gateway. Native Hermes schedules are not automatically LOOM schedules. |
+| **Hermes** | Its agent loop, sessions, conversational memory, tools, skill runtime, messaging gateway and native agent schedules. LOOM can observe them and declare project-owned jobs without becoming a second scheduler. |
 | **MINA** | An optional example persona, protocols, and configuration for a Hermes agent. Neither MINA nor her external accounts are required for LOOM's core. |
 | **ORCA** | Its desktop/remote workspace experience, terminals, coding sessions, and worktrees. |
 | **Codex and other coding agents** | Work performed inside their own harness and project checkout, using the project's instructions and declared LOOM interfaces. |
@@ -140,13 +141,34 @@ Optional embeddings, OCR, vision, and model calls depend on configured workers
 and providers. "Local-first" describes ownership and deployment, not a promise
 that every inference or third-party service runs offline.
 
+## Compatibility And Recovery
+
+Before 1.0, CLI/API shapes, declarations and configuration can evolve. Follow
+database migrations and keep deployment receipts; arbitrary database downgrades
+are not supported. This source release is not a ready-to-activate copy of the
+maintainer's host. Supply your own identities, credentials, disks and network.
+
+The writable Notes client is a pinned LiveSync overlay, not stock LiveSync.
+Participating devices need compatible builds. Preserve encryption, device-local
+state and Obsidian identity; do not auto-update the plugin to unreviewed upstream
+code. Notes sync and indexing are separate: a saved file need not be indexed or
+embedded yet. Binary attachments are references, not writable source documents.
+
+Cloud inclusion protects the exact captured bytes, not every application's live
+state by implication. Matching Notes recovery cohorts include sources, SQL
+bindings and transport state. Optional client captures include vault files and
+intent exports, not a live native browser database; same-client recovery also
+needs its matching closed profile. A phone's unsent offline edits are not on Main.
+See [backup and recovery](docs/operations/backup-restore-and-drills.md).
+
 ## Development And Roadmap
 
 The immediate priority is to make the existing system easier to install,
 understand, and use through real projects. Next come guided CLI setup, clearer
-prerequisite reporting, broader document-pipeline acceptance, project lifecycle
-coverage, and a deliberate model-driven automation integration. The website,
-rendered documentation, and diagrams follow this source release.
+prerequisite reporting, faster bulk import/indexing and search, and simpler
+diagnostics and recovery. OCR/vision quality for handwriting and equations remains
+optional rather than a completion guarantee. There is no latency SLA for large
+imports. The next optimisation cycle is separate from this beta's usable baseline.
 
 The [roadmap](.project/ROADMAP.md) separates current work from deferred ideas and
 does not promise release dates. Contributions, bug reports, documentation fixes,

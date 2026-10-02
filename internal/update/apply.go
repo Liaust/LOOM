@@ -416,10 +416,44 @@ func flakeArgument(releasePath, flakeOutput string) string {
 }
 
 func runHealthCheck(ctx context.Context, runner CommandRunner) error {
-	output, err := runner(ctx, "loom", "health", "--json")
-	if err != nil {
-		return err
+	return runHealthCheckUntilReady(ctx, runner, 3*time.Minute, time.Second)
+}
+
+func runHealthCheckUntilReady(ctx context.Context, runner CommandRunner, timeout, interval time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("wait for loomd readiness: %w", err)
+		}
+		output, err := runner(ctx, "loom", "health", "--json")
+		var failure struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		// loomd does not accept connections until startup migrations finish.
+		if json.Unmarshal(output, &failure) == nil && failure.Error.Code == "transport.unavailable" {
+			if err == nil {
+				err = fmt.Errorf("loomd is not reachable during startup")
+			}
+			timer := time.NewTimer(interval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return fmt.Errorf("wait for loomd readiness: %w (last check: %v)", ctx.Err(), err)
+			case <-timer.C:
+				continue
+			}
+		}
+		if err != nil {
+			return err
+		}
+		return validateHealthCheck(output)
 	}
+}
+
+func validateHealthCheck(output []byte) error {
 	var envelope struct {
 		OK   bool `json:"ok"`
 		Data struct {

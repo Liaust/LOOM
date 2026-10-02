@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/vrtmrz/obsidian-livesync",
+  "revision": "7b3b6ff854f2ff10452be3eaf8e0cd76ac65ac2b",
+  "version": "1.0.32-cli",
+  "archiveUrl": "https://codeload.github.com/vrtmrz/obsidian-livesync/tar.gz/7b3b6ff854f2ff10452be3eaf8e0cd76ac65ac2b",
+  "archiveSha256": "d427a25cac9a124610fb25d0747dc3dc329a7a486475841ba032652859b04403",
+  "packageLockSha256": "70c3f4c80bb6bcc525df84b282fa9e1191058a174a056de6e5ec8038d1377850",
+  "commonlib": "0.1.29",
+  "commonlibIntegrity": "sha512-PeBUUQNSuyS+ISPIvwK3rzaritHi0XDfNlFMOqaRpIbxGAWbWK0YDtE1Htbde3r8Lr3ZdTNjpY+Nmr//OxzgTA=="
+}

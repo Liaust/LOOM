@@ -42,8 +42,8 @@ type PipelineCoordinatorRunResult struct {
 	LastObjectID    string
 }
 
-// RunPipelineCoordinatorOnce advances at most one lightweight stage per claimed
-// file. Heavy stages are claimed exclusively by the heavy executor.
+// RunPipelineCoordinatorOnce drains a bounded number of lightweight stages.
+// Claim just-in-time so a slow stage does not strand a preclaimed batch.
 func (s *Service) RunPipelineCoordinatorOnce(ctx context.Context, input PipelineCoordinatorRunInput) (PipelineCoordinatorRunResult, error) {
 	if s == nil || s.store.db == nil {
 		return PipelineCoordinatorRunResult{}, fmt.Errorf("knowledge store is not configured")
@@ -52,12 +52,28 @@ func (s *Service) RunPipelineCoordinatorOnce(ctx context.Context, input Pipeline
 	if err != nil {
 		return PipelineCoordinatorRunResult{}, err
 	}
-	items, err := s.ClaimPipelineRuns(ctx, PipelineExecutionCoordinator, input.WorkerRunID, PipelineClaimOptions{Limit: input.Limit, LeaseDuration: input.LeaseDuration, Now: input.Now})
-	if err != nil {
-		return PipelineCoordinatorRunResult{}, err
+	limit := input.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
 	}
-	result := PipelineCoordinatorRunResult{ReleasedExpired: released, Claimed: int64(len(items))}
-	for _, item := range items {
+	result := PipelineCoordinatorRunResult{ReleasedExpired: released}
+	for result.Claimed < int64(limit) {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < 2*time.Second {
+			result.MoreWork = true
+			return result, nil
+		}
+		items, err := s.ClaimPipelineRuns(ctx, PipelineExecutionCoordinator, input.WorkerRunID, PipelineClaimOptions{Limit: 1, LeaseDuration: input.LeaseDuration, Now: input.Now})
+		if err != nil {
+			return result, err
+		}
+		if len(items) == 0 {
+			return result, nil
+		}
+		item := items[0]
+		result.Claimed++
 		result.LastRunID, result.LastObjectID = item.Run.KnowledgePipelineRunID, item.Object.KnowledgeObjectID
 		warnings, stageErr := s.executeCoordinatorStage(ctx, item, input)
 		if stageErr != nil {
@@ -72,7 +88,7 @@ func (s *Service) RunPipelineCoordinatorOnce(ctx context.Context, input Pipeline
 		}
 		result.Completed++
 	}
-	result.MoreWork = input.Limit > 0 && len(items) == input.Limit
+	result.MoreWork = true
 	return result, nil
 }
 

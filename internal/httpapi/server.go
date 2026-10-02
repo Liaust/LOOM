@@ -35,6 +35,7 @@ import (
 	"loom.local/loom/internal/events"
 	"loom.local/loom/internal/filetransfer"
 	"loom.local/loom/internal/health"
+	"loom.local/loom/internal/hermesschedules"
 	"loom.local/loom/internal/idempotency"
 	"loom.local/loom/internal/identity"
 	"loom.local/loom/internal/jobs"
@@ -117,6 +118,7 @@ type Services struct {
 	}
 	Artifacts                 artifacts.Service
 	Automation                automation.Service
+	HermesSchedules           *hermesschedules.Observer
 	Capabilities              capabilities.Service
 	ServiceAllowlists         serviceregistry.AllowlistResolver
 	Policy                    policy.Service
@@ -150,8 +152,9 @@ type Server struct {
 func NewServer(services Services, logger *slog.Logger) Server {
 	if services.ProjectRepos.State == nil && services.Projects.DB != nil && strings.TrimSpace(services.RuntimeConfig.NodeID) != "" {
 		services.ProjectRepos.State = projectstate.Service{
-			Reader:    services.Projects,
-			LocalNode: services.RuntimeConfig.NodeID,
+			Reader:             services.Projects,
+			LocalNode:          services.RuntimeConfig.NodeID,
+			ProjectDevelopment: storagearchive.ProjectDevelopmentInspector{Archive: services.ProjectArchive},
 		}
 	}
 	if services.ProjectRepos.Provenance == nil {
@@ -242,6 +245,7 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/knowledge/notes/objects/reconcile", s.handleKnowledgeNotesObjectsReconcile)
 	mux.HandleFunc("/v1/knowledge/notes/objects/", s.handleKnowledgeNotesObject)
 	mux.HandleFunc("/v1/knowledge/notes/passages/", s.handleKnowledgeNotesPassage)
+	mux.HandleFunc("/v1/knowledge/notes/conflicts", s.handleNotesConflicts)
 	mux.HandleFunc("/v1/knowledge/notes/search", s.handleKnowledgeNotesSearch)
 	mux.HandleFunc("/v1/knowledge/notes/embeddings/status", s.handleKnowledgeNotesEmbeddingsStatus)
 	mux.HandleFunc("/v1/knowledge/notes/embeddings/enable", s.handleKnowledgeNotesEmbeddingsEnable)
@@ -252,6 +256,7 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/knowledge/notes/pipelines/backfill", s.handleKnowledgeNotesPipelineBackfill)
 	mux.HandleFunc("/v1/knowledge/notes/pipelines", s.handleKnowledgeNotesPipelines)
 	mux.HandleFunc("/v1/knowledge/notes/pipelines/", s.handleKnowledgeNotesPipelineRef)
+	mux.HandleFunc("/v1/knowledge/notes/enrich", s.handleKnowledgeNotesEnrich)
 	mux.HandleFunc("/v1/knowledge/notes/reprocess", s.handleKnowledgeNotesReprocess)
 	mux.HandleFunc("/v1/knowledge/notes/projection/status", s.handleKnowledgeNotesProjectionStatus)
 	mux.HandleFunc("/v1/knowledge/notes/projection/rebuild", s.handleKnowledgeNotesProjectionRebuild)
@@ -338,6 +343,7 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/direct-event-endpoints", s.handleDirectEventEndpoints)
 	mux.HandleFunc("/v1/direct-event-endpoints/", s.handleDirectEventEndpoint)
 	mux.HandleFunc("/v1/schedules/status", s.handleScheduleStatus)
+	mux.HandleFunc("/v1/schedules/hermes", s.handleHermesSchedules)
 	mux.HandleFunc("/v1/schedules", s.handleSchedules)
 	mux.HandleFunc("/v1/schedules/", s.handleSchedule)
 	mux.HandleFunc("/v1/schedule-fires", s.handleScheduleFires)

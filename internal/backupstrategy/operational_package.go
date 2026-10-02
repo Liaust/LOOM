@@ -38,13 +38,15 @@ const (
 	OperationalRedactionPolicy      = "loom.internal.redaction.default.v1"
 
 	OperationalRetentionCount  = 3
-	OperationalPackageMaxBytes = int64(2 << 30)
+	OperationalPackageMaxBytes = int64(17 << 30)
 
 	operationalManifestMaxBytes = int64(4 << 20)
-	operationalDumpMaxBytes     = int64(1 << 30)
-	operationalConfigMaxBytes   = int64(4 << 20)
-	operationalStateMaxBytes    = int64(16 << 20)
-	operationalHealthMaxBytes   = int64(1 << 20)
+	// Notes embeddings are database state, not user payload copied into a dump.
+	// Keep a finite streaming bound with room for a real document collection.
+	operationalDumpMaxBytes   = int64(16 << 30)
+	operationalConfigMaxBytes = int64(4 << 20)
+	operationalStateMaxBytes  = int64(16 << 20)
+	operationalHealthMaxBytes = int64(1 << 20)
 
 	OperationalFindingInvalidPath              = "invalid_path"
 	OperationalFindingLink                     = "link_not_allowed"

@@ -173,7 +173,8 @@ func boxSourcesDatabase(t *testing.T) (*sql.DB, string) {
 	}
 	host := u.Hostname()
 	socket := u.Query().Get("host")
-	if host != "localhost" && host != "127.0.0.1" && host != "::1" && !(host == "" && strings.HasPrefix(socket, "/tmp/")) {
+	localSocket := strings.HasPrefix(socket, "/tmp/") || socket == "/run/postgresql" || socket == "/var/run/postgresql"
+	if host != "localhost" && host != "127.0.0.1" && host != "::1" && !(host == "" && localSocket) {
 		t.Fatal("Box source acceptance requires a local disposable database endpoint")
 	}
 	admin, err := sql.Open("pgx", raw)

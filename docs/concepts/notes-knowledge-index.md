@@ -1,6 +1,6 @@
 ---
 title: "Notes Knowledge Index"
-description: "Explains how notes roots become knowledge objects, extracted text, chunks, search documents, embeddings, and a read-only projection."
+description: "Explains canonical Notes sources, separate workspace write-back, versioned indexing, and generated read views."
 audience:
   - user
   - operator
@@ -10,7 +10,7 @@ tags:
   - concepts
   - notes
 status: draft
-verified_at: "2026-08-18"
+verified_at: "2026-09-29"
 source_scope:
   - "internal/knowledge/models.go"
   - "internal/knowledge/source_roots.go"
@@ -53,8 +53,18 @@ A notes source root is a canonical input point for notes.
 
 Current root kinds:
 
-- `box_notes`: a node's LOOM Box Notes root;
-- `project_notes`: a project's `notes/` facet.
+- `box_notes`: a registered node's Box Notes root;
+- `box_topics` and `box_library`: configured Topics and Library sources;
+- `project_material`: an explicitly declared project knowledge folder or managed
+  application-data allocation;
+- `project_notes`: supported legacy project Notes registration.
+
+Folder names alone do not enroll project files. Project knowledge declarations
+select the source. Separately, an operator can enroll a subset of those sources
+into the writable Notes workspace. The pinned client sends exact-base intent;
+the source adapter applies it to the original file or retains a conflict. This
+is separate from the older read-only generated projection and the search index.
+See [[Notes And Search]] for the user workflow and navigation.
 
 Source roots carry:
 

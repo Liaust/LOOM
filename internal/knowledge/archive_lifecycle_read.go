@@ -53,7 +53,7 @@ func notesProjectArchiveStopSQL(root, object, operation string) string {
 	 AND stopped_project.archive_state->>'actor_id'=stopped_archive.actor_id
 	 AND stopped_project.archive_state->>'reason'=stopped_archive.reason
 	 AND %[1]s.source_path=(stopped_project.archive_state->>'active_path') || '/' || stopped_writer.root_relative_path
-	 AND stopped_project.archive_state->>'active_path'=stopped_archive.plan_json#>>'{source,path,absolute_path}'
+	 AND stopped_project.archive_state->>'active_path'=stopped_archive.source_absolute_path
 	 AND stopped_writer.activation_status='disabled'
 	 AND stopped_writer.last_applied_by_actor_id=stopped_archive.actor_id
 	 AND stopped_writer.last_applied_at >= (stopped_project.archive_state->>'started_at')::timestamptz
@@ -86,9 +86,9 @@ func notesCustodyReadCaughtUpSQL(object string) string {
 	 WHERE lag_root.notes_source_root_id=` + object + `.notes_source_root_id
 	 AND lag_node.node_key=lag_root.node_key AND lag_node.node_role='main'
 	 AND (starts_with(` + object + `.source_path,(CASE WHEN lag_op.operation_kind='archive'
-	 THEN lag_op.plan_json#>>'{source,path,absolute_path}' ELSE lag_op.plan_json#>>'{destination,path,absolute_path}' END) || '/')
+	 THEN lag_op.source_absolute_path ELSE lag_op.destination_absolute_path END) || '/')
 	 OR starts_with(lag_root.source_path || '/' || ` + object + `.relative_path,(CASE WHEN lag_op.operation_kind='archive'
-	 THEN lag_op.plan_json#>>'{source,path,absolute_path}' ELSE lag_op.plan_json#>>'{destination,path,absolute_path}' END) || '/'))
+	 THEN lag_op.source_absolute_path ELSE lag_op.destination_absolute_path END) || '/'))
 	 AND NOT EXISTS (
 	 SELECT 1 FROM storage.workspace_lifecycle_events lag_event
 	 JOIN knowledge.notes_custody_transitions lag_transition USING(workspace_lifecycle_event_id)

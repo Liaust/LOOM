@@ -9,6 +9,7 @@ import (
 	"loom.local/loom/internal/capabilities"
 	"loom.local/loom/internal/cloudstorage"
 	"loom.local/loom/internal/filetransfer"
+	"loom.local/loom/internal/hermesschedules"
 	"loom.local/loom/internal/jobs"
 	"loom.local/loom/internal/knowledge"
 	"loom.local/loom/internal/lane"
@@ -287,6 +288,7 @@ type BackgroundData struct {
 }
 
 type AutomationsData struct {
+	HermesSchedules      *hermesschedules.Observation
 	Projects             []projects.Project
 	Automations          []automation.Automation
 	Schedules            []automation.Schedule

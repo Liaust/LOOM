@@ -113,23 +113,6 @@ func TestProjectionRefreshReusesUnchangedFiles(t *testing.T) {
 	assertProjectionFile(t, target, "modified")
 }
 
-func TestProjectionRefreshRefusesTruncatedInventory(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "generated")
-	defer makeProjectionWritableForCleanup(t, root)
-	if err := os.Mkdir(root, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	retained := filepath.Join(root, "retained.txt")
-	if err := os.WriteFile(retained, []byte("retain"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	svc := NewService(fakeProjectionSources{sources: make([]SourceObject, 5001)}, root)
-	if _, err := svc.Refresh(t.Context()); err == nil {
-		t.Fatal("accepted incomplete inventory")
-	}
-	assertProjectionFile(t, retained, "retain")
-}
-
 func TestProjectionFailureResealsAndRecordsIncomplete(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "generated")
 	defer makeProjectionWritableForCleanup(t, root)
@@ -141,7 +124,7 @@ func TestProjectionFailureResealsAndRecordsIncomplete(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(root, "nodes/main")); err != nil {
 		t.Fatal(err)
 	}
-	svc := NewService(fakeProjectionSources{sources: []SourceObject{{RootKind: RootKindBoxNotes, SourceNodeKey: "main", RelativePath: "nested/note.md", SourcePath: source}}}, root)
+	svc := NewService(fakeProjectionSources{sources: []SourceObject{{KnowledgeObjectID: "knowledge_object_fixture", RootKind: RootKindBoxNotes, SourceNodeKey: "main", RelativePath: "nested/note.md", SourcePath: source}}}, root)
 	if _, err := svc.Rebuild(t.Context(), RebuildInput{}); err == nil {
 		t.Fatal("linked parent accepted")
 	}
@@ -186,7 +169,7 @@ func TestProjectionRefreshCopyBudgetAndSizeDrift(t *testing.T) {
 	defer makeProjectionWritableForCleanup(t, root)
 	source := writeProjectionSource(t, "note.md", "abc")
 	size := int64(64*1024*1024 + 1)
-	provider := fakeProjectionSources{sources: []SourceObject{{RootKind: RootKindBoxNotes, SourceNodeKey: "main", RelativePath: "note.md", SourcePath: source, SizeBytes: &size}}}
+	provider := fakeProjectionSources{sources: []SourceObject{{KnowledgeObjectID: "knowledge_object_fixture", RootKind: RootKindBoxNotes, SourceNodeKey: "main", RelativePath: "note.md", SourcePath: source, SizeBytes: &size}}}
 	svc := NewService(provider, root)
 	if _, err := svc.Refresh(t.Context()); err == nil || !strings.Contains(err.Error(), "size changed") {
 		t.Fatalf("declared size mismatch: %v", err)

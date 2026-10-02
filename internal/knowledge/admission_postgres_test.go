@@ -2,6 +2,7 @@ package knowledge
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -70,6 +71,157 @@ func boxSyncedFixture(t *testing.T) (*Service, []SourceRoot) {
 		roots = append(roots, root)
 	}
 	return s, roots
+}
+
+func TestNotesAdmissionUnequalInventorySweepPostgres(t *testing.T) {
+	for _, catalogCount := range []int{1, 5} {
+		t.Run(fmt.Sprint(catalogCount), func(t *testing.T) {
+			s, roots := boxSyncedFixture(t)
+			size := int64(1)
+			for i := range catalogCount {
+				name := fmt.Sprintf("catalog-%d.md", i)
+				_, err := storagecatalog.NewService(s.store.db).RegisterEntry(t.Context(), storagecatalog.RegisterEntryInput{
+					StorageClass: storagecatalog.StorageClassObjectBlob, SourceArea: storagecatalog.SourceAreaNotes,
+					OriginNodeID: *roots[0].NodeID, OriginNodeKey: roots[0].NodeKey,
+					WatchedRootKey: roots[0].BackendRootKey, LogicalPath: name, OriginalSourcePath: name,
+					FileClass: "markdown", MimeType: "text/markdown", SizeBytes: &size,
+					ChecksumAlgorithm: "sha256", ChecksumHex: strings.TrimPrefix(hashArtifactValue(name), "sha256:"),
+					AvailabilityState: storagecatalog.AvailabilityStateAvailable,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			var cursor AdmissionCursor
+			for range 2 {
+				catalogSeen, syncedSeen, pages := 0, 0, 0
+				for {
+					result, err := s.AdmitRegisteredNotesOnce(t.Context(), cursor, 1)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if cursor.StorageDone && result.CatalogObserved != 0 || cursor.SyncedDone && result.SyncedObserved != 0 {
+						t.Fatal("finished inventory restarted before sweep completion")
+					}
+					replay, err := s.AdmitRegisteredNotesOnce(t.Context(), cursor, 1)
+					// Successful priority admission removes those identities from its
+					// next query; replay still preserves the full inventory position.
+					replayCursor, resultCursor := replay.Cursor, result.Cursor
+					replayCursor.PriorityAfter, resultCursor.PriorityAfter = [3]string{}, [3]string{}
+					if err != nil || replayCursor != resultCursor {
+						t.Fatalf("page replay changed checkpoint: %+v %v", replay, err)
+					}
+					catalogSeen += result.CatalogObserved
+					syncedSeen += result.SyncedObserved
+					pages++
+					raw, err := json.Marshal(result.Cursor)
+					if err != nil {
+						t.Fatal(err)
+					}
+					cursor = AdmissionCursor{}
+					if err := json.Unmarshal(raw, &cursor); err != nil {
+						t.Fatal(err)
+					}
+					if !result.MoreWork {
+						break
+					}
+					if pages >= max(catalogCount, 3) {
+						t.Fatal("admission never returned to idle")
+					}
+				}
+				if catalogSeen != catalogCount || syncedSeen != 3 || pages != max(catalogCount, 3) || cursor != (AdmissionCursor{}) {
+					t.Fatalf("incorrect sweep: catalog=%d synced=%d pages=%d cursor=%+v", catalogSeen, syncedSeen, pages, cursor)
+				}
+			}
+		})
+	}
+}
+
+func TestNotesAdmissionPriorityWhileSyncedSweepParkedPostgres(t *testing.T) {
+	s, roots := boxSyncedFixture(t)
+	ctx := t.Context()
+	entries, err := s.store.listSyncedNotesPage(ctx, "", [3]string{}, 10)
+	if err != nil || len(entries) != 3 {
+		t.Fatalf("fixture: %+v %v", entries, err)
+	}
+	// An excluded first candidate must not starve a later eligible delivery.
+	root := roots[0]
+	for _, candidate := range roots {
+		if candidate.NotesSourceRootID == entries[0].NotesSourceRootID {
+			root = candidate
+		}
+	}
+	root.Metadata = mustJSON(t, map[string]any{"box_id": "sync-fixture", "registration_metadata": map[string]any{"knowledge_source": map[string]any{"include": []string{"other.md"}}}})
+	if _, err := s.store.UpsertSourceRoot(ctx, root); err != nil {
+		t.Fatal(err)
+	}
+	cursor := AdmissionCursor{SyncedDone: true, StorageAfter: "storage_entry_parked"}
+	var admitted []KnowledgeObject
+	for range 4 {
+		result, err := s.AdmitRegisteredNotesOnce(ctx, cursor, 1)
+		if err != nil || result.SyncedObserved != 0 || result.PrioritySyncedObserved > 1 {
+			t.Fatalf("priority admission: %+v %v", result, err)
+		}
+		// Keep the legacy synced inventory parked to isolate the priority lane.
+		cursor.PriorityAfter = result.Cursor.PriorityAfter
+		admitted, err = s.store.ListKnowledgeObjects(ctx, KnowledgeObjectFilter{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(admitted) == 2 {
+			break
+		}
+	}
+	if len(admitted) != 2 {
+		t.Fatalf("eligible deliveries waited for catalog EOF: %+v", admitted)
+	}
+	for _, object := range admitted {
+		if object.NotesSourceRootID == root.NotesSourceRootID {
+			t.Fatal("excluded source was admitted")
+		}
+	}
+	remaining, err := s.store.listSyncedNotesPageFiltered(ctx, "", [3]string{}, 10, true)
+	if err != nil || len(remaining) != 1 || remaining[0].NotesSourceRootID != root.NotesSourceRootID {
+		t.Fatalf("admitted identities were not removed from priority work: %+v %v", remaining, err)
+	}
+	// A partial object write without a pipeline must not disappear from work.
+	if _, err := s.store.db.Exec(`DELETE FROM knowledge.pipeline_runs WHERE knowledge_object_id=$1`, admitted[0].KnowledgeObjectID); err != nil {
+		t.Fatal(err)
+	}
+	partial, err := s.store.listSyncedNotesPageFiltered(ctx, "", [3]string{}, 10, true)
+	if err != nil || len(partial) != 2 {
+		t.Fatalf("partial admission became invisible: %+v %v", partial, err)
+	}
+	if _, err := s.AdmitRegisteredNotesOnce(ctx, AdmissionCursor{SyncedDone: true, StorageDone: true}, 10); err != nil {
+		t.Fatal(err)
+	}
+	// A new version of an already admitted file is priority work again.
+	old := entries[1]
+	version := ids.NewObjectVersionID()
+	if _, err := s.store.db.Exec(`INSERT INTO objects.object_versions
+	 (object_version_id,object_id,version_number,blob_id,content_hash,source_node_id,source_path,size_bytes,mime_type,status,metadata)
+	 SELECT $1,object_id,version_number+1,blob_id,content_hash,source_node_id,source_path,size_bytes,mime_type,status,metadata
+	 FROM objects.object_versions WHERE object_version_id=$2`, version, old.ObjectVersionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.store.db.Exec(`UPDATE files.file_metadata SET latest_version_id=$1 WHERE object_id=$2`, version, old.ObjectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.store.db.Exec(`INSERT INTO sync.replicas(replica_id,replicated_kind,replicated_id,source_node_id,replica_node_id,replica_mode,freshness_state,storage_ref)
+	 SELECT $1,replicated_kind,$2,source_node_id,replica_node_id,replica_mode,freshness_state,storage_ref FROM sync.replicas WHERE replica_id=$3`, ids.NewReplicaID(), version, old.ReplicaID); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := s.store.listSyncedNotesPageFiltered(ctx, "", [3]string{}, 10, true)
+	if err != nil || len(changed) != 2 {
+		t.Fatalf("new version not priority work: %+v %v", changed, err)
+	}
+	if _, err := s.store.db.Exec(`UPDATE files.file_metadata SET index_policy='private_no_index' WHERE object_id=$1`, old.ObjectID); err != nil {
+		t.Fatal(err)
+	}
+	private, err := s.store.listSyncedNotesPageFiltered(ctx, "", [3]string{}, 10, true)
+	if err != nil || len(private) != 1 || private[0].NotesSourceRootID != root.NotesSourceRootID {
+		t.Fatalf("priority bypassed privacy: %+v %v", private, err)
+	}
 }
 
 func reconcileBoxSyncedFixture(t *testing.T, s *Service, roots []SourceRoot) []KnowledgeObject {
@@ -171,6 +323,46 @@ func TestBoxSyncedAdmissionPaginationAndReplayPostgres(t *testing.T) {
 			t.Fatal("custody coexistence repeated extraction")
 		}
 	}
+	// The two cursors do not align. A catalog-only reconciliation must not
+	// replace a synced owner even when it is absent from this batch.
+	catalog, err := s.store.ListStorageEntriesForNotesRoots(t.Context(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		storageOnly, err := s.ReconcileKnowledgeObjects(t.Context(), KnowledgeObjectReconcileInput{SourceRoots: roots, StorageEntries: catalog})
+		if err != nil || storageOnly.Applied != 0 || len(storageOnly.Skipped) != 3 {
+			t.Fatalf("off-page synced owner displaced: %+v %v", storageOnly, err)
+		}
+		for _, old := range objects {
+			current, err := s.store.GetKnowledgeObject(t.Context(), old.KnowledgeObjectID)
+			if err != nil || current.StorageEntryID != nil || current.SourceRevision != old.SourceRevision || !isSyncedKnowledgeObject(current) {
+				t.Fatalf("catalog-only page changed identity: %+v %v", current, err)
+			}
+		}
+		reconcileBoxSyncedFixture(t, s, roots)
+		if advanceBoxSyncedFixture(t, s) != 0 {
+			t.Fatal("separated-page replay repeated extraction")
+		}
+	}
+	// Exercise actual independent one-item cursors over multiple wraps too.
+	var cursor AdmissionCursor
+	for range 12 {
+		result, err := s.AdmitRegisteredNotesOnce(t.Context(), cursor, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cursor = result.Cursor
+		for _, old := range objects {
+			current, err := s.store.GetKnowledgeObject(t.Context(), old.KnowledgeObjectID)
+			if err != nil || current.SourceRevision != old.SourceRevision || current.StorageEntryID != nil {
+				t.Fatalf("one-item page changed source ownership: %+v %v", current, err)
+			}
+		}
+	}
+	if advanceBoxSyncedFixture(t, s) != 0 {
+		t.Fatal("cursor replay repeated extraction")
+	}
 	var count int
 	if err := s.store.db.QueryRow(`SELECT count(*) FROM knowledge.knowledge_objects`).Scan(&count); err != nil || count != 3 {
 		t.Fatalf("logical source count %d %v", count, err)
@@ -190,6 +382,35 @@ func TestBoxSyncedCurrentSourceSelectionPostgres(t *testing.T) {
 		t.Fatalf("initial source: %d %v", len(entries), err)
 	}
 	old := entries[0]
+	// Retained catalog custody coexists with the authoritative synced source.
+	// It must not take over while the newer owner is outside the synced page,
+	// private or temporarily unavailable.
+	_, err = storagecatalog.NewService(db).RegisterEntry(ctx, storagecatalog.RegisterEntryInput{
+		StorageClass: storagecatalog.StorageClassObjectBlob, SourceArea: storagecatalog.SourceAreaNotes,
+		OriginNodeID: old.SourceNodeID, OriginNodeKey: old.SourceNodeKey, WatchedRootKey: roots[0].BackendRootKey,
+		LogicalPath: "source.md", OriginalSourcePath: "source.md", FileClass: old.FileClass, MimeType: old.MimeType,
+		SizeBytes: old.SizeBytes, ChecksumAlgorithm: "sha256", ChecksumHex: strings.TrimPrefix(old.SourceHash, "sha256:"),
+		AvailabilityState: storagecatalog.AvailabilityStateAvailable,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := s.store.ListStorageEntriesForNotesRoots(ctx, false)
+	if err != nil || len(catalog) != 1 {
+		t.Fatalf("catalog: %d %v", len(catalog), err)
+	}
+	assertNoCatalogFallback := func() {
+		t.Helper()
+		result, err := s.ReconcileKnowledgeObjects(ctx, KnowledgeObjectReconcileInput{SourceRoots: roots, StorageEntries: catalog})
+		if err != nil || result.Applied != 0 {
+			t.Fatalf("retained catalog fallback: %+v %v", result, err)
+		}
+		var count int
+		if err := db.QueryRow(`SELECT count(*) FROM knowledge.knowledge_objects WHERE notes_source_root_id=$1 AND storage_entry_id IS NOT NULL`, roots[0].NotesSourceRootID).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("changed source owner: %d %v", count, err)
+		}
+	}
+	assertNoCatalogFallback()
 	var oldKnowledge KnowledgeObject
 	for _, object := range oldObjects {
 		if object.NotesSourceRootID == roots[0].NotesSourceRootID {
@@ -313,6 +534,35 @@ func TestBoxSyncedCurrentSourceSelectionPostgres(t *testing.T) {
 	if len(seen) != 3 {
 		t.Fatalf("lost independent roots: %d", len(seen))
 	}
+	t.Run("null-version-path-fallbacks", func(t *testing.T) {
+		if _, err := db.Exec(`UPDATE objects.object_versions SET source_path=NULL WHERE object_version_id=$1`, newVersion); err != nil {
+			t.Fatal(err)
+		}
+		assertSelection(0)
+		assertNoCatalogFallback()
+		if _, err := db.Exec(`UPDATE files.file_metadata SET source_path=NULL WHERE object_id=$1`, newObject); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE objects.objects SET metadata=metadata || jsonb_build_object('source_path',$2::text) WHERE object_id=$1`, newObject, old.SourcePath); err != nil {
+			t.Fatal(err)
+		}
+		assertSelection(0)
+		assertNoCatalogFallback()
+		var readable bool
+		if err := db.QueryRow(`SELECT `+notesKnowledgeVisibilitySQL("o", false)+` FROM knowledge.knowledge_objects o WHERE knowledge_object_id=$1`, oldKnowledge.KnowledgeObjectID).Scan(&readable); err != nil || readable {
+			t.Fatalf("null-path newer source resurrected old publication: %t %v", readable, err)
+		}
+		if _, err := db.Exec(`UPDATE objects.object_versions SET source_path=$2 WHERE object_version_id=$1`, newVersion, old.SourcePath); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE files.file_metadata SET source_path=$2 WHERE object_id=$1`, newObject, old.SourcePath); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE objects.objects SET metadata=metadata-'source_path' WHERE object_id=$1`, newObject); err != nil {
+			t.Fatal(err)
+		}
+		assertSelection(1)
+	})
 	for name, change := range map[string][2]string{
 		"private":     {`UPDATE files.file_metadata SET index_policy='private_no_index' WHERE object_id=$1`, `UPDATE files.file_metadata SET index_policy='text_later' WHERE object_id=$1`},
 		"disabled":    {`UPDATE objects.objects SET status='archived' WHERE object_id=$1`, `UPDATE objects.objects SET status='active' WHERE object_id=$1`},
@@ -324,6 +574,11 @@ func TestBoxSyncedCurrentSourceSelectionPostgres(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertSelection(0)
+			assertNoCatalogFallback()
+			var readable bool
+			if err := db.QueryRow(`SELECT `+notesKnowledgeVisibilitySQL("o", false)+` FROM knowledge.knowledge_objects o WHERE knowledge_object_id=$1`, oldKnowledge.KnowledgeObjectID).Scan(&readable); err != nil || readable {
+				t.Fatalf("newer denied source resurrected prior publication: %t %v", readable, err)
+			}
 			if _, err := db.Exec(change[1], newObject); err != nil {
 				t.Fatal(err)
 			}
@@ -463,6 +718,13 @@ func TestBoxSyncedProjectScopeCompatibilityPostgres(t *testing.T) {
 		}
 		if err := s.store.db.QueryRow(`SELECT `+notesKnowledgeVisibilitySQL("o", false)+` FROM knowledge.knowledge_objects o WHERE knowledge_object_id=$1`, object.KnowledgeObjectID).Scan(&visible); err != nil || visible {
 			t.Fatalf("archived project exact read %v %v", visible, err)
+		}
+		if err := s.store.db.QueryRow(`SELECT `+notesKnowledgeVisibilitySQL("o", true)+` FROM knowledge.knowledge_objects o WHERE knowledge_object_id=$1`, object.KnowledgeObjectID).Scan(&visible); err != nil || visible {
+			t.Fatalf("archived project legacy search %v %v", visible, err)
+		}
+		var writable bool
+		if err := s.store.db.QueryRow(`SELECT `+notesCustodyWriteAllowedSQL("o")+` FROM knowledge.knowledge_objects o WHERE knowledge_object_id=$1`, object.KnowledgeObjectID).Scan(&writable); err != nil || writable {
+			t.Fatalf("archived project processing %v %v", writable, err)
 		}
 	}
 }

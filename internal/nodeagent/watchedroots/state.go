@@ -165,6 +165,8 @@ type PathState struct {
 	Mode                       string                      `json:"mode,omitempty"`
 	ModifiedAt                 *time.Time                  `json:"modified_at,omitempty"`
 	ContentHashURI             string                      `json:"content_hash_uri,omitempty"`
+	HashObservedAt             *time.Time                  `json:"hash_observed_at,omitempty"`
+	HashVerifiedAt             *time.Time                  `json:"hash_verified_at,omitempty"`
 	HashStatus                 string                      `json:"hash_status,omitempty"`
 	SyncStatus                 string                      `json:"sync_status,omitempty"`
 	IndexStatus                string                      `json:"index_status,omitempty"`
@@ -237,22 +239,25 @@ type Finding struct {
 }
 
 type RootCheckpoint struct {
-	SchemaVersion             string     `json:"schema_version"`
-	RootKey                   string     `json:"root_key"`
-	WorkerKey                 string     `json:"worker_key"`
-	ConfigHash                string     `json:"config_hash"`
-	LastRunID                 string     `json:"last_run_id,omitempty"`
-	LastStartedAt             *time.Time `json:"last_started_at,omitempty"`
-	LastFinishedAt            *time.Time `json:"last_finished_at,omitempty"`
-	LastSuccessfulReconcileAt *time.Time `json:"last_successful_reconcile_at,omitempty"`
-	LastFullRescanAt          *time.Time `json:"last_full_rescan_at,omitempty"`
-	LastSequence              int64      `json:"last_sequence"`
-	PendingRescan             bool       `json:"pending_rescan"`
-	RootReachable             bool       `json:"root_reachable"`
-	PathStateCount            int        `json:"path_state_count"`
-	PathStateSnapshotHash     string     `json:"path_state_snapshot_hash,omitempty"`
-	LastErrorCode             string     `json:"last_error_code,omitempty"`
-	LastErrorMessage          string     `json:"last_error_message,omitempty"`
+	SchemaVersion             string      `json:"schema_version"`
+	RootKey                   string      `json:"root_key"`
+	WorkerKey                 string      `json:"worker_key"`
+	ConfigHash                string      `json:"config_hash"`
+	LastRunID                 string      `json:"last_run_id,omitempty"`
+	LastStartedAt             *time.Time  `json:"last_started_at,omitempty"`
+	LastFinishedAt            *time.Time  `json:"last_finished_at,omitempty"`
+	LastSuccessfulReconcileAt *time.Time  `json:"last_successful_reconcile_at,omitempty"`
+	LastFullRescanAt          *time.Time  `json:"last_full_rescan_at,omitempty"`
+	LastSequence              int64       `json:"last_sequence"`
+	PendingRescan             bool        `json:"pending_rescan"`
+	StoredCounts              *ScanCounts `json:"stored_counts,omitempty"`
+	OutputsCurrent            bool        `json:"outputs_current,omitempty"`
+	OutputsAlreadyCurrent     int         `json:"outputs_already_current,omitempty"`
+	RootReachable             bool        `json:"root_reachable"`
+	PathStateCount            int         `json:"path_state_count"`
+	PathStateSnapshotHash     string      `json:"path_state_snapshot_hash,omitempty"`
+	LastErrorCode             string      `json:"last_error_code,omitempty"`
+	LastErrorMessage          string      `json:"last_error_message,omitempty"`
 }
 
 type ScanCounts struct {
@@ -269,6 +274,8 @@ type ScanCounts struct {
 	HashComputed      int            `json:"hash_computed"`
 	HashUnchanged     int            `json:"hash_unchanged"`
 	HashDeferred      int            `json:"hash_deferred"`
+	HashReused        int            `json:"hash_reused,omitempty"`
+	HashBytesRead     int64          `json:"hash_bytes_read,omitempty"`
 	BudgetExhausted   int            `json:"budget_exhausted"`
 	Errors            int            `json:"errors"`
 	DirtyHintsBefore  int            `json:"dirty_hints_before"`
@@ -289,6 +296,7 @@ type PathChange struct {
 }
 
 type ScanResult struct {
+	forceHash         bool
 	RootKey           string              `json:"root_key"`
 	Mode              string              `json:"mode"`
 	Status            string              `json:"status"`

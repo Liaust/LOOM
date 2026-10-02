@@ -2,12 +2,18 @@ package nodeagent
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
 
 	noderuntime "loom.local/loom/internal/nodeagent/runtime"
 	"loom.local/loom/internal/nodeagent/watchedroots"
+)
+
+const (
+	watchedRootOutputBatchSize = 64
+	watchedRootPlanningBudget  = 10 * time.Second
 )
 
 func runWatchedRootReconcileAndPlan(ctx context.Context, store Store, config Config, state State, instance noderuntime.WorkerInstance, root watchedroots.ValidatedRoot, mode string, planOutputs bool, flushOutputs bool, reportToMain bool, correlationID string) (watchedroots.ScanResult, error) {
@@ -46,12 +52,29 @@ func runWatchedRootReconcileAndPlan(ctx context.Context, store Store, config Con
 			}
 			return result, nil
 		}
-		plan, err := watchedroots.PlanOutputs(watchedStore, root, instance.WorkerKey)
-		if err != nil {
-			return watchedroots.ScanResult{}, err
+		plan := watchedroots.OutputPlan{RootKey: root.Config.RootKey, WorkerKey: instance.WorkerKey, GeneratedAt: time.Now().UTC()}
+		if result.Mode == watchedroots.RunStatusSkipped && result.Checkpoint.OutputsCurrent {
+			plan.Counts.AlreadyCurrent = result.Checkpoint.OutputsAlreadyCurrent
+		} else {
+			plan, err = watchedroots.PlanOutputs(watchedStore, root, instance.WorkerKey)
+			if err != nil {
+				return watchedroots.ScanResult{}, err
+			}
+			result.Checkpoint.OutputsCurrent = len(plan.Actions) == 0
+			result.Checkpoint.OutputsAlreadyCurrent = plan.Counts.AlreadyCurrent
+			if err := watchedStore.SaveCheckpoint(root.Config.RootKey, result.Checkpoint); err != nil {
+				return watchedroots.ScanResult{}, err
+			}
+			plan = applyWatchedRootOutputPlan(ctx, store, config, state, watchedStore, root, plan)
 		}
-		plan = applyWatchedRootOutputPlan(store, config, state, watchedStore, root, plan)
 		result.OutputPlan = &plan
+		for _, action := range plan.Actions {
+			if action.ReasonCode == "queue_batch_commit_failed" || action.ReasonCode == "queue_batch_failed" {
+				// A partially installed redo record must recover under a fresh lock
+				// before any delivery or acknowledgement can modify its snapshots.
+				return result, fmt.Errorf("watched-root queue batch unavailable: %s", action.Error)
+			}
+		}
 		if backupStatus, err := store.backupStatusForWatchedRoot(config, state, root.Config.RootKey); err == nil {
 			result.BackupStatus = backupStatus
 		}
@@ -66,7 +89,7 @@ func runWatchedRootReconcileAndPlan(ctx context.Context, store Store, config Con
 				result.Status = watchedroots.RunStatusDegraded
 				result.Message = "watched-root scan completed with queued output still pending"
 			}
-			backupFlush := flushWatchedRootBackups(ctx, store, config, state, correlationID)
+			backupFlush := flushWatchedRootBackupsForRoot(ctx, store, config, state, correlationID, root.Config.RootKey)
 			result.BackupFlush = &backupFlush
 			if backupFlush.Status == watchedroots.OutputStatusFailed && result.Status == watchedroots.RunStatusHealthy {
 				result.Status = watchedroots.RunStatusDegraded
@@ -118,7 +141,7 @@ func flushWatchedRootOutputs(ctx context.Context, store Store, config Config, st
 		flush.FailedAfter = before.Counts.Failed
 		return flush
 	}
-	push, err := pushLocalSyncRootOnce(ctx, store, config, state, correlationID, before.Counts.Pending, false, rootKey)
+	push, err := pushLocalSyncRootOnce(ctx, store, config, state, correlationID, watchedRootOutputBatchSize, false, rootKey)
 	if err != nil {
 		flush.Status = watchedroots.OutputStatusFailed
 		flush.Error = err.Error()
@@ -135,18 +158,57 @@ func flushWatchedRootOutputs(ctx context.Context, store Store, config Config, st
 	flush.AcceptedAfter = push.LocalStatus.Counts.Accepted
 	flush.ConflictedAfter = push.LocalStatus.Counts.Conflicted
 	flush.FailedAfter = push.LocalStatus.Counts.Failed
-	if push.LocalStatus.Counts.Pending > 0 || push.LocalStatus.Counts.Failed > 0 || push.LocalStatus.Counts.Conflicted > 0 {
+	if push.LocalStatus.Counts.Failed > 0 || push.LocalStatus.Counts.Conflicted > 0 {
 		flush.Status = watchedroots.OutputStatusFailed
+	} else if push.LocalStatus.Counts.Pending > 0 {
+		flush.Status = watchedroots.OutputStatusQueued
 	} else {
 		flush.Status = watchedroots.OutputStatusRecorded
 	}
 	return flush
 }
 
-func applyWatchedRootOutputPlan(store Store, config Config, state State, watchedStore watchedroots.Store, root watchedroots.ValidatedRoot, plan watchedroots.OutputPlan) watchedroots.OutputPlan {
+func applyWatchedRootOutputPlan(ctx context.Context, store Store, config Config, state State, watchedStore watchedroots.Store, root watchedroots.ValidatedRoot, plan watchedroots.OutputPlan) watchedroots.OutputPlan {
+	if len(plan.Actions) == 0 {
+		return plan
+	}
+	if ctx.Err() != nil {
+		plan.Counts.Deferred = len(plan.Actions)
+		plan.Actions = nil
+		return plan
+	}
+	store, unlock, err := store.lockLocalSync(ctx)
+	if err == nil {
+		defer unlock()
+		store, err = store.beginSyncBatch()
+	}
+	if err != nil {
+		for idx := range plan.Actions {
+			markWatchedRootOutputFailed(&plan.Actions[idx], "queue_batch_failed", err.Error())
+		}
+		plan.Counts.Failed += len(plan.Actions)
+		return plan
+	}
+	started := time.Now()
+	queued := 0
 	for idx := range plan.Actions {
+		// Leave unstaged paths untouched so the next reconcile can plan them again.
+		// Reserve time for delivery instead of holding the queue lock for a whole vault.
+		if queued >= watchedRootOutputBatchSize || ctx.Err() != nil || time.Since(started) >= watchedRootPlanningBudget {
+			plan.Counts.Deferred = len(plan.Actions) - idx
+			plan.Actions = plan.Actions[:idx]
+			break
+		}
 		action := &plan.Actions[idx]
-		current, err := watchedStore.LoadPathState(action.RootKey, action.RelativePath)
+		if action.ActionKind != watchedroots.OutputActionSkipped && action.ActionKind != watchedroots.OutputActionBackupSkipped {
+			queued++
+		}
+		key := watchedroots.PathKey(action.RootKey, action.RelativePath)
+		current, found := store.syncBatch.paths[key]
+		var err error
+		if !found {
+			current, err = watchedStore.LoadPathState(action.RootKey, action.RelativePath)
+		}
 		if err != nil {
 			markWatchedRootOutputFailed(action, "load_path_state_failed", err.Error())
 			plan.Counts.Failed++
@@ -269,10 +331,13 @@ func applyWatchedRootOutputPlan(store Store, config Config, state State, watched
 				action.LocalBackupArtifactID = backupItem.LocalArtifactID
 			}
 		}
-		if err := watchedStore.SavePathState(current); err != nil {
-			markWatchedRootOutputFailed(action, "save_path_state_failed", err.Error())
-			plan.Counts.Failed++
+		store.syncBatch.paths[key] = current
+	}
+	if err := store.commitSyncBatch(); err != nil {
+		for idx := range plan.Actions {
+			markWatchedRootOutputFailed(&plan.Actions[idx], "queue_batch_commit_failed", err.Error())
 		}
+		plan.Counts.Failed += len(plan.Actions)
 	}
 	return plan
 }

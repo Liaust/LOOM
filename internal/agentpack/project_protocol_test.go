@@ -118,7 +118,7 @@ func TestProjectProtocolContextBudget(t *testing.T) {
 		{"skills/manage-loom-projects/references/project-commands.md", 500, 4000},
 		// Deployment-only reference now includes the shipped public endpoint flow.
 		{"skills/manage-loom-projects/references/managed-applications.md", 550, 4000},
-		{"skills/operate-loom-nodes/SKILL.md", 400, 3200},
+		{"skills/operate-loom-nodes/SKILL.md", 480, 3700},
 	} {
 		t.Run(c.file, func(t *testing.T) {
 			body := projectProtocolRead(t, c.file)
@@ -128,6 +128,24 @@ func TestProjectProtocolContextBudget(t *testing.T) {
 				t.Errorf("context budget exceeded")
 			}
 		})
+	}
+}
+
+func TestInstalledSchedulingAndArchiveGuidance(t *testing.T) {
+	schedules := projectProtocolRead(t, "skills/manage-loom-projects/references/project-schedules.md")
+	for _, term := range []string{"kind: hermes_schedule", "profile: mina", "status: paused", "loom schedules hermes --json", "no dummy project", "Reapply preserves", "codex exec"} {
+		if !strings.Contains(schedules, term) {
+			t.Errorf("installed scheduling route lacks %q", term)
+		}
+	}
+	if strings.Contains(schedules, "remains a separate integration") {
+		t.Fatal("installed Hermes adapter described as future work")
+	}
+	storage := projectProtocolRead(t, "skills/operate-loom-storage/SKILL.md")
+	for _, term := range []string{"readable custody", "Main has no Box Dropzone or Lane", "loom project archive plan", "--plan-digest", "leaves a project inactive", "export is optional"} {
+		if !strings.Contains(storage, term) {
+			t.Errorf("archive guidance lacks %q", term)
+		}
 	}
 }
 

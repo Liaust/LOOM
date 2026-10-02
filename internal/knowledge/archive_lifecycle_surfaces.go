@@ -72,6 +72,11 @@ func notesReadableRootObjectsSQL(root string, filter SourceLifecycleFilter) stri
 
 func notesReadableRootSQL(root string, filter SourceLifecycleFilter, includeInactive bool) string {
 	objects := `EXISTS (` + notesReadableRootObjectsSQL(root, filter) + `)`
+	return notesReadableRootWithObjectsSQL(root, filter, includeInactive, objects)
+}
+
+// Callers that already evaluated visibility can reuse those statement-local rows.
+func notesReadableRootWithObjectsSQL(root string, filter SourceLifecycleFilter, includeInactive bool, objects string) string {
 	if filter == SourceLifecycleFilterArchived {
 		return objects
 	}

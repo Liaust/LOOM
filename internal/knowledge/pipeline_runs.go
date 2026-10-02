@@ -28,6 +28,7 @@ func (s *Service) ensurePipelineRun(ctx context.Context, object KnowledgeObject,
 type pipelineRetrySpec struct {
 	Source      PipelineInspect
 	TargetStage string
+	ReuseStages map[string]bool
 }
 
 func (s *Service) ensurePipelineRunWithRetry(ctx context.Context, object KnowledgeObject, policy PipelinePolicy, force bool, priority int, retry *pipelineRetrySpec) (PipelineRun, bool, error) {
@@ -63,7 +64,19 @@ func (s *Service) ensurePipelineRunTx(ctx context.Context, tx *sql.Tx, objectID 
 	if err != nil {
 		return PipelineRun{}, false, err
 	}
-	plan, err := CompilePipelinePlan(object, policy)
+	if retry != nil && (retry.Source.Run.SourceHash != object.SourceHash || retry.Source.Run.SourceRevision != object.SourceRevision) {
+		return PipelineRun{}, false, fmt.Errorf("%w: retry source version changed", ErrConflict)
+	}
+	plan, err := recordedEnrichmentPlanTx(ctx, tx, object, policy)
+	if retry != nil {
+		var original CompiledPipelinePlan
+		if json.Unmarshal(retry.Source.Run.PlanSnapshot, &original) == nil && original.Enrichment != nil && !reflect.DeepEqual(original.Enrichment, plan.Enrichment) {
+			return PipelineRun{}, false, fmt.Errorf("%w: enrichment intent is no longer current", ErrConflict)
+		}
+	}
+	if force && retry == nil {
+		plan, err = CompilePipelinePlan(object, policy)
+	}
 	if err != nil {
 		return PipelineRun{}, false, err
 	}
@@ -119,6 +132,12 @@ func (s *Service) ensureLockedPipelineRunTx(ctx context.Context, tx *sql.Tx, obj
 	version, err := s.getOrCreateKnowledgeObjectVersionTx(ctx, tx, object, json.RawMessage(`{"schema_version":"knowledge.pipeline_source_version.v1"}`))
 	if err != nil {
 		return PipelineRun{}, false, err
+	}
+	if retry != nil && plan.Enrichment != nil {
+		version, err = scanKnowledgeObjectVersion(tx.QueryRowContext(ctx, `SELECT `+knowledgeObjectVersionColumns()+` FROM knowledge.knowledge_object_versions WHERE knowledge_object_version_id=$1`, retry.Source.Run.KnowledgeObjectVersionID))
+		if err != nil {
+			return PipelineRun{}, false, err
+		}
 	}
 	if retry != nil {
 		locked, validateErr := validateRetryReuseTx(ctx, tx, object, version, plan, snapshot, retry.Source.Run.KnowledgePipelineRunID, retryIndex)
@@ -232,7 +251,7 @@ func (s *Service) ensureLockedPipelineRunTx(ctx context.Context, tx *sql.Tx, obj
 		}
 		if index == startIndex {
 			status = PipelineStageStatusReady
-		} else if retryIndex >= 0 && index < retryIndex {
+		} else if retryIndex >= 0 && (index < retryIndex || retry.ReuseStages[compiled.StageKey]) {
 			oldStage, found := oldStageByKey[compiled.StageKey]
 			if !found || !isReusableUpstreamStageStatus(oldStage.Status) {
 				return PipelineRun{}, false, fmt.Errorf("%w: upstream stage %q is not reusable", ErrInvalid, compiled.StageKey)
@@ -270,7 +289,7 @@ func (s *Service) ensureLockedPipelineRunTx(ctx context.Context, tx *sql.Tx, obj
 		newStageByKey[compiled.StageKey] = stage
 	}
 	if retryIndex >= 0 {
-		if err = cloneRetryUpstreamArtifactsTx(ctx, tx, retry.Source, run, plan.Stages[retryIndex].Ordinal, newStageByKey); err != nil {
+		if err = cloneRetryUpstreamArtifactsTx(ctx, tx, retry.Source, run, plan.Stages[retryIndex].Ordinal, newStageByKey, retry.ReuseStages); err != nil {
 			return PipelineRun{}, false, err
 		}
 	}
@@ -492,8 +511,14 @@ func validateRetryReuseTx(ctx context.Context, tx *sql.Tx, object KnowledgeObjec
 	if source.KnowledgeObjectVersionID != version.KnowledgeObjectVersionID || source.SourceRevision != object.SourceRevision || source.SourceHash != object.SourceHash {
 		return PipelineInspect{}, fmt.Errorf("%w: retry source revision is not current", ErrInvalid)
 	}
-	if source.PipelineDefinitionKey != plan.DefinitionKey || source.PipelineDefinitionVersion != plan.DefinitionVersion || !pipelinePlanSnapshotsEqual(source.PlanSnapshot, snapshot) {
+	if source.PipelineDefinitionKey != plan.DefinitionKey || source.PipelineDefinitionVersion != plan.DefinitionVersion || (plan.Enrichment == nil && !pipelinePlanSnapshotsEqual(source.PlanSnapshot, snapshot)) {
 		return PipelineInspect{}, fmt.Errorf("%w: retry source plan is incompatible with current policy or definition", ErrInvalid)
+	}
+	if plan.Enrichment != nil {
+		var prior CompiledPipelinePlan
+		if json.Unmarshal(source.PlanSnapshot, &prior) != nil || !reflect.DeepEqual(prior.SourcePolicy, plan.SourcePolicy) {
+			return PipelineInspect{}, fmt.Errorf("%w: enrichment reuse source policy changed", ErrInvalid)
+		}
 	}
 	byKey := make(map[string]PipelineStageRun, len(stages))
 	for _, stage := range stages {
@@ -525,8 +550,18 @@ func validateRetryReuseTx(ctx context.Context, tx *sql.Tx, object KnowledgeObjec
 		// PDF page analysis republishes native page text and retires the earlier
 		// artifacts. Those outputs suffice only when that later stage is reused too.
 		if !outputReusable && stage.StageKey == FilePipelineStageNativeText {
+			// Scanned PDFs legitimately publish a metadata-only native result.
+			// Its exact version evidence is reusable; missing body text is not
+			// missing extraction, and must not force OCR to execute again.
+			if plan.FileFamily == "pdf" && hasReusableStageArtifact(artifacts, source, stage, []string{ArtifactKindMetadataText}) {
+				var metadata json.RawMessage
+				if err := tx.QueryRowContext(ctx, `SELECT metadata FROM knowledge.knowledge_object_versions WHERE knowledge_object_version_id=$1`, source.KnowledgeObjectVersionID).Scan(&metadata); err != nil {
+					return PipelineInspect{}, err
+				}
+				outputReusable = completedEmptyPDFExtraction(metadata)
+			}
 			analysis, exists := byKey[FilePipelineStagePDFPageAnalysis]
-			if exists && analysis.Ordinal > stage.Ordinal && analysis.Ordinal < plan.Stages[retryIndex].Ordinal &&
+			if !outputReusable && exists && analysis.Ordinal > stage.Ordinal && analysis.Ordinal < plan.Stages[retryIndex].Ordinal &&
 				(analysis.Status == PipelineStageStatusComplete || analysis.Status == PipelineStageStatusCompleteWithWarning) {
 				outputReusable = hasReusableStageArtifact(artifacts, source, analysis, []string{ArtifactKindEmbeddedText})
 			}
@@ -536,6 +571,14 @@ func validateRetryReuseTx(ctx context.Context, tx *sql.Tx, object KnowledgeObjec
 		}
 	}
 	return inspect, nil
+}
+
+func completedEmptyPDFExtraction(raw json.RawMessage) bool {
+	var evidence struct {
+		ExtractorKey string `json:"extractor_key"`
+		Status       string `json:"extraction_status"`
+	}
+	return json.Unmarshal(raw, &evidence) == nil && evidence.ExtractorKey == ExtractorKeyPDF && evidence.Status == ExtractionStatusNoEmbeddedText
 }
 
 func reusableStageMetadataMatches(stage PipelineStageRun, compiled CompiledPipelineStage) bool {
@@ -573,10 +616,10 @@ func hasReusableStageArtifact(artifacts []DerivedArtifact, run PipelineRun, stag
 	return false
 }
 
-func cloneRetryUpstreamArtifactsTx(ctx context.Context, tx *sql.Tx, source PipelineInspect, run PipelineRun, targetOrdinal int, newStages map[string]PipelineStageRun) error {
+func cloneRetryUpstreamArtifactsTx(ctx context.Context, tx *sql.Tx, source PipelineInspect, run PipelineRun, targetOrdinal int, newStages map[string]PipelineStageRun, reused map[string]bool) error {
 	for _, artifact := range source.Artifacts {
 		oldStage, found := stageByID(source.Stages, artifact.KnowledgePipelineStageRunID)
-		if !found || oldStage.Ordinal >= targetOrdinal || !artifact.Active {
+		if !found || (oldStage.Ordinal >= targetOrdinal && !reused[oldStage.StageKey]) || !artifact.Active {
 			continue
 		}
 		newStage, found := newStages[oldStage.StageKey]

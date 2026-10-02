@@ -9,6 +9,16 @@ import (
 	"loom.local/loom/internal/storagecatalog"
 )
 
+func TestOverviewUnifiedStatusBuckets(t *testing.T) {
+	var health NotesIndexHealth
+	for _, status := range []string{"waiting_quiet_window", "waiting_coordinator", "waiting_heavy", "complete_with_warnings", "blocked_manual_action", "stale", "cancelled"} {
+		addPipelineHealth(&health, normalizeNotesPipelineStatus(status), 1, nil, nil)
+	}
+	if health.Queued != 3 || health.Complete != 1 || health.CompleteWithWarnings != 1 || health.Blocked != 1 || health.Stale != 1 || health.Cancelled != 1 || health.Failed != 0 {
+		t.Fatalf("unified states misreported: %#v", health)
+	}
+}
+
 func TestNormalizeNotesFileClassBucket(t *testing.T) {
 	tests := map[string]string{
 		storagecatalog.FileClassMarkdown:          NotesFileClassBucketMarkdown,

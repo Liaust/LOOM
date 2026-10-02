@@ -54,7 +54,7 @@ func TestProjectionInheritedOwnerReadOnlyACL(t *testing.T) {
 		t.Fatalf("fixture does not reproduce owner denial: %v", err)
 	}
 	root := filepath.Join(base, "generated")
-	svc := NewService(fakeProjectionSources{sources: []SourceObject{{RootKind: RootKindBoxNotes, SourceNodeKey: "main", RelativePath: "new/deep/note.md", SourcePath: source}}}, root)
+	svc := NewService(fakeProjectionSources{sources: []SourceObject{{KnowledgeObjectID: "knowledge_object_fixture", RootKind: RootKindBoxNotes, SourceNodeKey: "main", RelativePath: "new/deep/note.md", SourcePath: source}}}, root)
 	for range 2 {
 		if _, err := svc.Rebuild(t.Context(), RebuildInput{}); err != nil {
 			t.Fatal(err)

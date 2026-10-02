@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"loom.local/loom/internal/config"
+	hs "loom.local/loom/internal/hermesschedules"
 	"loom.local/loom/internal/nodes"
 	pc "loom.local/loom/internal/projectcontracts"
 	"loom.local/loom/internal/projectregistration"
@@ -21,6 +22,8 @@ import (
 // owners. It does not maintain another project/root inventory. Before initial
 // registration, the caller must select an explicit path under the configured Box.
 type LocalResolver struct {
+	Hermes       hs.ProjectNative
+	HermesSource hs.Source
 	DB           *sql.DB
 	Config       func() (config.Config, error)
 	Applications ApplicationPrerequisiteReader
@@ -37,6 +40,7 @@ type RemoteDeclarationSource interface {
 }
 
 type localDeclaration struct {
+	HermesStates   map[pc.ResourceKey]hs.ProjectJob
 	Analysis       pc.Analysis
 	Input          projects.RegisterProjectContractInput
 	Target         pc.DeclarationTarget
@@ -160,6 +164,9 @@ func (r *LocalResolver) load(ctx context.Context, p Principal, projectRef, nodeR
 	if err != nil {
 		return out, fail(pc.DeclarationTargetUnavailable, "watch_owner_state_unavailable")
 	}
+	if err = r.readHermesSchedules(ctx, &out); err != nil {
+		return out, err
+	}
 	out.ScheduleStates, err = readDeclarationSchedules(ctx, r.DB, projectID)
 	if err != nil {
 		return out, err
@@ -204,6 +211,7 @@ func localPrerequisites(p Principal, x localDeclaration) Prerequisites {
 		}
 	}
 	addSchedulePrerequisites(&prereq, x, nil)
+	addHermesPrerequisites(&prereq, x, nil)
 	return prereq
 }
 func declarationWatchOwner(kind pc.DeclarationResourceKind) string {
@@ -236,6 +244,7 @@ func localPrerequisitesFor(p Principal, x localDeclaration, original map[pc.Reso
 		}
 	}
 	addSchedulePrerequisites(&out, x, original)
+	addHermesPrerequisites(&out, x, original)
 	return out
 }
 func declarationWatchContributors(x localDeclaration) ([]projects.DeclarationWatchContributor, error) {
@@ -348,6 +357,9 @@ func (r *LocalResolver) Resolve(ctx context.Context, p Principal, request pc.Dec
 		}
 	}
 	if err := r.appendApplications(ctx, x, &basis, payloads); err != nil {
+		return Resolution{}, err
+	}
+	if err := r.appendHermesSchedules(x, &basis, payloads); err != nil {
 		return Resolution{}, err
 	}
 	if err := r.appendSchedules(ctx, p, x, &basis, payloads); err != nil {

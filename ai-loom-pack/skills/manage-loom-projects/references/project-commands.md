@@ -30,25 +30,8 @@ Categories: notes/docs/research. Notes reads eligible files after apply;
 ignores/formats still apply. No implied backup or Provenance acceptance.
 Allocation sources: [reference](application-data-notes.md).
 
-Defaults: 1 GiB/file, 250 PDF pages, minute polling; smaller limits remain.
-Apply to update existing roots. Uploads stream above 32 MiB; views converge incrementally.
-
-Optional knowledge fields:
-
-```yaml
-refresh: {quiet_for: 10m, max_wait: 30m}
-processing: {ocr: auto, embeddings: true, image_descriptions: false}
-```
-
-Refresh waits once before processing, capped by max_wait; unchanged polling
-does not reset it. Whole seconds only: quiet 0s..24h; maximum positive, >=quiet,
-<=24h. Omission retains prompt native work / ten-minute heavy quiet time.
-OCR: auto/off. Processing omission inherits Main; false opts out, true cannot
-override host disablement. Models/sync remain host/application-owned.
-
-Use `loom notes pipelines inspect <ref>` for policy/deadline/skip reasons;
-selected revisions finish; newer edits coalesce. Search labels last-published
-content during refresh. Use `--require-current` to exclude lag; preserve exact citations.
+For intake filters, quiet windows and enrichment see
+[Notes pipeline declaration](notes-pipeline.md); load only when needed.
 
 Saving source does not enroll it. Plan against the selected owner node:
 
@@ -59,7 +42,8 @@ loom project status <ref> --node <node> --json
 loom project operation <operation-id> --json
 ```
 
-Supply required `--approval` references. Inspection does not resume operations.
+Supply repeatable `--approval` references when required.
+Historical operation inspection does not resume it.
 Apply `--resume <operation-id>`, preserving original selectors,
 effects, plan, key and approval references. Resolve stale plans/prerequisites first.
 
@@ -72,7 +56,8 @@ retain separate authorization.
 
 Prepared application installation uses the same plan/apply/status route within
 node policy. See [managed applications](managed-applications.md) for descriptor,
-data, credentials and public HTTPS beneath `apps.liaust.com`; no per-app host setup.
+data, credentials and public HTTPS beneath `apps.example.com` (operator-selected
+domain); no per-app host setup.
 
 [Schedules](project-schedules.md) use the same plan/apply route.
 

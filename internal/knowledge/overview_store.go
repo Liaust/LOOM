@@ -18,24 +18,10 @@ func (s Store) ListNotesOverviewRows(ctx context.Context, input NotesOverviewInp
 		return nil, fmt.Errorf("knowledge store is not configured")
 	}
 	clauses, args := notesOverviewRootClauses(input)
+	clauses[0] = notesReadableRootWithObjectsSQL("r", input.SourceLifecycle, input.IncludeInactive,
+		`EXISTS (SELECT 1 FROM object_rows visible WHERE visible.notes_source_root_id=r.notes_source_root_id)`)
 	query := `
-		WITH object_search AS (
-			SELECT o.knowledge_object_id,
-			       COUNT(sd.search_document_id)::int AS search_document_count,
-			       MAX(sd.indexed_at) AS last_indexed_at
-			FROM knowledge.knowledge_objects o
-			LEFT JOIN knowledge.knowledge_chunks kc
-			  ON kc.knowledge_object_id = o.knowledge_object_id
-			LEFT JOIN search.search_documents sd
-			  ON sd.source_kind = 'knowledge_chunk'
-			 AND sd.source_id = kc.knowledge_chunk_id
-			WHERE o.deleted_at IS NULL
-			  AND ` + visibleNotesCustodyObjectSQL("o", true) + `
-			  AND ` + notesLifecycleSelectionSQL("o", input.SourceLifecycle) + `
-			  AND ` + visibleNotesKnowledgeRelativePathSQL("o.relative_path") + `
-			GROUP BY o.knowledge_object_id
-		),
-		object_rows AS (
+		WITH object_rows AS MATERIALIZED (
 			SELECT o.notes_source_root_id,
 			       COALESCE(NULLIF(o.file_class, ''), 'unknown') AS file_class,
 			       COALESCE(NULLIF(o.processing_state, ''), 'metadata_only') AS processing_state,
@@ -60,8 +46,15 @@ func (s Store) ListNotesOverviewRows(ctx context.Context, input NotesOverviewInp
 			       o.last_processed_at,
 			       object_search.last_indexed_at
 			FROM knowledge.knowledge_objects o
-			LEFT JOIN object_search
-			  ON object_search.knowledge_object_id = o.knowledge_object_id
+			LEFT JOIN LATERAL (
+				SELECT COUNT(sd.search_document_id)::int AS search_document_count,
+				       MAX(sd.indexed_at) AS last_indexed_at
+				FROM knowledge.knowledge_chunks kc
+				LEFT JOIN search.search_documents sd
+				  ON sd.source_kind = 'knowledge_chunk'
+				 AND sd.source_id = kc.knowledge_chunk_id
+				WHERE kc.knowledge_object_id = o.knowledge_object_id
+			) object_search ON true
 			WHERE o.deleted_at IS NULL
 			  AND ` + visibleNotesCustodyObjectSQL("o", true) + `
 			  AND ` + notesLifecycleSelectionSQL("o", input.SourceLifecycle) + `
@@ -146,16 +139,33 @@ func (s Store) ListNotesOverviewPipelineRows(ctx context.Context, input NotesOve
 		return nil, fmt.Errorf("knowledge store is not configured")
 	}
 	clauses, args := notesOverviewRootClauses(input)
+	// The inner pipeline_stats join already proves a visible object in this root.
+	clauses[0] = "true"
 	query := `
 		WITH pipeline_stats AS (
 			SELECT o.notes_source_root_id,
 			       ps.status,
-			       COUNT(ps.knowledge_pipeline_status_id)::int AS status_count,
+			       COUNT(*)::int AS status_count,
 			       MAX(ps.updated_at) AS last_updated_at,
 			       MAX(ps.failed_at) AS last_failed_at
 			FROM knowledge.knowledge_objects o
-			JOIN knowledge.pipeline_statuses ps
-			  ON ps.knowledge_object_id = o.knowledge_object_id
+			JOIN LATERAL (
+				SELECT current_run.status, current_run.updated_at,
+				       CASE WHEN current_run.status = 'failed' THEN current_run.updated_at END AS failed_at
+				FROM (
+					SELECT status, updated_at FROM knowledge.pipeline_runs
+					WHERE knowledge_object_id = o.knowledge_object_id
+					ORDER BY generation DESC, updated_at DESC, knowledge_pipeline_run_id DESC LIMIT 1
+				) current_run
+				UNION ALL
+				SELECT legacy.status, legacy.updated_at, legacy.failed_at
+				FROM (
+					SELECT status, updated_at, failed_at FROM knowledge.pipeline_statuses
+					WHERE knowledge_object_id = o.knowledge_object_id
+					ORDER BY updated_at DESC, knowledge_pipeline_status_id DESC LIMIT 1
+				) legacy
+				WHERE NOT EXISTS (SELECT 1 FROM knowledge.pipeline_runs WHERE knowledge_object_id = o.knowledge_object_id)
+			) ps ON true
 			WHERE o.deleted_at IS NULL
 			  AND ` + visibleNotesCustodyObjectSQL("o", true) + `
 			  AND ` + notesLifecycleSelectionSQL("o", input.SourceLifecycle) + `

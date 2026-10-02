@@ -1,0 +1,21 @@
+kind: loom.script_exposure
+schema_version: script.exposure.v0.3
+expose:
+  enabled: true
+  provider: project
+  endpoint: codex_review
+capability:
+  class_namespace: project
+  class_name: codex_review
+  form: job
+  risk_level: medium
+  execution_authorization_level: 3
+  requires_approval: false
+  side_effects: [model_inference]
+  input_schema:
+    type: object
+    additionalProperties: false
+  output_schema:
+    type: object
+execution:
+  default_mode: enqueue_only

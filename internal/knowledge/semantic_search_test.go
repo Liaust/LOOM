@@ -51,7 +51,7 @@ func TestNotesSearchExactSemanticVersionProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(query.SQL, "kov.source_hash, '') AS passage_source_hash") || strings.Count(query.SQL, "passage_source_hash") != 2 {
+	if !strings.Contains(query.SQL, "COALESCE(kov.source_hash,'') AS passage_source_hash") || strings.Count(query.SQL, "passage_source_hash") != 1 {
 		t.Fatal("semantic result does not select the matched version hash")
 	}
 }

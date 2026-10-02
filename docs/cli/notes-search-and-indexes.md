@@ -51,7 +51,11 @@ aliases:
 | `loom notes objects reconcile --dry-run` | dry-run | Plans object reconciliation. |
 | `loom notes objects reconcile --apply --yes` | operator-mutating | Writes knowledge-object reconciliation. |
 | `loom notes search` | read-only | Searches notes knowledge documents. |
+| `loom notes passage get` | read-only | Retrieves the exact cited version with current access checks. |
+| `loom notes passage locate` | read-only | Resolves the complete citation to a current enrolled workspace binding, or explains why none is available. |
 | `loom notes reprocess ...` | operator-mutating | Queues notes pipeline work. |
+| `loom notes enrich ...` | read-only | Previews admitted objects and supported one-version enrichment. |
+| `loom notes enrich ... --yes` | operator-mutating | Requests selected OCR, image vision or embeddings without changing automatic defaults; folders require a saved preview. |
 | `loom notes pipelines status/list/inspect/failures` | read-only | Inspects unified file pipelines without returning artifact bodies. |
 | `loom notes pipelines retry ... --yes` | operator-mutating | Creates a new generation after a reviewed failure. |
 | `loom notes pipelines policy status` | read-only | Shows OCR, image-description, and embedding policy. |
@@ -74,6 +78,22 @@ aliases:
 | `loom object ingest` | mutating | Ingests a local file into the object store. |
 
 ## Important Naming
+
+### Citation To Workspace File
+
+Copy the complete `passage_followup` tuple from search. For example, substituting
+only values returned together by that hit:
+
+```sh
+loom --json notes passage locate <chunk-id> --object <object-id> --version <version-id> --source-hash sha256:<digest> --source-lifecycle active
+```
+
+`available` returns `binding.workspace`, `binding.collection`, `binding.path`
+and the exact source hash. `stale_citation`, `archived`, `unbound` or `unavailable`
+does not supply a current writable destination. The backend binding is not a
+device receipt: preserve the separate local-search, sync and indexing labels.
+Use passage get for historical text, not locate as a way to replace an old
+citation with today's file. Neither command mutates source files.
 
 Use:
 

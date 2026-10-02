@@ -13,6 +13,11 @@ var ErrNotesCustodyPaused = fmt.Errorf("%w: Notes source custody pauses processi
 // and privacy checks remain independent, and project writers remain disabled.
 func notesCustodyWriteAllowedSQL(object string) string {
 	return `(NOT EXISTS (
+	 SELECT 1 FROM knowledge.notes_source_roots owner_root
+	 WHERE owner_root.notes_source_root_id=` + object + `.notes_source_root_id AND owner_root.project_id IS NOT NULL
+	 AND NOT EXISTS (SELECT 1 FROM projects.projects owner_project
+	 WHERE owner_project.project_id=owner_root.project_id AND owner_project.status='active')
+	) AND NOT EXISTS (
 	 SELECT 1 FROM knowledge.notes_current_custody current_custody
 	 JOIN storage.workspace_lifecycle_events current_event USING(workspace_lifecycle_event_id)
 	 WHERE current_custody.knowledge_object_id=` + object + `.knowledge_object_id AND current_event.to_state='archived'
@@ -21,8 +26,8 @@ func notesCustodyWriteAllowedSQL(object string) string {
 	 JOIN storage.workspace_archive_operations custody_op ON custody_op.operation_kind='archive'
 	 WHERE custody_root.notes_source_root_id=` + object + `.notes_source_root_id
 	 AND custody_node.node_key=custody_root.node_key AND custody_node.node_role='main'
-	 AND (starts_with(` + object + `.source_path,(custody_op.plan_json#>>'{source,path,absolute_path}') || '/')
-	 OR starts_with(custody_root.source_path || '/' || ` + object + `.relative_path,(custody_op.plan_json#>>'{source,path,absolute_path}') || '/'))
+	 AND (starts_with(` + object + `.source_path,custody_op.source_absolute_path || '/')
+	 OR starts_with(custody_root.source_path || '/' || ` + object + `.relative_path,custody_op.source_absolute_path || '/'))
 	 AND NOT EXISTS (
 	 SELECT 1 FROM storage.workspace_archive_manifests custody_manifest
 	 JOIN storage.workspace_archive_operations custody_restore ON custody_restore.workspace_archive_operation_id=custody_manifest.restore_operation_id

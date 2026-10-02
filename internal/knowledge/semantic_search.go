@@ -25,14 +25,14 @@ func (s *Service) resolveNotesSearchMode(ctx context.Context, input NotesSearchI
 	if err != nil {
 		return "", requestedMode, false, "", EmbeddingSettings{}, err
 	}
-	activeCount := 0
+	hasEmbeddings := false
 	if settings.Enabled {
-		activeCount, err = s.store.CountActiveCurrentEmbeddings(ctx, settings)
+		hasEmbeddings, err = s.store.HasActiveCurrentEmbeddings(ctx, settings)
 		if err != nil {
 			return "", requestedMode, false, "", EmbeddingSettings{}, err
 		}
 	}
-	semanticAvailable = settings.Enabled && activeCount > 0 && s.embeddingRuntime != nil
+	semanticAvailable = settings.Enabled && hasEmbeddings && s.embeddingRuntime != nil
 	if requestedMode == "" {
 		requestedMode = NotesSearchModeHybrid
 	}
@@ -43,7 +43,7 @@ func (s *Service) resolveNotesSearchMode(ctx context.Context, input NotesSearchI
 	case NotesSearchModeSemantic:
 		if !settings.Enabled {
 			fallbackReason = notesSearchFallbackEmbeddingsDisabled
-		} else if activeCount == 0 {
+		} else if !hasEmbeddings {
 			fallbackReason = notesSearchFallbackNoActiveEmbeddings
 		} else if s.embeddingRuntime == nil {
 			fallbackReason = notesSearchFallbackRuntimeUnavailable
@@ -53,7 +53,7 @@ func (s *Service) resolveNotesSearchMode(ctx context.Context, input NotesSearchI
 		if !settings.Enabled {
 			return NotesSearchModeLexical, requestedMode, semanticAvailable, notesSearchFallbackEmbeddingsDisabled, settings, nil
 		}
-		if activeCount == 0 {
+		if !hasEmbeddings {
 			return NotesSearchModeLexical, requestedMode, semanticAvailable, notesSearchFallbackNoActiveEmbeddings, settings, nil
 		}
 		if s.embeddingRuntime == nil {
@@ -108,6 +108,11 @@ func (s *Service) notesSearchQueryVector(ctx context.Context, input NotesSearchI
 }
 
 func (s *Service) searchSemanticNotesVector(ctx context.Context, input NotesSearchInput, settings EmbeddingSettings, vector []float32) ([]NotesSearchResult, error) {
+	if input.semanticBatch != nil {
+		if results, ok := input.semanticBatch[notesLexicalVariant{input.SourceLifecycle, input.RequireCurrent, input.Limit}]; ok {
+			return append([]NotesSearchResult{}, results...), nil
+		}
+	}
 	query, err := buildSemanticNotesSearchQuery(input, settings, vector)
 	if err != nil {
 		return nil, err
@@ -136,6 +141,13 @@ func (s *Service) searchSemanticNotesVector(ctx context.Context, input NotesSear
 }
 
 func buildSemanticNotesSearchQuery(input NotesSearchInput, settings EmbeddingSettings, vector []float32) (notesSearchQuery, error) {
+	return buildSemanticNotesVariantsQuery(input, settings, vector, nil)
+}
+
+func buildSemanticNotesVariantsQuery(input NotesSearchInput, settings EmbeddingSettings, vector []float32, variants []notesLexicalVariant) (notesSearchQuery, error) {
+	if input.indexed != nil {
+		return buildIndexedNotesSemanticHydration(input, settings, vector, variants)
+	}
 	if _, err := NormalizeSourceLifecycleFilter(input.SourceLifecycle); err != nil {
 		return notesSearchQuery{}, err
 	}
@@ -159,50 +171,34 @@ func buildSemanticNotesSearchQuery(input NotesSearchInput, settings EmbeddingSet
 		firstNonEmpty(settings.ModelKey, EmbeddingModelMXBAIEmbedLarge),
 		firstPositiveInt(settings.Dimensions, DefaultEmbeddingDimensions),
 	}
+	objectsInput := input
+	if len(variants) > 0 {
+		objectsInput.SourceLifecycle = SourceLifecycleFilterAll
+	}
+	objectsSQL := notesSearchObjectsSQL(objectsInput, &args)
 	sqlText := `
-		WITH semantic_candidates AS (
+		WITH visible_objects AS MATERIALIZED (` + objectsSQL + `),
+		semantic_candidates AS MATERIALIZED (
 			SELECT sd.search_document_id,
-			       sd.source_kind,
 			       ko.knowledge_object_id,
-			       COALESCE(kc.knowledge_object_version_id, '') AS knowledge_object_version_id,
-			       COALESCE(kov.source_hash, '') AS passage_source_hash,
-			       (COALESCE(kc.metadata->>'text_source', '') = 'metadata_text'
-			        OR COALESCE(sd.metadata->>'text_source', '') = 'metadata_text'
-			        OR COALESCE(sd.metadata->'metadata_only' = 'true'::jsonb, false)) AS passage_metadata_only,
 			       kc.knowledge_chunk_id,
-			       root.notes_source_root_id,
-			       root.root_kind,
-			       ` + notesSearchReadContextSQL("root", "ko", "kov", true) + ` AS source_context_root,
-			       ko.source_node_key,
-			       COALESCE(ko.project_id, '') AS project_id,
 			       ko.relative_path,
-			       ko.source_path,
-			       COALESCE(NULLIF(ko.title, ''), NULLIF(sd.title, ''), ko.relative_path) AS title,
-			       ko.file_class,
-			       kc.chunk_index,
-			       COALESCE(kc.structural_path, sd.summary, '') AS structural_path,
-			       left(kc.chunk_text, 240) AS snippet,
 			       (ce.embedding <=> $1::vector) AS semantic_distance,
-			       sd.source_created_at,
-			       sd.source_modified_at,
-			       COALESCE(sd.recency_at, ko.recency_at) AS recency_at,
-			       COALESCE(NULLIF(sd.recency_basis, ''), ko.recency_basis) AS recency_basis,
-			       COALESCE(kov.observed_at, ko.last_seen_at) AS observed_at,
-			       sd.indexed_at
+			       ko.search_lifecycle,
+			       (COALESCE(kov.source_revision,ko.source_revision)=ko.latest_source_revision
+			        AND COALESCE(kov.source_hash,ko.source_hash)=ko.latest_source_hash) AS publication_current
 			FROM knowledge.chunk_embeddings ce
 			JOIN knowledge.knowledge_chunks kc
 			  ON kc.knowledge_chunk_id = ce.knowledge_chunk_id
 			 AND kc.knowledge_object_id = ce.knowledge_object_id
 			 AND kc.chunk_hash = ce.chunk_hash
 			 AND kc.chunker_version = ce.chunker_version
-			JOIN knowledge.knowledge_objects ko
+			JOIN visible_objects ko
 			  ON ko.knowledge_object_id = kc.knowledge_object_id
 			 AND ko.knowledge_object_id = ce.knowledge_object_id
 			LEFT JOIN knowledge.knowledge_object_versions kov
 			  ON kov.knowledge_object_version_id = kc.knowledge_object_version_id
 			 AND kov.knowledge_object_id = kc.knowledge_object_id
-			JOIN knowledge.notes_source_roots root
-			  ON root.notes_source_root_id = ko.notes_source_root_id
 			JOIN search.search_documents sd
 			  ON sd.source_kind = 'knowledge_chunk'
 			 AND sd.source_id = kc.knowledge_chunk_id
@@ -213,10 +209,7 @@ func buildSemanticNotesSearchQuery(input NotesSearchInput, settings EmbeddingSet
 			  AND ce.runtime_key = $2
 			  AND ce.model_key = $3
 			  AND ce.dimensions = $4
-			  AND ko.deleted_at IS NULL
-			  AND ` + visibleNotesCustodyObjectSQL("ko", true) + `
-			  AND ` + notesLifecycleSelectionSQL("ko", input.SourceLifecycle) + `
-			  AND ` + notesPublishedVersionSQL("ko", "kc", "kov", true, input.RequireCurrent) + `
+			  AND ` + notesPublishedVersionSQL("ko", "kc", "kov", true, false) + `
 			  AND ` + notesHybridVersionSQL(input.Mode) + `
 			  AND kc.status IN ('created', 'indexed')
 			  AND (
@@ -224,29 +217,10 @@ func buildSemanticNotesSearchQuery(input NotesSearchInput, settings EmbeddingSet
 				OR kc.knowledge_object_version_id IS NULL
 				OR ce.knowledge_object_version_id = kc.knowledge_object_version_id
 			  )
-			  AND ` + visibleNotesKnowledgeRelativePathSQL("ko.relative_path") + `
 	`
 	add := func(condition string, value any) {
 		args = append(args, value)
 		sqlText += fmt.Sprintf(" AND %s $%d", condition, len(args))
-	}
-	if value := strings.TrimSpace(input.ProjectID); value != "" {
-		add("ko.project_id =", value)
-	}
-	if input.SourceCategory != "" {
-		add("("+sourceCategorySQL("root.root_kind")+") =", input.SourceCategory)
-	}
-	if value := strings.TrimSpace(input.SourceNodeKey); value != "" {
-		add("ko.source_node_key =", value)
-	}
-	if value := strings.TrimSpace(input.NotesSourceRootID); value != "" {
-		add("ko.notes_source_root_id =", value)
-	}
-	if value := strings.TrimSpace(input.FileClass); value != "" {
-		add("ko.file_class =", value)
-	}
-	if value := strings.TrimSpace(input.Path); value != "" {
-		add("ko.relative_path ILIKE", "%"+value+"%")
 	}
 	for _, tag := range normalizeTags(input.Tags) {
 		add("(sd.metadata->'tags') ?", tag)
@@ -263,38 +237,95 @@ func buildSemanticNotesSearchQuery(input NotesSearchInput, settings EmbeddingSet
 		before, _ := ParseAbsoluteTimestamp(input.Before)
 		add("COALESCE(sd.recency_at, ko.recency_at) <", before)
 	}
-	args = append(args, candidateLimit)
-	sqlText += fmt.Sprintf(`
-		)
-		SELECT search_document_id,
-		       source_kind,
-		       knowledge_object_id,
-		       knowledge_object_version_id,
-		       knowledge_chunk_id,
-		       notes_source_root_id,
-		       root_kind,
-		       source_node_key,
-		       project_id,
-		       relative_path,
-		       source_path,
-		       title,
-		       file_class,
-		       chunk_index,
-		       structural_path,
-		       snippet,
-		       semantic_distance,
-		       source_created_at,
-		       source_modified_at,
-		       recency_at,
-		       recency_basis,
-		       observed_at,
-		       indexed_at
-		       ,source_context_root
-		       ,passage_source_hash, passage_metadata_only
-		FROM semantic_candidates
-		ORDER BY semantic_distance ASC, relative_path, search_document_id
-		LIMIT $%d`, len(args))
+	sqlText += `)`
+	filterSQL, limitSQL := "TRUE", "request.candidate_limit"
+	if len(variants) > 0 {
+		values := make([]string, 0, len(variants))
+		for i, variant := range variants {
+			if variant.Lifecycle != SourceLifecycleFilterActive && variant.Lifecycle != SourceLifecycleFilterArchived {
+				return notesSearchQuery{}, fmt.Errorf("invalid semantic partition lifecycle")
+			}
+			values = append(values, fmt.Sprintf("(%d,'%s',%t,%d)", i, variant.Lifecycle, variant.Current, notesSearchCandidateLimit(variant.Limit)))
+		}
+		sqlText += ` SELECT request.ordinal,result.* FROM (VALUES ` + strings.Join(values, ",") + `)
+		 AS request(ordinal,lifecycle,require_current,candidate_limit) CROSS JOIN LATERAL (`
+		filterSQL = "search_lifecycle=request.lifecycle AND (NOT request.require_current OR publication_current)"
+	} else {
+		if input.RequireCurrent {
+			filterSQL = "publication_current"
+		}
+		args = append(args, candidateLimit)
+		limitSQL = fmt.Sprintf("$%d", len(args))
+	}
+	if len(variants) == 0 {
+		sqlText += `,`
+	} else {
+		sqlText += `WITH`
+	}
+	sqlText += ` ranked AS MATERIALIZED (
+	 SELECT * FROM semantic_candidates WHERE ` + filterSQL + `
+	 ORDER BY semantic_distance ASC,relative_path,search_document_id LIMIT ` + limitSQL + `
+	)
+	SELECT sd.search_document_id, sd.source_kind, ko.knowledge_object_id,
+	 COALESCE(kc.knowledge_object_version_id,''), kc.knowledge_chunk_id,
+	 root.notes_source_root_id, root.root_kind, ko.source_node_key, COALESCE(ko.project_id,''),
+	 ko.relative_path, ko.source_path,
+	 COALESCE(NULLIF(ko.title,''),NULLIF(sd.title,''),ko.relative_path), ko.file_class,
+	 kc.chunk_index, COALESCE(kc.structural_path,sd.summary,''), left(kc.chunk_text,240),
+	 ranked.semantic_distance, sd.source_created_at, sd.source_modified_at,
+	 COALESCE(sd.recency_at,ko.recency_at), COALESCE(NULLIF(sd.recency_basis,''),ko.recency_basis),
+	 COALESCE(kov.observed_at,ko.last_seen_at), sd.indexed_at,
+	 ` + notesSearchReadContextSQL("root", "ko", "kov", true) + ` AS source_context_root,
+	 COALESCE(kov.source_hash,'') AS passage_source_hash,
+	 (COALESCE(kc.metadata->>'text_source','')='metadata_text'
+	  OR COALESCE(sd.metadata->>'text_source','')='metadata_text'
+	  OR COALESCE(sd.metadata->'metadata_only'='true'::jsonb,false))
+	FROM ranked
+	JOIN search.search_documents sd ON sd.search_document_id=ranked.search_document_id
+	JOIN knowledge.knowledge_objects ko ON ko.knowledge_object_id=ranked.knowledge_object_id
+	JOIN knowledge.knowledge_chunks kc ON kc.knowledge_chunk_id=ranked.knowledge_chunk_id
+	JOIN knowledge.notes_source_roots root ON root.notes_source_root_id=ko.notes_source_root_id
+	LEFT JOIN knowledge.knowledge_object_versions kov
+	 ON kov.knowledge_object_version_id=kc.knowledge_object_version_id AND kov.knowledge_object_id=ko.knowledge_object_id
+	ORDER BY ranked.semantic_distance,ranked.relative_path,ranked.search_document_id`
+	if len(variants) > 0 {
+		sqlText += `) result ORDER BY request.ordinal,result.semantic_distance,result.relative_path,result.search_document_id`
+	}
 	return notesSearchQuery{SQL: sqlText, Args: args}, nil
+}
+
+func (s *Service) loadNotesSemanticBatch(ctx context.Context, input NotesSearchInput, settings EmbeddingSettings, vector []float32) (map[notesLexicalVariant][]NotesSearchResult, error) {
+	variants := notesLexicalVariants(input)
+	query, err := buildSemanticNotesVariantsQuery(input, settings, vector, variants)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.queryNotesSearch(ctx, input, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	batch := make(map[notesLexicalVariant][]NotesSearchResult, len(variants))
+	for _, variant := range variants {
+		batch[variant] = []NotesSearchResult{}
+	}
+	for rows.Next() {
+		var ordinal int
+		result, err := scanSemanticNotesSearchResult(notesReadScannerFunc(func(dest ...any) error {
+			return rows.Scan(append([]any{&ordinal}, dest...)...)
+		}))
+		if err != nil {
+			return nil, err
+		}
+		if ordinal < 0 || ordinal >= len(variants) {
+			return nil, fmt.Errorf("invalid semantic request partition")
+		}
+		key := variants[ordinal]
+		result.SemanticRank = len(batch[key]) + 1
+		result.Citation = notesSearchCitation(result)
+		batch[key] = append(batch[key], result)
+	}
+	return batch, rows.Err()
 }
 
 func scanSemanticNotesSearchResult(scanner notesSearchResultScanner) (NotesSearchResult, error) {
@@ -537,13 +568,13 @@ func firstPositiveInt(value int, fallback int) int {
 	return fallback
 }
 
-func (s Store) CountActiveCurrentEmbeddings(ctx context.Context, settings EmbeddingSettings) (int, error) {
+func (s Store) HasActiveCurrentEmbeddings(ctx context.Context, settings EmbeddingSettings) (bool, error) {
 	if s.db == nil {
-		return 0, fmt.Errorf("knowledge store is not configured")
+		return false, fmt.Errorf("knowledge store is not configured")
 	}
-	var count int
+	var exists bool
 	err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*)::int
+		SELECT EXISTS (SELECT 1
 		FROM knowledge.chunk_embeddings ce
 		JOIN knowledge.knowledge_chunks kc
 		  ON kc.knowledge_chunk_id = ce.knowledge_chunk_id
@@ -567,9 +598,10 @@ func (s Store) CountActiveCurrentEmbeddings(ctx context.Context, settings Embedd
 			OR kc.knowledge_object_version_id IS NULL
 			OR ce.knowledge_object_version_id = kc.knowledge_object_version_id
 		  )
-	`, firstNonEmpty(settings.RuntimeKey, EmbeddingRuntimeOllama), firstNonEmpty(settings.ModelKey, EmbeddingModelMXBAIEmbedLarge), firstPositiveInt(settings.Dimensions, DefaultEmbeddingDimensions)).Scan(&count)
+		)
+	`, firstNonEmpty(settings.RuntimeKey, EmbeddingRuntimeOllama), firstNonEmpty(settings.ModelKey, EmbeddingModelMXBAIEmbedLarge), firstPositiveInt(settings.Dimensions, DefaultEmbeddingDimensions)).Scan(&exists)
 	if err == sql.ErrNoRows {
-		return 0, nil
+		return false, nil
 	}
-	return count, err
+	return exists, err
 }

@@ -127,6 +127,83 @@ func embedChunkPassages(ctx context.Context, runtime EmbeddingRuntime, model str
 	}
 }
 
+const embeddingMicrobatchChunks = 8
+const embeddingMicrobatchBytes = 32 * 1024
+
+type chunkEmbeddingResult struct {
+	Vector    []float32
+	InputHash string
+}
+
+// Inputs remain separate model sequences, not one concatenated context. A batch
+// refusal falls back to the same lossless adaptive splitter used by single chunks.
+func embedChunkBatch(ctx context.Context, runtime EmbeddingRuntime, model string, dimensions int, chunks []KnowledgeChunk) ([]chunkEmbeddingResult, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	passages, err := PrepareEmbeddingPassages(chunks, EmbeddingPassageOptions{})
+	if err != nil {
+		return nil, err
+	}
+	inputs, err := EmbeddingRuntimeInputsFromPassages(passages)
+	if err != nil {
+		return nil, err
+	}
+	response, err := runtime.Embed(ctx, EmbeddingRuntimeRequest{Model: model, Inputs: inputs, Truncate: false})
+	var runtimeErr *EmbeddingRuntimeError
+	if errors.As(err, &runtimeErr) && runtimeErr.Kind == EmbeddingRuntimeErrorContextLength {
+		results := make([]chunkEmbeddingResult, 0, len(chunks))
+		for _, chunk := range chunks {
+			r, p, err := embedChunkPassages(ctx, runtime, model, chunk)
+			if err != nil {
+				return nil, err
+			}
+			mapped, err := mapChunkEmbeddingResults([]KnowledgeChunk{chunk}, p, r, dimensions)
+			if err != nil {
+				return nil, err
+			}
+			results = append(results, mapped...)
+		}
+		return results, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return mapChunkEmbeddingResults(chunks, passages, response, dimensions)
+}
+
+func mapChunkEmbeddingResults(chunks []KnowledgeChunk, passages []EmbeddingPassage, response EmbeddingRuntimeResponse, dimensions int) ([]chunkEmbeddingResult, error) {
+	if len(response.Embeddings) != len(passages) {
+		return nil, fmt.Errorf("%w: embedding response passage count mismatch", ErrInvalid)
+	}
+	for _, vector := range response.Embeddings {
+		if len(vector) != dimensions {
+			return nil, fmt.Errorf("%w: embedding response dimensions mismatch", ErrInvalid)
+		}
+	}
+	results := make([]chunkEmbeddingResult, 0, len(chunks))
+	offset := 0
+	for _, chunk := range chunks {
+		end := offset
+		for end < len(passages) && passages[end].KnowledgeChunkID == chunk.KnowledgeChunkID {
+			end++
+		}
+		if end == offset {
+			return nil, fmt.Errorf("%w: embedding chunk has no mapped passages", ErrInvalid)
+		}
+		vector, err := AverageEmbeddingVectors(response.Embeddings[offset:end])
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, chunkEmbeddingResult{Vector: vector, InputHash: hashEmbeddingInput(passages[offset:end])})
+		offset = end
+	}
+	if offset != len(passages) {
+		return nil, fmt.Errorf("%w: unmapped embedding passages", ErrInvalid)
+	}
+	return results, nil
+}
+
 type embeddingTextSegment struct {
 	Text  string
 	Start int

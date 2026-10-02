@@ -83,3 +83,39 @@ func TestSourcePipelinePolicyOverrides(t *testing.T) {
 		t.Fatal("legacy snapshot changed")
 	}
 }
+
+func TestCollectionAttachmentProcessingPolicy(t *testing.T) {
+	metadata := json.RawMessage(`{"source_root":{"knowledge_source":{"policy":{"processing":{"paths":["TreeOfLife/**"],"ocr":"off","image_descriptions":false,"embeddings":true,"embedding_file_types":["markdown","text"]}}}}}`)
+	for _, tc := range []struct {
+		path, class        string
+		embed, ocr, vision bool
+	}{
+		{"TreeOfLife/note.md", storagecatalog.FileClassMarkdown, true, false, false},
+		{"TreeOfLife/paper.pdf", storagecatalog.FileClassPDF, false, false, false},
+		{"TreeOfLife/image.png", storagecatalog.FileClassImage, false, false, false},
+		{"TreeOfLife/diagram.canvas", storagecatalog.FileClassText, false, false, false},
+		{"TreeOfLife/recording.wav", storagecatalog.FileClassAudio, false, false, false},
+		{"Other/paper.pdf", storagecatalog.FileClassPDF, true, true, true},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			object := KnowledgeObject{RelativePath: tc.path, FileClass: tc.class, Metadata: metadata}
+			source, err := knowledgeSourcePolicy(object)
+			if err != nil {
+				t.Fatal(err)
+			}
+			effective := effectiveSourcePipelinePolicy(PipelinePolicy{EmbeddingsEnabled: true, PDFOCREnabled: true, ImageOCREnabled: true, ImageDescriptionsEnabled: true}, source)
+			if effective.EmbeddingsEnabled != tc.embed || effective.PDFOCREnabled != tc.ocr || effective.ImageOCREnabled != tc.ocr || effective.ImageDescriptionsEnabled != tc.vision {
+				t.Fatalf("wrong effective policy: %+v", effective)
+			}
+			plan, err := CompilePipelinePlan(object, PipelinePolicy{EmbeddingsEnabled: true, PDFOCREnabled: true, ImageOCREnabled: true, ImageDescriptionsEnabled: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, stage := range plan.Stages {
+				if stage.StageKey == FilePipelineStageEmbedding && stage.Selected != tc.embed {
+					t.Fatalf("unexpected embedding stage: %+v", stage)
+				}
+			}
+		})
+	}
+}

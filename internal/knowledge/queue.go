@@ -20,7 +20,7 @@ const (
 	defaultKnowledgeRetryMaximumDelay  = time.Hour
 	defaultKnowledgeMaxTextBytes       = int64(5 * 1024 * 1024)
 	defaultKnowledgeMaxExtractedBytes  = int64(10 * 1024 * 1024)
-	defaultKnowledgeMaxChunksPerObject = 1000
+	defaultKnowledgeMaxChunksPerObject = 2048
 )
 
 type KnowledgeWorkClaimOptions struct {

@@ -36,7 +36,27 @@ func NewSupervisor(service Service, logger *slog.Logger) Supervisor {
 }
 
 func (s Supervisor) Run(ctx context.Context, req requestctx.Context) {
-	_, _ = s.RunDueOnce(ctx, req, time.Now().UTC())
+	// Jobs may run for hours. Their existing single-runner loop must not block
+	// the scheduler/dispatcher that enqueues them or unrelated maintenance ticks.
+	jobsDone := make(chan struct{})
+	go func() {
+		defer close(jobsDone)
+		s.runLoop(ctx, req, "jobs")
+	}()
+	// The Notes transport keeps a bounded live connection; it must not hold
+	// the serial background lane while waiting for the next device edit.
+	notesDone := make(chan struct{})
+	go func() {
+		defer close(notesDone)
+		s.runLoop(ctx, req, "notes")
+	}()
+	s.runLoop(ctx, req, "background")
+	<-jobsDone
+	<-notesDone
+}
+
+func (s Supervisor) runLoop(ctx context.Context, req requestctx.Context, lane string) {
+	_, _ = s.runDueOnce(ctx, req, time.Now().UTC(), lane)
 
 	interval := s.PollInterval
 	if interval <= 0 {
@@ -50,7 +70,7 @@ func (s Supervisor) Run(ctx context.Context, req requestctx.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			if _, err := s.RunDueOnce(ctx, req, now.UTC()); err != nil && s.Logger != nil {
+			if _, err := s.runDueOnce(ctx, req, now.UTC(), lane); err != nil && s.Logger != nil {
 				s.Logger.Warn("worker supervisor tick failed",
 					slog.String("component", "workers"),
 					slog.String("error", err.Error()),
@@ -61,14 +81,20 @@ func (s Supervisor) Run(ctx context.Context, req requestctx.Context) {
 }
 
 func (s Supervisor) RunDueOnce(ctx context.Context, req requestctx.Context, now time.Time) (SupervisorResult, error) {
-	result := SupervisorResult{}
-	repair, err := s.Service.RepairStaleRuns(ctx, req, now)
-	if err != nil {
-		return SupervisorResult{}, err
-	}
-	result.RepairedStaleRuns = repair.RepairedInstances
+	return s.runDueOnce(ctx, req, now, "")
+}
 
-	workers, err := s.Service.ListDueWorkers(ctx, now, 50)
+func (s Supervisor) runDueOnce(ctx context.Context, req requestctx.Context, now time.Time, lane string) (SupervisorResult, error) {
+	result := SupervisorResult{}
+	if lane == "background" || lane == "" {
+		repair, err := s.Service.RepairStaleRuns(ctx, req, now)
+		if err != nil {
+			return SupervisorResult{}, err
+		}
+		result.RepairedStaleRuns = repair.RepairedInstances
+	}
+
+	workers, err := s.Service.listDueWorkers(ctx, now, 50, lane)
 	if err != nil {
 		return SupervisorResult{}, err
 	}

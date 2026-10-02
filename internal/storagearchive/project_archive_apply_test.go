@@ -66,6 +66,39 @@ func TestProjectArchiveApplyMovesPayloadAndCommitsLifecycle(t *testing.T) {
 	}
 }
 
+func TestProjectArchiveNativePauseFailurePreservesPayloadAndRecovers(t *testing.T) {
+	environment, plan := newProjectArchiveApplyEnvironment(t)
+	pauseErr := errors.New("native schedule owner unavailable")
+	calls := 0
+	environment.service.PauseNativeSchedules = func(ctx context.Context, projectID string) error {
+		calls++
+		if projectID != plan.Custody.ProjectID || environment.projects.transitions == 0 {
+			t.Fatal("native pause lacks committed project fence")
+		}
+		if _, err := os.Lstat(environment.canonicalRoot); err != nil {
+			t.Fatalf("workspace moved before native pause: %v", err)
+		}
+		if calls == 1 {
+			return pauseErr
+		}
+		return nil
+	}
+	partial, err := environment.service.ApplyProjectPhysicalArchive(context.Background(), plan, plan.PlanDigest)
+	if !errors.Is(err, pauseErr) || !partial.MutationBlocked || !partial.Recoverable || len(partial.Deactivations) != 0 {
+		t.Fatalf("pause failure must stop before deactivation: result=%#v err=%v", partial, err)
+	}
+	if err := projects.EnsureProjectMutable(partial.Project.Project.Project, "project_activation", "scripts"); !projects.IsProjectArchiveInProgress(err) {
+		t.Fatalf("pause failure lost archive fence: %v", err)
+	}
+	recovered, err := environment.service.RecoverProjectPhysicalArchive(context.Background(), plan, plan.PlanDigest)
+	if err != nil || recovered.Phase != projects.ProjectArchivePhaseComplete || calls != 2 {
+		t.Fatalf("native pause retry failed: calls=%d result=%#v err=%v", calls, recovered, err)
+	}
+	if _, err := environment.service.ApplyProjectPhysicalArchive(context.Background(), plan, plan.PlanDigest); err != nil || calls != 2 {
+		t.Fatalf("terminal replay repeated native pause: calls=%d err=%v", calls, err)
+	}
+}
+
 func TestProjectArchiveApplyRequiresExplicitArchiveDeactivationBeforeMutation(t *testing.T) {
 	environment, plan := newProjectArchiveApplyEnvironment(t)
 	environment.service.Activation = &fakeProjectRuntimeActivationService{}

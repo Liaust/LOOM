@@ -147,6 +147,16 @@ func ParsePolicy(enabled, key string) (Policy, error) {
 // Check verifies every included committed package, and requires fresh evidence
 // when enabled. It never reads live profile state or treats staging as evidence.
 func Check(ctx context.Context, p Policy, now time.Time) ([]Evidence, error) {
+	return checkFreshness(ctx, p, now, MaxAge)
+}
+
+// CheckDailyCoverage reports the daily publisher's coverage, not eligibility
+// for creating a backup. Both paths authenticate the same retained packages.
+func CheckDailyCoverage(ctx context.Context, p Policy, now time.Time) ([]Evidence, error) {
+	return checkFreshness(ctx, p, now, 24*time.Hour+MaxAge)
+}
+
+func checkFreshness(ctx context.Context, p Policy, now time.Time, maxAge time.Duration) ([]Evidence, error) {
 	p, origin, err := p.Resolve()
 	if err != nil {
 		return nil, err
@@ -208,7 +218,7 @@ func Check(ctx context.Context, p Policy, now time.Time) ([]Evidence, error) {
 		if e.CreatedAt.After(now) {
 			return nil, fmt.Errorf("future recovery evidence")
 		}
-		if expectedOrigin == origin && now.Sub(e.CreatedAt) <= MaxAge {
+		if expectedOrigin == origin && now.Sub(e.CreatedAt) <= maxAge {
 			fresh = true
 		}
 		delete(retained, name)

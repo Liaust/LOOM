@@ -107,7 +107,8 @@ file allowlist and source hashes. Initially allow only these source templates:
   `protocols/CREDENTIALS.md`, `protocols/DEVICE-AND-TOOL-ROUTING.md`,
   `protocols/MAC-COMPUTER-USE.md`, `protocols/EXTERNAL-MESSAGING.md`,
   `protocols/LOOM-ROUTING.md`, `protocols/PROJECT-DELEGATION.md`,
-  `protocols/PROVENANCE-AND-MEMORY.md`, `protocols/SESSION-RETRIEVAL.md`,
+  `protocols/PROVENANCE-AND-MEMORY.md`, `protocols/PROVENANCE-RECONCILIATION.md`,
+  `protocols/SESSION-RETRIEVAL.md`,
   `protocols/SKILL-CREATION-AND-PROMOTION.md`.
 - `handoffs/HANDOFF-TEMPLATE.md`, as an empty handoff form only.
 

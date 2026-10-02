@@ -226,6 +226,16 @@ func (s ProjectRuntimeService) applyProjectPhysicalArchive(ctx context.Context, 
 	}
 	result = projectArchiveFailureResult(result, current, state, nil)
 
+	// The committed mutation-blocked phase is the lifecycle fence. The project
+	// transition's exclusive row lock waited for any in-flight declaration share
+	// lock; all later declaration applies refuse this archive phase. Pause before
+	// deactivation/move, retry idempotently after failure, and never resume here.
+	if s.PauseNativeSchedules != nil {
+		if err := s.PauseNativeSchedules(ctx, plan.Custody.ProjectID); err != nil {
+			return result, err
+		}
+	}
+
 	deactivations := make([]projects.ProjectDeactivationResult, 0, len(plan.Deactivations))
 	for _, reviewed := range plan.Deactivations {
 		input := reviewed.Input

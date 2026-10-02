@@ -30,6 +30,7 @@ type Store struct {
 
 	// A value-scoped token is passed only through one held sync transaction.
 	syncLocked bool
+	syncBatch  *queueBatch
 }
 
 type LocalQueueCounts struct {

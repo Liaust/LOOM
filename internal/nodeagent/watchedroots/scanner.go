@@ -57,11 +57,15 @@ func Reconcile(ctx context.Context, store Store, req ScanRequest) (ScanResult, e
 	if mode == ScanModeAuto {
 		mode = autoScanMode(root, checkpoint, dirtyHints, started)
 	}
+	if req.Force {
+		mode = ScanModeFull
+	}
 	if mode == ScanModeDirty && hasRescanHint(dirtyHints) {
 		mode = ScanModeFull
 	}
 
 	result := ScanResult{
+		forceHash: req.Force || req.Mode == ScanModeFull || mode == ScanModeDirty,
 		RootKey:   root.Config.RootKey,
 		Mode:      mode,
 		Status:    RunStatusHealthy,
@@ -366,7 +370,9 @@ func reconcileObservation(store Store, root ValidatedRoot, previous PathState, o
 	}
 	preserveOutputState(previous, &state)
 	if state.Status == PathStatusIncluded && obs.Kind == PathKindFile {
-		hashURI, hashStatus, err := hashStableFile(root, obs.RelativePath, previous, result)
+		state.HashObservedAt = hashObservationSince(previous, obs, now)
+		state.HashVerifiedAt = previous.HashVerifiedAt
+		hashURI, hashStatus, err := hashStableFile(root, obs.RelativePath, previous, &state, result)
 		if err != nil {
 			state.HashStatus = HashStatusError
 			state.LastErrorCode = HashStatusError
@@ -390,6 +396,9 @@ func reconcileObservation(store Store, root ValidatedRoot, previous PathState, o
 		result.Counts.Changed++
 	} else {
 		result.Counts.Unchanged++
+	}
+	if change == nil && state.HashStatus == HashStatusUnchanged && state.HashVerifiedAt == previous.HashVerifiedAt {
+		return previous, nil, nil
 	}
 	if err := store.SavePathState(state); err != nil {
 		return PathState{}, nil, err
@@ -584,16 +593,29 @@ func finishScan(store Store, root ValidatedRoot, workerKey string, result ScanRe
 	if err != nil {
 		return ScanResult{}, err
 	}
-	states, err := store.ListPathStates(root.Config.RootKey, 0)
-	if err != nil {
-		return ScanResult{}, err
-	}
+	var states []PathState
 	if result.Status == RunStatusSkipped || result.Mode == RunStatusSkipped {
-		applyStoredStateCounts(&result, states)
+		if previous.StoredCounts != nil {
+			counts := *previous.StoredCounts
+			result.Counts.Files, result.Counts.Directories = counts.Files, counts.Directories
+			result.Counts.Included, result.Counts.Excluded = counts.Included, counts.Excluded
+			result.Counts.Skipped, result.Counts.Deleted = counts.Skipped, counts.Deleted
+			result.Counts.MissingDeferred = counts.MissingDeferred
+		}
+	} else {
+		states, err = store.ListPathStates(root.Config.RootKey, 0)
+		if err != nil {
+			return ScanResult{}, err
+		}
 	}
+	result.FinishedAt = time.Now().UTC()
+	result.DurationMS = result.FinishedAt.Sub(result.StartedAt).Milliseconds()
 	result.Counts.Findings = countActiveFindings(findings)
 	result.Checkpoint = buildCheckpoint(root, workerKey, previous, result, states)
 	result.Summary = buildSummary(root, workerKey, result, findings)
+	if result.Checkpoint.LastFullRescanAt != nil {
+		result.Summary.LastFullScanAt = *result.Checkpoint.LastFullRescanAt
+	}
 	if err := store.SaveCheckpoint(root.Config.RootKey, result.Checkpoint); err != nil {
 		return ScanResult{}, err
 	}
@@ -621,7 +643,49 @@ func applyStoredStateCounts(result *ScanResult, states []PathState) {
 	}
 }
 
-func hashStableFile(root ValidatedRoot, relativePath string, previous PathState, result *ScanResult) (string, string, error) {
+// A missing timestamp in older path state starts a new stability observation.
+// Repeated polls preserve the timestamp; a replacement or metadata change resets it.
+func hashObservationSince(previous PathState, obs PathObservation, now time.Time) *time.Time {
+	if previous.HashObservedAt != nil && sameHashObservation(previous, obs) {
+		return previous.HashObservedAt
+	}
+	return &now
+}
+
+func sameHashObservation(previous PathState, obs PathObservation) bool {
+	if previous.Kind != PathKindFile || obs.Kind != PathKindFile || !obs.Exists || !obs.Safe ||
+		previous.Mode != obs.Mode || previous.SizeBytes != obs.SizeBytes || previous.ModifiedAt == nil || !previous.ModifiedAt.Equal(obs.ModifiedAt) {
+		return false
+	}
+	a, b := previous.Fidelity, obs.Fidelity
+	return a != nil && b != nil && a.DeviceID != nil && b.DeviceID != nil && a.Inode != nil && b.Inode != nil &&
+		*a.DeviceID == *b.DeviceID && *a.Inode == *b.Inode
+}
+
+func sameHashFileInfo(before, opened, after os.FileInfo) bool {
+	return before.Mode().IsRegular() && opened.Mode().IsRegular() && after.Mode().IsRegular() &&
+		os.SameFile(before, opened) && os.SameFile(opened, after) &&
+		before.Size() == opened.Size() && opened.Size() == after.Size() &&
+		before.ModTime().Equal(opened.ModTime()) && opened.ModTime().Equal(after.ModTime())
+}
+
+func hashStableFile(root ValidatedRoot, relativePath string, previous PathState, current *PathState, result *ScanResult) (string, string, error) {
+	verifiedAt := previous.HashVerifiedAt
+	// Older successful scans hashed on every visit. Their scan timestamp is
+	// already verification evidence, not a reason to reread the entire library.
+	if verifiedAt == nil && !previous.LastScannedAt.IsZero() {
+		verified := previous.LastScannedAt
+		verifiedAt = &verified
+	}
+	if !result.forceHash && current.ModifiedAt != nil && previous.ContentHashURI != "" &&
+		(previous.HashStatus == HashStatusComputed || previous.HashStatus == HashStatusUnchanged) &&
+		verifiedAt != nil && time.Since(*verifiedAt) >= 0 && time.Since(*verifiedAt) < 24*time.Hour &&
+		sameHashObservation(previous, PathObservation{Kind: current.Kind, Exists: true, Safe: current.Classification.Safe, SizeBytes: current.SizeBytes, Mode: current.Mode, ModifiedAt: *current.ModifiedAt, Fidelity: current.Fidelity}) &&
+		sameHashObservation(previous, ObservePath(root, relativePath)) {
+		current.HashVerifiedAt = verifiedAt
+		result.Counts.HashReused++
+		return previous.ContentHashURI, HashStatusUnchanged, nil
+	}
 	target := filepath.Join(root.RootPath, filepath.FromSlash(relativePath))
 	before, err := os.Stat(target)
 	if err != nil {
@@ -631,21 +695,16 @@ func hashStableFile(root ValidatedRoot, relativePath string, previous PathState,
 	if err != nil {
 		return "", HashStatusError, err
 	}
-	if delay > 0 {
-		time.Sleep(delay)
-		after, err := os.Stat(target)
-		if err != nil {
-			return "", HashStatusError, err
-		}
-		if before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
-			result.Counts.HashDeferred++
-			return previous.ContentHashURI, HashStatusDeferred, nil
-		}
+	// Stability is observed across ordinary scans, never by sleeping while the
+	// caller owns the shared sync queue lock. Keep the prior hash until eligible.
+	if delay > 0 && (current.HashObservedAt == nil || time.Since(*current.HashObservedAt) < delay) {
+		result.Counts.HashDeferred++
+		return previous.ContentHashURI, HashStatusDeferred, nil
 	}
 	if before.Size() > root.Config.Scan.MaxHashFileBytes {
 		return "", HashStatusTooLarge, nil
 	}
-	if before.Size() > root.Config.Scan.MaxHashBytesPerRun {
+	if before.Size() > root.Config.Scan.MaxHashBytesPerRun-result.Counts.HashBytesRead {
 		result.Counts.HashDeferred++
 		return previous.ContentHashURI, HashStatusDeferred, nil
 	}
@@ -654,11 +713,30 @@ func hashStableFile(root ValidatedRoot, relativePath string, previous PathState,
 		return "", HashStatusError, err
 	}
 	defer file.Close()
-	hasher := sha256.New()
-	if _, err := io.Copy(hasher, file); err != nil {
+	opened, err := file.Stat()
+	if err != nil {
 		return "", HashStatusError, err
 	}
+	hasher := sha256.New()
+	remaining := root.Config.Scan.MaxHashBytesPerRun - result.Counts.HashBytesRead
+	read, copyErr := io.Copy(hasher, io.LimitReader(file, remaining))
+	result.Counts.HashBytesRead += read
+	if copyErr != nil {
+		return "", HashStatusError, copyErr
+	}
+	after, err := os.Lstat(target)
+	if err != nil {
+		return "", HashStatusError, err
+	}
+	observed := ObservePath(root, relativePath)
+	if read != before.Size() || !sameHashFileInfo(before, opened, after) || !sameHashObservation(*current, observed) {
+		current.HashObservedAt = nil
+		result.Counts.HashDeferred++
+		return previous.ContentHashURI, HashStatusDeferred, nil
+	}
 	hashURI := "sha256:" + hex.EncodeToString(hasher.Sum(nil))
+	verified := time.Now().UTC()
+	current.HashVerifiedAt = &verified
 	if hashURI == previous.ContentHashURI && previous.HashStatus != "" {
 		result.Counts.HashUnchanged++
 		return hashURI, HashStatusUnchanged, nil
@@ -709,14 +787,30 @@ func buildCheckpoint(root ValidatedRoot, workerKey string, previous RootCheckpoi
 	checkpoint.LastStartedAt = &result.StartedAt
 	checkpoint.LastFinishedAt = &result.FinishedAt
 	checkpoint.RootReachable = result.Status != RunStatusBlocked
-	checkpoint.PathStateCount = len(states)
-	checkpoint.PathStateSnapshotHash = pathStateSnapshotHash(states)
+	if result.Mode != RunStatusSkipped {
+		checkpoint.PathStateCount = len(states)
+		checkpoint.PathStateSnapshotHash = pathStateSnapshotHash(states)
+		inventory := ScanResult{}
+		applyStoredStateCounts(&inventory, states)
+		checkpoint.StoredCounts = &inventory.Counts
+		checkpoint.OutputsCurrent = false
+	}
 	if result.Status != RunStatusBlocked {
 		checkpoint.LastSuccessfulReconcileAt = &result.FinishedAt
 		if result.Mode == ScanModeFull {
 			checkpoint.LastFullRescanAt = &result.FinishedAt
 		}
-		checkpoint.PendingRescan = false
+		if result.Mode != RunStatusSkipped {
+			checkpoint.PendingRescan = false
+		}
+		for _, state := range states {
+			// An input beyond the configured hash budget needs policy/operator
+			// attention, not an immediate full rescan on every ordinary tick.
+			if state.Status == PathStatusIncluded && state.Kind == PathKindFile && state.HashStatus == HashStatusDeferred && state.SizeBytes <= root.Config.Scan.MaxHashBytesPerRun && state.SizeBytes <= root.Config.Scan.MaxHashFileBytes {
+				checkpoint.PendingRescan = true
+				break
+			}
+		}
 		checkpoint.LastErrorCode = ""
 		checkpoint.LastErrorMessage = ""
 	} else {
@@ -1016,6 +1110,12 @@ func normalizeScanMode(mode string) string {
 }
 
 func autoScanMode(root ValidatedRoot, checkpoint RootCheckpoint, hints []DirtyHint, now time.Time) string {
+	if checkpoint.ConfigHash != root.ConfigHash || checkpoint.StoredCounts == nil || !root.RootReachable {
+		return ScanModeFull
+	}
+	if checkpoint.PendingRescan {
+		return ScanModeFull
+	}
 	if len(hints) > 0 {
 		return ScanModeDirty
 	}

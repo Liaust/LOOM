@@ -1,0 +1,15 @@
+kind: loom.script
+id: codex_review
+name: Read the acceptance project with Codex
+version: 0.1.0
+entrypoint:
+  command: [/bin/sh, run.sh]
+execution:
+  timeout_seconds: 120
+  network: true
+  filesystem:
+    mode: read_only
+artifacts:
+  - key: answer
+    path: answer.txt
+    type: file

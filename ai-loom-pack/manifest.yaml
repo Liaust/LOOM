@@ -147,6 +147,7 @@ templates:
       - protocols/MAC-COMPUTER-USE.md
       - protocols/PROJECT-DELEGATION.md
       - protocols/PROVENANCE-AND-MEMORY.md
+      - protocols/PROVENANCE-RECONCILIATION.md
       - protocols/README.md
       - protocols/SESSION-RETRIEVAL.md
       - protocols/SKILL-CREATION-AND-PROMOTION.md

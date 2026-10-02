@@ -1,0 +1,3 @@
+Read AGENTS.md and README.md in the working project. Reply with one sentence
+explaining its purpose, followed by the exact line: LOOM_CODEX_SCHEDULE_OK
+Make no edits and perform no other actions. Do not call external tools.

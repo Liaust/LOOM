@@ -673,6 +673,10 @@ func (s Store) lockLocalSync(ctx context.Context) (Store, func() error, error) {
 		return s, nil, err
 	}
 	s.syncLocked = true
+	if err := s.recoverSyncBatch(); err != nil {
+		_ = unlock()
+		return s, nil, err
+	}
 	return s, unlock, nil
 }
 
@@ -1451,6 +1455,20 @@ func (s Store) LocalSyncStatus(config Config, state State) (LocalSyncStatus, err
 		return LocalSyncStatus{}, err
 	}
 	defer unlock()
+	if s.syncBatch != nil {
+		return s.localSyncStatusUncached(config, state)
+	}
+	return cachedLocalStatus("sync:"+state.NodeID+":"+config.NodeKey,
+		[]string{s.syncEventsPath(), s.syncOutboxPath(), s.syncObjectsPath(), s.syncDeletionsPath(), s.syncCursorsPath(), s.syncConflictsPath()},
+		func() (LocalSyncStatus, error) { return s.localSyncStatusUncached(config, state) })
+}
+
+func (s Store) localSyncStatusUncached(config Config, state State) (LocalSyncStatus, error) {
+	s, unlock, err := s.lockLocalSync(context.Background())
+	if err != nil {
+		return LocalSyncStatus{}, err
+	}
+	defer unlock()
 	if err := s.EnsureSyncDataDirs(); err != nil {
 		return LocalSyncStatus{}, err
 	}
@@ -1513,14 +1531,14 @@ func (s Store) LoadSyncEvents() ([]LocalSyncEvent, error) {
 		return nil, err
 	}
 	var events []LocalSyncEvent
-	if err := readJSONFile(s.syncEventsPath(), &events); err != nil {
+	if err := s.readSyncJSON(s.syncEventsPath(), &events); err != nil {
 		return nil, err
 	}
 	return events, nil
 }
 
 func (s Store) SaveSyncEvents(events []LocalSyncEvent) error {
-	return writeJSONFile(s.syncEventsPath(), events, 0o600)
+	return s.writeSyncJSON(s.syncEventsPath(), events)
 }
 
 func (s Store) LoadSyncObjects() ([]LocalSyncObject, error) {
@@ -1528,14 +1546,14 @@ func (s Store) LoadSyncObjects() ([]LocalSyncObject, error) {
 		return nil, err
 	}
 	var objects []LocalSyncObject
-	if err := readJSONFile(s.syncObjectsPath(), &objects); err != nil {
+	if err := s.readSyncJSON(s.syncObjectsPath(), &objects); err != nil {
 		return nil, err
 	}
 	return objects, nil
 }
 
 func (s Store) SaveSyncObjects(objects []LocalSyncObject) error {
-	return writeJSONFile(s.syncObjectsPath(), objects, 0o600)
+	return s.writeSyncJSON(s.syncObjectsPath(), objects)
 }
 
 func (s Store) LoadSyncDeletions() ([]LocalSyncDeletionRequest, error) {
@@ -1543,14 +1561,14 @@ func (s Store) LoadSyncDeletions() ([]LocalSyncDeletionRequest, error) {
 		return nil, err
 	}
 	var deletions []LocalSyncDeletionRequest
-	if err := readJSONFile(s.syncDeletionsPath(), &deletions); err != nil {
+	if err := s.readSyncJSON(s.syncDeletionsPath(), &deletions); err != nil {
 		return nil, err
 	}
 	return deletions, nil
 }
 
 func (s Store) SaveSyncDeletions(deletions []LocalSyncDeletionRequest) error {
-	return writeJSONFile(s.syncDeletionsPath(), deletions, 0o600)
+	return s.writeSyncJSON(s.syncDeletionsPath(), deletions)
 }
 
 func (s Store) LoadSyncOutbox() ([]LocalSyncOutboxItem, error) {
@@ -1558,14 +1576,14 @@ func (s Store) LoadSyncOutbox() ([]LocalSyncOutboxItem, error) {
 		return nil, err
 	}
 	var outbox []LocalSyncOutboxItem
-	if err := readJSONFile(s.syncOutboxPath(), &outbox); err != nil {
+	if err := s.readSyncJSON(s.syncOutboxPath(), &outbox); err != nil {
 		return nil, err
 	}
 	return outbox, nil
 }
 
 func (s Store) SaveSyncOutbox(outbox []LocalSyncOutboxItem) error {
-	return writeJSONFile(s.syncOutboxPath(), outbox, 0o600)
+	return s.writeSyncJSON(s.syncOutboxPath(), outbox)
 }
 
 func (s Store) LoadSyncCursors() ([]LocalSyncCursor, error) {
@@ -1573,7 +1591,7 @@ func (s Store) LoadSyncCursors() ([]LocalSyncCursor, error) {
 		return nil, err
 	}
 	var cursors []LocalSyncCursor
-	if err := readJSONFile(s.syncCursorsPath(), &cursors); err != nil {
+	if err := s.readSyncJSON(s.syncCursorsPath(), &cursors); err != nil {
 		return nil, err
 	}
 	sort.Slice(cursors, func(i, j int) bool {
@@ -1583,7 +1601,7 @@ func (s Store) LoadSyncCursors() ([]LocalSyncCursor, error) {
 }
 
 func (s Store) SaveSyncCursors(cursors []LocalSyncCursor) error {
-	return writeJSONFile(s.syncCursorsPath(), cursors, 0o600)
+	return s.writeSyncJSON(s.syncCursorsPath(), cursors)
 }
 
 func (s Store) LoadSyncConflicts() ([]LocalSyncConflict, error) {
@@ -1591,14 +1609,14 @@ func (s Store) LoadSyncConflicts() ([]LocalSyncConflict, error) {
 		return nil, err
 	}
 	var conflicts []LocalSyncConflict
-	if err := readJSONFile(s.syncConflictsPath(), &conflicts); err != nil {
+	if err := s.readSyncJSON(s.syncConflictsPath(), &conflicts); err != nil {
 		return nil, err
 	}
 	return conflicts, nil
 }
 
 func (s Store) SaveSyncConflicts(conflicts []LocalSyncConflict) error {
-	return writeJSONFile(s.syncConflictsPath(), conflicts, 0o600)
+	return s.writeSyncJSON(s.syncConflictsPath(), conflicts)
 }
 
 func (s Store) nextLocalSequence(streamName string) (int64, error) {

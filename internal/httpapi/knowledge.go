@@ -23,6 +23,10 @@ import (
 )
 
 func (s Server) handleKnowledgeNotesPassage(w http.ResponseWriter, r *http.Request) {
+	if strings.HasSuffix(r.URL.Path, "/workspace") {
+		s.handleNotesWorkspaceNavigation(w, r)
+		return
+	}
 	correlationID, ctx := requestMeta(r)
 	if r.Method != http.MethodGet {
 		s.writeError(w, correlationID, http.StatusMethodNotAllowed, "method.not_allowed", "knowledge", "notes_passage", "Method is not allowed.", nil)
@@ -806,4 +810,74 @@ func notesLifecycleFromRequest(r *http.Request) (knowledge.SourceLifecycleFilter
 		return "", knowledge.ErrInvalid
 	}
 	return knowledge.NormalizeSourceLifecycleFilter(knowledge.SourceLifecycleFilter(values.Get("source_lifecycle")))
+}
+
+func (s Server) handleKnowledgeNotesEnrich(w http.ResponseWriter, r *http.Request) {
+	correlationID, ctx := requestMeta(r)
+	switch r.Method {
+	case http.MethodGet:
+		q := r.URL.Query()
+		input := knowledge.EnrichmentSelection{Ref: q.Get("ref"), Kind: q.Get("kind"), NodeKey: q.Get("node"), After: q.Get("after"), SourceRevision: q.Get("source_revision"), SourceHash: q.Get("source_hash")}
+		for key, dst := range map[string]*bool{"recursive": &input.Recursive, "ocr": &input.Stages.OCR, "vision": &input.Stages.Vision, "embeddings": &input.Stages.Embeddings} {
+			if q.Get(key) != "" {
+				value, err := strconv.ParseBool(q.Get(key))
+				if err != nil {
+					s.writeError(w, correlationID, http.StatusBadRequest, "knowledge.invalid_enrichment", "knowledge", key, "Expected a boolean selection flag.", err)
+					return
+				}
+				*dst = value
+			}
+		}
+		if q.Get("limit") != "" {
+			value, err := strconv.Atoi(q.Get("limit"))
+			if err != nil {
+				s.writeError(w, correlationID, http.StatusBadRequest, "knowledge.invalid_enrichment", "knowledge", "limit", "Expected an integer limit.", err)
+				return
+			}
+			input.Limit = value
+		}
+		if _, err := knowledge.NormalizeEnrichmentSelection(input); err != nil {
+			s.writeError(w, correlationID, http.StatusBadRequest, "knowledge.invalid_enrichment", "knowledge", "enrich", err.Error(), err)
+			return
+		}
+		preview, err := s.knowledgeService().PreviewEnrichment(ctx, input)
+		if err != nil {
+			s.writeError(w, correlationID, http.StatusBadRequest, "knowledge.enrichment_preview_failed", "knowledge", "enrich", err.Error(), err)
+			return
+		}
+		response.WriteJSON(w, http.StatusOK, response.Success(correlationID, preview))
+	case http.MethodPost:
+		var input knowledge.EnrichmentApplyInput
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&input); err != nil {
+			s.writeError(w, correlationID, http.StatusBadRequest, "request.invalid_json", "knowledge", "enrich", "Invalid enrichment apply JSON.", err)
+			return
+		}
+		if err := knowledge.ValidateEnrichmentApply(input); err != nil {
+			s.writeError(w, correlationID, http.StatusBadRequest, "knowledge.invalid_enrichment", "knowledge", "enrich", err.Error(), err)
+			return
+		}
+		req, err := requestctx.ResolveBootstrap(ctx, s.services.DB, correlationID)
+		if err != nil {
+			s.writeError(w, correlationID, http.StatusInternalServerError, "request.context_failed", "knowledge", "bootstrap", "Could not resolve request context.", err)
+			return
+		}
+		record, proceed := s.beginIdempotency(w, r, ctx, correlationID, req, "knowledge.notes.enrich", input)
+		if !proceed {
+			return
+		}
+		receipt, err := s.knowledgeService().ApplyEnrichment(ctx, input, req.ActorID)
+		if err != nil {
+			wrapped := loomerrors.Wrap("knowledge.enrichment_failed", "knowledge", "enrich", "Could not apply enrichment.", err)
+			s.failIdempotency(ctx, record, wrapped.Code, response.FailureWithIdempotency(correlationID, record.Key, wrapped))
+			s.writeError(w, correlationID, http.StatusBadRequest, wrapped.Code, "knowledge", "enrich", wrapped.Summary, err)
+			return
+		}
+		envelope := response.SuccessWithIdempotency(correlationID, record.Key, receipt)
+		s.completeIdempotency(ctx, record, "knowledge_enrichment", "selection", envelope)
+		response.WriteJSON(w, http.StatusOK, envelope)
+	default:
+		s.writeError(w, correlationID, http.StatusMethodNotAllowed, "method.not_allowed", "knowledge", "enrich", "Method is not allowed.", nil)
+	}
 }

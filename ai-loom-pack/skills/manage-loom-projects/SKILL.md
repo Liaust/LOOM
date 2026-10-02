@@ -8,10 +8,9 @@ description: Work in a LOOM project, manage its declarations and lifecycle, or d
 ## Ordinary edits
 
 Work in known source under actual repository instructions (including `AGENTS.md`).
-Start with project `.project/STATE.md` and relevant files; use OVERVIEW (or an
-existing PROJECT.md), ROADMAP and MAP only when that context helps. These are
-editable project-wide Markdown, not another registration manifest. Edit relevant
-files, run appropriate tests and give a concise handoff.
+Start with project `.project/STATE.md` and relevant files; use OVERVIEW, PROJECT,
+ROADMAP or MAP when useful. These are editable Markdown, not registration
+manifests. Run appropriate tests and give a concise handoff.
 No LOOM registration, activation, projection refresh or semantic acceptance
 is needed merely to read or edit source. Do not install optional `.repo/` or
 initialize Git as enrollment ceremony. Use the actual harness; Git remains optional.
@@ -28,11 +27,11 @@ intent; edit its resource declarations to request management. Saving source does
 not enroll it. Generated `loom-storage` views are never write targets.
 
 Creation is caller-local unless `--backend` selects the configured backend
-filesystem. An `owner_node` field does not route a local command to Main.
+filesystem. `owner_node` does not route a local command to Main.
 Normal backend creation registers the same generated identity and source, with
 no resource activation. Its context is automatically observed by the bounded
 project-context worker. Local-only creation stays source-only.
-Plan/apply resolves on the selected owner node; verify the returned target/root.
+Plan/apply resolves on the selected owner node; verify target/root.
 
 Use reviewed plan/apply/status for management. Keep target, plan and stable request key. Historical
 operation inspection does not resume it. Registration and activation are separate;
@@ -62,15 +61,13 @@ Choose lifecycle by running harness, not model vendor. A Codex model inside ORCA
 remains ORCA-owned; Codex-owned worktrees use native Codex controls. Use the
 installed native skills; never adopt the other's worktree.
 
-ORCA folder registration does not create its directory.
-
 ## Source custody and command scope
 
-Project export and `.loomignore` are current. In Portal's **Export Project...**,
-**Local** reads caller-visible source even when main is offline. **From Main**
-requires backend access and returns the archive to caller-local output.
-Every mode excludes `.loom/state/` and `.loom/tmp/`. Review overwrite/ignore rules
-in the reference.
+Project export and `.loomignore` are current. Portal **Export Project...** Local
+reads caller-visible source; From Main requires backend access. Both return
+caller-local output and exclude `.loom/state/` and `.loom/tmp/`.
+Local export can use readable caller-local source when main is offline; From
+Main requires connectivity. Keep credential values out of exported source.
 
 Declaration reconciliation and prepared application installation use the same
 plan/apply/status workflow; node policy supplies allocation and credential access
@@ -78,7 +75,10 @@ without per-app operator grants. For deployment inputs see
 [managed applications](references/managed-applications.md).
 Public HTTPS beneath `apps.example.com` is part of that same workflow: declare
 the hostname. No separate per-application DNS, TLS or operator grant setup is needed.
-The declaration `--refresh-projections` effect remains separate. Project development
-context has its own automatic metadata refresh; a manual diagnostic is
+Project context has automatic metadata refresh; a manual diagnostic is
 `loom provenance project sync <project-ref>`.
 Source support, installed availability and live health remain distinct.
+
+Use [schedules](references/project-schedules.md) for either MINA's native
+`hermes_schedule` declaration or a LOOM capability schedule (including project
+`codex exec`). Personal MINA timers do not require a project.

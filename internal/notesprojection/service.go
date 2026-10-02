@@ -83,8 +83,27 @@ func (s Service) Rebuild(ctx context.Context, input RebuildInput) (RebuildResult
 // required before removing stale generated entries; explicit rebuild remains
 // available for repairing copied content even when its source is unchanged.
 func (s Service) Refresh(ctx context.Context) (bool, error) {
-	result, err := s.rebuild(ctx, RebuildInput{MaxObjects: 5001}, true)
+	result, err := s.rebuild(ctx, RebuildInput{}, true)
 	return len(result.Changes) > 0, err
+}
+
+// The worker persists lastSuccess in its checkpoint. Live editable Notes sync
+// does not use this generated read-only projection.
+func (s Service) RefreshCoalesced(ctx context.Context, lastSuccess time.Time) (changed, refreshed bool, err error) {
+	root, err := normalizeProjectionRoot(s.ProjectionRoot)
+	if err != nil {
+		return false, false, err
+	}
+	age := s.now().Sub(lastSuccess)
+	if !lastSuccess.IsZero() && age >= 0 && age < time.Minute {
+		_, pendingErr := os.Lstat(filepath.Join(root, ".loom", "rebuild-pending"))
+		_, manifestErr := os.Lstat(manifestPath(root))
+		if errors.Is(pendingErr, os.ErrNotExist) && manifestErr == nil {
+			return false, false, nil
+		}
+	}
+	changed, err = s.Refresh(ctx)
+	return changed, err == nil, err
 }
 
 func (s Service) rebuild(ctx context.Context, input RebuildInput, refresh bool) (RebuildResult, error) {
@@ -120,12 +139,23 @@ func (s Service) rebuild(ctx context.Context, input RebuildInput, refresh bool) 
 	if err != nil {
 		return RebuildResult{}, fmt.Errorf("list notes projection sources: %w", err)
 	}
-	if refresh && len(sources) >= 5001 {
-		return RebuildResult{}, fmt.Errorf("automatic Notes projection exceeds 5000 sources; refusing incomplete inventory")
+	if err := ctx.Err(); err != nil {
+		return RebuildResult{}, err
+	}
+	if input.MaxObjects > 0 && len(sources) > input.MaxObjects {
+		return RebuildResult{}, fmt.Errorf("notes projection source inventory exceeds explicit limit %d; refusing incomplete inventory", input.MaxObjects)
+	}
+	seen := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		id := strings.TrimSpace(source.KnowledgeObjectID)
+		if _, duplicate := seen[id]; id == "" || duplicate {
+			return RebuildResult{}, fmt.Errorf("notes projection source inventory has empty or duplicate identity %q", id)
+		}
+		seen[id] = struct{}{}
 	}
 	entries, buildFindings := BuildProjectionEntries(root, sources, now)
-	if refresh && len(buildFindings) > 0 {
-		return RebuildResult{}, fmt.Errorf("automatic Notes projection has invalid source paths; refusing partial inventory")
+	if len(buildFindings) > 0 {
+		return RebuildResult{}, fmt.Errorf("Notes projection has invalid source paths; refusing partial inventory")
 	}
 	previous, found, manifestErr := ReadManifest(root)
 	if refresh && manifestErr != nil {

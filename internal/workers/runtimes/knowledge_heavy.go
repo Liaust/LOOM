@@ -57,24 +57,91 @@ func (r KnowledgeHeavyRuntime) RunOnce(ctx context.Context, run workers.RunConte
 	if err != nil {
 		return workers.RunResult{}, err
 	}
-	now := time.Now().UTC()
-	if r.Now != nil {
-		now = r.Now().UTC()
-	}
-	runID, instanceID := run.Run.WorkerRunID, run.Instance.WorkerInstanceID
-	items, err := r.Knowledge.ClaimPipelineRuns(ctx, knowledge.PipelineExecutionHeavy, runID, knowledge.PipelineClaimOptions{Limit: 1, LeaseDuration: time.Duration(config.LeaseDurationSeconds) * time.Second, Now: now})
+	policy, err := workers.ParseTickPolicy(run.Instance.TickPolicyJSON)
 	if err != nil {
 		return workers.RunResult{}, err
 	}
+	return drainKnowledgeHeavy(ctx, config.Resource.Timeout(), policy, r.currentTime, func() (knowledge.HeavyExecutorRunResult, error) {
+		return r.runStage(ctx, run, config)
+	})
+}
+
+func (r KnowledgeHeavyRuntime) currentTime() time.Time {
+	if r.Now != nil {
+		return r.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+// Each stage retains its full execution budget. The short drain window bounds
+// admission of additional stages, not the execution time of a claimed stage.
+func drainKnowledgeHeavy(ctx context.Context, stageBudget time.Duration, policy workers.TickPolicy, now func() time.Time, stage func() (knowledge.HeavyExecutorRunResult, error)) (workers.RunResult, error) {
+	started := now()
+	var total knowledge.HeavyExecutorRunResult
+	stages := make([]knowledge.HeavyExecutorRunResult, 0, 8)
+	mayHaveMore := false
+	for len(stages) < 8 {
+		if err := ctx.Err(); err != nil {
+			return workers.RunResult{}, err
+		}
+		at := now()
+		if len(stages) > 0 && at.Sub(started) >= 30*time.Second {
+			break
+		}
+		if deadline, ok := ctx.Deadline(); ok && deadline.Sub(at) < stageBudget+5*time.Second {
+			break
+		}
+		result, err := stage()
+		if err != nil {
+			return workers.RunResult{}, err
+		}
+		if result.Claimed == 0 {
+			mayHaveMore = false
+			break
+		}
+		stages = append(stages, result)
+		total.Claimed += result.Claimed
+		total.Completed += result.Completed
+		total.Failed += result.Failed
+		mayHaveMore = result.Failed == 0
+		if result.Failed > 0 {
+			break
+		}
+	}
+	summary := struct {
+		knowledge.HeavyExecutorRunResult
+		Stages   []knowledge.HeavyExecutorRunResult `json:"stages"`
+		MoreWork bool                               `json:"more_work"`
+	}{total, stages, mayHaveMore}
+	next := policy.NextAfter(now())
+	if mayHaveMore && policy.Mode == workers.TickModeInterval && policy.IntervalSeconds > workers.MinimumIntervalSeconds {
+		at := now().Add(time.Duration(workers.MinimumIntervalSeconds) * time.Second)
+		next = &at
+	}
+	return workers.RunResult{
+		Status: workers.RunStatusSucceeded, ResultSummary: mustWorkerJSON(summary),
+		Counters:      map[string]int64{"claimed": total.Claimed, "completed": total.Completed, "failed": total.Failed},
+		ResourceUsage: mustWorkerJSON(map[string]any{"stages": stages}),
+		NextRunAfter:  next,
+	}, nil
+}
+
+func (r KnowledgeHeavyRuntime) runStage(ctx context.Context, run workers.RunContext, config knowledgeHeavyConfig) (knowledge.HeavyExecutorRunResult, error) {
+	now := r.currentTime()
+	runID, instanceID := run.Run.WorkerRunID, run.Instance.WorkerInstanceID
+	items, err := r.Knowledge.ClaimPipelineRuns(ctx, knowledge.PipelineExecutionHeavy, runID, knowledge.PipelineClaimOptions{Limit: 1, LeaseDuration: time.Duration(config.LeaseDurationSeconds) * time.Second, Now: now})
+	if err != nil {
+		return knowledge.HeavyExecutorRunResult{}, err
+	}
 	if len(items) == 0 {
-		return workers.RunResult{Status: workers.RunStatusSucceeded, ResultSummary: json.RawMessage(`{"claimed":0}`), Counters: map[string]int64{"claimed": 0}, ResourceUsage: json.RawMessage(`{"available":false}`)}, nil
+		return knowledge.HeavyExecutorRunResult{}, nil
 	}
 	item := items[0]
 	pipelineRunID, stageRunID := item.Run.KnowledgePipelineRunID, item.Stage.KnowledgePipelineStageRunID
 	lease, err := run.Service.AcquireResourceLease(ctx, workers.ResourceLeaseRequest{ResourceKey: workers.ResourceKnowledgeHeavy, HolderID: runID, WorkerInstanceID: &instanceID, WorkerRunID: &runID, KnowledgePipelineRunID: &pipelineRunID, KnowledgePipelineStageRunID: &stageRunID, TTL: time.Duration(config.LeaseDurationSeconds) * time.Second, Now: now})
 	if err != nil {
 		_ = r.Knowledge.ReleasePipelineClaim(ctx, item)
-		return workers.RunResult{}, err
+		return knowledge.HeavyExecutorRunResult{}, err
 	}
 	defer run.Service.ReleaseResourceLease(context.Background(), lease)
 	handlers := map[string]knowledge.HeavyStageHandler{}
@@ -84,12 +151,7 @@ func (r KnowledgeHeavyRuntime) RunOnce(ctx context.Context, run workers.RunConte
 	if r.Embedding != nil {
 		handlers[knowledge.FilePipelineStageEmbedding] = knowledge.EmbeddingStageHandler{Service: r.Knowledge, Runtime: r.Embedding}
 	}
-	result, err := r.Knowledge.ExecuteClaimedHeavyStage(ctx, item, config.Resource, handlers)
-	if err != nil {
-		return workers.RunResult{}, err
-	}
-	usage, _ := json.Marshal(result.Observation)
-	return workers.RunResult{Status: workers.RunStatusSucceeded, ResultSummary: mustWorkerJSON(result), Counters: map[string]int64{"claimed": result.Claimed, "completed": result.Completed, "failed": result.Failed}, ResourceUsage: usage, Retryable: false}, nil
+	return r.Knowledge.ExecuteClaimedHeavyStage(ctx, item, config.Resource, handlers)
 }
 
 func parseKnowledgeHeavyConfig(raw json.RawMessage) (knowledgeHeavyConfig, error) {

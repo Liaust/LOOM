@@ -49,7 +49,9 @@ func TestNotesSearchExactLexicalVersionProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(query.SQL, "kov.source_hash, '') AS passage_source_hash") || !strings.Contains(query.SQL, "s.passage_source_hash") {
+	if !strings.Contains(query.SQL, "COALESCE(detail_version.source_hash,'')") ||
+		!strings.Contains(query.SQL, "detail_version.knowledge_object_version_id=s.knowledge_object_version_id") ||
+		!strings.Contains(query.SQL, "detail_version.knowledge_object_id=s.knowledge_object_id") {
 		t.Fatal("lexical result does not select the matched version hash")
 	}
 }
@@ -126,6 +128,103 @@ func TestBoxSourceLiteralIdentifiersAndQuotedPhrases(t *testing.T) {
 	query, err := buildNotesSearchQuery(input)
 	if err != nil || !strings.Contains(query.SQL, "NOT EXISTS (SELECT 1 FROM query_phrases") || strings.Contains(query.SQL, "LIKE '%' || qt.term") {
 		t.Fatalf("nonliteral query: %v", err)
+	}
+}
+
+func TestNotesSearchSQLTermsMatchOversizedIndexKeys(t *testing.T) {
+	long := strings.Repeat("abcdef0123456789", 100)
+	other := long + "z"
+	query, err := buildNotesSearchQuery(NotesSearchInput{Query: strings.ToUpper(long) + " " + other + " SYNTHETIC_NOT_A_SECRET " + long})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var terms []string
+	if err = json.Unmarshal([]byte(query.Args[1].(string)), &terms); err != nil {
+		t.Fatal(err)
+	}
+	// Check actual SQL arguments, not the independently parsed display query.
+	indexed := lexical.TokenizeLexical(long + " " + other)
+	want := append(indexed, "synthetic_not_a_secret")
+	if !reflect.DeepEqual(terms, want) || terms[0] == terms[1] {
+		t.Fatalf("SQL/index mismatch: got %v want %v", terms, want)
+	}
+}
+
+func TestNotesSearchScoresMatchedDocumentsWithoutSelfJoin(t *testing.T) {
+	query, err := buildNotesSearchQuery(NotesSearchInput{Query: "amber compass orchard", RequireCurrent: true, Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(query.SQL, "matched_docs AS (\n\t\t\tSELECT * FROM filtered_docs") ||
+		!strings.Contains(query.SQL, "FROM matched_docs fd") ||
+		strings.Contains(query.SQL, "JOIN matched_docs") || strings.Contains(query.SQL, "JOIN match_flags") {
+		t.Fatal("scoring must carry each document's match flags instead of rejoining its document set")
+	}
+}
+
+func TestNotesSearchUsesEquijoinAndDefersResultContext(t *testing.T) {
+	query, err := buildNotesSearchQuery(NotesSearchInput{Query: "amber compass", RequireCurrent: true, Limit: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"visible_objects AS MATERIALIZED",
+		"chunk_refs AS MATERIALIZED",
+		"JOIN visible_objects owner ON owner.knowledge_object_id=chunk.knowledge_object_id",
+		"matching_terms AS MATERIALIZED",
+		"JOIN matching_terms lt",
+		"COALESCE(kov.source_revision,ko.source_revision)=ko.latest_source_revision",
+		"COALESCE(kov.source_hash,ko.source_hash)=ko.latest_source_hash",
+		"ON ko.knowledge_object_id = CASE sd.source_kind",
+		"WHEN 'knowledge_chunk' THEN kc.knowledge_object_id",
+		"WHEN 'knowledge_object_metadata' THEN sd.source_id END",
+		"WHERE context_object.knowledge_object_id=s.knowledge_object_id) AS source_context_root",
+		"context_version.knowledge_object_id=context_object.knowledge_object_id",
+	} {
+		if !strings.Contains(query.SQL, want) {
+			t.Fatalf("missing indexed identity join or exact result context: %s", want)
+		}
+	}
+	corpusEnd := strings.Index(query.SQL, "corpus_stats AS MATERIALIZED")
+	if corpusEnd < 0 || strings.Contains(query.SQL[:corpusEnd], "AS source_context_root") {
+		t.Fatal("must not construct returned context for every corpus chunk")
+	}
+}
+
+func TestNotesSearchObjectFiltersRemainInsideEvidenceBoundary(t *testing.T) {
+	args := []any{"query", "terms", "phrases"}
+	input := NotesSearchInput{ProjectID: "project_test", SourceCategory: "notes", SourceNodeKey: "main", NotesSourceRootID: "root_test", FileClass: "markdown", Path: "folder/note", SourceLifecycle: SourceLifecycleFilterArchived}
+	query := notesSearchObjectsSQL(input, &args)
+	if !reflect.DeepEqual(args[3:], []any{"project_test", "notes", "main", "root_test", "markdown", "%folder/note%"}) {
+		t.Fatalf("source filter bindings: %#v", args)
+	}
+	for _, want := range []string{visibleNotesCustodyObjectSQL("ko", true), notesLifecycleSelectionSQL("ko", input.SourceLifecycle), visibleNotesKnowledgeRelativePathSQL("ko.relative_path"), "ko.project_id = $4", "ko.relative_path ILIKE $9"} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("lost source filter: %s", want)
+		}
+	}
+}
+
+func TestNotesSearchMaterializesCorpusStatistics(t *testing.T) {
+	query, err := buildNotesSearchQuery(NotesSearchInput{Query: "amber compass orchard", RequireCurrent: true, Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The one-row aggregate must be cached even when PostgreSQL underestimates
+	// the candidate count; inlining it repeats the entire corpus scan per match.
+	start := strings.Index(query.SQL, "corpus_stats AS MATERIALIZED (")
+	end := strings.Index(query.SQL, "doc_term_scores AS (")
+	if start < 0 || end <= start {
+		t.Fatal("corpus statistics must be materialized before term scoring")
+	}
+	corpus := query.SQL[start:end]
+	for _, want := range []string{"COUNT(fd.lexical_document_id)", "AVG(GREATEST(fd.document_length, 1))", "FROM filtered_docs fd", "WHERE fd.lexical_document_id IS NOT NULL"} {
+		if !strings.Contains(corpus, want) {
+			t.Fatalf("full-corpus calculation lost %q", want)
+		}
+	}
+	if strings.Contains(corpus, "LIMIT") {
+		t.Fatal("candidate output limit must not truncate the ranking corpus")
 	}
 }
 
@@ -210,8 +309,8 @@ func TestBuildNotesSearchQueryIncludesFilters(t *testing.T) {
 		"ko.source_node_key =",
 		"ko.notes_source_root_id =",
 		"ko.file_class =",
-		"sd.metadata->>'text_source'",
-		"sd.metadata->>'extraction_status'",
+		"detail_document.metadata->>'text_source'",
+		"detail_document.metadata->>'extraction_status'",
 		"metadata_only",
 		"ko.relative_path ILIKE",
 		"(sd.metadata->'tags') ?",

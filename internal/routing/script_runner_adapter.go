@@ -77,11 +77,11 @@ func executeScriptRun(ctx context.Context, jobService jobs.Service, execCtx Exec
 		waitResult = jobs.WaitResultQueued
 	}
 	if err != nil {
-		return ExecutionResult{}, err
+		return ExecutionResult{JobID: job.JobID}, err
 	}
 	result, err := jobService.ScriptRunResult(ctx, job.JobID, executionMode, waitResult)
 	if err != nil {
-		return ExecutionResult{}, err
+		return ExecutionResult{JobID: job.JobID}, err
 	}
 	if executionMode != jobs.ScriptRunEnqueueOnly && waitResult == jobs.WaitResultWaitTimeout {
 		return scriptRunExecutionResult(CapabilityCallStatusFailed, result)

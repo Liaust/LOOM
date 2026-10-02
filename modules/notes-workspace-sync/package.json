@@ -1,0 +1,11 @@
+{
+  "name": "@loom/notes-workspace-sync",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Exact-revision IPC adapter for the pinned native LiveSync CLI",
+  "scripts": {
+    "test": "node --test native.test.mjs"
+  },
+  "engines": { "node": ">=22.12.0" }
+}

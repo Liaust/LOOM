@@ -182,6 +182,7 @@ func newSchedulesCommand(opts *options) *cobra.Command {
 		},
 	}
 	cmd.AddCommand(statusCmd)
+	cmd.AddCommand(newHermesSchedulesCommand(opts))
 
 	return cmd
 }

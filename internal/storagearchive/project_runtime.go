@@ -45,33 +45,35 @@ type ProjectStorageArchiver interface {
 }
 
 type ProjectRuntimeDeps struct {
-	PlanEvidence        ProjectPhysicalPlanEvidenceStore
-	Projects            ProjectRuntimeProjectService
-	RepositoryState     ProjectRuntimeRepositoryStateService
-	Activation          ProjectRuntimeActivationService
-	StorageArchive      ProjectStorageArchiver
-	WorkspaceMove       ProjectWorkspaceArchivePlanner
-	RuntimeQuiescence   ProjectRuntimeQuiescenceVerifier
-	WorkspaceRoots      TrustedWorkspaceRoots
-	RuntimeManifestRoot string
-	Now                 func() time.Time
-	ArchiveFailureHook  ProjectPhysicalArchiveFailureHook
-	RestoreFailureHook  ProjectPhysicalRestoreFailureHook
+	PauseNativeSchedules func(context.Context, string) error
+	PlanEvidence         ProjectPhysicalPlanEvidenceStore
+	Projects             ProjectRuntimeProjectService
+	RepositoryState      ProjectRuntimeRepositoryStateService
+	Activation           ProjectRuntimeActivationService
+	StorageArchive       ProjectStorageArchiver
+	WorkspaceMove        ProjectWorkspaceArchivePlanner
+	RuntimeQuiescence    ProjectRuntimeQuiescenceVerifier
+	WorkspaceRoots       TrustedWorkspaceRoots
+	RuntimeManifestRoot  string
+	Now                  func() time.Time
+	ArchiveFailureHook   ProjectPhysicalArchiveFailureHook
+	RestoreFailureHook   ProjectPhysicalRestoreFailureHook
 }
 
 type ProjectRuntimeService struct {
-	PlanEvidence        ProjectPhysicalPlanEvidenceStore
-	Projects            ProjectRuntimeProjectService
-	RepositoryState     ProjectRuntimeRepositoryStateService
-	Activation          ProjectRuntimeActivationService
-	StorageArchive      ProjectStorageArchiver
-	WorkspaceMove       ProjectWorkspaceArchivePlanner
-	RuntimeQuiescence   ProjectRuntimeQuiescenceVerifier
-	WorkspaceRoots      TrustedWorkspaceRoots
-	RuntimeManifestRoot string
-	Now                 func() time.Time
-	ArchiveFailureHook  ProjectPhysicalArchiveFailureHook
-	RestoreFailureHook  ProjectPhysicalRestoreFailureHook
+	PauseNativeSchedules func(context.Context, string) error
+	PlanEvidence         ProjectPhysicalPlanEvidenceStore
+	Projects             ProjectRuntimeProjectService
+	RepositoryState      ProjectRuntimeRepositoryStateService
+	Activation           ProjectRuntimeActivationService
+	StorageArchive       ProjectStorageArchiver
+	WorkspaceMove        ProjectWorkspaceArchivePlanner
+	RuntimeQuiescence    ProjectRuntimeQuiescenceVerifier
+	WorkspaceRoots       TrustedWorkspaceRoots
+	RuntimeManifestRoot  string
+	Now                  func() time.Time
+	ArchiveFailureHook   ProjectPhysicalArchiveFailureHook
+	RestoreFailureHook   ProjectPhysicalRestoreFailureHook
 }
 
 type ProjectArchiveInput struct {
@@ -250,18 +252,19 @@ func NewProjectRuntimeService(deps ProjectRuntimeDeps) ProjectRuntimeService {
 		deps.PlanEvidence, _ = deps.Projects.(ProjectPhysicalPlanEvidenceStore)
 	}
 	return ProjectRuntimeService{
-		PlanEvidence:        deps.PlanEvidence,
-		Projects:            deps.Projects,
-		RepositoryState:     deps.RepositoryState,
-		Activation:          deps.Activation,
-		StorageArchive:      deps.StorageArchive,
-		WorkspaceMove:       deps.WorkspaceMove,
-		RuntimeQuiescence:   deps.RuntimeQuiescence,
-		WorkspaceRoots:      deps.WorkspaceRoots,
-		RuntimeManifestRoot: deps.RuntimeManifestRoot,
-		Now:                 deps.Now,
-		ArchiveFailureHook:  deps.ArchiveFailureHook,
-		RestoreFailureHook:  deps.RestoreFailureHook,
+		PauseNativeSchedules: deps.PauseNativeSchedules,
+		PlanEvidence:         deps.PlanEvidence,
+		Projects:             deps.Projects,
+		RepositoryState:      deps.RepositoryState,
+		Activation:           deps.Activation,
+		StorageArchive:       deps.StorageArchive,
+		WorkspaceMove:        deps.WorkspaceMove,
+		RuntimeQuiescence:    deps.RuntimeQuiescence,
+		WorkspaceRoots:       deps.WorkspaceRoots,
+		RuntimeManifestRoot:  deps.RuntimeManifestRoot,
+		Now:                  deps.Now,
+		ArchiveFailureHook:   deps.ArchiveFailureHook,
+		RestoreFailureHook:   deps.RestoreFailureHook,
 	}
 }
 

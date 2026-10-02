@@ -90,6 +90,10 @@ func PipelineDefinitionForObject(object KnowledgeObject) PipelineDefinition {
 }
 
 func pipelineFileFamily(object KnowledgeObject) string {
+	// Canvas is a retained attachment, even when MIME sniffing calls its JSON text.
+	if knowledgeObjectExtension(object) == ".canvas" {
+		return "metadata_only"
+	}
 	switch object.FileClass {
 	case storagecatalog.FileClassMarkdown:
 		return "markdown"

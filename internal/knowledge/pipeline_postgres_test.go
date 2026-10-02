@@ -33,6 +33,40 @@ func openPipelinePostgres(t *testing.T) *sql.DB {
 	return db
 }
 
+func TestNotesOverviewUsesLatestUnifiedPipelinePostgres(t *testing.T) {
+	db, url := boxSourcesDatabase(t)
+	if _, err := migrations.Up(t.Context(), url, filepath.Join("..", "..", "migrations")); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	service, object := pipelineFixture(t, db, storagecatalog.FileClassMarkdown, "text/markdown", "overview", now)
+	run, err := service.EnsurePipelineRun(t.Context(), object, PipelinePolicy{}, false, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []string{"waiting_heavy", "complete_with_warnings", "blocked_manual_action"} {
+		if _, err := db.Exec(`UPDATE knowledge.pipeline_runs SET status=$2,updated_at=$3 WHERE knowledge_pipeline_run_id=$1`, run.KnowledgePipelineRunID, status, now); err != nil {
+			t.Fatal(err)
+		}
+		rows, err := service.store.ListNotesOverviewPipelineRows(t.Context(), NotesOverviewInput{NodeKey: object.SourceNodeKey})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 1 || rows[0].Count != 1 || rows[0].Status != status || rows[0].LastUpdatedAt == nil {
+			t.Fatalf("current unified trajectory missing: %#v", rows)
+		}
+	}
+	completeRunForTest(t, db, run.KnowledgePipelineRunID)
+	next, err := service.EnsurePipelineRun(t.Context(), object, PipelinePolicy{}, true, 100)
+	if err != nil || next.KnowledgePipelineRunID == run.KnowledgePipelineRunID {
+		t.Fatalf("new generation: %v", err)
+	}
+	rows, err := service.store.ListNotesOverviewPipelineRows(t.Context(), NotesOverviewInput{NodeKey: object.SourceNodeKey})
+	if err != nil || len(rows) != 1 || rows[0].Count != 1 || rows[0].Status == PipelineStatusComplete {
+		t.Fatalf("historical generation double-counted: %#v %v", rows, err)
+	}
+}
+
 func pipelineFixture(t *testing.T, db *sql.DB, fileClass, mimeType, body string, now time.Time) (*Service, KnowledgeObject) {
 	t.Helper()
 	service := NewService(db, WithClock(func() time.Time { return now }))
@@ -123,6 +157,7 @@ func setPipelinePolicyForTest(t *testing.T, db *sql.DB, policy PipelinePolicy) {
 	t.Helper()
 	metadata, err := json.Marshal(map[string]any{
 		"schema_version": "knowledge.pipeline_policy.v1", "pdf_ocr_enabled": policy.PDFOCREnabled,
+		"image_ocr_enabled":          policy.ImageOCREnabled,
 		"image_descriptions_enabled": policy.ImageDescriptionsEnabled,
 	})
 	if err != nil {

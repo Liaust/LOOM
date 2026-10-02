@@ -2,6 +2,7 @@ package knowledge
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 )
 
@@ -16,6 +17,10 @@ func (handler ImageDescriptionStageHandler) Execute(ctx context.Context, item Pi
 		return HeavyStageObservation{}, nil, fmt.Errorf("%w: image description requires a standalone image object", ErrInvalid)
 	}
 	if handler.Runtime == nil {
+		var plan CompiledPipelinePlan
+		if json.Unmarshal(item.Run.PlanSnapshot, &plan) == nil && plan.Enrichment != nil {
+			return HeavyStageObservation{}, nil, fmt.Errorf("%w: requested image vision runtime is unavailable", ErrInvalid)
+		}
 		return observedHeavy(policy, 0, 0), []string{"local vision runtime is disabled or unavailable"}, nil
 	}
 	prepare := handler.PreparePolicy

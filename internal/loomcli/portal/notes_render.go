@@ -531,6 +531,9 @@ func renderNotesSearchResultSetHeader(builder *strings.Builder, search NotesSear
 	}
 	parts = append(parts, "lifecycle="+firstNonEmpty(string(search.ResultSet.SourceLifecycle), "active"),
 		fmt.Sprintf("archived_omitted=%d truncated=%t", search.ResultSet.ArchivedMatchesOmitted, search.ResultSet.ArchivedMatchesOmittedTruncated))
+	if search.ResultSet.CandidateRetrievalTruncated {
+		parts = append(parts, "candidates=bounded")
+	}
 	fmt.Fprintf(builder, "  %s\n", strings.Join(parts, " "))
 }
 

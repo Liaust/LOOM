@@ -1,6 +1,7 @@
 package knowledge
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"path"
@@ -155,8 +156,10 @@ func notesSyncedCurrentSourceSQL(scope, object, version, file string) string {
 	 AND newer_scope.relevance_status = 'active')
 	 AND COALESCE(newer_version.source_node_id, newer_file.source_node_id)
 	 IS NOT DISTINCT FROM COALESCE(%[3]s.source_node_id, %[4]s.source_node_id)
-	 AND COALESCE(newer_version.source_path, newer_file.source_path, newer_object.metadata->>'source_path', '')
-	 = COALESCE(%[3]s.source_path, %[4]s.source_path, %[2]s.metadata->>'source_path', '')
+	 AND (newer_version.source_path = COALESCE(%[3]s.source_path, %[4]s.source_path, %[2]s.metadata->>'source_path', '')
+	 OR (newer_version.source_path IS NULL
+	 AND COALESCE(newer_file.source_path, newer_object.metadata->>'source_path', '')
+	 = COALESCE(%[3]s.source_path, %[4]s.source_path, %[2]s.metadata->>'source_path', '')))
 	 AND (newer_version.created_at, newer_version.object_version_id) > (%[3]s.created_at, %[3]s.object_version_id)
 	)`, scope, object, version, file)
 }
@@ -216,8 +219,17 @@ func notesKnowledgeVisibilityPolicySQL(object string, legacySearch, archiveRead,
 		legacy = "(visibility_root.root_kind NOT IN ('box_topics','box_library','project_material') AND (visibility_root.root_kind <> 'box_notes' OR " + object + ".storage_entry_id IS NOT NULL)) OR "
 		declaration = "CASE WHEN visibility_root.root_kind = 'box_notes' THEN " + declaration + " ELSE " + object + ".metadata->'source_root'->'knowledge_source' = visibility_root.metadata->'registration_metadata'->'knowledge_source' END"
 	}
+	projectReadable := "true"
+	if !archiveRead {
+		// Legacy projects may predate physical custody receipts. Their archived
+		// status must still stop active search and processing.
+		projectReadable = `(visibility_root.project_id IS NULL OR EXISTS (
+		 SELECT 1 FROM projects.projects current_project
+		 WHERE current_project.project_id=visibility_root.project_id AND current_project.status='active'))`
+	}
 	return `EXISTS (SELECT 1 FROM knowledge.notes_source_roots visibility_root
 	 WHERE visibility_root.notes_source_root_id = ` + object + `.notes_source_root_id
+	 AND ` + projectReadable + `
 	 AND ` + declarationEnrollmentEvidenceSQL("visibility_root", object, archiveRead) + `
 	 AND (` + legacy + `(
 	 ` + rootReadable + `
@@ -265,6 +277,13 @@ func ignoredNotesKnowledgeRelativePath(relativePath string) bool {
 		return false
 	}
 	cleaned := path.Clean(value)
+	for _, part := range strings.Split(strings.ToLower(cleaned), "/") {
+		if suffix, ok := strings.CutPrefix(part, ".loom-notes-"); ok && len(suffix) == 64 {
+			if _, err := hex.DecodeString(suffix); err == nil {
+				return true
+			}
+		}
+	}
 	base := strings.ToLower(path.Base(cleaned))
 	switch base {
 	case "loom.notes.yaml", "loom.notes.yml":
@@ -275,7 +294,7 @@ func ignoredNotesKnowledgeRelativePath(relativePath string) bool {
 }
 
 func visibleNotesKnowledgeRelativePathSQL(column string) string {
-	return "(lower(" + column + ") NOT IN ('loom.notes.yaml', 'loom.notes.yml') AND lower(" + column + ") NOT LIKE '%/loom.notes.yaml' AND lower(" + column + ") NOT LIKE '%/loom.notes.yml')"
+	return "(lower(" + column + ") NOT IN ('loom.notes.yaml', 'loom.notes.yml') AND lower(" + column + ") NOT LIKE '%/loom.notes.yaml' AND lower(" + column + ") NOT LIKE '%/loom.notes.yml' AND lower(replace(" + column + ", chr(92), '/')) !~ '(^|/)[.]loom-notes-[0-9a-f]{64}(/|$)')"
 }
 
 // Only v0.5 uses this additional live fence. A stripped version marker cannot

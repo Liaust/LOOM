@@ -23,6 +23,7 @@ type CompiledPipelineStage struct {
 }
 
 type CompiledPipelinePlan struct {
+	Enrichment              *PipelineEnrichment                     `json:"enrichment,omitempty"`
 	HeavyQuietWindowSeconds int                                     `json:"heavy_quiet_window_seconds,omitempty"`
 	SchemaVersion           string                                  `json:"schema_version"`
 	DefinitionKey           string                                  `json:"definition_key"`

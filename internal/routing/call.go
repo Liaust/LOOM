@@ -164,6 +164,11 @@ func (s Service) Call(ctx context.Context, req requestctx.Context, input Capabil
 		PolicyDecisionID:        decision.PolicyDecisionID,
 		GrantID:                 grantID,
 	}, input.Input)
+	// Execution may have created a job before its caller cancelled. Receipt
+	// persistence must not inherit that cancellation or lose the job identity.
+	executionContextErr := ctx.Err()
+	ctx, receiptCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer receiptCancel()
 	if err != nil {
 		code := "provider.execution_failed"
 		message := err.Error()
@@ -171,11 +176,14 @@ func (s Service) Call(ctx context.Context, req requestctx.Context, input Capabil
 			code = runtimeCode
 			message = runtimeMessage
 		}
-		route, call, eventIDs, markErr := s.markFailed(ctx, req, route.RouteID, call.CapabilityCallID, code, message, decision.PolicyDecisionID, approvalID, grantID, eventIDs)
+		route, call, eventIDs, markErr := s.markFailedWithResult(ctx, req, route.RouteID, call.CapabilityCallID, code, message, decision.PolicyDecisionID, approvalID, grantID, execResult.JobID, objectOrDefault(execResult.Result), objectOrDefault(execResult.ResultRefs), eventIDs)
 		if markErr != nil {
-			return CapabilityCallOutcome{}, markErr
+			return outcome(route, call, eventIDs, &execResult), markErr
 		}
-		return outcome(route, call, eventIDs, nil), nil
+		if executionContextErr != nil {
+			return outcome(route, call, eventIDs, &execResult), executionContextErr
+		}
+		return outcome(route, call, eventIDs, &execResult), nil
 	}
 	eventIDs = append(eventIDs, execResult.EventIDs...)
 	if err := s.persistServiceManagerObservation(ctx, req, route.ProviderID, route.CapabilityEndpointID, objectOrDefault(execResult.Result), time.Now().UTC()); err != nil {

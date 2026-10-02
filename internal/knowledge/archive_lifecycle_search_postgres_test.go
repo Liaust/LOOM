@@ -59,6 +59,14 @@ func seedNotesArchiveSearchEmbeddings(t *testing.T, f *notesArchivePostgresFixtu
 	if _, err := f.s.store.db.Exec(`UPDATE knowledge.chunk_embeddings SET embedding=array_fill(1::real,ARRAY[dimensions])::vector`); err != nil {
 		t.Fatal(err)
 	}
+	// The fixture seeds every chunk, so publish its complete version as well.
+	// Unified search deliberately excludes vectors without a semantic publication.
+	if _, err := f.s.store.db.Exec(`UPDATE knowledge.knowledge_objects
+	 SET semantic_version_id=lexical_version_id,semantic_runtime_key=$1,
+	 semantic_model_key=$2,semantic_dimensions=$3,semantic_published_at=now()
+	 WHERE lexical_version_id IS NOT NULL`, settings.RuntimeKey, settings.ModelKey, settings.Dimensions); err != nil {
+		t.Fatal(err)
+	}
 	runtime := &notesArchiveQueryEmbedding{}
 	f.s.embeddingRuntime = runtime
 	f.before = f.processingSnapshot(t)

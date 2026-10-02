@@ -32,7 +32,7 @@ var workspaceExportSources = []string{
 	".hermes/SOUL.md", "AGENTS.md", "WORKFLOW.md", "OPERATING-POLICY.md", "WORKSPACE-MAP.md", "TOOLING.md",
 	"protocols/README.md", "protocols/BASECAMP.md", "protocols/GITHUB.md", "protocols/CREDENTIALS.md",
 	"protocols/EXTERNAL-MESSAGING.md", "protocols/LOOM-ROUTING.md", "protocols/PROJECT-DELEGATION.md",
-	"protocols/PROVENANCE-AND-MEMORY.md", "protocols/SESSION-RETRIEVAL.md", "protocols/SKILL-CREATION-AND-PROMOTION.md",
+	"protocols/PROVENANCE-AND-MEMORY.md", "protocols/PROVENANCE-RECONCILIATION.md", "protocols/SESSION-RETRIEVAL.md", "protocols/SKILL-CREATION-AND-PROMOTION.md",
 	"protocols/DEVICE-AND-TOOL-ROUTING.md", "protocols/MAC-COMPUTER-USE.md",
 	"handoffs/HANDOFF-TEMPLATE.md",
 }
@@ -452,7 +452,7 @@ func PlanWorkspaceExport(options WorkspaceExportOptions) (WorkspaceExportPlan, e
 			return fmt.Errorf("invalid or duplicate export destination")
 		}
 		total += len(payload)
-		if len(payload) > maxWorkspaceFileSize || total > workspaceExportMaxBytes || len(p.payloads) >= 22 {
+		if len(payload) > maxWorkspaceFileSize || total > workspaceExportMaxBytes || len(p.payloads) >= 23 {
 			return fmt.Errorf("export payload bound exceeded")
 		}
 		p.payloads[path] = payload

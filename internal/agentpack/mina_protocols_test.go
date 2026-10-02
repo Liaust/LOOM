@@ -22,7 +22,7 @@ func TestMINAPersonalityAndOperatingContracts(t *testing.T) {
 		"OPERATING-POLICY.md":                {"Require explicit authorization", "credential/account changes", "external publication or contact", "Session pruning, archiving and retention changes", "not an instruction to disable or restart"},
 		"TOOLING.md":                         {"deployment and authenticated verification before use", "Nix owns package versions", "Same-user read-only modes are not a security sandbox", "Never open a runtime database directly", "memory.write_approval=false", "skills.write_approval=false", "skills.guard_agent_created=false", "project-local"},
 		"protocols/PROJECT-DELEGATION.md":    {"exact accepted base", "Do not give the worker MINA's SOUL", "credentials, permissions or operational authority"},
-		"protocols/PROVENANCE-AND-MEMORY.md": {"Candidates are clues, not facts or permission", "actual producer identity", "do not invent a second Markdown ledger", "deterministic Archivist", "Current sources and explicit instructions remain authoritative"},
+		"protocols/PROVENANCE-AND-MEMORY.md": {"Candidates are clues, not facts or permission", "actual producer identity", "do not invent a second Markdown ledger", "configured nightly Hermes task", "Current sources and explicit instructions remain authoritative"},
 		"protocols/SESSION-RETRIEVAL.md":     {"source visibility", "Never query a session database directly", "Do not change retention"},
 	} {
 		text := strings.Join(strings.Fields(string(payloads[name])), " ")

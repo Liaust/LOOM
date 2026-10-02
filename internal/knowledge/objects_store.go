@@ -141,6 +141,19 @@ func (s Store) UpsertKnowledgeObject(ctx context.Context, object KnowledgeObject
 	if err := requireNotesCustodyWriteTx(ctx, tx, object); err != nil {
 		return KnowledgeObject{}, err
 	}
+	// Catalog and synced observations arrive on independent admission pages.
+	// Recheck ownership at the write boundary, not only among this batch's
+	// candidates. An ineligible current synced source must not fall back to its
+	// retained catalog bytes; its ordinary synced page owns future admission.
+	if object.StorageEntryID != nil {
+		owned, err := notesSourceHasSyncedOwner(ctx, tx, object)
+		if err != nil {
+			return KnowledgeObject{}, err
+		}
+		if owned {
+			return KnowledgeObject{}, ErrNotesCustodyPaused
+		}
+	}
 
 	var existingID string
 	err = tx.QueryRowContext(ctx, `
@@ -240,6 +253,10 @@ func (s Store) ListSyncedObjectEntriesForNotesRoots(ctx context.Context, sourceR
 }
 
 func (s Store) listSyncedNotesPage(ctx context.Context, sourceRootID string, after [3]string, limit int) ([]SyncedObjectEntry, error) {
+	return s.listSyncedNotesPageFiltered(ctx, sourceRootID, after, limit, false)
+}
+
+func (s Store) listSyncedNotesPageFiltered(ctx context.Context, sourceRootID string, after [3]string, limit int, changedOnly bool) ([]SyncedObjectEntry, error) {
 	if s.db == nil {
 		return nil, fmt.Errorf("knowledge store is not configured")
 	}
@@ -247,7 +264,6 @@ func (s Store) listSyncedNotesPage(ctx context.Context, sourceRootID string, aft
 		"nsr.root_kind IN ('box_notes', 'box_topics', 'box_library', 'project_notes', 'project_material')",
 		"nsr.status = 'active'",
 		notesSyncedBoxOriginSQL("nsr", "ov", "f", "sr"),
-		notesSyncedCurrentSourceSQL("ss", "o", "ov", "f"),
 		"f.index_policy IS DISTINCT FROM 'private_no_index'",
 		"o.status = 'active'",
 		"o.object_type = 'file'",
@@ -274,6 +290,14 @@ func (s Store) listSyncedNotesPage(ctx context.Context, sourceRootID string, aft
 		)`,
 	}
 	args := []any{}
+	if changedOnly {
+		clauses = append(clauses, `NOT EXISTS (
+		 SELECT 1 FROM admitted_synced admitted
+		 WHERE admitted.notes_source_root_id = nsr.notes_source_root_id
+		 AND admitted.object_version_id = ov.object_version_id
+		 AND admitted.replica_id = sr.replica_id
+		)`)
+	}
 	if strings.TrimSpace(sourceRootID) != "" {
 		args = append(args, strings.TrimSpace(sourceRootID))
 		clauses = append(clauses, fmt.Sprintf("nsr.notes_source_root_id = $%d", len(args)))
@@ -283,7 +307,44 @@ func (s Store) listSyncedNotesPage(ctx context.Context, sourceRootID string, aft
 		args = append(args, after[0], after[1], after[2])
 		clauses = append(clauses, fmt.Sprintf("(nsr.notes_source_root_id, ov.object_version_id, sr.replica_id) > ($%d::text, $%d::text, $%d::text)", n+1, n+2, n+3))
 	}
-	query := `
+	// Rank every retained identity once, before privacy, availability or cursor
+	// filters. A newer ineligible identity must still hide the older source.
+	query := `WITH `
+	if changedOnly {
+		// Read admitted identities once, not every row in a root per replica.
+		query += `admitted_synced AS MATERIALIZED (
+		 SELECT notes_source_root_id,
+		 metadata->'synced_object'->>'object_version_id' AS object_version_id,
+		 metadata->'synced_object'->>'replica_id' AS replica_id
+		 FROM knowledge.knowledge_objects ko
+		 WHERE deleted_at IS NULL AND metadata->'synced_object' IS NOT NULL
+		 AND EXISTS (SELECT 1 FROM knowledge.pipeline_runs pr
+		  WHERE pr.knowledge_object_id=ko.knowledge_object_id
+		  AND pr.source_revision=ko.source_revision AND pr.source_hash=ko.source_hash)
+		), `
+	}
+	query += `relevant_scopes AS MATERIALIZED (
+			SELECT DISTINCT ss.scope_id
+			FROM knowledge.notes_source_roots nsr
+			JOIN scopes.scopes ss ON ` + notesSyncedScopeSQL("nsr", "ss") + `
+			WHERE nsr.status = 'active'
+			AND nsr.root_kind IN ('box_notes','box_topics','box_library','project_notes','project_material')
+		), current_sources AS MATERIALIZED (
+			SELECT DISTINCT ON (
+				osl.scope_id, COALESCE(ov.source_node_id, f.source_node_id),
+				COALESCE(ov.source_path, f.source_path, o.metadata->>'source_path', '')
+			) osl.scope_id, o.object_id, ov.object_version_id
+			FROM relevant_scopes rs
+			JOIN objects.object_scope_links osl ON osl.scope_id = rs.scope_id
+			AND osl.relevance_status = 'active'
+			JOIN objects.objects o ON o.object_id = osl.object_id
+			JOIN files.file_metadata f ON f.object_id = o.object_id
+			JOIN objects.object_versions ov ON ov.object_version_id = f.latest_version_id
+			AND ov.object_id = o.object_id
+			ORDER BY osl.scope_id, COALESCE(ov.source_node_id, f.source_node_id),
+			COALESCE(ov.source_path, f.source_path, o.metadata->>'source_path', ''),
+			ov.created_at DESC, ov.object_version_id DESC
+		)
 		SELECT
 			nsr.notes_source_root_id,
 			nsr.backend_root_key,
@@ -316,14 +377,14 @@ func (s Store) listSyncedNotesPage(ctx context.Context, sourceRootID string, aft
 			ss.scope_key
 		FROM knowledge.notes_source_roots nsr
 		JOIN scopes.scopes ss ON ` + notesSyncedScopeSQL("nsr", "ss") + `
-		JOIN objects.objects o
-		  ON EXISTS (SELECT 1 FROM objects.object_scope_links osl
-		     WHERE osl.scope_id = ss.scope_id AND osl.object_id = o.object_id AND osl.relevance_status = 'active')
+		JOIN current_sources cs ON cs.scope_id = ss.scope_id
+		JOIN objects.objects o ON o.object_id = cs.object_id
 		JOIN files.file_metadata f
 		  ON f.object_id = o.object_id
 		JOIN objects.object_versions ov
 		  ON ov.object_version_id = f.latest_version_id
 		 AND ov.object_id = o.object_id
+		 AND ov.object_version_id = cs.object_version_id
 		JOIN sync.replicas sr
 		  ON sr.replicated_id = ov.object_version_id
 		LEFT JOIN nodes.nodes n

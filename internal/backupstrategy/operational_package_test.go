@@ -15,6 +15,32 @@ import (
 	"time"
 )
 
+func TestOperationalDatabaseCapacityBound(t *testing.T) {
+	if operationalDumpMaxBytes != 16<<30 || OperationalPackageMaxBytes != 17<<30 {
+		t.Fatal("database capacity regressed to the pre-Notes limit")
+	}
+	var sum int64
+	for _, spec := range operationalArtifactSpecs {
+		sum += spec.MaxBytes
+	}
+	if sum > OperationalPackageMaxBytes {
+		t.Fatal("artifact bounds exceed package capacity")
+	}
+	// A sparse oversized file is rejected from metadata, without allocating or
+	// reading gigabytes merely to test the limit.
+	f, err := os.CreateTemp(t.TempDir(), "oversized")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := f.Truncate(operationalDumpMaxBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inspectStableFile(f.Name(), operationalDumpMaxBytes, false); err == nil {
+		t.Fatal("oversized dump accepted")
+	}
+}
+
 func TestOperationalPackageNormalIsCompleteVerifiedAndIndependentOfUserData(t *testing.T) {
 	fixture := newOperationalFixture(t)
 	first := createOperationalFixture(t, fixture, "operational-001", time.Date(2026, 8, 29, 10, 0, 0, 0, time.UTC), nil)

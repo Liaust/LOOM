@@ -6,10 +6,30 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"loom.local/loom/internal/knowledge"
+	"loom.local/loom/internal/storagecatalog"
 	"loom.local/loom/internal/workers"
 )
+
+func TestKnowledgeIndexerBacklogCadence(t *testing.T) {
+	now := time.Now().UTC()
+	policy := workers.TickPolicy{Mode: workers.TickModeInterval, IntervalSeconds: 60}
+	if next := knowledgeIndexerNextRun(policy, false, false, now); next == nil || next.Sub(now) != time.Minute {
+		t.Fatal("idle inventory must retain configured cadence", next)
+	}
+	if next := knowledgeIndexerNextRun(policy, true, false, now); next == nil || next.Sub(now) != time.Duration(workers.MinimumIntervalSeconds)*time.Second {
+		t.Fatal("pipeline backlog must get bounded continuation", next)
+	}
+	if next := knowledgeIndexerNextRun(policy, false, true, now); next == nil || next.Sub(now) != time.Duration(workers.MinimumIntervalSeconds)*time.Second {
+		t.Fatal("admission pages must get bounded continuation", next)
+	}
+	policy.Mode = workers.TickModeManual
+	if next := knowledgeIndexerNextRun(policy, true, true, now); next != nil {
+		t.Fatal("backlog must not activate manual scheduling", next)
+	}
+}
 
 func TestKnowledgeIndexerRuntimeDescriptorAndInstance(t *testing.T) {
 	runtime := NewKnowledgeIndexerRuntime(nil)
@@ -109,8 +129,8 @@ func TestParseKnowledgeIndexerConfigDefaultsAndBounds(t *testing.T) {
 	if config.BatchSize != 200 {
 		t.Fatalf("batch size = %d, want clamp to 200", config.BatchSize)
 	}
-	if config.MaxObjectsPerRun != 50 {
-		t.Fatalf("max objects = %d, want default 50", config.MaxObjectsPerRun)
+	if config.MaxObjectsPerRun != 200 {
+		t.Fatalf("max objects = %d, want default 200", config.MaxObjectsPerRun)
 	}
 	if config.MaxTextBytesPerObject != 5*1024*1024 {
 		t.Fatalf("max text bytes = %d, want 5 MiB", config.MaxTextBytesPerObject)
@@ -126,10 +146,116 @@ func TestParseKnowledgeIndexerConfigDefaultsAndBounds(t *testing.T) {
 	}
 }
 
+func TestKnowledgeIndexerRetainsExplicitSmallBatch(t *testing.T) {
+	config, err := parseKnowledgeIndexerConfig(json.RawMessage(`{"batch_size":12,"max_objects_per_run":7}`))
+	if err != nil || config.BatchSize != 12 || config.MaxObjectsPerRun != 7 {
+		t.Fatalf("explicit bounds changed: %+v %v", config, err)
+	}
+}
+
+func TestKnowledgeIndexerHeadingDenseNotesBudget(t *testing.T) {
+	runtime := NewKnowledgeIndexerRuntime(nil)
+	for _, raw := range []json.RawMessage{runtime.DefaultConfig(), json.RawMessage(`{}`)} {
+		config, err := parseKnowledgeIndexerConfig(raw)
+		if err != nil || config.MaxChunksPerObject != 2048 {
+			t.Fatalf("default chunk budget: %+v %v", config, err)
+		}
+		service := &knowledge.Service{}
+		object := knowledge.KnowledgeObject{FileClass: storagecatalog.FileClassMarkdown}
+		extraction, err := service.BuildTextPipelineExtraction(object,
+			strings.Repeat("# Section\n\nSmall paragraph.\n\n", 1434), knowledge.ChunkerOptions{})
+		if err != nil || len(extraction.Chunks) != 1434 || len(extraction.Chunks) > config.MaxChunksPerObject {
+			t.Fatalf("heading-dense note not admitted: chunks=%d err=%v", len(extraction.Chunks), err)
+		}
+	}
+	config, err := parseKnowledgeIndexerConfig(json.RawMessage(`{"max_chunks_per_object":1000}`))
+	if err != nil || config.MaxChunksPerObject != 1000 {
+		t.Fatalf("explicit chunk budget changed: %+v %v", config, err)
+	}
+}
+
+func TestProjectionRefreshCheckpointUsesWorkerJSONObject(t *testing.T) {
+	raw := mustWorkerJSON(projectionRefreshCheckpoint{})
+	if _, err := workers.JSONObject(raw, "checkpoint_json"); err != nil {
+		t.Fatal(err)
+	}
+	var decoded projectionRefreshCheckpoint
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestKnowledgeIndexerRunOnceRequiresService(t *testing.T) {
 	runtime := NewKnowledgeIndexerRuntime(nil)
 	_, err := runtime.RunOnce(context.Background(), workers.RunContext{})
 	if err == nil {
 		t.Fatal("RunOnce returned nil error without knowledge service")
+	}
+}
+
+func TestKnowledgeAdmissionBudgetRetainsCursorAndProcessingContext(t *testing.T) {
+	cursor := knowledge.AdmissionCursor{StorageAfter: "catalog", SyncedAfter: [3]string{"root", "version", "replica"}, StorageDone: true}
+	result, timedOut, err := admitKnowledgeNotes(t.Context(), cursor, 200, time.Millisecond,
+		func(ctx context.Context, saved knowledge.AdmissionCursor, limit int) (knowledge.AdmissionResult, error) {
+			if saved != cursor || limit != 200 {
+				t.Fatal("admission input changed")
+			}
+			<-ctx.Done()
+			return knowledge.AdmissionResult{Cursor: knowledge.AdmissionCursor{SyncedDone: true}, Applied: 3}, ctx.Err()
+		})
+	if err != nil || !timedOut || result.Cursor != cursor || !result.MoreWork || result.Applied != 0 || t.Context().Err() != nil {
+		t.Fatalf("timeout consumed processing context or advanced cursor: %+v %t %v", result, timedOut, err)
+	}
+}
+
+func TestKnowledgeAdmissionBudgetPreservesSuccessAndFailures(t *testing.T) {
+	want := knowledge.AdmissionResult{Cursor: knowledge.AdmissionCursor{StorageAfter: "next"}, Applied: 2}
+	failure := errors.New("database failure")
+	for _, admissionErr := range []error{nil, failure, context.DeadlineExceeded} {
+		result, timedOut, err := admitKnowledgeNotes(t.Context(), knowledge.AdmissionCursor{}, 2, time.Second,
+			func(context.Context, knowledge.AdmissionCursor, int) (knowledge.AdmissionResult, error) {
+				return want, admissionErr
+			})
+		if result != want || timedOut || !errors.Is(err, admissionErr) {
+			t.Fatalf("success or unrelated failure changed: %+v %t %v", result, timedOut, err)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, timedOut, err := admitKnowledgeNotes(ctx, knowledge.AdmissionCursor{}, 2, time.Second,
+		func(ctx context.Context, _ knowledge.AdmissionCursor, _ int) (knowledge.AdmissionResult, error) {
+			return want, ctx.Err()
+		})
+	if timedOut || !errors.Is(err, context.Canceled) {
+		t.Fatalf("parent cancellation was swallowed: %t %v", timedOut, err)
+	}
+}
+
+func TestKnowledgeAdmissionPageLimitBackoffAndReplay(t *testing.T) {
+	for _, tc := range []struct {
+		raw   string
+		limit int
+		want  int
+	}{
+		{`{}`, 200, 200},
+		{`{"admission_timed_out":true}`, 200, 100},
+		{`{"admission_timed_out":true,"admission_page_limit":100}`, 200, 50},
+		{`{"admission_timed_out":false,"admission_page_limit":50}`, 200, 50},
+		{`{"admission_timed_out":true,"admission_page_limit":1}`, 200, 1},
+		{`{"admission_timed_out":false,"admission_page_limit":50}`, 12, 12},
+	} {
+		checkpoints := map[string]workers.WorkerCheckpoint{"default": {CheckpointJSON: json.RawMessage(tc.raw)}}
+		for range 2 {
+			got, err := knowledgeAdmissionPageLimit(tc.limit, checkpoints)
+			if err != nil || got != tc.want {
+				t.Fatalf("page backoff/replay %s: %d %v", tc.raw, got, err)
+			}
+		}
+	}
+	if got, err := knowledgeAdmissionPageLimit(200, nil); err != nil || got != 200 {
+		t.Fatal("new instance changed configured ceiling", got, err)
+	}
+	if _, err := knowledgeAdmissionPageLimit(200, map[string]workers.WorkerCheckpoint{"default": {CheckpointJSON: json.RawMessage("invalid")}}); err == nil {
+		t.Fatal("invalid checkpoint accepted")
 	}
 }

@@ -118,6 +118,8 @@ func (s *Service) defaultHeavyStageHandler(stage string) HeavyStageHandler {
 	}
 }
 
+// ReleasePipelineClaim yields unfinished work without charging a retry attempt.
+// Claims that fail still retain their attempt count and normal retry limits.
 func (s *Service) ReleasePipelineClaim(ctx context.Context, item PipelineWorkItem) error {
 	tx, err := s.store.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -127,7 +129,7 @@ func (s *Service) ReleasePipelineClaim(ctx context.Context, item PipelineWorkIte
 	if err = lockPipelineClaimTx(ctx, tx, item); err != nil {
 		return err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE knowledge.pipeline_stage_runs SET status='ready',claimed_by_worker_run_id='',updated_at=now() WHERE knowledge_pipeline_stage_run_id=$1 AND claim_generation=$2 AND claimed_by_worker_run_id=$3 AND status='processing'`, item.Stage.KnowledgePipelineStageRunID, item.Run.ClaimGeneration, item.Run.ClaimedByWorkerRunID)
+	result, err := tx.ExecContext(ctx, `UPDATE knowledge.pipeline_stage_runs SET status='ready',attempt_count=GREATEST(attempt_count-1,0),claimed_by_worker_run_id='',updated_at=now() WHERE knowledge_pipeline_stage_run_id=$1 AND claim_generation=$2 AND claimed_by_worker_run_id=$3 AND status='processing'`, item.Stage.KnowledgePipelineStageRunID, item.Run.ClaimGeneration, item.Run.ClaimedByWorkerRunID)
 	if err != nil {
 		return err
 	}

@@ -1,51 +1,42 @@
 # Roadmap
 
-The order below is directional, not a release-date commitment. Working code,
-remaining acceptance, and possible future integrations are different things.
+This is directional, not a release-date commitment. Version 0.9.0 establishes
+the usable-system public beta; the next optimisation cycle can use 0.10.x.
+Internal V1/V2 planning labels are not public semantic-version promises.
 
-## Public Developer Preview
+## Current Baseline
 
-- Publish a clean, privacy-audited source baseline with licensing, contributor
-  guidance, clear dependency ownership, and an honest implementation snapshot.
-- Reconcile the documentation around current projects, search and agent use.
-- Add code-rendered system/network maps and real Portal visuals after the
-  source/docs baseline; build the public documentation site separately.
+Projects/declarations, managed applications, capability schedules, native
+Hermes schedule integration, qualified Provenance, selective Notes processing,
+writable source-backed Notes sync, archive/recovery and agent/node integration
+are implemented. See [current state](STATE.md) for their limits rather than
+treating this list as a guarantee for every configuration.
 
-## Make The Existing System Easier To Use
+## Next: Optimise What Exists
 
-- Add guided CLI installation/configuration over existing setup primitives,
-  including hardware, identities, credentials, network and recovery prerequisites.
-- Keep project work file-first: ordinary edits should not require repeated
-  documentation searches or registration ceremonies.
-- Improve actionable errors, prerequisite summaries, resumable operations,
-  context discovery and the consistency of CLI/API/Portal workflows.
-- Bring remaining Portal project forms into line with file-first CLI creation
-  and declaration operations; do not make legacy facet forms the onboarding path.
-- Replace remaining maintainer-specific assumptions with documented operator
-  configuration and make supported platform/dependency combinations explicit.
+- Improve bulk imports so text/indexing/embeddings and asset delivery can make
+  bounded progress concurrently without exhausting Main's compute or disk.
+- Refine retrieval plans, lexical/semantic ranking and source-version lookups
+  against real larger collections; expose useful latency and backlog diagnostics.
+- Reduce unnecessary watcher/polling/full-scan work and client status noise;
+  preserve event-driven ordinary editing and exact conflict/source checks.
+- Make recovery status and service coverage easier to understand without
+  conflating readable archives with application-consistent recovery.
+- Assess better extraction and handwriting/equation quality only where useful;
+  retain selective processing for expensive documents.
 
-## Exercise Complete Workflows
+## Simplify Installation And Operation
 
-- Continue a real project through development, deployment, state projection,
-  candidate registration, reconciliation, retrieval and later changes.
-- Verify Notes queues, chunking, embeddings, OCR and PDF processing against
-  representative real documents; distinguish disabled workers from failures.
-- Verify fresh application-data backup/recovery and larger archive/inactive
-  restore/reactivation scenarios without creating a replica testing platform.
-- Check explicit project schedules and automation lifecycle through actual use.
-
-## Extend Deliberately
-
-- General, authorized agent SSH between nodes, separate from desktop control.
-- A LOOM-owned bounded agentic-run adapter with project-specific declarations,
-  identity, run history, concurrency and failure reporting. Hermes native jobs
-  must not silently become a second canonical scheduling system.
+- Guided CLI installation/configuration over existing primitives: hardware,
+  network, identities, credentials, processing engines and recovery prerequisites.
+- More consistent CLI/API/Portal prerequisite reporting, resumable actions and
+  project forms; ordinary file edits should not require registration ceremony.
+- Repeatable packaging and documented supported platform/dependency combinations,
+  rather than assuming the maintainer's personal host configuration.
 - Clearer agent workspace portability, connector setup and credential rotation.
-- Additional installation targets and public release packaging after the
-  documented reference configuration has a repeatable setup path.
 
-## Deferred Ideas
+## Deferred
 
-Mobile/iOS computer control, further connectors, and broader autonomy remain
-ideas, not implemented commitments. New capabilities should solve an observed
-workflow problem rather than add another control layer by default.
+Mobile/iOS desktop control, additional connectors and further installation
+targets remain separate proposals. New features should solve an observed
+workflow problem rather than introduce another control layer by default.

@@ -1,0 +1,12 @@
+kind: loom.project
+schema_version: project.contract.v0.3
+project:
+  slug: codex-schedule-trial
+  name: Codex schedule trial
+  owner_node: main
+  status: active
+facets:
+  scripts: true
+  schedules: true
+provider_defaults:
+  scripts_provider: project

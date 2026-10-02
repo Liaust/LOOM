@@ -234,3 +234,11 @@ func (c Client) RunKnowledgeNotesIndexer(ctx context.Context, correlationID stri
 func (c Client) RunKnowledgeNotesEmbedder(ctx context.Context, correlationID string, input workers.RunOnceInput) (response.Envelope[workers.RunOnceResult], error) {
 	return doJSON[workers.RunOnceResult](c, ctx, http.MethodPost, "/v1/knowledge/notes/workers/embedder/run", correlationID, input)
 }
+
+func (c Client) PreviewKnowledgeNotesEnrichment(ctx context.Context, correlationID string, input knowledge.EnrichmentSelection) (response.Envelope[knowledge.EnrichmentPreview], error) {
+	query := url.Values{"ref": {input.Ref}, "kind": {input.Kind}, "node": {input.NodeKey}, "recursive": {strconv.FormatBool(input.Recursive)}, "limit": {strconv.Itoa(input.Limit)}, "after": {input.After}, "ocr": {strconv.FormatBool(input.Stages.OCR)}, "vision": {strconv.FormatBool(input.Stages.Vision)}, "embeddings": {strconv.FormatBool(input.Stages.Embeddings)}, "source_revision": {input.SourceRevision}, "source_hash": {input.SourceHash}}
+	return doJSON[knowledge.EnrichmentPreview](c, ctx, http.MethodGet, "/v1/knowledge/notes/enrich?"+query.Encode(), correlationID, nil)
+}
+func (c Client) ApplyKnowledgeNotesEnrichment(ctx context.Context, correlationID string, input knowledge.EnrichmentApplyInput) (response.Envelope[knowledge.EnrichmentReceipt], error) {
+	return doJSON[knowledge.EnrichmentReceipt](c, ctx, http.MethodPost, "/v1/knowledge/notes/enrich", correlationID, input)
+}

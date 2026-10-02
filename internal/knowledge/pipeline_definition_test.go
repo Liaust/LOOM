@@ -13,6 +13,8 @@ func TestPipelineDefinitionFileFamilies(t *testing.T) {
 		want, forbid              []string
 	}{
 		{"markdown", storagecatalog.FileClassMarkdown, "note.md", "markdown", []string{FilePipelineStageNativeText, FilePipelineStageEmbedding}, []string{FilePipelineStagePDFOCR, FilePipelineStageImageDescription}},
+		{"canvas MIME text", storagecatalog.FileClassText, "map.canvas", "metadata_only", []string{FilePipelineStageMetadata}, []string{FilePipelineStageNativeText, FilePipelineStageEmbedding}},
+		{"audio", storagecatalog.FileClassAudio, "recording.wav", "metadata_only", []string{FilePipelineStageMetadata}, []string{FilePipelineStageNativeText, FilePipelineStageEmbedding}},
 		{"structured", storagecatalog.FileClassCode, "data.json", "structured", []string{FilePipelineStageNativeText, FilePipelineStageEmbedding}, []string{FilePipelineStagePDFOCR, FilePipelineStageImageDescription}},
 		{"docx", storagecatalog.FileClassOfficeDocument, "report.docx", "docx", []string{FilePipelineStageNativeText}, []string{FilePipelineStagePDFOCR, FilePipelineStageImageDescription}},
 		{"pdf", storagecatalog.FileClassPDF, "scan.pdf", "pdf", []string{FilePipelineStagePDFPageAnalysis, FilePipelineStagePDFOCR}, []string{FilePipelineStageImageDescription}},

@@ -105,13 +105,13 @@ func parseDeclarationShape(raw []byte) (ProjectDeclaration, string) {
 			return d, "declaration.key"
 		}
 		payloads := 0
-		for _, present := range []bool{r.Repository != nil, r.Knowledge != nil, r.Protection != nil, r.Application != nil, r.Schedule != nil} {
+		for _, present := range []bool{r.Repository != nil, r.Knowledge != nil, r.Protection != nil, r.Application != nil, r.Schedule != nil, r.HermesSchedule != nil} {
 			if present {
 				payloads++
 			}
 		}
 		switch r.Kind {
-		case DeclarationRepository, DeclarationKnowledge, DeclarationProtection, DeclarationApplication, DeclarationSchedule:
+		case DeclarationRepository, DeclarationKnowledge, DeclarationProtection, DeclarationApplication, DeclarationSchedule, DeclarationHermesSchedule:
 		default:
 			return d, "declaration.kind"
 		}
@@ -121,6 +121,13 @@ func parseDeclarationShape(raw []byte) (ProjectDeclaration, string) {
 		var p string
 		var protection ResourceKey
 		switch r.Kind {
+		case DeclarationHermesSchedule:
+			if r.HermesSchedule == nil {
+				return d, "declaration.hermes_schedule: payload required"
+			}
+			if _, err := HermesScheduleInput(*r.HermesSchedule, "/project"); err != nil {
+				return d, "declaration.hermes_schedule: " + err.Error()
+			}
 		case DeclarationSchedule:
 			if r.Schedule == nil {
 				return d, "declaration.union"
@@ -837,6 +844,9 @@ func declarationPlanActions(c *DeclarationCompilation) ([]PlanAction, []PlanUnsu
 		r := c.Document.Resources[key]
 		action, status, reason := "", "pending", ""
 		switch r.Kind {
+		case DeclarationHermesSchedule:
+			action = "would_reconcile_hermes_schedule"
+			reason = "Reconcile only this project-owned native Hermes timer; default paused."
 		case DeclarationSchedule:
 			action = "would_reconcile_schedule"
 			reason = "Reconcile this project's native schedule; omitted status defaults disabled."
@@ -1184,7 +1194,8 @@ func CompileDeclarationEnrollment(loaded LoadedProject, c DeclarationCompilation
 		}
 		localKey := string(key)
 		knowledgePath := KnowledgeLogicalPath(key, *knowledge)
-		include, exclude := append([]string{}, defaultNotesIncludes...), append([]string{}, defaultNotesExcludes...)
+		include := normalizePolicyPatterns(firstNonEmptyStrings(knowledge.Include, defaultNotesIncludes))
+		exclude := normalizePolicyPatterns(firstNonEmptyStrings(knowledge.Exclude, defaultNotesExcludes))
 		for _, selection := range selections {
 			if !selection.Enabled {
 				continue
@@ -1200,6 +1211,12 @@ func CompileDeclarationEnrollment(loaded LoadedProject, c DeclarationCompilation
 					return nil, fmt.Errorf("declaration.enrollment_protection_conflict: safe root for %s", key)
 				}
 				localKey = spec.Key
+				// A shared watcher must not silently narrow backup coverage or ignore
+				// explicit Notes selection. Omitted fields retain policy inheritance.
+				if (len(knowledge.Include) > 0 && !stringSlicesEqual(include, spec.Include)) ||
+					(len(knowledge.Exclude) > 0 && !stringSlicesEqual(exclude, spec.Exclude)) {
+					return nil, fmt.Errorf("declaration.enrollment_protection_conflict: knowledge filters for %s must match its shared protection root", key)
+				}
 				include, exclude = append([]string{}, spec.Include...), append([]string{}, spec.Exclude...)
 			}
 		}

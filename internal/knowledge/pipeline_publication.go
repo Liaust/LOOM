@@ -47,6 +47,11 @@ func withdrawIncompatiblePublicationsTx(ctx context.Context, tx *sql.Tx, objectI
 		if stage.Selected {
 			continue
 		}
+		// Adding OCR/vision must not recompute source-disabled embeddings or remove
+		// the exact earlier semantic publication authorized for these same bytes.
+		if plan.Enrichment != nil && stage.StageKey == FilePipelineStageEmbedding && plan.Enrichment.Preserved.Embeddings {
+			continue
+		}
 		switch stage.StageKey {
 		case FilePipelineStageEmbedding, FilePipelineStagePDFOCR, FilePipelineStageImageOCR, FilePipelineStageImageDescription:
 		default:

@@ -201,6 +201,7 @@ PYCOMPAT
 
   passthru = (old.passthru or { }) // {
     upstreamRevision = revision;
+    projectSchedulePython = "${upstream.hermesVenv}/bin/python3";
     upstreamTag = "v2026.8.31";
     upstreamSourceHash = hermes-upstream.narHash;
     macComputerUseSourceRelative = "share/loom-hermes-native";

@@ -132,6 +132,10 @@ func (s Service) ListRuns(ctx context.Context, workerRef string, filter RunFilte
 }
 
 func (s Service) ListDueWorkers(ctx context.Context, now time.Time, limit int) ([]WorkerInstance, error) {
+	return s.listDueWorkers(ctx, now, limit, "")
+}
+
+func (s Service) listDueWorkers(ctx context.Context, now time.Time, limit int, lane string) ([]WorkerInstance, error) {
 	if s.DB == nil {
 		return nil, fmt.Errorf("%w: database is required", ErrInvalid)
 	}
@@ -142,6 +146,9 @@ func (s Service) ListDueWorkers(ctx context.Context, now time.Time, limit int) (
 		  AND enabled = true
 		  AND paused = false
 		  AND current_run_id IS NULL
+		  AND ($10 = '' OR ($10 = 'jobs' AND worker_kind = 'job_runner')
+		    OR ($10 = 'notes' AND worker_kind = 'notes_workspace_sync')
+		    OR ($10 = 'background' AND worker_kind NOT IN ('job_runner','notes_workspace_sync')))
 		  AND (
 		      (tick_policy_json->>'mode' = $6 AND (next_run_after IS NULL OR next_run_after <= $8))
 		      OR
@@ -149,7 +156,7 @@ func (s Service) ListDueWorkers(ctx context.Context, now time.Time, limit int) (
 		  )
 		ORDER BY COALESCE(next_run_after, '-infinity'::timestamptz), worker_key ASC
 		LIMIT $9
-	`, LocalityMainOwned, LifecycleRegistered, LifecycleActive, LifecycleDegraded, LifecycleFailed, TickModeInterval, TickModeDailyLocal, now.UTC(), limit)
+	`, LocalityMainOwned, LifecycleRegistered, LifecycleActive, LifecycleDegraded, LifecycleFailed, TickModeInterval, TickModeDailyLocal, now.UTC(), limit, lane)
 	if err != nil {
 		return nil, err
 	}

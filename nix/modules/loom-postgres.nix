@@ -6,11 +6,14 @@ let
   restoreAuthorityPeerMap = "loom_restore_authority";
   adminUsers = lib.filter (name: name != cfg.postgres.user && name != provenanceCfg.user) cfg.postgres.adminUsers;
   provenanceDBURL = "user=${provenanceCfg.user} dbname=${provenanceCfg.database} host=/run/postgresql sslmode=disable";
+  pgSearch = pkgs.callPackage ../packages/pg-search-bin.nix {
+    postgresql = cfg.postgres.package;
+  };
   postgresPackage =
-    if cfg.postgres.pgvector.enable then
-      cfg.postgres.package.withPackages (ps: [
-        ps.pgvector
-      ])
+    if cfg.postgres.pgvector.enable || cfg.postgres.pgSearch.enable then
+      cfg.postgres.package.withPackages (ps:
+        lib.optional cfg.postgres.pgvector.enable ps.pgvector
+        ++ lib.optional cfg.postgres.pgSearch.enable pgSearch)
     else
       cfg.postgres.package;
 in
@@ -52,6 +55,12 @@ in
       description = "Install and create the PostgreSQL pgvector extension for LOOM notes embeddings.";
     };
 
+    pgSearch.enable = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Load the pinned PostgreSQL 17 pg_search extension for the Notes retrieval evaluation. Does not switch Notes search or create indexes.";
+    };
+
     provenance = {
       database = lib.mkOption {
         type = lib.types.strMatching "^[a-z_][a-z0-9_]*$";
@@ -76,6 +85,12 @@ in
   config = lib.mkIf (cfg.enable && cfg.postgres.enable) {
     assertions = [
       {
+        assertion = !cfg.postgres.pgSearch.enable || (cfg.postgres.pgvector.enable
+          && pkgs.stdenv.hostPlatform.system == "x86_64-linux"
+          && lib.versions.major cfg.postgres.package.version == "17");
+        message = "The pg_search evaluation requires PostgreSQL 17, pgvector and x86_64 Linux.";
+      }
+      {
         assertion = provenanceCfg.database != cfg.postgres.database;
         message = "LOOM provenance database must not collide with the primary LOOM database.";
       }
@@ -98,6 +113,9 @@ in
       enable = true;
       enableTCPIP = false;
       package = postgresPackage;
+      settings = lib.mkIf cfg.postgres.pgSearch.enable {
+        shared_preload_libraries = "pg_search";
+      };
       ensureDatabases = [
         cfg.postgres.database
         provenanceCfg.database
@@ -136,6 +154,10 @@ in
     environment.systemPackages = [
       postgresPackage
     ];
+
+    # OpenBLAS initializes NUMA allocation while pg_search is preloaded.
+    systemd.services.postgresql.serviceConfig.SystemCallFilter =
+      lib.mkIf cfg.postgres.pgSearch.enable (lib.mkAfter [ "mbind" ]);
 
     systemd.services.postgresql-setup.script = lib.mkAfter ''
       psql -v ON_ERROR_STOP=1 -d postgres <<'SQL'

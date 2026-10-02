@@ -135,6 +135,10 @@ type NotesIndexHealth struct {
 	Complete             int        `json:"complete"`
 	Failed               int        `json:"failed"`
 	SkippedUnsupported   int        `json:"skipped_unsupported"`
+	CompleteWithWarnings int        `json:"complete_with_warnings"`
+	Blocked              int        `json:"blocked"`
+	Stale                int        `json:"stale"`
+	Cancelled            int        `json:"cancelled"`
 	LastIndexedAt        *time.Time `json:"last_indexed_at,omitempty"`
 	LastPipelineUpdateAt *time.Time `json:"last_pipeline_update_at,omitempty"`
 	LastFailureAt        *time.Time `json:"last_failure_at,omitempty"`
@@ -467,12 +471,21 @@ func addIndexHealth(target *NotesIndexHealth, searchDocuments int, indexedAt *ti
 
 func addPipelineHealth(target *NotesIndexHealth, status string, count int, updatedAt *time.Time, failedAt *time.Time) {
 	switch status {
-	case PipelineStatusQueued:
+	case PipelineStatusQueued, "waiting_quiet_window", "waiting_coordinator", "waiting_heavy":
 		target.Queued += count
 	case PipelineStatusProcessing:
 		target.Processing += count
 	case PipelineStatusComplete:
 		target.Complete += count
+	case "complete_with_warnings":
+		target.Complete += count
+		target.CompleteWithWarnings += count
+	case "blocked_manual_action":
+		target.Blocked += count
+	case "stale":
+		target.Stale += count
+	case "cancelled":
+		target.Cancelled += count
 	case PipelineStatusFailed:
 		target.Failed += count
 		target.LastFailureAt = latestTimePtr(target.LastFailureAt, failedAt)
@@ -614,6 +627,10 @@ func normalizeNotesProcessingState(state string) string {
 
 func normalizeNotesPipelineStatus(status string) string {
 	status = strings.TrimSpace(status)
+	switch status {
+	case "waiting_quiet_window", "waiting_coordinator", "waiting_heavy", "complete_with_warnings", "blocked_manual_action", "stale", "cancelled":
+		return status
+	}
 	if status == "" {
 		return PipelineStatusNotStarted
 	}

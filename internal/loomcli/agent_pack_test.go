@@ -399,6 +399,7 @@ func workspaceExportCLIFixture(t *testing.T) string {
 	for _, relative := range []string{".hermes/SOUL.md", "AGENTS.md", "WORKFLOW.md", "OPERATING-POLICY.md", "WORKSPACE-MAP.md", "TOOLING.md", "protocols/README.md", "protocols/BASECAMP.md", "protocols/GITHUB.md", "protocols/CREDENTIALS.md", "protocols/EXTERNAL-MESSAGING.md", "protocols/LOOM-ROUTING.md", "protocols/PROJECT-DELEGATION.md", "protocols/PROVENANCE-AND-MEMORY.md", "protocols/SESSION-RETRIEVAL.md", "protocols/SKILL-CREATION-AND-PROMOTION.md", "protocols/DEVICE-AND-TOOL-ROUTING.md", "protocols/MAC-COMPUTER-USE.md", "handoffs/HANDOFF-TEMPLATE.md"} {
 		paths = append(paths, "ai-loom-pack/templates/mina/"+relative)
 	}
+	paths = append(paths, "ai-loom-pack/templates/mina/protocols/PROVENANCE-RECONCILIATION.md")
 	for _, path := range paths {
 		payload, err := os.ReadFile(filepath.Join("..", "..", path))
 		if err != nil {
@@ -436,7 +437,7 @@ func TestWorkspaceExportCLIPlanApplyAndRefusal(t *testing.T) {
 		if err := json.Unmarshal([]byte(output), &plan); err != nil {
 			t.Fatal(err)
 		}
-		if len(plan.Manifest.Files) != 22 || plan.Manifest.ExportID == "" || id != "" && id != plan.Manifest.ExportID {
+		if len(plan.Manifest.Files) != 23 || plan.Manifest.ExportID == "" || id != "" && id != plan.Manifest.ExportID {
 			t.Fatalf("invalid plan: %s", output)
 		}
 		id = plan.Manifest.ExportID
@@ -452,7 +453,7 @@ func TestWorkspaceExportCLIPlanApplyAndRefusal(t *testing.T) {
 		t.Fatal(err)
 	}
 	var result agentpack.WorkspaceExportResult
-	if err := json.Unmarshal([]byte(output), &result); err != nil || !result.Applied || result.Manifest.ExportID != id || len(result.Created) != 28 {
+	if err := json.Unmarshal([]byte(output), &result); err != nil || !result.Applied || result.Manifest.ExportID != id || len(result.Created) != 29 {
 		t.Fatalf("result: %+v %v", result, err)
 	}
 	info, err := os.Stat(filepath.Join(destination, ".hermes/SOUL.md"))

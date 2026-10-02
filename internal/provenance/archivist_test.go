@@ -428,6 +428,48 @@ func TestArchivistCrashAfterCommitDeterministicReplayPostgres(t *testing.T) {
 	}
 }
 
+func TestArchivistCandidateEnvelopePostgresTimestampPrecision(t *testing.T) {
+	// Observed on Main: the JSON envelope retains nanoseconds, while the pgx
+	// timestamptz round trip stores only microseconds in the candidate column.
+	registeredAt := time.Date(2026, 9, 28, 20, 47, 49, 284203142, time.UTC)
+	for _, tc := range []struct {
+		name       string
+		projected  time.Time
+		wantReason string
+	}{
+		{"exact", registeredAt, "agent_interpretation"},
+		{"postgres_precision", registeredAt.Truncate(time.Microsecond), "agent_interpretation"},
+		{"different_microsecond", registeredAt.Truncate(time.Microsecond).Add(time.Microsecond), "partial_evidence"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := strictArchivistCandidate(t, "cfa671de-d6c6-49b9-9b09-70cf118baf2f", "Acceptance fixture export format is undecided.")
+			var envelope archivistCandidateEnvelope
+			if err := json.Unmarshal(candidate.Candidate.Payload, &envelope); err != nil {
+				t.Fatal(err)
+			}
+			envelope.RegisteredAt = registeredAt
+			envelope.Registration.AssertionPosture = "source_claim"
+			candidate.Candidate.RegisteredAt = tc.projected
+			candidate.Candidate.AssertionPosture = "source_claim"
+			candidate.Candidate.Submitted = mustTestJSON(t, envelope.Registration)
+			candidate.Candidate.Payload = mustTestJSON(t, envelope)
+			fake := newArchivistFakeTransport()
+			fake.candidates[candidate.Candidate.ID] = candidate
+			archivist, _ := NewArchivist(fake)
+			result, err := archivist.Run(context.Background(), ArchivistRunRequest{
+				CandidateLimit: 1, EvidenceLimit: 4, CandidateIDs: []SemanticID{candidate.Candidate.ID},
+				IdempotencyKey: "timestamp-precision", Producer: archivistProducer(), LeaseGuard: allowArchivistLease,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Deferred != 1 || result.Accepted != 0 || len(result.Outcomes) != 1 || result.Outcomes[0].ReasonCode != tc.wantReason {
+				t.Fatalf("expected source policy or genuine identity mismatch %q, got %#v", tc.wantReason, result)
+			}
+		})
+	}
+}
+
 func strictArchivistCandidate(t *testing.T, id SemanticID, claim string) CandidateLifecycleProjection {
 	t.Helper()
 	registration := strictArchivistRegistration(claim)

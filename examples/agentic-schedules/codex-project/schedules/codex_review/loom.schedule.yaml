@@ -1,0 +1,25 @@
+kind: loom.schedule
+schema_version: schedule.contract.v0.3
+schedule:
+  key: codex_review
+  display_name: Codex project acceptance
+  status: paused
+target:
+  capability: main@codex-schedule-trial.codex_review
+  input_file: input.example.json
+  run_as: scheduler
+timing:
+  kind: interval
+  expression: 1m
+  timezone: UTC
+misfire:
+  policy: run_if_late_within
+  lateness_window_seconds: 30
+concurrency:
+  policy: skip_if_pending
+approval:
+  policy: none
+timeout:
+  seconds: 180
+retry:
+  max_attempts: 1

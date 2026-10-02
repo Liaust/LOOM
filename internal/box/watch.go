@@ -219,7 +219,7 @@ func watchRootItemForArea(contract Contract, area string) (projectcontracts.Proj
 			MaxBatchBytes: boxWatchMaxFileBytes(area),
 		},
 		SyncPolicy:   syncPolicy,
-		IndexPolicy:  agentwatchedroots.IndexPolicy{Mode: indexMode},
+		IndexPolicy:  agentwatchedroots.IndexPolicy{Mode: indexMode, MaxTextBytes: policy.Index.MaxTextBytes},
 		DeletePolicy: agentwatchedroots.DeletePolicy{Mode: deleteMode},
 	}
 	if config.SyncPolicy.Mode != agentwatchedroots.SyncModeNone {
@@ -265,6 +265,14 @@ func watchRootItemForArea(contract Contract, area string) (projectcontracts.Proj
 			"include":            config.Include,
 			"exclude":            config.Exclude,
 		}
+	}
+	if policy.Processing != nil {
+		source, _ := metadata["knowledge_source"].(map[string]any)
+		if source == nil {
+			source = map[string]any{"include": config.Include, "exclude": config.Exclude}
+			metadata["knowledge_source"] = source
+		}
+		source["policy"] = projectcontracts.KnowledgeSourcePolicy{Processing: policy.Processing}
 	}
 	return projectcontracts.ProjectWatchedRootItem{
 		Key:              area,
@@ -335,6 +343,14 @@ func loadWatchPolicy(path string, expectedArea string) (WatchPolicy, []Diagnosti
 	}
 	if !policy.Enabled {
 		diagnostics = append(diagnostics, Diagnostic{Severity: "warning", Code: "box.watch.policy_disabled", Message: "Box watch policy is disabled", Path: path})
+	}
+	if policy.Processing != nil {
+		if err := projectcontracts.ValidateKnowledgeProcessingPolicy(*policy.Processing); err != nil {
+			diagnostics = append(diagnostics, Diagnostic{Severity: "error", Code: "box.watch.processing_invalid", Message: err.Error(), Path: path})
+		}
+	}
+	if policy.Index.MaxTextBytes < 0 || policy.Index.MaxTextBytes > 8*1024*1024 {
+		diagnostics = append(diagnostics, Diagnostic{Severity: "error", Code: "box.watch.index_limit_invalid", Message: "index.max_text_bytes must be between 1 and 8388608 when specified", Path: path})
 	}
 	return policy, diagnostics
 }

@@ -30,6 +30,7 @@ import (
 	"loom.local/loom/internal/events"
 	"loom.local/loom/internal/filetransfer"
 	"loom.local/loom/internal/health"
+	"loom.local/loom/internal/hermesschedules"
 	"loom.local/loom/internal/httpapi"
 	"loom.local/loom/internal/idempotency"
 	"loom.local/loom/internal/identity"
@@ -42,6 +43,7 @@ import (
 	"loom.local/loom/internal/minidashboard"
 	"loom.local/loom/internal/modules"
 	"loom.local/loom/internal/nodes"
+	"loom.local/loom/internal/notesworkspacesync"
 	"loom.local/loom/internal/objects"
 	"loom.local/loom/internal/objectstore"
 	"loom.local/loom/internal/policy"
@@ -464,15 +466,16 @@ func newServeCommand(opts *options) *cobra.Command {
 				Allowlists:   serviceregistry.FileAllowlistResolver{Path: cfg.ServiceAllowlist},
 			})
 			projectArchiveService := storagearchive.NewProjectRuntimeService(storagearchive.ProjectRuntimeDeps{
-				Projects:            projectService,
-				RepositoryState:     projectService,
-				Activation:          projectActivationService,
-				StorageArchive:      storageArchiveService,
-				WorkspaceMove:       projectWorkspaceMove,
-				RuntimeQuiescence:   projectArchiveQuiescenceRuntime(routingService),
-				WorkspaceRoots:      storagearchive.TrustedWorkspaceRoots{BoxRoot: cfg.BoxPath, StorageRoot: cfg.StorageRoot},
-				RuntimeManifestRoot: projectRuntimeArchiveRoot,
-				Now:                 func() time.Time { return time.Now().UTC() },
+				PauseNativeSchedules: projectHermesArchivePause(func() (config.Config, error) { return config.Load(opts.config) }),
+				Projects:             projectService,
+				RepositoryState:      projectService,
+				Activation:           projectActivationService,
+				StorageArchive:       storageArchiveService,
+				WorkspaceMove:        projectWorkspaceMove,
+				RuntimeQuiescence:    projectArchiveQuiescenceRuntime(routingService),
+				WorkspaceRoots:       storagearchive.TrustedWorkspaceRoots{BoxRoot: cfg.BoxPath, StorageRoot: cfg.StorageRoot},
+				RuntimeManifestRoot:  projectRuntimeArchiveRoot,
+				Now:                  func() time.Time { return time.Now().UTC() },
 			})
 			projectWatchService := projectwatch.NewService(projectwatch.Deps{
 				Projects:     projectService,
@@ -526,6 +529,17 @@ func newServeCommand(opts *options) *cobra.Command {
 			if err := workerRegistry.Register(workerruntimes.NewKnowledgeHeavyRuntimeWithRuntimes(knowledgeService, visionRuntime, embeddingRuntime)); err != nil {
 				return err
 			}
+			var notesWorkspace *notesworkspacesync.Runtime
+			if cfg.NotesWorkspaceConfig != "" {
+				workspaceConfig, err := notesworkspacesync.LoadRuntimeConfig(cfg.NotesWorkspaceConfig)
+				if err != nil {
+					return err
+				}
+				notesWorkspace = &notesworkspacesync.Runtime{Config: workspaceConfig, DB: sqlDB, Knowledge: knowledgeService, NodeKey: cfg.NodeID}
+			}
+			if err := workerRegistry.Register(workerruntimes.NotesWorkspaceRuntime{Runtime: notesWorkspace}); err != nil {
+				return err
+			}
 			if err := workerRegistry.Register(workerruntimes.NewKnowledgeEmbedderRuntime(knowledgeService, embeddingRuntime)); err != nil {
 				return err
 			}
@@ -572,7 +586,7 @@ func newServeCommand(opts *options) *cobra.Command {
 				slog.Int("instances_updated", workerSeedResult.InstancesUpdated),
 				slog.Int("health_created", workerSeedResult.HealthCreated),
 			)
-			if err := seedProjectContextRefresh(ctx, sqlDB, cfg, provenanceFoundation, workerRegistry, logger, workerSeedReq); err != nil {
+			if err := seedProjectContextRefresh(ctx, sqlDB, cfg, provenanceFoundation, workerRegistry, logger, workerSeedReq, projectArchiveService); err != nil {
 				return fmt.Errorf("seed project context refresh: %w", err)
 			}
 			workerSupervisor := workers.NewSupervisor(workerService, logger)
@@ -594,6 +608,10 @@ func newServeCommand(opts *options) *cobra.Command {
 						return minidashboard.ActivityStatus(ctx, workerService, time.Now().UTC())
 					},
 				},
+			}
+			hermesSchedules, err := runtimeHermesSchedules(cfg)
+			if err != nil {
+				return err
 			}
 			server := httpapi.NewServer(httpapi.Services{
 				DB:                sqlDB,
@@ -632,6 +650,7 @@ func newServeCommand(opts *options) *cobra.Command {
 				MiniDashboard:        miniDashboardService,
 				Artifacts:            artifactService,
 				Automation:           automationService,
+				HermesSchedules:      hermesSchedules,
 				Capabilities:         capabilityService,
 				ServiceAllowlists:    serviceregistry.FileAllowlistResolver{Path: cfg.ServiceAllowlist},
 				Policy:               policyService,
@@ -808,4 +827,20 @@ func newVersionCommand() *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "loomd %s\n", info.Version)
 		},
 	}
+}
+
+// runtimeHermesSchedules binds only configured source identity. Construction has
+// no filesystem side effects; missing/inaccessible stores remain unavailable at
+// observation time and never impede daemon startup or provision a native profile.
+func runtimeHermesSchedules(cfg config.Config) (*hermesschedules.Observer, error) {
+	source, err := cfg.HermesScheduleSource()
+	if err != nil {
+		return nil, err
+	}
+	if source.Profile == "" {
+		return nil, nil
+	}
+	// Never fall back to reading the private home in loomd. An absent helper is
+	// unavailable until the trusted installed binding is supplied.
+	return &hermesschedules.Observer{Source: source, ReadSanitized: hermesschedules.HelperReader(cfg.HermesSchedulesSocket)}, nil
 }

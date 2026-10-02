@@ -6,6 +6,7 @@ Read the protocol relevant to the current task; none grants new authority.
 - `MAC-COMPUTER-USE.md`: native desktop preflight, fresh targeting and uncertain delivery.
 - `LOOM-ROUTING.md`: choose authoritative retrieval and action surfaces.
 - `PROVENANCE-AND-MEMORY.md`: keep qualified meaning and conversation separate.
+- `PROVENANCE-RECONCILIATION.md`: source-backed autonomous semantic maintenance.
 - `PROJECT-DELEGATION.md`: give project workers bounded, identity-neutral work.
 - `SESSION-RETRIEVAL.md`: retrieve relevant history without merging sessions.
 - `SKILL-CREATION-AND-PROMOTION.md`: preserve native and installed ownership.

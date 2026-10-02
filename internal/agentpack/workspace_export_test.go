@@ -102,7 +102,7 @@ func TestWorkspaceExportSourceBindingAndReconstruction(t *testing.T) {
 	if _, err := os.Lstat(options.Path); !os.IsNotExist(err) {
 		t.Fatal("planning wrote destination")
 	}
-	if len(plan.Manifest.Files) != 22 || len(plan.payloads) != 23 {
+	if len(plan.Manifest.Files) != 23 || len(plan.payloads) != 24 {
 		t.Fatal("wrong census")
 	}
 
@@ -115,7 +115,7 @@ func TestWorkspaceExportSourceBindingAndReconstruction(t *testing.T) {
 		}
 		expectedSources[path] = true
 	}
-	if len(expectedSources) != 19 {
+	if len(expectedSources) != 20 {
 		t.Fatal("instruction source census changed")
 	}
 	for _, entry := range plan.Manifest.Files {
@@ -159,7 +159,7 @@ func TestWorkspaceExportSourceBindingAndReconstruction(t *testing.T) {
 		t.Fatalf("apply: %v", err)
 	}
 	tree := exportTestTree(t, options.Path)
-	if len(tree) != 23 {
+	if len(tree) != 24 {
 		t.Fatalf("tree: %v", tree)
 	}
 	for _, file := range plan.Manifest.Files {

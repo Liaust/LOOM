@@ -18,7 +18,7 @@ var minaSourceFiles = []string{
 	".hermes/SOUL.md", "AGENTS.md", "OPERATING-POLICY.md", "TOOLING.md", "WORKFLOW.md", "WORKSPACE-MAP.md",
 	"handoffs/HANDOFF-TEMPLATE.md", "investigations/README.md", "protocols/BASECAMP.md", "protocols/CREDENTIALS.md", "protocols/DEVICE-AND-TOOL-ROUTING.md",
 	"protocols/EXTERNAL-MESSAGING.md", "protocols/GITHUB.md", "protocols/LOOM-ROUTING.md", "protocols/MAC-COMPUTER-USE.md", "protocols/PROJECT-DELEGATION.md",
-	"protocols/PROVENANCE-AND-MEMORY.md", "protocols/README.md", "protocols/SESSION-RETRIEVAL.md",
+	"protocols/PROVENANCE-AND-MEMORY.md", "protocols/PROVENANCE-RECONCILIATION.md", "protocols/README.md", "protocols/SESSION-RETRIEVAL.md",
 	"protocols/SKILL-CREATION-AND-PROMOTION.md", "recovery/README.md", "skills/installed/README.md", "tmp/README.md",
 }
 

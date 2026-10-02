@@ -187,25 +187,31 @@ type InitResult struct {
 }
 
 type WatchPolicy struct {
-	SchemaVersion string            `json:"schema_version" yaml:"schema_version"`
-	Area          string            `json:"area" yaml:"area"`
-	Path          string            `json:"path" yaml:"path"`
-	Enabled       bool              `json:"enabled" yaml:"enabled"`
-	Mode          string            `json:"mode" yaml:"mode"`
-	Semantics     string            `json:"semantics" yaml:"semantics"`
-	Catalog       WatchPolicyToggle `json:"catalog" yaml:"catalog"`
-	Object        WatchPolicyToggle `json:"object" yaml:"object"`
-	Text          WatchPolicyToggle `json:"text" yaml:"text"`
-	Index         WatchPolicyToggle `json:"index" yaml:"index"`
-	Sync          WatchPolicyToggle `json:"sync" yaml:"sync"`
-	Backup        WatchPolicyToggle `json:"backup" yaml:"backup"`
-	Delete        string            `json:"delete_semantics" yaml:"delete_semantics"`
-	Notes         string            `json:"notes,omitempty" yaml:"notes,omitempty"`
-	Metadata      map[string]any    `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	Processing    *projectcontracts.KnowledgeProcessingPolicy `json:"processing,omitempty" yaml:"processing,omitempty"`
+	SchemaVersion string                                      `json:"schema_version" yaml:"schema_version"`
+	Area          string                                      `json:"area" yaml:"area"`
+	Path          string                                      `json:"path" yaml:"path"`
+	Enabled       bool                                        `json:"enabled" yaml:"enabled"`
+	Mode          string                                      `json:"mode" yaml:"mode"`
+	Semantics     string                                      `json:"semantics" yaml:"semantics"`
+	Catalog       WatchPolicyToggle                           `json:"catalog" yaml:"catalog"`
+	Object        WatchPolicyToggle                           `json:"object" yaml:"object"`
+	Text          WatchPolicyToggle                           `json:"text" yaml:"text"`
+	Index         WatchIndexPolicy                            `json:"index" yaml:"index"`
+	Sync          WatchPolicyToggle                           `json:"sync" yaml:"sync"`
+	Backup        WatchPolicyToggle                           `json:"backup" yaml:"backup"`
+	Delete        string                                      `json:"delete_semantics" yaml:"delete_semantics"`
+	Notes         string                                      `json:"notes,omitempty" yaml:"notes,omitempty"`
+	Metadata      map[string]any                              `json:"metadata,omitempty" yaml:"metadata,omitempty"`
 }
 
 type WatchPolicyToggle struct {
 	Enabled bool `json:"enabled" yaml:"enabled"`
+}
+
+type WatchIndexPolicy struct {
+	Enabled      bool  `json:"enabled" yaml:"enabled"`
+	MaxTextBytes int64 `json:"max_text_bytes,omitempty" yaml:"max_text_bytes,omitempty"`
 }
 
 type WatchPlan struct {

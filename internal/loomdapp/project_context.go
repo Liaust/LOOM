@@ -11,16 +11,17 @@ import (
 	"loom.local/loom/internal/provenance"
 	"loom.local/loom/internal/repostate"
 	"loom.local/loom/internal/requestctx"
+	"loom.local/loom/internal/storagearchive"
 	"loom.local/loom/internal/workers"
 	workerruntimes "loom.local/loom/internal/workers/runtimes"
 )
 
-func seedProjectContextRefresh(ctx context.Context, db *sql.DB, cfg config.Config, foundation *provenance.FoundationAPI, registry *workers.Registry, logger *slog.Logger, req requestctx.Context) error {
+func seedProjectContextRefresh(ctx context.Context, db *sql.DB, cfg config.Config, foundation *provenance.FoundationAPI, registry *workers.Registry, logger *slog.Logger, req requestctx.Context, archive storagearchive.ProjectRuntimeService) error {
 	if cfg.NodeRole != "main" {
 		return nil
 	}
 	projectService := projects.NewService(db)
-	refresh := provenance.ProjectRefreshService{Source: projectstate.Service{Reader: projectService, LocalNode: cfg.NodeID}, Repositories: repostate.ProvenanceAdapter{}, Projection: foundation}
+	refresh := provenance.ProjectRefreshService{Source: projectstate.Service{Reader: projectService, LocalNode: cfg.NodeID, ProjectDevelopment: storagearchive.ProjectDevelopmentInspector{Archive: archive}}, Repositories: repostate.ProvenanceAdapter{}, Projection: foundation}
 	runtime := workerruntimes.ProjectContextRefreshRuntime{Sources: projectService, Refresh: refresh, LocalNode: cfg.NodeID}
 	if err := registry.Register(runtime); err != nil {
 		return err

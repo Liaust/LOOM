@@ -279,6 +279,29 @@ func (s Store) EnsureWatchedRootBackupDataDirs() error {
 }
 
 func (s Store) LocalWatchedRootBackupStatus(config Config, state State, rootKey string) (LocalWatchedRootBackupStatus, error) {
+	rootKey = strings.TrimSpace(rootKey)
+	status, err := cachedLocalStatus("backup:"+rootKey+":"+state.NodeID+":"+config.NodeKey,
+		[]string{s.watchedRootBackupArtifactsPath(), s.watchedRootBackupBatchesPath(), s.watchedRootBackupItemsPath(), s.watchedRootBackupOutboxPath()},
+		func() (LocalWatchedRootBackupStatus, error) {
+			return s.localWatchedRootBackupStatusUncached(config, state, rootKey)
+		})
+	if err != nil {
+		return status, err
+	}
+	// Policy and inventory summaries change independently of the queue files.
+	status.Limits = s.watchedRootBackupLimits(rootKey)
+	status.Counts.Protected, status.Counts.Ignored = 0, 0
+	status.PolicyVersion, status.PolicyFingerprint = "", ""
+	if rootKey != "" {
+		if summary, err := watchedroots.NewStore(s.DataDir).LoadLatestSummary(rootKey); err == nil {
+			status.Counts.Protected, status.Counts.Ignored = summary.Included, summary.Excluded
+			status.PolicyVersion, status.PolicyFingerprint = summary.PolicyVersion, summary.PolicyFingerprint
+		}
+	}
+	return status, nil
+}
+
+func (s Store) localWatchedRootBackupStatusUncached(config Config, state State, rootKey string) (LocalWatchedRootBackupStatus, error) {
 	if err := s.EnsureWatchedRootBackupDataDirs(); err != nil {
 		return LocalWatchedRootBackupStatus{}, err
 	}
@@ -514,7 +537,11 @@ func (s Store) queueWatchedRootBackupActionLocked(config Config, state State, ac
 }
 
 func flushWatchedRootBackups(ctx context.Context, store Store, config Config, state State, correlationID string) watchedroots.BackupOutputFlush {
-	before, err := store.LocalWatchedRootBackupStatus(config, state, "")
+	return flushWatchedRootBackupsForRoot(ctx, store, config, state, correlationID, "")
+}
+
+func flushWatchedRootBackupsForRoot(ctx context.Context, store Store, config Config, state State, correlationID, rootKey string) watchedroots.BackupOutputFlush {
+	before, err := store.LocalWatchedRootBackupStatus(config, state, rootKey)
 	if err != nil {
 		return watchedroots.BackupOutputFlush{Attempted: false, Status: watchedroots.OutputStatusFailed, Error: err.Error()}
 	}
@@ -544,11 +571,11 @@ func flushWatchedRootBackups(ctx context.Context, store Store, config Config, st
 		flush.ManualAfter = before.Counts.ManualAction
 		return flush
 	}
-	push, err := pushLocalWatchedRootBackupsOnce(ctx, store, config, state, correlationID)
+	push, err := pushLocalWatchedRootBackupsForRoot(ctx, store, config, state, correlationID, rootKey, 16)
 	if err != nil {
 		flush.Status = watchedroots.OutputStatusFailed
 		flush.Error = err.Error()
-		if after, statusErr := store.LocalWatchedRootBackupStatus(config, state, ""); statusErr == nil {
+		if after, statusErr := store.LocalWatchedRootBackupStatus(config, state, rootKey); statusErr == nil {
 			flush.PendingAfter = after.Counts.Pending
 			flush.RetryableAfter = after.Counts.Retryable
 			flush.AcceptedAfter = after.Counts.Accepted
@@ -565,8 +592,10 @@ func flushWatchedRootBackups(ctx context.Context, store Store, config Config, st
 	flush.ConflictedAfter = push.LocalStatus.Counts.Conflicted
 	flush.FailedAfter = push.LocalStatus.Counts.Failed
 	flush.ManualAfter = push.LocalStatus.Counts.ManualAction
-	if push.LocalStatus.Counts.Pending > 0 || push.LocalStatus.Counts.Failed > 0 || push.LocalStatus.Counts.Conflicted > 0 {
+	if push.LocalStatus.Counts.Failed > 0 || push.LocalStatus.Counts.Conflicted > 0 {
 		flush.Status = watchedroots.OutputStatusFailed
+	} else if push.LocalStatus.Counts.Pending > 0 {
+		flush.Status = watchedroots.OutputStatusQueued
 	} else {
 		flush.Status = watchedroots.OutputStatusRecorded
 	}
@@ -574,10 +603,18 @@ func flushWatchedRootBackups(ctx context.Context, store Store, config Config, st
 }
 
 func pushLocalWatchedRootBackupsOnce(ctx context.Context, store Store, config Config, state State, correlationID string) (LocalWatchedRootBackupPushRun, error) {
+	return pushLocalWatchedRootBackupsLimited(ctx, store, config, state, correlationID, 0)
+}
+
+func pushLocalWatchedRootBackupsLimited(ctx context.Context, store Store, config Config, state State, correlationID string, maxItems int) (LocalWatchedRootBackupPushRun, error) {
+	return pushLocalWatchedRootBackupsForRoot(ctx, store, config, state, correlationID, "", maxItems)
+}
+
+func pushLocalWatchedRootBackupsForRoot(ctx context.Context, store Store, config Config, state State, correlationID, rootKey string, maxItems int) (LocalWatchedRootBackupPushRun, error) {
 	var result LocalWatchedRootBackupPushRun
 	err := store.withWatchedRootBackupQueueLock(func() error {
 		var pushErr error
-		result, pushErr = pushLocalWatchedRootBackupsOnceLocked(ctx, store, config, state, correlationID)
+		result, pushErr = pushLocalWatchedRootBackupsOnceLocked(ctx, store, config, state, correlationID, rootKey, maxItems)
 		return pushErr
 	})
 	if compactErr := store.compactWatchedRootBackupQueueEventsIfLarge(); err == nil {
@@ -586,7 +623,7 @@ func pushLocalWatchedRootBackupsOnce(ctx context.Context, store Store, config Co
 	return result, err
 }
 
-func pushLocalWatchedRootBackupsOnceLocked(ctx context.Context, store Store, config Config, state State, correlationID string) (LocalWatchedRootBackupPushRun, error) {
+func pushLocalWatchedRootBackupsOnceLocked(ctx context.Context, store Store, config Config, state State, correlationID, rootKey string, maxItems int) (LocalWatchedRootBackupPushRun, error) {
 	if strings.TrimSpace(state.NodeID) == "" {
 		return LocalWatchedRootBackupPushRun{}, errors.New("node credential is not imported: missing node_id")
 	}
@@ -610,8 +647,20 @@ func pushLocalWatchedRootBackupsOnceLocked(ctx context.Context, store Store, con
 		return LocalWatchedRootBackupPushRun{}, err
 	}
 	pending := pendingWatchedRootBackupOutboxItems(outbox)
+	if rootKey != "" {
+		selected := make([]LocalWatchedRootBackupOutboxItem, 0, len(pending))
+		for _, item := range pending {
+			if item.RootKey == rootKey {
+				selected = append(selected, item)
+			}
+		}
+		pending = selected
+	}
+	if maxItems > 0 && len(pending) > maxItems {
+		pending = pending[:maxItems]
+	}
 	if len(pending) == 0 {
-		status, statusErr := store.LocalWatchedRootBackupStatus(config, state, "")
+		status, statusErr := store.LocalWatchedRootBackupStatus(config, state, rootKey)
 		if statusErr != nil {
 			return LocalWatchedRootBackupPushRun{}, statusErr
 		}
@@ -638,6 +687,9 @@ func pushLocalWatchedRootBackupsOnceLocked(ctx context.Context, store Store, con
 	results := make([]mainwatchedroots.BackupBatchResult, 0, len(pending))
 	submittedItems := 0
 	for _, outboxItem := range pending {
+		if err := ctx.Err(); err != nil {
+			return LocalWatchedRootBackupPushRun{}, err
+		}
 		batchIdx := watchedRootBackupBatchIndex(batches, outboxItem.LocalRef)
 		if batchIdx < 0 {
 			err := fmt.Errorf("local backup batch not found for outbox item %s", outboxItem.LocalRef)
@@ -763,7 +815,7 @@ func pushLocalWatchedRootBackupsOnceLocked(ctx context.Context, store Store, con
 		items, _ = store.LoadWatchedRootBackupItems()
 		outbox, _ = store.LoadWatchedRootBackupOutbox()
 	}
-	status, err := store.LocalWatchedRootBackupStatus(config, state, "")
+	status, err := store.LocalWatchedRootBackupStatus(config, state, rootKey)
 	if err != nil {
 		return LocalWatchedRootBackupPushRun{}, err
 	}

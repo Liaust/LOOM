@@ -99,6 +99,57 @@ func TestBoxKnowledgeSourcePoliciesExplicitOptIn(t *testing.T) {
 	}
 }
 
+func TestBoxNotesScopedProcessingAndTextLimit(t *testing.T) {
+	root := initializedWatchBox(t, ProfileMain)
+	contract := *Inspect(Resolved{RootPath: root, Profile: ProfileMain, OwnerNode: "macbook"}).Contract
+	path := filepath.Join(root, contract.Policies[AreaNotes])
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var policy WatchPolicy
+	if err := yaml.Unmarshal(raw, &policy); err != nil {
+		t.Fatal(err)
+	}
+	policy.Index.MaxTextBytes = 8 * 1024 * 1024
+	policy.Processing = &projectcontracts.KnowledgeProcessingPolicy{Paths: []string{"TreeOfLife/**"}, OCR: "off", EmbeddingFileTypes: []string{"markdown", "text"}}
+	write := func() {
+		raw, err := yaml.Marshal(policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write()
+	item, diagnostics := watchRootItemForArea(contract, AreaNotes)
+	if hasErrorDiagnostics(diagnostics) {
+		t.Fatal(diagnostics)
+	}
+	var config agentwatchedroots.RootConfig
+	if err := json.Unmarshal(item.ConfigJSON, &config); err != nil {
+		t.Fatal(err)
+	}
+	if config.IndexPolicy.MaxTextBytes != 8*1024*1024 {
+		t.Fatalf("text limit: %+v", config.IndexPolicy)
+	}
+	source := item.Metadata["knowledge_source"].(map[string]any)
+	encoded, _ := json.Marshal(source["policy"])
+	decoded, err := projectcontracts.DecodeKnowledgeSourcePolicy(encoded)
+	if err != nil || decoded.Processing.Paths[0] != "TreeOfLife/**" {
+		t.Fatalf("policy=%s err=%v", encoded, err)
+	}
+	for _, limit := range []int64{-1, 8*1024*1024 + 1} {
+		policy.Index.MaxTextBytes = limit
+		write()
+		_, diagnostics := watchRootItemForArea(contract, AreaNotes)
+		if !hasErrorDiagnostics(diagnostics) {
+			t.Fatalf("accepted invalid text limit %d", limit)
+		}
+	}
+}
+
 func TestBuildWatchPlanIncludesNotesAndDocumentsOnly(t *testing.T) {
 	root := initializedWatchBox(t, ProfileWorkspace)
 	plan, err := BuildWatchPlan(WatchStatusInput{Resolved: Resolved{RootPath: root, Profile: ProfileWorkspace, OwnerNode: "macbook"}})

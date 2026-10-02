@@ -1,0 +1,19 @@
+kind: loom.project
+schema_version: project.contract.v0.5
+project:
+  id: project_01ARZ3NDEKTSV4RRFFQ69G5FAX
+  slug: hermes-schedule-trial
+  name: Hermes schedule trial
+  owner_node: main
+  status: active
+resources:
+  mina_review:
+    kind: hermes_schedule
+    hermes_schedule:
+      profile: mina
+      every_minutes: 60
+      status: paused
+      prompt: >-
+        Read AGENTS.md and README.md in this project. Report its purpose locally
+        in one sentence ending LOOM_HERMES_SCHEDULE_OK. Do not edit files,
+        contact anyone, access credentials or change schedules.

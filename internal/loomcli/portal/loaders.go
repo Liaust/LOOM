@@ -653,6 +653,7 @@ func loadMainCloudStatus(ctx context.Context, client Client, correlationID strin
 func loadAutomationsScreen(ctx context.Context, client Client, correlationID string, fallback Snapshot) ScreenLoadResult {
 	builder := newScreenLoadBuilder(ScreenAutomations, fallback)
 	data := AutomationsData{}
+	data.HermesSchedules = loadHermesSchedules(ctx, client, correlationID)
 	data.Projects, data.ArchivedProjects = loadProjectInventoryForActionQuarantine(ctx, client, correlationID, &builder)
 
 	if envelope, err := client.ListAutomations(ctx, correlationID, automation.AutomationFilter{Limit: 20}); err != nil {

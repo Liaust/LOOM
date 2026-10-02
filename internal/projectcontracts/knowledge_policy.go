@@ -5,10 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"loom.local/loom/internal/nodeagent/watchedroots"
 )
 
 // NormalizeKnowledgeSourcePolicy validates intent without enabling host services.
 func NormalizeKnowledgeSourcePolicy(k KnowledgeDeclaration) (*KnowledgeSourcePolicy, error) {
+	if err := watchedroots.ValidatePatterns(k.Include); err != nil {
+		return nil, fmt.Errorf("knowledge.include: %w", err)
+	}
+	if err := watchedroots.ValidatePatterns(k.Exclude); err != nil {
+		return nil, fmt.Errorf("knowledge.exclude: %w", err)
+	}
 	if k.Refresh == nil && k.Processing == nil {
 		return nil, nil
 	}
@@ -26,8 +34,8 @@ func NormalizeKnowledgeSourcePolicy(k KnowledgeDeclaration) (*KnowledgeSourcePol
 	}
 	if k.Processing != nil {
 		p := *k.Processing
-		if p.OCR != "" && p.OCR != "auto" && p.OCR != "off" {
-			return nil, fmt.Errorf("knowledge.processing.ocr must be auto or off")
+		if err := ValidateKnowledgeProcessingPolicy(p); err != nil {
+			return nil, err
 		}
 		out.Processing = &p
 	}
@@ -66,10 +74,34 @@ func DecodeKnowledgeSourcePolicy(raw []byte) (KnowledgeSourcePolicy, error) {
 			return policy, fmt.Errorf("invalid normalized knowledge refresh policy")
 		}
 	}
-	if p := policy.Processing; p != nil && p.OCR != "" && p.OCR != "auto" && p.OCR != "off" {
-		return policy, fmt.Errorf("invalid normalized knowledge OCR policy")
+	if p := policy.Processing; p != nil {
+		if err := ValidateKnowledgeProcessingPolicy(*p); err != nil {
+			return policy, err
+		}
 	}
 	return policy, nil
+}
+
+func ValidateKnowledgeProcessingPolicy(p KnowledgeProcessingPolicy) error {
+	if p.OCR != "" && p.OCR != "auto" && p.OCR != "off" {
+		return fmt.Errorf("knowledge.processing.ocr must be auto or off")
+	}
+	if err := watchedroots.ValidatePatterns(p.Paths); err != nil {
+		return fmt.Errorf("knowledge.processing.paths: %w", err)
+	}
+	seen := map[string]bool{}
+	for _, family := range p.EmbeddingFileTypes {
+		switch family {
+		case "markdown", "text", "pdf", "image":
+		default:
+			return fmt.Errorf("knowledge.processing.embedding_file_types: unsupported type %q", family)
+		}
+		if seen[family] {
+			return fmt.Errorf("knowledge.processing.embedding_file_types: duplicate type %q", family)
+		}
+		seen[family] = true
+	}
+	return nil
 }
 
 func knowledgeDuration(raw string, fallback time.Duration) (time.Duration, error) {

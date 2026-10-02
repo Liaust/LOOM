@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pressly/goose/v3"
 	"loom.local/loom/internal/automation"
 	"loom.local/loom/internal/bootstrap"
 	"loom.local/loom/internal/capabilities"
@@ -32,9 +31,7 @@ import (
 	"loom.local/loom/internal/response"
 )
 
-// This opt-in fixture cannot use LOOM_DB_URL or a production endpoint. The
-// worker/operator supplies a fresh, private local cluster. Databases are retained
-// for inspection; only our own connections/listener are closed by the tests.
+// This opt-in fixture creates and removes only its own unique local database.
 func calendarDatabase(t *testing.T) (*sql.DB, string, requestctx.Context) {
 	t.Helper()
 	raw := os.Getenv("LOOM_CALENDAR_TEST_DB_URL")
@@ -45,21 +42,31 @@ func calendarDatabase(t *testing.T) (*sql.DB, string, requestctx.Context) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u.Host != "" || !strings.HasPrefix(u.Query().Get("host"), "/tmp/loom-calendar-w1.") || u.Path != "/loom_calendar_w1" {
-		t.Fatal("calendar fixture must name loom_calendar_w1 on a private /tmp/loom-calendar-w1.* Unix socket")
+	localAdmin := (u.Query().Get("host") == "/run/postgresql" || u.Query().Get("host") == "/var/run/postgresql") && u.Path == "/postgres"
+	privateAdmin := strings.HasPrefix(u.Query().Get("host"), "/tmp/loom-calendar-w1.") && u.Path == "/loom_calendar_w1"
+	if u.Host != "" || (!localAdmin && !privateAdmin) {
+		t.Fatal("calendar fixture requires an explicit local admin socket; it creates its own database")
 	}
 	admin, err := sql.Open("pgx", raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer admin.Close()
+	t.Cleanup(func() { admin.Close() })
 	name := fmt.Sprintf("loom_calendar_%d", time.Now().UnixNano())
 	if _, err = admin.ExecContext(t.Context(), `CREATE DATABASE "`+name+`"`); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := admin.ExecContext(ctx, `DROP DATABASE "`+name+`" WITH (FORCE)`); err != nil {
+			t.Errorf("remove owned calendar database: %v", err)
+		}
+	})
 	u.Path = "/" + name
 	result, err := migrations.Up(t.Context(), u.String(), filepath.Join("..", "..", "migrations"))
-	if err != nil || result.CurrentVersion != 69 {
+	latest, latestErr := migrations.LatestVersion(filepath.Join("..", "..", "migrations"))
+	if err != nil || latestErr != nil || result.CurrentVersion != latest {
 		t.Fatalf("migration=%+v err=%v", result, err)
 	}
 	db, err := sql.Open("pgx", u.String())
@@ -74,8 +81,34 @@ func calendarDatabase(t *testing.T) (*sql.DB, string, requestctx.Context) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("PostgreSQL fixture: %s, migration %d; retained for review", u.String(), result.CurrentVersion)
+	t.Logf("Owned PostgreSQL fixture: %s, migration %d; automatic cleanup", name, result.CurrentVersion)
 	return db, u.String(), req
+}
+
+// Exercise this migration's SQL, not whichever migration happens to be latest.
+func calendarMigration(t *testing.T, db *sql.DB, up bool) error {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "migrations", "00069_calendar_schedules.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.Split(string(raw), "-- +goose Down")
+	if len(parts) != 2 {
+		t.Fatal("invalid calendar migration fixture")
+	}
+	index := 1
+	if up {
+		index = 0
+	}
+	tx, err := db.BeginTx(t.Context(), nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(t.Context(), parts[index]); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func seedCalendarTarget(t *testing.T, db *sql.DB, req requestctx.Context) projects.Project {
@@ -111,6 +144,56 @@ func calendarCounts(t *testing.T, db *sql.DB) map[string]int {
 		counts[table] = n
 	}
 	return counts
+}
+
+func TestCalendarPostgresArchiveFilterCorrelatesOuterProject(t *testing.T) {
+	db, _, req := calendarDatabase(t)
+	active := seedCalendarTarget(t, db, req)
+	archived, err := projects.NewService(db).CreateProject(t.Context(), req, projects.CreateInput{Name: "Archived calendar", Slug: "archived-calendar", HomeNodeRef: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := automation.Service{DB: db}
+	for _, item := range []struct{ key, project string }{
+		{"active_calendar", active.ProjectID},
+		{"archived_calendar", archived.Project.Project.ProjectID},
+		{"global_calendar", ""},
+	} {
+		_, err := svc.CreateSchedule(t.Context(), req, automation.CreateScheduleInput{
+			ScheduleKey: item.key, ScheduleKind: "interval", ScheduleExpr: "1h",
+			TargetCapability: "main@calendar.read", ProjectRef: item.project,
+			RunAsActorRef: "owner", InputJSON: json.RawMessage(`{}`),
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", item.key, err)
+		}
+	}
+	// Only fixture state changes: an unrelated archived project must not hide
+	// active-project or projectless runtime rows from the default inventory.
+	if _, err := db.ExecContext(t.Context(), `UPDATE projects.projects SET status='archived' WHERE project_id=$1`, archived.Project.Project.ProjectID); err != nil {
+		t.Fatal(err)
+	}
+	schedules, err := svc.ListSchedules(t.Context(), automation.ScheduleFilter{})
+	if err != nil || len(schedules) != 2 {
+		t.Fatalf("default schedules: count=%d err=%v", len(schedules), err)
+	}
+	for _, item := range schedules {
+		if item.ProjectID != nil && *item.ProjectID != active.ProjectID {
+			t.Fatalf("archived schedule leaked: %+v", item)
+		}
+	}
+	automations, err := svc.ListAutomations(t.Context(), automation.AutomationFilter{})
+	if err != nil || len(automations) != 2 {
+		t.Fatalf("default automations: count=%d err=%v", len(automations), err)
+	}
+	history, err := svc.GetSchedule(t.Context(), "archived_calendar")
+	if err != nil {
+		t.Fatalf("exact archived schedule: %v", err)
+	}
+	explicit, err := svc.ListSchedules(t.Context(), automation.ScheduleFilter{AutomationRef: history.Automation.AutomationID})
+	if err != nil || len(explicit) != 1 {
+		t.Fatalf("explicit archived history: count=%d err=%v", len(explicit), err)
+	}
 }
 
 func TestCalendarPostgresSupportedPreviewAndDurableClaims(t *testing.T) {
@@ -203,11 +286,10 @@ func TestCalendarPostgresSupportedPreviewAndDurableClaims(t *testing.T) {
 		}
 	})
 	t.Run("migration down and up without cron data", func(t *testing.T) {
-		dir := filepath.Join("..", "..", "migrations")
-		if err := goose.DownContext(t.Context(), db, dir); err != nil {
+		if err := calendarMigration(t, db, false); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := migrations.Up(t.Context(), dbURL, dir); err != nil {
+		if err := calendarMigration(t, db, true); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -230,7 +312,7 @@ func TestCalendarPostgresSupportedPreviewAndDurableClaims(t *testing.T) {
 	if _, err := db.Exec(`UPDATE automation.schedules SET schedule_kind='bogus' WHERE schedule_id=$1`, s.ScheduleID); err == nil {
 		t.Fatal("invalid kind passed constraint")
 	}
-	if err := goose.DownContext(t.Context(), db, filepath.Join("..", "..", "migrations")); err == nil || !strings.Contains(err.Error(), "retained cron") {
+	if err := calendarMigration(t, db, false); err == nil || !strings.Contains(err.Error(), "retained cron") {
 		t.Fatalf("rollback did not refuse retained cron: %v", err)
 	}
 	var n int
@@ -325,6 +407,36 @@ func TestCalendarPostgresSupportedPreviewAndDurableClaims(t *testing.T) {
 	skipped, err := restarted.RunScheduler(t.Context(), req, automation.SchedulerRunInput{Now: now})
 	if err != nil || skipped.SkippedFires != 1 || skipped.CreatedInvocations != 0 {
 		t.Fatalf("concurrency profile: %+v %v", skipped, err)
+	}
+
+	// A completed dispatch is not completion of its queued/running script job.
+	if _, err := db.Exec(`INSERT INTO jobs.jobs(job_id,job_type,status,origin_actor_id,origin_node_id,execution_node_id)
+       VALUES('job_calendar_schedule_overlap','script_run','running',$1,$2,$2)`, req.ActorID, req.OriginNodeID); err != nil {
+		t.Fatal(err)
+	}
+	for index, status := range []string{"created", "queued", "running", "completed", "failed", "cancelled", "timed_out"} {
+		// Remove the previous iteration's pending transport state: this check
+		// deliberately exercises only the independently linked job lifecycle.
+		if _, err := db.Exec(`UPDATE automation.invocations SET status='succeeded',job_id='job_calendar_schedule_overlap' WHERE source_ref=$1`, s.ScheduleID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE jobs.jobs SET status=$1 WHERE job_id='job_calendar_schedule_overlap'`, status); err != nil {
+			t.Fatal(err)
+		}
+		at := now.Add(time.Duration(10+index) * time.Minute)
+		if _, err := db.Exec(`UPDATE automation.schedules SET next_fire_at=$2 WHERE schedule_id=$1`, s.ScheduleID, at); err != nil {
+			t.Fatal(err)
+		}
+		linked, err := restarted.RunScheduler(t.Context(), req, automation.SchedulerRunInput{Now: at})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if index < 3 && (linked.SkippedFires != 1 || linked.CreatedInvocations != 0) {
+			t.Fatalf("live %s job overlapped: %+v", status, linked)
+		}
+		if index >= 3 && (linked.SkippedFires != 0 || linked.CreatedInvocations != 1) {
+			t.Fatalf("terminal %s job kept exclusion: %+v", status, linked)
+		}
 	}
 
 	// Explicit lateness policy admits one late run and still advances past now.

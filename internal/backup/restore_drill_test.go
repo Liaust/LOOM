@@ -93,7 +93,7 @@ func TestOperationalRestoreDrillVerifiesExactPackageAndUsesDisposableDatabase(t 
 	runner := func(_ context.Context, name string, args []string, stdin io.Reader) ([]byte, error) {
 		commands = append(commands, name+" "+strings.Join(args, " "))
 		if name == "psql" {
-			return []byte(`{"nodes":1}`), nil
+			return []byte(`{"migration":61,"nodes":1}`), nil
 		}
 		return nil, nil
 	}
@@ -109,6 +109,56 @@ func TestOperationalRestoreDrillVerifiesExactPackageAndUsesDisposableDatabase(t 
 		PackageDir: created.PackageDir, ExpectedManifestSHA256: strings.Repeat("f", 64), ExpectedPackageID: "operational-restore",
 	}); err == nil {
 		t.Fatal("operational restore plan accepted wrong manifest identity")
+	}
+}
+
+func TestOperationalRestoreDrillBindsRestoredSchemaToManifest(t *testing.T) {
+	created, _, _ := createOperationalRestoreFixture(t)
+	for _, tc := range []struct {
+		name    string
+		output  string
+		success bool
+	}{
+		{"historical_matching_head", `{"migration":61,"nodes":1}`, true},
+		{"older_head", `{"migration":60,"nodes":1}`, false},
+		{"newer_head", `{"migration":78,"nodes":1}`, false},
+		{"missing_head", `{"nodes":1}`, false},
+		{"null_head", `{"migration":null}`, false},
+		{"string_head", `{"migration":"61"}`, false},
+		{"fractional_head", `{"migration":61.5}`, false},
+		{"malformed_summary", `not JSON`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			drops := 0
+			target := "loom_restore_drill_schema_binding"
+			authority := restoreAuthorityStub{drop: func(_ context.Context, request restoreauthority.DropRequest) (restoreauthority.Result, error) {
+				drops++
+				if request.Kind != restoreauthority.KindOperational || request.Database != target {
+					t.Fatalf("unexpected cleanup target: %#v", request)
+				}
+				return restoreauthority.Result{Status: "succeeded", Kind: request.Kind, Database: request.Database, CleanupAttempted: true, CleanupSucceeded: true}, nil
+			}}
+			result, err := RunOperationalRestoreDrill(context.Background(), OperationalRestoreDrillInput{
+				PackageDir: created.PackageDir, ExpectedManifestSHA256: created.ManifestSHA256,
+				ExpectedPackageID: created.Verification.PackageID, TargetDatabase: target, Authority: authority,
+				Runner: func(_ context.Context, _ string, _ []string, _ io.Reader) ([]byte, error) {
+					return []byte(tc.output), nil
+				},
+			})
+			if drops != 1 {
+				t.Fatalf("cleanup calls = %d, want 1", drops)
+			}
+			if tc.success {
+				if err != nil || result.Status != "succeeded" || result.DatabaseSummary["migration"] != float64(61) {
+					t.Fatalf("matching historical schema: result=%#v err=%v", result, err)
+				}
+				return
+			}
+			var failure *RestoreDatabaseFailure
+			if !errors.As(err, &failure) || !failure.CleanupAttempted || !failure.CleanupSucceeded || result.Status == "succeeded" || !strings.Contains(err.Error(), "schema head") {
+				t.Fatalf("unbound schema accepted or cleanup lost: result=%#v err=%v", result, err)
+			}
+		})
 	}
 }
 

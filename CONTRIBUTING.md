@@ -1,6 +1,6 @@
 # Contributing To LOOM
 
-LOOM is a developer preview. Useful contributions make a real workflow simpler,
+LOOM is a public beta. Useful contributions make a real workflow simpler,
 fix a reproducible bug, improve explanation, or remove an unnecessary constraint.
 You do not need Basecamp, a particular agent, or access to the maintainer's machines.
 

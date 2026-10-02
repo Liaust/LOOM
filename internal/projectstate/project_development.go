@@ -48,7 +48,7 @@ type projectDevelopmentReader struct {
 // project nor infers repository membership, and works without Git or .repo.
 func ReadProjectDevelopment(ctx context.Context, input ProjectDevelopmentInput) ProjectDevelopmentState {
 	r := projectDevelopmentReader{ctx: ctx, state: emptyProjectDevelopment(input), observed: map[string]os.FileInfo{}, blobs: map[string][2]string{}}
-	if input.Lifecycle == "archived" {
+	if input.Lifecycle == "archived" && !input.VerifiedArchive {
 		return r.finish(ProjectDevelopmentArchived, "project_archived")
 	}
 	if input.LocalNode == "" || input.OwnerNode == "" || input.LocalNode != input.OwnerNode {
@@ -94,7 +94,7 @@ func ReadProjectDevelopment(ctx context.Context, input ProjectDevelopmentInput) 
 	if yamlScalarValue(project, "id") != input.ProjectID || yamlScalarValue(project, "owner_node") != input.OwnerNode {
 		return r.finish(ProjectDevelopmentMismatch, "identity_owner_mismatch")
 	}
-	if yamlScalarValue(project, "status") == "archived" {
+	if yamlScalarValue(project, "status") == "archived" && !input.VerifiedArchive {
 		return r.finish(ProjectDevelopmentArchived, "source_archived")
 	}
 	info, err := r.safeStat(".project")
@@ -149,8 +149,11 @@ func ReadProjectDevelopment(ctx context.Context, input ProjectDevelopmentInput) 
 		}
 	}
 	r.state.Complete = posture == ProjectDevelopmentReady
-	if r.state.Complete && input.ObserveGit {
+	if r.state.Complete && input.ObserveGit && !input.VerifiedArchive {
 		r.state.Git = r.observeGit(physical)
+	}
+	if input.VerifiedArchive && posture == ProjectDevelopmentReady {
+		posture, reason = ProjectDevelopmentArchived, "verified_archive_context"
 	}
 	return r.finish(posture, reason)
 }

@@ -1,6 +1,6 @@
 ---
 name: operate-loom-storage
-description: Inspect or operate LOOM Box, Lane, Dropzone, main storage, backup, retention, fidelity, or cloud workflows when real user files, custody, protection, or safe deletion are involved.
+description: Inspect or operate LOOM Box, Lane, archive, storage, backup, retention, fidelity, or cloud workflows when real user files, custody, protection, or safe deletion are involved.
 ---
 
 # Operate LOOM Storage
@@ -18,20 +18,36 @@ custody before proposing a write, transfer, cleanup, restore, or deletion.
 5. Release-matched docs, current CLI help, and the relevant operations runbook.
 6. Generated exports only as read-only representations of accepted state.
 
-Never write directly into generated `loom-storage` backup, Lane, archive, or
-projection views. Change canonical source or use the controlling LOOM command.
+Change canonical source or use the controlling LOOM command. Retained archives
+are readable custody, not generated exports. Do not move, overwrite or purge
+them directly; use typed archive/restore operations.
 
 ## Classify The Surface
 
-- **Box Notes/Documents:** writable source controlled by Box policy.
+- **Box Notes/Topics/Library:** writable source controlled by Box policy.
 - **Project root:** writable project source controlled by project contracts.
 - **Lane:** explicit send-to-main custody staging.
-- **Dropzone:** transfer-record-managed custody surface.
-- **Main Documents:** writable main source with import/catalog behavior.
-- **Generated storage export:** read-only or command-controlled view.
+- **Main archive:** readable inactive custody, not an editable project source.
+- **Generated Notes/client vault:** local editable replica; saves route to its
+  enrolled canonical source. It is not another authoritative backup tree.
 - **Backup/cloud artifact:** protection evidence, not an ordinary source tree.
 
 If classification is unclear, inspect paths and status without changing them.
+Main has no Box Dropzone or Lane; Mac Lane delivery ends in Main Imports.
+
+## Archive And Restore
+
+For projects use `loom project archive plan <ref>` and its exact reviewed
+apply/inspect/restore commands from the `manage-loom-projects` skill.
+For mapped generic workspaces use `loom storage workspace plan <kind>
+<object-id> <slug> --reason <reason>`; apply/restore-apply takes the saved plan
+and exact `--plan-digest` plus `--yes`. Inspect/recover uses its operation ID.
+Read archived files directly at the receipt's retained path when available;
+export is optional copying, not a prerequisite for reading. Restore preserves
+identity but leaves a project inactive. Explicit project reactivation does not
+start its services, watchers or paused schedules. Semantic decisions are not
+superseded merely because their source is archived. Physical custody receipts
+do not establish broader historical/as-of search support.
 
 ## Inspect, Plan, Apply, Verify
 

@@ -47,6 +47,13 @@ input. They are not a required follow-up to every registration. Never call
 database or lifecycle-store internals. After an authorized operation, exact-get
 the candidate and resulting records, relationships or cases.
 
+The equivalent CLI is `loom provenance operations apply --file review.json
+--idempotency-key <stable-batch-key> --yes --json`. Save the exact request and
+operation UUIDs for retries. `loom provenance candidate list --limit 10 --json`
+pages all candidate lifecycle states using `--after-time` and `--after-id` from
+the preceding page; exact-get and skip already resolved items. These surfaces
+do not themselves grant reconciliation authority to an ordinary capture agent.
+
 Ordinary agents do not run the deterministic Archivist as part of capture.
 Its bounded manual controls stay in the Archivist workspace's
 `protocols/CANDIDATE-REVIEW.md`; installing this shared skill grants none of them.

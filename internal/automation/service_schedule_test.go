@@ -68,14 +68,16 @@ func TestArchivedProjectRuntimeFilters(t *testing.T) {
 	if !hasExplicitRuntimeRef("", "automation_test") {
 		t.Fatal("non-empty automation ref should be explicit")
 	}
-	byProject := archivedProjectByProjectColumnSQL("project_id")
-	for _, want := range []string{"projects.projects", "project_id", "status = 'archived'"} {
-		if !strings.Contains(byProject, want) {
-			t.Fatalf("project archived filter missing %q: %s", want, byProject)
+	for _, column := range []string{"automations.project_id", "schedules.project_id", "invocations.project_id"} {
+		byProject := archivedProjectByProjectColumnSQL(column)
+		for _, want := range []string{"projects.projects", "archived_project.project_id = " + column, column + " IS NULL", "status = 'archived'"} {
+			if !strings.Contains(byProject, want) {
+				t.Fatalf("project archived filter missing %q: %s", want, byProject)
+			}
 		}
 	}
-	byAutomation := archivedProjectByAutomationColumnSQL("automation_id")
-	for _, want := range []string{"automation.automations", "projects.projects", "automation_id", "status = 'archived'"} {
+	byAutomation := archivedProjectByAutomationColumnSQL("schedule_fires.automation_id")
+	for _, want := range []string{"automation.automations", "projects.projects", "archived_automation.automation_id = schedule_fires.automation_id", "status = 'archived'"} {
 		if !strings.Contains(byAutomation, want) {
 			t.Fatalf("automation archived filter missing %q: %s", want, byAutomation)
 		}

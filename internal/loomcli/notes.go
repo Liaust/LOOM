@@ -3,6 +3,7 @@ package loomcli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"text/tabwriter"
@@ -33,7 +34,9 @@ func newNotesCommand(opts *options) *cobra.Command {
 	cmd.AddCommand(newNotesPipelinesCommand(opts))
 	cmd.AddCommand(newNotesProjectionCommand(opts))
 	cmd.AddCommand(newNotesReprocessCommand(opts))
+	cmd.AddCommand(newNotesEnrichCommand(opts))
 	cmd.AddCommand(newNotesRunCommand(opts))
+	cmd.AddCommand(newNotesConflictsCommand(opts))
 	return cmd
 }
 
@@ -70,7 +73,7 @@ func newNotesPassageCommand(opts *options) *cobra.Command {
 	get.Flags().StringVar(&input.KnowledgeObjectVersionID, "version", "", "exact retained knowledge version ID")
 	get.Flags().StringVar(&input.SourceHash, "source-hash", "", "exact sha256 source content address")
 	addNotesSourceLifecycleFlag(get, &input.SourceLifecycle)
-	cmd.AddCommand(get)
+	cmd.AddCommand(get, newNotesLocateCommand(opts))
 	return cmd
 }
 
@@ -340,6 +343,13 @@ func newNotesObjectsReconcileCommand(opts *options) *cobra.Command {
 	return cmd
 }
 
+func notesSearchCommandError(err error) *loomerrors.Error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return loomerrors.Wrap("notes.search_timeout", "knowledge", "notes_search", "Notes search exceeded its 10-second deadline; no complete result was returned. Retry, or use --project or --path to narrow the search. Persistent timeouts require query investigation.", err)
+	}
+	return loomerrors.Wrap("notes.search_failed", "knowledge", "notes_search", "Could not search notes knowledge.", err)
+}
+
 func newNotesSearchCommand(opts *options) *cobra.Command {
 	input := knowledge.NotesSearchInput{}
 	cmd := &cobra.Command{
@@ -358,7 +368,7 @@ func newNotesSearchCommand(opts *options) *cobra.Command {
 			defer cancel()
 			envelope, err := commandCtx.Client.SearchKnowledgeNotes(ctx, commandCtx.CorrelationID, searchInput)
 			if err != nil {
-				return renderError(cmd, opts, commandCtx.CorrelationID, loomerrors.Wrap("notes.search_failed", "knowledge", "notes_search", "Could not search notes knowledge.", err))
+				return renderError(cmd, opts, commandCtx.CorrelationID, notesSearchCommandError(err))
 			}
 			if opts.jsonOutput {
 				return json.NewEncoder(cmd.OutOrStdout()).Encode(envelope.Data)
@@ -870,6 +880,7 @@ func renderNotesOverviewIndexHealth(cmd *cobra.Command, health knowledge.NotesIn
 		health.Failed,
 		health.SkippedUnsupported,
 	)
+	fmt.Fprintf(cmd.OutOrStdout(), "Warnings=%d blocked=%d stale=%d cancelled=%d\n", health.CompleteWithWarnings, health.Blocked, health.Stale, health.Cancelled)
 	fmt.Fprintf(cmd.OutOrStdout(), "Last indexed: %s\n", timePtrOrDash(health.LastIndexedAt))
 	fmt.Fprintf(cmd.OutOrStdout(), "Last pipeline update: %s\n", timePtrOrDash(health.LastPipelineUpdateAt))
 	if health.LastFailureAt != nil {
@@ -992,6 +1003,7 @@ func renderNotesSearchResults(cmd *cobra.Command, opts *options, results knowled
 			fmt.Fprintf(tw, "\toriginal=%s canonical=%s archived_at=%s archive=%s\n", result.OriginalPath, result.CanonicalPath, timePtrOrDash(result.ArchivedAt), result.ArchiveOperationID)
 		}
 		fmt.Fprint(tw, followups[index])
+		fmt.Fprint(tw, notesNavigationFollowupLine(result, index+1))
 		if result.Freshness.IndexedSourceRevision != "" {
 			fmt.Fprintf(tw, "\tindexed=%s latest=%s current=%t refresh=%s semantic_lag=%t\n", result.Freshness.IndexedSourceRevision, result.Freshness.LatestSourceRevision, result.Freshness.Current, result.Freshness.RefreshState, result.Freshness.SemanticLag)
 		}
@@ -1024,6 +1036,9 @@ func renderNotesSearchSummary(cmd *cobra.Command, results knowledge.NotesSearchR
 		fmt.Fprintf(cmd.OutOrStdout(), "Refreshing matches omitted=%d truncated=%t\n", results.RefreshingMatchesOmitted, results.RefreshingMatchesOmittedTruncated)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Source lifecycle: %s; archived matches omitted=%d truncated=%t\n", dashIfEmpty(string(results.SourceLifecycle)), results.ArchivedMatchesOmitted, results.ArchivedMatchesOmittedTruncated)
+	if results.CandidateRetrievalTruncated {
+		fmt.Fprintln(cmd.OutOrStdout(), "Candidate retrieval is bounded; result and omission counts are not exhaustive.")
+	}
 	mode := strings.TrimSpace(results.Mode)
 	if mode == "" {
 		mode = "-"

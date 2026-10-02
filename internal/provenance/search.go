@@ -75,6 +75,8 @@ type SearchFreshness struct {
 	ValidFrom   *time.Time `json:"valid_from,omitempty"`
 	ValidUntil  *time.Time `json:"valid_until,omitempty"`
 	Currentness string     `json:"currentness"`
+	// A truncated qualification is only a preview; use exact_get before interpreting it.
+	CurrentnessTruncated bool `json:"currentness_truncated,omitempty"`
 }
 
 type SearchExactGet struct {
@@ -808,6 +810,9 @@ func fitSearchCompactResult(match *SearchCompactMatch, value func() any) error {
 		case utf8.RuneCountInString(match.MatchExplanation.Text) > 96:
 			match.MatchExplanation = boundedSearchText(match.MatchExplanation.Text, utf8.RuneCountInString(match.MatchExplanation.Text)-16)
 			match.MatchExplanation.Truncated = true
+		case match.Source.Kind == "accepted_record" && utf8.RuneCountInString(match.Freshness.Currentness) > 96:
+			match.Freshness.Currentness = boundedSearchText(match.Freshness.Currentness, max(96, utf8.RuneCountInString(match.Freshness.Currentness)-16)).Text
+			match.Freshness.CurrentnessTruncated = true
 		case len(match.Source.SourceReferenceIDs) > 0:
 			match.Source.SourceReferenceIDs = match.Source.SourceReferenceIDs[:len(match.Source.SourceReferenceIDs)-1]
 			match.Source.Truncated = true
@@ -819,6 +824,9 @@ func fitSearchCompactResult(match *SearchCompactMatch, value func() any) error {
 			match.ProjectIDs = match.ProjectIDs[:len(match.ProjectIDs)-1]
 		case len(match.RepositoryIDs) > 0:
 			match.RepositoryIDs = match.RepositoryIDs[:len(match.RepositoryIDs)-1]
+		case match.Source.Kind == "accepted_record" && utf8.RuneCountInString(match.Freshness.Currentness) > 32:
+			match.Freshness.Currentness = boundedSearchText(match.Freshness.Currentness, max(32, utf8.RuneCountInString(match.Freshness.Currentness)-16)).Text
+			match.Freshness.CurrentnessTruncated = true
 		case utf8.RuneCountInString(match.Summary.Text) > 0:
 			match.Summary = boundedSearchText(match.Summary.Text, utf8.RuneCountInString(match.Summary.Text)-1)
 			match.Summary.Truncated = true

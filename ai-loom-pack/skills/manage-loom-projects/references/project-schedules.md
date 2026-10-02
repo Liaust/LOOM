@@ -47,5 +47,44 @@ to reactivate. Removing the resource and applying disables future runs, retainin
 ID, fires and invocations. It does not cancel dispatched work or delete history.
 Returning the same key reuses ownership. Project restore leaves runtime inactive.
 
-Hermes/model-driven automation remains a separate integration. This declaration
-does not create a Hermes cron job or arbitrary command executor.
+## MINA / Hermes schedules
+
+For MINA's context-rich reviews, use the installed native Hermes adapter rather
+than wrapping MINA in a LOOM capability. Personal cross-project jobs can be
+created directly through Hermes; they need no dummy project. Observe both native
+and project-owned jobs with `loom schedules hermes --json` (also in Portal).
+
+A project can declare a MINA job in the same `.loom/project.yaml`:
+
+```yaml
+resources:
+  mina_review:
+    kind: hermes_schedule
+    hermes_schedule:
+      profile: mina
+      every_minutes: 60
+      status: paused
+      prompt: >-
+        Read this project's AGENTS.md and .project/STATE.md. Report progress
+        and blockers; do not deploy or change schedules.
+```
+
+Use exactly one of `every_minutes`, five-field `cron`, or RFC3339 `at`.
+Optional `skills` lists installed skill names. The workdir is the registered
+project, not an arbitrary prompt-provided path. Status defaults to `paused`;
+explicit `active` requests activation. Use normal project plan/apply/status.
+Hermes owns the native job, clock, session and history: LOOM does not create a
+second timer. On Main, the gateway uses Europe/Amsterdam; the read-only inventory
+does not certify timezone or scheduler liveness.
+
+Reapply preserves an existing pause. Native edits can require reconciliation;
+do not overwrite drift blindly. Archive/withdrawal pauses only marked project
+jobs. Restore/reactivation never resumes them automatically. A completed
+one-shot is not rearmed by reapply. Pausing prevents future triggers, not an
+already-running session. Stored `ok` is a native result, not independent proof
+of task effects or successful message delivery.
+
+For a general project coding task instead, declare a script capability invoking
+`codex exec` with explicit project context, then target it with the LOOM
+`schedule` resource above. LOOM owns that job and its bounded completion; MINA's
+profile and memories are not implicitly inherited.

@@ -43,10 +43,15 @@ const (
 	ProjectionStatusSkipped      = "skipped"
 )
 
+// SourceListInput limits complete inventories: zero means all sources. A positive
+// limit exceeded by the inventory must return an error, never a truncated list.
 type SourceListInput struct {
 	Limit int `json:"limit,omitempty"`
 }
 
+// SourceProvider returns a complete, consistently ordered snapshot or an error.
+// Implementations must not report partial inventories as success: omission permits
+// pruning generated entries. Payload files themselves are not snapshot-isolated.
 type SourceProvider interface {
 	ListProjectionSources(ctx context.Context, input SourceListInput) ([]SourceObject, error)
 }

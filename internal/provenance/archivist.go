@@ -346,8 +346,13 @@ func decodeArchivistCandidateEnvelope(projection CandidateLifecycleProjection) (
 	if err := decodeLosslessJSON(projection.Candidate.Payload, &envelope); err != nil {
 		return archivistCandidateEnvelope{}, err
 	}
+	// JSON preserves the original nanoseconds; pgx stores timestamptz at
+	// microsecond precision. Accept that exact storage projection without
+	// rewriting historical envelopes or tolerating a different microsecond.
+	registeredAtMatches := envelope.RegisteredAt.Equal(projection.Candidate.RegisteredAt) ||
+		envelope.RegisteredAt.Truncate(time.Microsecond).Equal(projection.Candidate.RegisteredAt)
 	if envelope.SchemaVersion != SchemaVersion || envelope.CandidateID != projection.Candidate.ID || envelope.State != "pending" ||
-		!envelope.RegisteredAt.UTC().Equal(projection.Candidate.RegisteredAt.UTC()) {
+		!registeredAtMatches {
 		return archivistCandidateEnvelope{}, errors.New("candidate envelope identity differs from exact projection")
 	}
 	var submitted CandidateRegistration

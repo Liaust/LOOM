@@ -26,6 +26,37 @@ Exact passage get enforces current source access. A typed unavailable or
 privacy-refused passage is not an empty quotation. Keep the refusal; do not
 retry another engine to evade it. Retention is not deletion permission.
 
+## Workspace Navigation And Freshness
+
+`loom notes passage locate` accepts the exact same citation tuple as passage get
+and resolves it to the currently enrolled workspace binding. Historical wording
+can remain readable while its former file is not a current editable target.
+Preserve the returned status; do not fabricate a path for a stale or archived hit.
+
+These are different observations:
+
+- Obsidian local save/local search works on device files, including offline edits.
+- Native publication/upload does not prove that Main applied an edit. Wait for
+  the matching source acknowledgement; a conflict/hold retains its own bytes.
+- `binding_recorded_device_ack_unknown` means the server knows the binding but
+  has not proved this particular device received it.
+- Lexical and semantic indexing have separate publication versions. A saved and
+  synchronized file can legitimately be waiting for either search index.
+
+Normal source discovery/admission is automatic. Do not force global reconcile,
+reindex, reset a replica or run a worker merely because a new edit is not yet
+searchable. Inspect the exact file's pipeline when needed. Configured scan,
+admission, quiet windows and model work all contribute latency.
+
+The legacy generated Notes projection is read-only. The enrolled writable
+workspace is a separate exact-base source adapter; raw projection edits do not
+write back. PDF/image bindings are references, not binary write-back permission.
+
+Recovery must preserve pending client intent, unresolved variants, source
+journals, SQL bindings, native local receipts and keys, not just indexed text.
+Do not delete/rebuild these stores to clear a hold. Use the operator handoff for
+an actual recovery; search success is not proof of backup coverage.
+
 ## Provenance linked receipts
 
 Exact record/candidate get `--sources` returns linked stored source receipts

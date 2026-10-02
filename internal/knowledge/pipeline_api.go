@@ -381,11 +381,11 @@ func (s *Service) reconcilePipelinePolicyObjectTx(ctx context.Context, tx *sql.T
 		}
 		return false, err
 	}
-	oldPlan, err := CompilePipelinePlan(object, oldPolicy)
+	oldPlan, err := recordedEnrichmentPlanTx(ctx, tx, object, oldPolicy)
 	if err != nil {
 		return false, err
 	}
-	newPlan, err := CompilePipelinePlan(object, newPolicy)
+	newPlan, err := recordedEnrichmentPlanTx(ctx, tx, object, newPolicy)
 	if err != nil {
 		return false, err
 	}
@@ -409,11 +409,11 @@ func (s *Service) reconcilePipelinePolicyObjectTx(ctx context.Context, tx *sql.T
 }
 
 func policyTransitionObjectEligibleTx(ctx context.Context, tx *sql.Tx, object KnowledgeObject, oldPolicy, newPolicy PipelinePolicy) (bool, error) {
-	oldPlan, err := CompilePipelinePlan(object, oldPolicy)
+	oldPlan, err := recordedEnrichmentPlanTx(ctx, tx, object, oldPolicy)
 	if err != nil {
 		return false, err
 	}
-	newPlan, err := CompilePipelinePlan(object, newPolicy)
+	newPlan, err := recordedEnrichmentPlanTx(ctx, tx, object, newPolicy)
 	if err != nil {
 		return false, err
 	}
@@ -481,6 +481,15 @@ func (s *Service) RetryPipeline(ctx context.Context, ref string, input PipelineR
 	if err != nil {
 		return PipelineRun{}, err
 	}
+	if inspection.Run.SourceRevision != "" {
+		current, e := s.store.GetKnowledgeObject(ctx, inspection.Run.KnowledgeObjectID)
+		if e != nil {
+			return PipelineRun{}, e
+		}
+		if current.SourceHash != inspection.Run.SourceHash || current.SourceRevision != inspection.Run.SourceRevision {
+			return PipelineRun{}, fmt.Errorf("%w: retry source version is no longer current", ErrConflict)
+		}
+	}
 	input.StageKey = strings.TrimSpace(input.StageKey)
 	if input.StageKey != "" {
 		found := false
@@ -502,6 +511,27 @@ func (s *Service) RetryPipeline(ctx context.Context, ref string, input PipelineR
 	if err != nil {
 		return PipelineRun{}, err
 	}
+	var intentPlan CompiledPipelinePlan
+	if json.Unmarshal(inspection.Run.PlanSnapshot, &intentPlan) == nil && intentPlan.Enrichment != nil {
+		if _, e := compileEnrichmentPlan(object, policyStatus.Policy, *intentPlan.Enrichment); e != nil {
+			return PipelineRun{}, e
+		}
+		if input.StageKey == "" {
+			input.StageKey = FilePipelineStageEmbedding
+			if intentPlan.Enrichment.Requested.Vision {
+				input.StageKey = FilePipelineStageImageDescription
+			}
+			if intentPlan.Enrichment.Requested.OCR {
+				input.StageKey = FilePipelineStageImageOCR
+				if intentPlan.FileFamily == "pdf" {
+					input.StageKey = FilePipelineStagePDFPageAnalysis
+				}
+			}
+		}
+		if input.StageKey == FilePipelineStagePDFOCR {
+			input.StageKey = FilePipelineStagePDFPageAnalysis
+		}
+	}
 	if input.StageKey == "" {
 		return s.EnsurePipelineRun(ctx, object, policyStatus.Policy, true, input.Priority)
 	}
@@ -509,6 +539,27 @@ func (s *Service) RetryPipeline(ctx context.Context, ref string, input PipelineR
 	if err != nil {
 		return PipelineRun{}, err
 	}
-	run, _, err := s.ensurePipelineRunWithRetry(ctx, object, policyStatus.Policy, true, input.Priority, &pipelineRetrySpec{Source: inspection, TargetStage: input.StageKey})
+	retry := &pipelineRetrySpec{Source: inspection, TargetStage: input.StageKey, ReuseStages: map[string]bool{}}
+	if intentPlan.Enrichment != nil {
+		for _, compiled := range intentPlan.Stages {
+			if !enrichmentRetainedStage(*intentPlan.Enrichment, compiled.StageKey) {
+				continue
+			}
+			if input.StageKey == compiled.StageKey {
+				return PipelineRun{}, fmt.Errorf("%w: stage was retained from earlier work; request it explicitly with notes enrich", ErrInvalid)
+			}
+			var previous PipelineStageRun
+			for _, stage := range inspection.Stages {
+				if stage.StageKey == compiled.StageKey {
+					previous = stage
+				}
+			}
+			if !isReusableUpstreamStageStatus(previous.Status) || !reusableStageMetadataMatches(previous, compiled) || (previous.Status != PipelineStageStatusSkippedNotApplicable && !hasReusableStageArtifact(inspection.Artifacts, inspection.Run, previous, compiled.OutputArtifactKinds)) {
+				return PipelineRun{}, fmt.Errorf("%w: retained stage %s is no longer reusable", ErrConflict, compiled.StageKey)
+			}
+			retry.ReuseStages[compiled.StageKey] = true
+		}
+	}
+	run, _, err := s.ensurePipelineRunWithRetry(ctx, object, policyStatus.Policy, true, input.Priority, retry)
 	return run, err
 }

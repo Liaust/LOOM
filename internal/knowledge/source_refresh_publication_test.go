@@ -55,6 +55,32 @@ func TestRefreshPathInputSurvivesRestartPostgres(t *testing.T) {
 	}
 }
 
+func TestCoordinatorDrainsBoundedStagesPostgres(t *testing.T) {
+	db, url := boxSourcesDatabase(t)
+	if _, err := migrations.Up(t.Context(), url, filepath.Join("..", "..", "migrations")); err != nil {
+		t.Fatal(err)
+	}
+	s, object := pipelineFixture(t, db, "markdown", "text/markdown", "# Drain\nBounded cobalt notebook.\n", time.Now().UTC())
+	s.sourceStagingRoot = t.TempDir()
+	if _, err := s.EnsurePipelineRun(t.Context(), object, PipelinePolicy{}, false, 100); err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.RunPipelineCoordinatorOnce(t.Context(), PipelineCoordinatorRunInput{WorkerRunID: "drain-first", Limit: 2})
+	if err != nil || first.Completed != 2 || first.Claimed != 2 || !first.MoreWork {
+		t.Fatalf("bounded multi-stage progress: %+v %v", first, err)
+	}
+	// Resume from durable stage state using a fresh service, not an in-memory cursor.
+	s = NewService(db, WithSourceStagingRoot(s.sourceStagingRoot))
+	next, err := s.RunPipelineCoordinatorOnce(t.Context(), PipelineCoordinatorRunInput{WorkerRunID: "drain-restart", Limit: 20})
+	if err != nil || next.Completed < 2 || next.MoreWork {
+		t.Fatalf("restart drain: %+v %v", next, err)
+	}
+	empty, err := s.RunPipelineCoordinatorOnce(t.Context(), PipelineCoordinatorRunInput{WorkerRunID: "drain-idle", Limit: 20})
+	if err != nil || empty.Claimed != 0 || empty.MoreWork {
+		t.Fatalf("idle replay: %+v %v", empty, err)
+	}
+}
+
 func TestRefreshSemanticPublicationPostgres(t *testing.T) {
 	s, roots := boxSyncedFixture(t)
 	setPipelinePolicyForTest(t, s.store.db, PipelinePolicy{EmbeddingsEnabled: true})

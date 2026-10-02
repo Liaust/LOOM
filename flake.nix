@@ -51,7 +51,7 @@
         }:
         pkgs.buildGoModule {
           pname = name;
-          version = "0.0.0-dev";
+          version = "0.9.0";
           src = ./.;
           inherit subPackages;
           inherit vendorHash;
@@ -59,7 +59,7 @@
           ldflags = [
             "-s"
             "-w"
-            "-X loom.local/loom/internal/version.Version=0.0.0-dev"
+            "-X loom.local/loom/internal/version.Version=0.9.0"
           ];
 
           postInstall = ''
@@ -148,6 +148,10 @@
             inherit hermes-upstream system;
           };
         } // lib.optionalAttrs (system == "x86_64-linux") {
+          pg-search = pkgs.callPackage ./nix/packages/pg-search-bin.nix {
+            postgresql = pkgs.postgresql_17;
+          };
+          notes-workspace-sync = pkgs.callPackage ./nix/packages/notes-workspace-sync.nix { };
           agent-browser = pkgs.callPackage ./nix/packages/agent-browser.nix {
             chromium = hermes-upstream.inputs.nixpkgs.legacyPackages.${system}.chromium;
           };
@@ -187,6 +191,7 @@
       # Same module and one selected runtime, not a second gateway definition.
       nixosModules.loom-mina = import ./nix/modules/loom-morathustra.nix;
       nixosModules.loom-service-manager = import ./nix/modules/loom-service-manager.nix;
+      nixosModules.loom-notes-workspace = import ./nix/modules/loom-notes-workspace.nix;
       nixosModules.loom-restore-authority = import ./nix/modules/loom-restore-authority.nix;
 
       nixosConfigurations = {

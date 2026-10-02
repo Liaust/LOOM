@@ -1,0 +1,388 @@
+--- a/node_modules/@vrtmrz/livesync-commonlib/dist/serviceModules/ServiceFileHandlerBase.js
++++ b/node_modules/@vrtmrz/livesync-commonlib/dist/serviceModules/ServiceFileHandlerBase.js
+@@ -37,6 +37,7 @@
+   deferredConflictChecks = /* @__PURE__ */ new Map();
+   constructor(services) {
+     super(services);
++    this.loomIntent = services.loomIntent;
+     this.events = services.events;
+     this.databaseFileAccess = services.databaseFileAccess;
+     this.storageAccess = services.storageAccess;
+@@ -250,6 +251,7 @@
+     const file = typeof info === "string" ? await this.storage.getFileStub(info) : info;
+     return file;
+   }
++  async loomPublish(paths, run) { return await this.serializedByFileEventPaths(paths, run); }
+   async storeFileToDB(info, force = false, onlyChunks = false) {
+     return await this.serializedByFileEventPaths(
+       [getStoragePathFromUXFileInfo(info)],
+@@ -268,6 +270,8 @@
+    * document lock for this core operation.
+    */
+   async storeFileToDBWithBaseRevisionCore(info, baseRevision, createIfDifferent) {
++    const gated = await this.loomIntent?.mutation({ kind: "store", info,  });
++    if (gated !== undefined) return gated;
+     const file = await this.infoToStub(info);
+     if (file == null) {
+       this._log(`File ${tryGetFilePath(info)} is not exist on the storage`, LOG_LEVEL_VERBOSE);
+@@ -327,6 +331,8 @@
+    * not yet started and cannot supply a new event for a concurrent edit.
+    */
+   async storeFileToDBFromRevision(info, force = false, onlyChunks = false, preferredBasePath, retryIfStorageChanges = false, snapshotRetry = 0) {
++    const gated = await this.loomIntent?.mutation({ kind: "store", info,  });
++    if (gated !== undefined) return gated;
+     const file = await this.infoToStub(info);
+     if (file == null) {
+       this._log(`File ${tryGetFilePath(info)} is not exist on the storage`, LOG_LEVEL_VERBOSE);
+@@ -475,6 +481,8 @@
+    * the displayed conflict branch when its provenance is known.
+    */
+   async deleteFileFromDBCore(info) {
++    const gated = await this.loomIntent?.mutation({ kind: "delete", info,  });
++    if (gated !== undefined) return gated;
+     const file = await this.infoToStub(info);
+     const path = typeof info === "string" ? info : tryGetFilePath(info);
+     if (file == null) {
+@@ -565,6 +573,8 @@
+    * source conflict before deleting its old path.
+    */
+   async renameFileInDBCore(info, oldPath, retryIfStorageChanges = false) {
++    const gated = await this.loomIntent?.mutation({ kind: "rename", info, oldPath });
++    if (gated !== undefined) return gated;
+     const newPath = getStoragePathFromUXFileInfo(info);
+     const [oldDocumentId, newDocumentId] = await Promise.all([
+       this.path.path2id(oldPath),
+@@ -634,6 +644,8 @@
+   }
+   /** Delete one selected revision and clear matching provenance under the caller's document lock. */
+   async deleteRevisionFromDBCore(info, rev) {
++    const gated = await this.loomIntent?.mutation({ kind: "resolve", info,  });
++    if (gated !== undefined) return gated;
+     const path = getStoragePathFromUXFileInfo(info);
+     const provenance = await this.getProvenance(path);
+     const deleted = await this.db.delete(info, rev);
+@@ -734,12 +746,33 @@
+    * destructive operation.
+    */
+   async applyDatabaseEntryToStorage(docEntry, file, force, allowExistingConflicts = false, incomingRetry = 0) {
++    if (this.loomIntent && String(docEntry.path).startsWith("LOOM-Control-v1/")) {
++      await this.loomIntent?.beforeReflect(docEntry);
++      return true;
++    }
++    const gated = await this.loomIntent?.beforeReflect(docEntry);
++    if (gated !== undefined) return gated;
++    if (this.loomIntent) {
++      force = false;
++      allowExistingConflicts = false;
++      const origin = this.loomIntent.materializedRevision?.(String(docEntry.path));
++      if (origin) await this.setProvenance(docEntry.path, origin, (await this.storage.stat(docEntry.path))?.mtime);
++    }
++    let success = false;
++    try {
++      success = await this.applyDatabaseEntryToStorageNative(docEntry, file, force, allowExistingConflicts, incomingRetry);
++      return success;
++    } finally {
++      await this.loomIntent?.afterReflect(docEntry, success);
++    }
++  }
++  async applyDatabaseEntryToStorageNative(docEntry, file, force, allowExistingConflicts = false, incomingRetry = 0) {
+     const mode = file == null ? "create" : "modify";
+     const path = this.getPath(docEntry);
+     const settings = this.setting.currentSettings();
+     const revs = await this.db.getConflictedRevs(path);
+     if (revs.length > 0 && !allowExistingConflicts) {
+-      if (settings.writeDocumentsIfConflicted) {
++      if (settings.writeDocumentsIfConflicted && !this.loomIntent) {
+       } else {
+         await this.queueConflictCheckFor(path, true);
+         return true;
+@@ -758,7 +791,7 @@
+     }
+     if (!existOnDB && existDoc) {
+       let safeDeletionSnapshot;
+-      if (!force && !settings.writeDocumentsIfConflicted) {
++      if (!force && (!settings.writeDocumentsIfConflicted || this.loomIntent)) {
+         let protection = await this.preserveUnsyncedStorageAsConflict(path, existDoc, docEntry);
+         if (protection.preserved) return true;
+         if (!protection.snapshot || !await this.currentStorageSnapshotMatches(protection.snapshot.file, protection.snapshot.revision)) {
+@@ -872,7 +905,7 @@
+         this._log(`File ${docRead.path} is not changed`, LOG_LEVEL_VERBOSE);
+         return true;
+       }
+-      if (!force && !settings.writeDocumentsIfConflicted) {
++      if (!force && (!settings.writeDocumentsIfConflicted || this.loomIntent)) {
+         let protection = await this.preserveUnsyncedStorageAsConflict(path, existDoc, docEntry, docData);
+         if (protection.preserved) return true;
+         if (!protection.snapshot) {
+@@ -940,6 +973,10 @@
+     if (!incomingEntry._rev) {
+       return { preserved: false };
+     }
++    if (await this.loomIntent?.reviewedReplacement?.(String(path), incomingEntry._rev, await readFile.body.text()) &&
++        await this.currentStorageSnapshotMatches(readFile, observedProvenance)) {
++      return { preserved: false, snapshot };
++    }
+     const classification = await this.classifyStorageContent(
+       readFile,
+       incomingEntry,
+@@ -958,6 +995,7 @@
+       await this.queueConflictCheckFor(path);
+       return { preserved: true };
+     }
++    if (this.loomIntent) { await this.loomIntent.mutation({kind: "store", info: path}); return {preserved: true}; }
+     const storedRevision = classification.kind === "edited" ? await this.db.storeWithBaseRevision(readFile, classification.revision, true) : await this.db.storeIndependentRevision(readFile, true);
+     if (storedRevision === false) {
+       this._log(`Prevented overwriting unsynchronised local changes for ${path}`, LOG_LEVEL_NOTICE);
+@@ -1274,6 +1312,10 @@
+     this._log(ex, LOG_LEVEL_VERBOSE);
+   }
+   async _anyProcessReplicatedDoc(entry) {
++    if (this.loomIntent && String(entry.path).startsWith("LOOM-Control-v1/")) {
++      await this.loomIntent?.beforeReflect(entry);
++      return true;
++    }
+     return await this.serializedByFileEventPaths([this.getPath(entry)], async () => {
+       if (!await this.vault.isTargetFile(entry.path)) {
+         this._log(`File ${entry.path} is not the target file`, LOG_LEVEL_VERBOSE);
+--- a/node_modules/@vrtmrz/livesync-commonlib/dist/serviceModules/ServiceFileHandlerBase.d.ts
++++ b/node_modules/@vrtmrz/livesync-commonlib/dist/serviceModules/ServiceFileHandlerBase.d.ts
+@@ -12,7 +12,15 @@
+ import type { SettingService } from "../services/base/SettingService.js";
+ import type { VaultService } from "../services/base/VaultService.js";
+ import type { FileReflectionProvenance } from "../interfaces/FileReflectionProvenance.js";
++export interface LoomIntentHooks {
++    reviewedReplacement?(path: string, revision: string, text: string): Promise<boolean>;
++    materializedRevision?(path: string): string | undefined;
++    mutation(input: { kind: "store" | "delete" | "rename" | "resolve"; info: UXFileInfoStub | FilePathWithPrefix; oldPath?: FilePathWithPrefix }): Promise<boolean | undefined>;
++    beforeReflect(entry: MetaEntry): Promise<boolean | undefined>;
++    afterReflect(entry: MetaEntry, success: boolean): Promise<void>;
++}
+ export interface ServiceFileHandlerDependencies {
++    loomIntent?: LoomIntentHooks;
+     events: LiveSyncEventHub;
+     API: APIService;
+     databaseFileAccess: DatabaseFileAccess;
+@@ -96,6 +104,7 @@
+     readFileFromStub(file: UXFileInfoStub | UXFileInfo): Promise<UXFileInfo>;
+     tryRecordUntrackedFileRevision(info: UXFileInfoStub | UXFileInfo, expectedRevision: string): Promise<boolean>;
+     private infoToStub;
++    loomPublish(paths: FilePathWithPrefix[], run: () => Promise<boolean>): Promise<boolean>;
+     storeFileToDB(info: UXFileInfoStub | UXFileInfo | UXInternalFileInfoStub | FilePathWithPrefix, force?: boolean, onlyChunks?: boolean): Promise<boolean>;
+     storeFileToDBWithBaseRevision(info: UXFileInfoStub | UXFileInfo | FilePathWithPrefix, baseRevision: string, createIfDifferent?: boolean): Promise<boolean>;
+     /**
+--- a/node_modules/@vrtmrz/livesync-commonlib/dist/managers/EntryManager/EntryManagerImpls.js
++++ b/node_modules/@vrtmrz/livesync-commonlib/dist/managers/EntryManager/EntryManagerImpls.js
+@@ -205,6 +205,7 @@
+   return result;
+ }
+ function isTargetFile(host, filenameSrc) {
++  if (host.services.path.loomControlPath?.(String(filenameSrc))) return true;
+   const settings = host.services.setting.currentSettings();
+   const file = filenameSrc.startsWith(ICHeader) ? filenameSrc.substring(ICHeader.length) : filenameSrc;
+   if (file.startsWith(ICXHeader)) return true;
+--- a/src/serviceFeatures/replication/ReplicateResultProcessor.ts
++++ b/src/serviceFeatures/replication/ReplicateResultProcessor.ts
+@@ -450,7 +450,7 @@
+             // If the document is version info, check compatibility and return.
+             if (isAnyNote(change)) {
+                 const docPath = this.getPath(change);
+-                if (!(await this.services.vault.isTargetFile(docPath))) {
++                if (!this.services.path.loomControlPath?.(String(docPath)) && !(await this.services.vault.isTargetFile(docPath))) {
+                     this.log(`Skipped: ${docPath}`, LOG_LEVEL_VERBOSE);
+                     return;
+                 }
+--- a/src/main.ts
++++ b/src/main.ts
+@@ -1,3 +1,7 @@
++import { createLoomClient, startLoomClient } from "./loomClient/obsidian";
++import type { IntentClient } from "./loomClient/client";
++import { reserved } from "./loomClient/protocol";
++import { pinLocalVaultName } from "./loomClient/namespace";
+ import { useP2PSettingsPreparation } from "@/serviceFeatures/useP2PSettingsPreparation";
+ import { getLanguage, Notice, Plugin, type App, type PluginManifest } from "./deps";
+ import { setGetLanguage } from "@vrtmrz/livesync-commonlib/compat/common/coreEnvFunctions";
+@@ -54,6 +57,7 @@
+ export type LiveSyncCore = LiveSyncBaseCore<ObsidianServiceContext, LiveSyncCommands>;
+ export default class ObsidianLiveSyncPlugin extends Plugin {
+     core: LiveSyncCore;
++    loomClient!: IntentClient;
+
+     /**
+      * Initialise service modules.
+@@ -98,7 +102,10 @@
+             vault: services.vault,
+         });
+
++        this.loomClient = createLoomClient(this, databaseFileAccess, () => services.database.localDatabase);
++        services.path.loomControlPath = reserved;
+         const fileHandler = new ServiceFileHandler({
++            loomIntent: this.loomClient,
+             events: services.context.events,
+             API: services.API,
+             databaseFileAccess: databaseFileAccess,
+@@ -218,12 +226,16 @@
+     private async _startUp() {
++        pinLocalVaultName(this.core.services.API, this.core.services.vault, await this.loadData());
+         if (!(await this.core.services.control.onLoad())) return;
+         const onReady = this.core.services.control.onReady.bind(this.core.services.control);
+-        this.app.workspace.onLayoutReady(onReady);
++        this.app.workspace.onLayoutReady(async () => { await onReady(); await startLoomClient(this); });
+     }
+     override onload() {
+         void this._startUp();
+     }
+     override onunload(): void {
+-        return void this.core.services.control.onUnload();
++        void (async () => {
++            try { await this.loomClient?.stopNative(); }
++            finally { await this.core.services.control.onUnload(); }
++        })();
+     }
+ }
+--- a/src/managers/ObsidianStorageEventManagerAdapter.ts
++++ b/src/managers/ObsidianStorageEventManagerAdapter.ts
+@@ -91,14 +91,31 @@
+ class ObsidianWatchAdapter implements IStorageEventWatchAdapter {
+     constructor(private plugin: ObsidianLiveSyncPlugin) {}
+
+-    beginWatch(handlers: IStorageEventWatchHandlers): Promise<void> {
++    async beginWatch(handlers: IStorageEventWatchHandlers): Promise<void> {
+         const plugin = this.plugin;
++        await plugin.loomClient.ready;
+
+         const boundHandlers = {
+-            onCreate: handlers.onCreate.bind(handlers),
+-            onChange: handlers.onChange.bind(handlers),
+-            onDelete: handlers.onDelete.bind(handlers),
+-            onRename: handlers.onRename.bind(handlers),
++            onCreate: (...args: Parameters<IStorageEventWatchHandlers["onCreate"]>) => {
++                const [file] = args;
++                plugin.loomClient.capture({kind: "create", path: (file as TFile | TFolder).path, folder: "children" in (file as TFile | TFolder)});
++                return handlers.onCreate(...args);
++            },
++            onChange: (...args: Parameters<IStorageEventWatchHandlers["onChange"]>) => {
++                const [file] = args;
++                plugin.loomClient.capture({kind: "edit", path: (file as TFile | TFolder).path, folder: "children" in (file as TFile | TFolder)});
++                return handlers.onChange(...args);
++            },
++            onDelete: (...args: Parameters<IStorageEventWatchHandlers["onDelete"]>) => {
++                const [file] = args;
++                plugin.loomClient.capture({kind: "delete", path: (file as TFile | TFolder).path, folder: "children" in (file as TFile | TFolder)});
++                return handlers.onDelete(...args);
++            },
++            onRename: (...args: Parameters<IStorageEventWatchHandlers["onRename"]>) => {
++                const [file, oldPath] = args;
++                plugin.loomClient.capture({kind: "rename", path: (file as TFile | TFolder).path, folder: "children" in (file as TFile | TFolder), oldPath});
++                return handlers.onRename(...args);
++            },
+             onRaw: handlers.onRaw.bind(handlers),
+             onEditorChange: handlers.onEditorChange?.bind(handlers),
+         };
+--- a/node_modules/@vrtmrz/livesync-commonlib/dist/serviceModules/ServiceDatabaseFileAccessBase.js
++++ b/node_modules/@vrtmrz/livesync-commonlib/dist/serviceModules/ServiceDatabaseFileAccessBase.js
+@@ -22,6 +22,7 @@
+   }
+   async checkIsTargetFile(file) {
+     const path = getStoragePathFromUXFileInfo(file);
++    if (this.path.loomControlPath?.(String(path))) return true;
+     if (!await this.vault.isTargetFile(path)) {
+       this._log(`File is not target: ${path}`, LOG_LEVEL_VERBOSE);
+       return false;
+--- a/manifest.json
++++ b/manifest.json
+@@ -1,6 +1,6 @@
+ {
+     "id": "obsidian-livesync",
+-    "name": "Self-hosted LiveSync",
++    "name": "Self-hosted LiveSync (LOOM intent v1)",
+     "version": "1.0.32",
+     "minAppVersion": "1.7.2",
+     "description": "Community implementation of self-hosted livesync. Reflect your vault changes to some other devices immediately. Please make sure to disable other synchronize solutions to avoid content corruption or duplication.",
+--- a/node_modules/@vrtmrz/livesync-commonlib/dist/serviceFeatures/offlineScanner.js
++++ b/node_modules/@vrtmrz/livesync-commonlib/dist/serviceFeatures/offlineScanner.js
+@@ -695,6 +695,10 @@
+           return FilePairProcessResults.COMPLETED;
+         }
+         log(`DELETE LOCAL: ${file.path}`, LOG_LEVEL_INFO);
++        if (host.serviceModules.fileHandler.loomIntent) {
++          await host.serviceModules.fileHandler.loomIntent.mutation({kind: "resolve", info: file.path});
++          return FilePairProcessResults.SKIPPED;
++        }
+         await host.serviceModules.storageAccess.delete(file.path, true);
+         fileMaps.delete(fileMapKey);
+         saveFileStatus(host);
+--- a/node_modules/@vrtmrz/livesync-commonlib/dist/services/base/PathService.d.ts
++++ b/node_modules/@vrtmrz/livesync-commonlib/dist/services/base/PathService.d.ts
+@@ -15,6 +15,8 @@
+  * This class would be migrated to the new logic later.
+  */
+ export declare abstract class PathService<T extends ServiceContext = ServiceContext> extends ServiceBase<T> implements IPathService {
++    /** Optional namespace hook supplied only by the LOOM plugin composition. */
++    loomControlPath?: (path: string) => boolean;
+     protected settingService: ISettingService;
+     private readonly getPathObfuscationPassphrase?;
+     protected abstract normalizePath(path: string): string;
+--- a/src/serviceFeatures/conflictResolution/operations.ts
++++ b/src/serviceFeatures/conflictResolution/operations.ts
+@@ -39,7 +39,9 @@
+ export interface ConflictResolutionOperationsDependencies {
+     readonly events: Pick<LiveSyncEventHub, "emitEvent">;
+     readonly databaseFileAccess: Pick<DatabaseFileAccess, "fetchEntryMeta" | "getConflictedRevs" | "storeContent">;
+-    readonly fileHandler: Pick<IFileHandler, "deleteRevisionFromDB" | "dbToStorage">;
++    readonly fileHandler: Pick<IFileHandler, "deleteRevisionFromDB" | "dbToStorage"> & {
++        loomIntent?: { mutation(input: { kind: "resolve"; info: FilePathWithPrefix }): Promise<boolean | undefined> };
++    };
+     readonly localDatabase: () => Pick<LiveSyncLocalDB, "tryAutoMerge">;
+     readonly conflict: Pick<
+         IConflictService,
+@@ -71,6 +73,12 @@
+ ): ConflictResolutionOperations {
+     const latestResolveRequestByFilename = new Map<FilePathWithPrefix, number>();
+     let nextResolveRequestId = 0;
++    const heldByLoom = async (path: FilePathWithPrefix) => {
++        if (!dependencies.fileHandler.loomIntent || !(await dependencies.databaseFileAccess.getConflictedRevs(path)).length)
++            return false;
++        await dependencies.fileHandler.loomIntent.mutation({ kind: "resolve", info: path });
++        return true;
++    };
+
+     const resolveByDeletingRevision = async (
+         path: FilePathWithPrefix,
+@@ -78,6 +86,7 @@
+         subTitle = "",
+         showNotice = true
+     ): Promise<typeof MISSING_OR_ERROR | typeof AUTO_MERGED> => {
++        if (await heldByLoom(path)) return MISSING_OR_ERROR;
+         const title = `Resolving ${subTitle ? `[${subTitle}]` : ""}:`;
+         if (!(await dependencies.fileHandler.deleteRevisionFromDB(path, deleteRevision))) {
+             dependencies.log(
+@@ -110,6 +119,7 @@
+     };
+
+     const checkConflictAndPerformAutoMerge = async (path: FilePathWithPrefix): Promise<diff_check_result> => {
++        if (await heldByLoom(path)) return CANCELLED;
+         const ret = await dependencies
+             .localDatabase()
+             .tryAutoMerge(path, !dependencies.currentSettings().disableMarkdownAutoMerge);
+@@ -274,7 +284,8 @@
+             dependencies.log(
+                 `conflict: Deleting the older revision ${mTimeAndRev[i][1]} (${new Date(mTimeAndRev[i][0]).toLocaleString()}) of ${filename}`
+             );
+-            await resolveByDeletingRevision(filename, mTimeAndRev[i][1], "NEWEST", showNotice);
++            if (await resolveByDeletingRevision(filename, mTimeAndRev[i][1], "NEWEST", showNotice) === MISSING_OR_ERROR)
++                return false;
+         }
+         return true;
+     };
+diff --git a/node_modules/@vrtmrz/livesync-commonlib/dist/common/utils.js b/node_modules/@vrtmrz/livesync-commonlib/dist/common/utils.js
+--- a/node_modules/@vrtmrz/livesync-commonlib/dist/common/utils.js
++++ b/node_modules/@vrtmrz/livesync-commonlib/dist/common/utils.js
+@@ -69,6 +69,8 @@
+ function isTextDocument(doc) {
+   if (doc.type == "plain") return true;
+   if (doc.datatype == "plain") return true;
++  // Explicit binary metadata takes precedence over text-like extensions.
++  if (doc.type == "newnote" || doc.datatype == "newnote") return false;
+   if (isPlainText(doc.path)) return true;
+   return false;
+ }

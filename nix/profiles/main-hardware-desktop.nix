@@ -8,6 +8,7 @@
     ../modules/loom-postgres.nix
     ../modules/loom-embeddings.nix
     ../modules/loom-notes-ai.nix
+    ../modules/loom-notes-workspace.nix
     ../modules/loom-service.nix
     ../modules/loom-restore-authority.nix
     ../modules/loom-mini-dashboard.nix

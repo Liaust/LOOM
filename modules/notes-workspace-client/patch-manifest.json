@@ -1,0 +1,87 @@
+{
+  "upstreamRevision": "7b3b6ff854f2ff10452be3eaf8e0cd76ac65ac2b",
+  "commonlib": "0.1.29",
+  "targets": [
+    {
+      "path": "node_modules/@vrtmrz/livesync-commonlib/dist/serviceModules/ServiceFileHandlerBase.js",
+      "before": "f1185fd2a70c4375662c37abf4143efea90c162150685cc4e8b34ad5b80a28cb",
+      "after": "fa2c7368498bb1c62fe147ad2e9b929293d55e0e414fbe409f86d3ebda904d0b"
+    },
+    {
+      "path": "node_modules/@vrtmrz/livesync-commonlib/dist/serviceModules/ServiceFileHandlerBase.d.ts",
+      "before": "5510d2adb12d608e988b269e875fe90173273f43030b389d28043408ef3f3a30",
+      "after": "72680fd75d34a2b4541a240e56262b9d604ddaf1b9d6bdbd1d374d97e618d2d7"
+    },
+    {
+      "path": "node_modules/@vrtmrz/livesync-commonlib/dist/managers/EntryManager/EntryManagerImpls.js",
+      "before": "1450eef7e7745d93cebee1fe61146748205ca716d2aa1a205a7d785d38a91478",
+      "after": "5e80d2d2af1310a74461c63f3658a4cc9782d17fed00d76762aea0a430d240f3"
+    },
+    {
+      "path": "src/serviceFeatures/replication/ReplicateResultProcessor.ts",
+      "before": "c29b1427a070760ef62b58416b27d6d430f3e7736d09a4fc1b60440a7a9ee703",
+      "after": "8714e09e6dde7015aa598461b02bce00565bfc830aca54d740ec234d7036c8cf"
+    },
+    {
+      "path": "src/main.ts",
+      "before": "cb09abcbce94c4058c98a2536af7b2bf5ef748c8ea03b4f0902bef091aa5d216",
+      "after": "1e5ad3d265802165bc6dcd33378483953dc250a4261dbbeb43166f29cb489c0b"
+    },
+    {
+      "path": "src/managers/ObsidianStorageEventManagerAdapter.ts",
+      "before": "0f71dc1977a33ba7db23649db7985be1ca5919bfe2e5de4c47a6773ef559dfa5",
+      "after": "cda1ae14770e217b96166999ed721cada6e640270b313de8798d383208b9d0cc"
+    },
+    {
+      "path": "node_modules/@vrtmrz/livesync-commonlib/dist/serviceModules/ServiceDatabaseFileAccessBase.js",
+      "before": "8992df87451478a5dfdbef5a48a58975df1c90e2829f6e018ea1c958c13b002f",
+      "after": "8621ef4f2aaf13a35d092d9537186d4df103128ef7d1ccc861a5b9cff7bd67ab"
+    },
+    {
+      "path": "manifest.json",
+      "before": "c8571c0a727e57893de946b9cfd5bfaf30629b08f1bd4d7a8901f92ade08e29d",
+      "after": "17ca595a9f329e1e861ed4ad4d7cdc0f36fcb4f3969003debfbb4d29744ec48f"
+    },
+    {
+      "path": "node_modules/@vrtmrz/livesync-commonlib/dist/serviceFeatures/offlineScanner.js",
+      "before": "89cd59f4ed89875fb1eabc4f38dbb6999663701e38c6d8621480d0e4f52cda46",
+      "after": "bbc798fcbf4d89cdbc4328ace1ec0a312eb03e26b2c7beefbf62cce86d721f98"
+    },
+    {
+      "path": "node_modules/@vrtmrz/livesync-commonlib/dist/services/base/PathService.d.ts",
+      "before": "3d9509b09c10399e27af56fa660209000c62a590adb8041d38b4a20d360f9ef8",
+      "after": "b408a54efd5aa4782d28452883a8977719e7a9abdf18080474d772161b16165a"
+    },
+    {
+      "path": "src/serviceFeatures/conflictResolution/operations.ts",
+      "before": "b7f89bb380c3c78fd0c98909d22c6ea47e0d27b984d540db22f7ee8673099c08",
+      "after": "d83d9653a55c6e6e194c7f97713a4ce331aa28166f8821147a9559ec62c3841e"
+    },
+    {
+      "path": "node_modules/@vrtmrz/livesync-commonlib/dist/common/utils.js",
+      "before": "ef433049e7ae9eaf94d179c77b49c1934faaac03f879a87032d2c4a85392eb83",
+      "after": "5b2b4c70a9313959b81c26a965643483a10a5cebeaa4cb87d9228772ec25c05e"
+    }
+  ],
+  "patchSha256": "318dc3164fc8427e9494b20928e7f3143c42ce43c251ed96802674d6045f9032",
+  "overlay": {
+    "conflicts.ts": "c0b1a4d9006f3aaf30845207b1bb672bc5472d7640df39af5b3c30a7bb3bc957",
+    "conflict-ui.ts": "9fb50a33ec8cd6a37717c1437a7a30a67f3f92fd224b9f4cf1bf5deb9656edb5",
+    "client.ts": "a88bf30dae5cda72a1e053a8356dcee17ada0719602289b8cee1a942a6419ce1",
+    "client.unit.spec.ts": "9b3fbd26e7222398f63c494a00a1862193d944bf46c576ce504d008e16afb7d7",
+    "control.ts": "46bc13baf6ed78b7f37121386595fdcf1c5070fa262fb96c33a1220b64997c5d",
+    "control.unit.spec.ts": "5935303908c4cde12bf4c4d1c646caddaa0381dfa7056f0af5c0a5a5f93c2224",
+    "journal.ts": "983e321fcbda89e7b8e2c4d4dc7b9744253461c6c385bba7ef1884e8ed2bd112",
+    "nativeFixture.ts": "d957fb6a0fc31744c0bcd8b899a861c4d263b83cb9ab956bb19cc0d9607b24fd",
+    "obsidian.ts": "3361879368b1bf88382701c2c956839cd547d7d24d76267d05af8a1515b7b50e",
+    "protocol.ts": "1d1b0d0eed621fc80db6f6812a3b8b35a17f32631d5b2d640ff2b2c6d6312367",
+    "publisher.ts": "6dd9e496cb03b7ce68895a7c7086500565b2926b746c69f2f906c88d80dbb299",
+    "publisher.unit.spec.ts": "32f0e090f134f1956a286c5a59582128ac266b1f1abe1e388dbd36fa29f36ace",
+    "work.ts": "e35a29fc94b5fa0eae3b5a974f58556e3cc691e7fa704cb3caa2cf2d18d06692",
+    "work.unit.spec.ts": "51a1462289b0cf8998a42f887289a0f1ee2cd1222d2f217f2d037a9c12cabaea",
+    "draft.ts": "37397d39ef1e1d21394b71d2a4de647f7be60b7518eacae041a43868ba74ac9a",
+    "journal.unit.spec.ts": "83408f194c5f8f82f1b354286104be72956c2dc2c5864adb77af705674b583a5",
+    "namespace.ts": "4b2d85136bba0cf6e1c12885cdf3eb62ab319f581f953971e26b45679fda6391",
+    "namespace.unit.spec.ts": "93acd12158a6f72fad6cfebcbea8902b21ff713886b5bc40410d9ad2ef26f2a0"
+  }
+}

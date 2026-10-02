@@ -23,6 +23,13 @@ authorized bounded action, then verify its component and downstream effect.
 
 ## Evidence and availability
 
+Use `loom services list --json` / `loom service inspect <ref>` for registry
+state. Generic status/start/stop/restart/logs need advertised manager endpoints
+and a node-local allowlist; registration alone supplies neither. Managed apps
+use `loom project status <ref> --node main --json` and their application health,
+not generic service commands. An unavailable generic endpoint is not proof the
+application is down.
+
 Current task and repository/node instructions govern scope. Runtime records and
 approved host/service observations establish health; release-matched source and
 help establish support. Plans are future intent.

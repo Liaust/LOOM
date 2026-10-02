@@ -180,6 +180,27 @@ func (s Store) LoadPathState(rootKey, relativePath string) (PathState, error) {
 	return s.LoadPathStateByKey(rootKey, pathKey)
 }
 
+// Used when a queue redo journal will be removed after publishing this binding.
+func (s Store) SavePathStateDurable(state PathState) error {
+	if err := s.SavePathState(state); err != nil {
+		return err
+	}
+	root := normalizeRootKey(state.RootKey)
+	path := s.pathStatePath(root, PathKey(root, state.RelativePath))
+	for _, name := range []string{path, filepath.Dir(path)} {
+		f, err := os.Open(name)
+		if err != nil {
+			return err
+		}
+		err = f.Sync()
+		_ = f.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s Store) LoadPathStateByKey(rootKey, pathKey string) (PathState, error) {
 	var state PathState
 	err := readJSONFile(s.pathStatePath(rootKey, pathKey), &state)

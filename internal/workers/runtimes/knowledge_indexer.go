@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -31,6 +32,10 @@ const notesCustodyCheckpointSchema = "notes_custody.cursor.v1"
 type notesCustodyCheckpoint struct {
 	SchemaVersion string `json:"schema_version"`
 	EventID       string `json:"event_id"`
+}
+
+type projectionRefreshCheckpoint struct {
+	LastSuccess time.Time `json:"last_success"`
 }
 
 func (r KnowledgeIndexerRuntime) WithArchiveService(service *storagearchive.WorkspaceMoveService, nodeKey string) KnowledgeIndexerRuntime {
@@ -120,7 +125,7 @@ func (r KnowledgeIndexerRuntime) Describe() workers.KindDescriptor {
 }
 
 func (r KnowledgeIndexerRuntime) DefaultConfig() json.RawMessage {
-	return json.RawMessage(`{"schema_version":"knowledge_indexer.config.v0.8.5","batch_size":50,"max_runtime_seconds":30,"max_objects_per_run":50,"max_text_bytes_per_object":5242880,"max_extracted_text_bytes":10485760,"max_chunks_per_object":1000,"lease_duration_seconds":120,"retry":{"max_attempts":3,"base_delay_seconds":60,"max_delay_seconds":3600}}`)
+	return json.RawMessage(`{"schema_version":"knowledge_indexer.config.v0.8.5","batch_size":200,"max_runtime_seconds":30,"max_objects_per_run":200,"max_text_bytes_per_object":5242880,"max_extracted_text_bytes":10485760,"max_chunks_per_object":2048,"lease_duration_seconds":120,"retry":{"max_attempts":3,"base_delay_seconds":60,"max_delay_seconds":3600}}`)
 }
 
 func (r KnowledgeIndexerRuntime) DefaultInstances() []workers.InstanceDescriptor {
@@ -176,15 +181,31 @@ func (r KnowledgeIndexerRuntime) RunOnce(ctx context.Context, run workers.RunCon
 	if config.MaxObjectsPerRun > 0 && config.MaxObjectsPerRun < limit {
 		limit = config.MaxObjectsPerRun
 	}
+	admissionLimit, err := knowledgeAdmissionPageLimit(limit, run.Checkpoints)
+	if err != nil {
+		return workers.RunResult{}, err
+	}
 	custody, err := r.consumeCustody(ctx, run.Checkpoints, limit)
 	if err != nil {
 		return workers.RunResult{}, err
 	}
-	admission, err := r.Knowledge.AdmitRegisteredNotesOnce(ctx, cursor, limit)
+	admission, admissionTimedOut, err := admitKnowledgeNotes(ctx, cursor, admissionLimit,
+		time.Duration(config.MaxRuntimeSeconds)*time.Second/3, r.Knowledge.AdmitRegisteredNotesOnce)
 	if err != nil {
 		return workers.RunResult{}, fmt.Errorf("admit registered Notes: %w", err)
 	}
-	result, err := r.Knowledge.RunKnowledgeIndexerOnce(ctx, knowledge.KnowledgeIndexerRunInput{
+	if admissionTimedOut && run.Logger != nil {
+		run.Logger.Warn("Notes admission timed out; retaining cursor and processing existing work")
+	}
+	// Reserve time to publish the generated view and checkpoints after a drain.
+	coordinatorCtx := ctx
+	if deadline, ok := ctx.Deadline(); ok && r.Projection != nil {
+		reserve := min(8*time.Second, time.Duration(config.MaxRuntimeSeconds)*time.Second/3)
+		var stopCoordinator context.CancelFunc
+		coordinatorCtx, stopCoordinator = context.WithDeadline(ctx, deadline.Add(-reserve))
+		defer stopCoordinator()
+	}
+	result, err := r.Knowledge.RunKnowledgeIndexerOnce(coordinatorCtx, knowledge.KnowledgeIndexerRunInput{
 		WorkerRunID:           run.Run.WorkerRunID,
 		Limit:                 limit,
 		LeaseDuration:         time.Duration(config.LeaseDurationSeconds) * time.Second,
@@ -200,12 +221,23 @@ func (r KnowledgeIndexerRuntime) RunOnce(ctx context.Context, run workers.RunCon
 		return workers.RunResult{}, err
 	}
 	projectionChanged := false
+	var projectionCheckpoint projectionRefreshCheckpoint
+	if saved, ok := run.Checkpoints["projection_refresh"]; ok {
+		if err := json.Unmarshal(saved.CheckpointJSON, &projectionCheckpoint); err != nil {
+			return workers.RunResult{}, fmt.Errorf("invalid Notes projection refresh checkpoint: %w", err)
+		}
+	}
 	if r.Projection != nil {
-		projectionChanged, err = r.Projection.Refresh(ctx)
+		var refreshed bool
+		projectionChanged, refreshed, err = r.Projection.RefreshCoalesced(ctx, projectionCheckpoint.LastSuccess)
 		if err != nil {
 			return workers.RunResult{}, fmt.Errorf("refresh generated Notes projection: %w", err)
 		}
+		if refreshed {
+			projectionCheckpoint.LastSuccess = time.Now().UTC()
+		}
 	}
+	pipelineMore := result.MoreWork
 	result.MoreWork = result.MoreWork || admission.MoreWork
 	if custody != nil {
 		result.MoreWork = result.MoreWork || !custody.Wrapped
@@ -233,35 +265,39 @@ func (r KnowledgeIndexerRuntime) RunOnce(ctx context.Context, run workers.RunCon
 		"more_work":                result.MoreWork,
 		"updated_at":               time.Now().UTC().Format(time.RFC3339Nano),
 		"admission":                admission,
+		"admission_timed_out":      admissionTimedOut,
+		"admission_page_limit":     admissionLimit,
 		"projection_changed":       projectionChanged,
 	})
 	output := workers.RunResult{
 		Status:        workers.RunStatusSucceeded,
 		ResultSummary: mustWorkerJSON(result),
 		Counters: map[string]int64{
-			"catalog_observed":    int64(admission.CatalogObserved),
-			"synced_observed":     int64(admission.SyncedObserved),
-			"admission_applied":   int64(admission.Applied),
-			"admission_skipped":   int64(admission.Skipped),
-			"released_expired":    result.ReleasedExpired,
-			"claimed":             result.Claimed,
-			"processed":           result.Processed,
-			"skipped_unsupported": result.SkippedUnsupported,
-			"extracted":           result.Extracted,
-			"metadata_only":       result.MetadataOnly,
-			"too_large":           result.TooLarge,
-			"password_required":   result.PasswordRequired,
-			"no_embedded_text":    result.NoEmbeddedText,
-			"source_unavailable":  result.SourceUnavailable,
-			"retry_scheduled":     result.RetryScheduled,
-			"failed_terminal":     result.FailedTerminal,
-			"text_bytes_read":     result.TextBytesRead,
-			"chunks_created":      result.ChunksCreated,
-			"links_created":       result.LinksCreated,
-			"statuses_written":    result.StatusesWritten,
+			"catalog_observed":         int64(admission.CatalogObserved),
+			"synced_observed":          int64(admission.SyncedObserved),
+			"priority_synced_observed": int64(admission.PrioritySyncedObserved),
+			"admission_applied":        int64(admission.Applied),
+			"admission_skipped":        int64(admission.Skipped),
+			"released_expired":         result.ReleasedExpired,
+			"claimed":                  result.Claimed,
+			"processed":                result.Processed,
+			"skipped_unsupported":      result.SkippedUnsupported,
+			"extracted":                result.Extracted,
+			"metadata_only":            result.MetadataOnly,
+			"too_large":                result.TooLarge,
+			"password_required":        result.PasswordRequired,
+			"no_embedded_text":         result.NoEmbeddedText,
+			"source_unavailable":       result.SourceUnavailable,
+			"retry_scheduled":          result.RetryScheduled,
+			"failed_terminal":          result.FailedTerminal,
+			"text_bytes_read":          result.TextBytesRead,
+			"chunks_created":           result.ChunksCreated,
+			"links_created":            result.LinksCreated,
+			"statuses_written":         result.StatusesWritten,
 		},
 		ResourceUsage: json.RawMessage(`{}`),
 		CheckpointUpdates: []workers.CheckpointUpdate{
+			{Key: "projection_refresh", SchemaVersion: "notes_projection.refresh.v1", Value: mustWorkerJSON(projectionCheckpoint), Metadata: json.RawMessage(`{}`)},
 			{Key: "admission", SchemaVersion: "knowledge_admission.cursor.v1", Value: mustWorkerJSON(admission.Cursor), Metadata: json.RawMessage(`{}`)},
 			{
 				Key:           "default",
@@ -270,9 +306,22 @@ func (r KnowledgeIndexerRuntime) RunOnce(ctx context.Context, run workers.RunCon
 				Metadata:      json.RawMessage(`{"schema_version":"worker_checkpoint.metadata.v0.2"}`),
 			},
 		},
-		NextRunAfter: tickPolicy.NextAfter(time.Now().UTC()),
+		NextRunAfter: knowledgeIndexerNextRun(tickPolicy, pipelineMore, admission.MoreWork, time.Now().UTC()),
 		Retryable:    false,
 	}
+	if admissionTimedOut {
+		output.Counters["admission_timeouts"] = 1
+		// Processing succeeded, but admission is incomplete and must be retried.
+		output.Retryable = true
+		retained := output.CheckpointUpdates[:0]
+		for _, update := range output.CheckpointUpdates {
+			if update.Key != "admission" {
+				retained = append(retained, update)
+			}
+		}
+		output.CheckpointUpdates = retained
+	}
+	output.Counters["admission_page_limit"] = int64(admissionLimit)
 	if custody != nil {
 		var findings, projected, replayed int64
 		for _, item := range custody.Items {
@@ -286,17 +335,62 @@ func (r KnowledgeIndexerRuntime) RunOnce(ctx context.Context, run workers.RunCon
 		output.Counters["custody_findings"] = findings
 		output.Counters["custody_objects_projected"] = projected
 		output.Counters["custody_objects_replayed"] = replayed
-		output.ResultSummary = mustWorkerJSON(struct {
-			knowledge.KnowledgeIndexerRunResult
-			Custody *knowledge.NotesCustodyBatchResult `json:"custody"`
-		}{result, custody})
 		output.CheckpointUpdates = append(output.CheckpointUpdates, workers.CheckpointUpdate{
 			Key: "custody", SchemaVersion: notesCustodyCheckpointSchema,
 			Value:    mustWorkerJSON(notesCustodyCheckpoint{SchemaVersion: notesCustodyCheckpointSchema, EventID: custody.NextCursor}),
 			Metadata: json.RawMessage(`{}`),
 		})
 	}
+	output.ResultSummary = mustWorkerJSON(struct {
+		knowledge.KnowledgeIndexerRunResult
+		AdmissionTimedOut  bool                               `json:"admission_timed_out"`
+		AdmissionPageLimit int                                `json:"admission_page_limit"`
+		Custody            *knowledge.NotesCustodyBatchResult `json:"custody,omitempty"`
+	}{result, admissionTimedOut, admissionLimit, custody})
 	return output, nil
+}
+
+func knowledgeAdmissionPageLimit(limit int, checkpoints map[string]workers.WorkerCheckpoint) (int, error) {
+	if saved, ok := checkpoints["default"]; ok {
+		var previous struct {
+			Limit    int  `json:"admission_page_limit"`
+			TimedOut bool `json:"admission_timed_out"`
+		}
+		if err := json.Unmarshal(saved.CheckpointJSON, &previous); err != nil {
+			return 0, fmt.Errorf("invalid Notes indexer checkpoint")
+		}
+		if previous.Limit > 0 {
+			limit = min(limit, previous.Limit)
+		}
+		if previous.TimedOut {
+			limit = max(1, limit/2)
+		}
+	}
+	return limit, nil
+}
+
+func admitKnowledgeNotes(ctx context.Context, cursor knowledge.AdmissionCursor, limit int, budget time.Duration,
+	admit func(context.Context, knowledge.AdmissionCursor, int) (knowledge.AdmissionResult, error),
+) (knowledge.AdmissionResult, bool, error) {
+	admissionCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	result, err := admit(admissionCtx, cursor, limit)
+	if ctx.Err() != nil {
+		return knowledge.AdmissionResult{}, false, ctx.Err()
+	}
+	if err != nil && errors.Is(admissionCtx.Err(), context.DeadlineExceeded) {
+		// Partial admission is replayable; never publish its uncommitted cursor.
+		return knowledge.AdmissionResult{Cursor: cursor, MoreWork: true}, true, nil
+	}
+	return result, false, err
+}
+
+func knowledgeIndexerNextRun(policy workers.TickPolicy, pipelineMore, admissionMore bool, now time.Time) *time.Time {
+	if (pipelineMore || admissionMore) && policy.Mode == workers.TickModeInterval && policy.IntervalSeconds > workers.MinimumIntervalSeconds {
+		next := now.Add(time.Duration(workers.MinimumIntervalSeconds) * time.Second)
+		return &next
+	}
+	return policy.NextAfter(now)
 }
 
 func parseKnowledgeIndexerConfig(raw json.RawMessage) (knowledgeIndexerConfig, error) {
@@ -306,12 +400,12 @@ func parseKnowledgeIndexerConfig(raw json.RawMessage) (knowledgeIndexerConfig, e
 	}
 	config := knowledgeIndexerConfig{
 		SchemaVersion:         "knowledge_indexer.config.v0.8",
-		BatchSize:             50,
+		BatchSize:             200,
 		MaxRuntimeSeconds:     30,
-		MaxObjectsPerRun:      50,
+		MaxObjectsPerRun:      200,
 		MaxTextBytesPerObject: 5 * 1024 * 1024,
 		MaxExtractedTextBytes: 10485760,
-		MaxChunksPerObject:    1000,
+		MaxChunksPerObject:    2048,
 		LeaseDurationSeconds:  120,
 		Retry: indexerRetryConfig{
 			MaxAttempts:      3,
@@ -325,7 +419,7 @@ func parseKnowledgeIndexerConfig(raw json.RawMessage) (knowledgeIndexerConfig, e
 		}
 	}
 	if config.BatchSize <= 0 {
-		config.BatchSize = 50
+		config.BatchSize = 200
 	}
 	if config.BatchSize > 200 {
 		config.BatchSize = 200
@@ -343,7 +437,7 @@ func parseKnowledgeIndexerConfig(raw json.RawMessage) (knowledgeIndexerConfig, e
 		config.MaxExtractedTextBytes = 10 * 1024 * 1024
 	}
 	if config.MaxChunksPerObject <= 0 {
-		config.MaxChunksPerObject = 1000
+		config.MaxChunksPerObject = 2048
 	}
 	if config.LeaseDurationSeconds <= 0 {
 		config.LeaseDurationSeconds = 120

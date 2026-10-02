@@ -3,8 +3,8 @@ package knowledge
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
-	"time"
 )
 
 type EmbeddingStageHandler struct {
@@ -12,7 +12,7 @@ type EmbeddingStageHandler struct {
 	Runtime EmbeddingRuntime
 }
 
-func (handler EmbeddingStageHandler) Execute(ctx context.Context, item PipelineWorkItem, policy HeavyResourcePolicy) (HeavyStageObservation, []string, error) {
+func (handler EmbeddingStageHandler) Execute(ctx context.Context, item PipelineWorkItem, policy HeavyResourcePolicy) (observation HeavyStageObservation, warnings []string, err error) {
 	settings, err := handler.Service.store.GetEmbeddingSettings(ctx)
 	if err != nil {
 		return HeavyStageObservation{}, nil, err
@@ -23,44 +23,76 @@ func (handler EmbeddingStageHandler) Execute(ctx context.Context, item PipelineW
 	if handler.Runtime == nil {
 		return HeavyStageObservation{}, nil, &EmbeddingRuntimeError{Kind: EmbeddingRuntimeErrorUnavailable, Message: "embedding runtime is unavailable"}
 	}
-	chunks, err := handler.Service.store.listKnowledgeChunksForVersion(ctx, item.Run.KnowledgeObjectVersionID)
+	if _, _, err = boundedEmbeddingChunks(nil, policy); err != nil {
+		return HeavyStageObservation{}, nil, err
+	}
+	chunks, err := handler.Service.store.listPendingUnifiedEmbeddingChunks(ctx, item.Run.KnowledgeObjectVersionID, settings, policy.MaxUnits+1)
+	if err != nil {
+		return HeavyStageObservation{}, nil, err
+	}
+	chunks, more, err := boundedEmbeddingChunks(chunks, policy)
 	if err != nil {
 		return HeavyStageObservation{}, nil, err
 	}
 	var inputBytes int64
-	for _, chunk := range chunks {
-		inputBytes += int64(len(chunk.ChunkText))
+	completed := 0
+	defer func() {
+		observation = observedHeavy(policy, completed, inputBytes)
+		// A bounded turn can expire after making durable progress. Continue from
+		// those vectors instead of spending the failure allowance on useful work.
+		// Cancellation and no-progress timeouts retain normal failure handling.
+		if completed > 0 && errors.Is(err, context.DeadlineExceeded) && ctx.Err() == context.DeadlineExceeded {
+			warnings, err = []string{heavyStageMoreUnits}, nil
+		}
+	}()
+	pending := make([]KnowledgeChunk, 0, embeddingMicrobatchChunks)
+	pendingBytes := 0
+	flush := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+		results, err := embedChunkBatch(ctx, handler.Runtime, settings.ModelKey, settings.Dimensions, pending)
+		if err != nil {
+			return err
+		}
+		for i, chunk := range pending {
+			if err := handler.Service.activateUnifiedChunkEmbedding(ctx, item, chunk, settings, results[i].Vector, results[i].InputHash); err != nil {
+				return err
+			}
+			completed++
+			inputBytes += int64(len(chunk.ChunkText))
+		}
+		pending, pendingBytes = pending[:0], 0
+		return nil
 	}
-	if err = policy.ValidateWork(len(chunks), inputBytes); err != nil {
-		return HeavyStageObservation{}, nil, err
-	}
 	for _, chunk := range chunks {
+		if len(pending) > 0 && (len(pending) >= embeddingMicrobatchChunks || pendingBytes+len(chunk.ChunkText) > embeddingMicrobatchBytes) {
+			if err = flush(); err != nil {
+				return HeavyStageObservation{}, nil, err
+			}
+		}
 		reused, err := handler.Service.reuseUnifiedChunkEmbedding(ctx, item, chunk, settings)
 		if err != nil {
 			return HeavyStageObservation{}, nil, err
 		}
 		if reused {
+			completed++
+			inputBytes += int64(len(chunk.ChunkText))
 			continue
 		}
-		response, passages, err := embedChunkPassages(ctx, handler.Runtime, settings.ModelKey, chunk)
-		if err != nil {
-			return HeavyStageObservation{}, nil, err
-		}
-		vector, err := AverageEmbeddingVectors(response.Embeddings)
-		if err != nil {
-			return HeavyStageObservation{}, nil, err
-		}
-		if len(vector) != settings.Dimensions {
-			return HeavyStageObservation{}, nil, fmt.Errorf("%w: embedding dimensions %d do not match configured dimensions %d", ErrInvalid, len(vector), settings.Dimensions)
-		}
-		if err = handler.Service.activateUnifiedChunkEmbedding(ctx, item, chunk, settings, vector, hashEmbeddingInput(passages)); err != nil {
-			return HeavyStageObservation{}, nil, err
-		}
+		pending = append(pending, chunk)
+		pendingBytes += len(chunk.ChunkText)
+	}
+	if err = flush(); err != nil {
+		return HeavyStageObservation{}, nil, err
+	}
+	if more {
+		return observedHeavy(policy, completed, inputBytes), []string{heavyStageMoreUnits}, nil
 	}
 	if err = handler.Service.publishUnifiedEmbeddingObjectState(ctx, item, settings); err != nil {
 		return HeavyStageObservation{}, nil, err
 	}
-	return observedHeavy(policy, len(chunks), inputBytes), nil, nil
+	return observedHeavy(policy, completed, inputBytes), nil, nil
 }
 
 func (s *Service) publishUnifiedEmbeddingObjectState(ctx context.Context, item PipelineWorkItem, settings EmbeddingSettings) error {
@@ -123,6 +155,49 @@ func (s Store) listKnowledgeChunksForVersion(ctx context.Context, versionID stri
 	return result, rows.Err()
 }
 
+// Completed compatible vectors are the durable cursor. Each ordinary claim reads
+// only the next bounded turn plus one lookahead chunk; no in-memory offset survives
+// a retry, and the existing publication transaction still verifies completeness.
+func (s Store) listPendingUnifiedEmbeddingChunks(ctx context.Context, versionID string, settings EmbeddingSettings, limit int) ([]KnowledgeChunk, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+knowledgeChunkColumnsWithAlias("c")+`
+	 FROM knowledge.knowledge_chunks c WHERE c.knowledge_object_version_id=$1
+	 AND NOT EXISTS (SELECT 1 FROM knowledge.chunk_embeddings e
+	 WHERE e.knowledge_chunk_id=c.knowledge_chunk_id AND e.chunk_hash=c.chunk_hash
+	 AND e.chunker_version=c.chunker_version AND e.active AND e.status='active'
+	 AND e.runtime_key=$2 AND e.model_key=$3 AND e.dimensions=$4)
+	 ORDER BY c.chunk_index LIMIT $5`, versionID, settings.RuntimeKey, settings.ModelKey, settings.Dimensions, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var chunks []KnowledgeChunk
+	for rows.Next() {
+		chunk, err := scanKnowledgeChunk(rows)
+		if err != nil {
+			return nil, err
+		}
+		chunks = append(chunks, chunk)
+	}
+	return chunks, rows.Err()
+}
+
+func boundedEmbeddingChunks(chunks []KnowledgeChunk, policy HeavyResourcePolicy) ([]KnowledgeChunk, bool, error) {
+	if policy.MaxUnits <= 0 || policy.MaxInputBytes <= 0 {
+		return nil, false, fmt.Errorf("%w: embedding turn budgets must be positive", ErrInvalid)
+	}
+	var inputBytes int64
+	for i, chunk := range chunks {
+		if err := policy.ValidateWork(i+1, inputBytes+int64(len(chunk.ChunkText))); err != nil {
+			if i == 0 {
+				return nil, false, err // A single oversized chunk cannot make progress.
+			}
+			return chunks[:i], true, nil
+		}
+		inputBytes += int64(len(chunk.ChunkText))
+	}
+	return chunks, false, nil
+}
+
 func unifiedEmbeddingItem(item PipelineWorkItem, chunk KnowledgeChunk, settings EmbeddingSettings) EmbeddingWorkItem {
 	return EmbeddingWorkItem{KnowledgeObjectID: chunk.KnowledgeObjectID, KnowledgeObjectVersionID: chunk.KnowledgeObjectVersionID, KnowledgeChunkID: &chunk.KnowledgeChunkID, RuntimeKey: settings.RuntimeKey, ModelKey: settings.ModelKey, Dimensions: settings.Dimensions, Generation: item.Run.Generation, ChunkHash: chunk.ChunkHash, ChunkerVersion: chunk.ChunkerVersion}
 }
@@ -170,5 +245,3 @@ func (s *Service) activateUnifiedChunkEmbedding(ctx context.Context, item Pipeli
 	}
 	return tx.Commit()
 }
-
-var _ = time.Time{}

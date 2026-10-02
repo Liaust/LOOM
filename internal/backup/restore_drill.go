@@ -306,6 +306,17 @@ func RunOperationalRestoreDrill(ctx context.Context, input OperationalRestoreDri
 	if err != nil {
 		return returnFailure(fmt.Errorf("operational restore verification: %w", err))
 	}
+	// A successful pg_restore and the presence of core tables do not prove
+	// that the restored schema matches the authenticated package declaration.
+	var restored struct {
+		Migration *int64 `json:"migration"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(output), &restored); err != nil || restored.Migration == nil {
+		return returnFailure(fmt.Errorf("operational restore verification: missing or invalid restored schema head"))
+	}
+	if *restored.Migration != plan.Verification.Manifest.SchemaHead {
+		return returnFailure(fmt.Errorf("operational restore verification: restored schema head %d does not match package schema head %d", *restored.Migration, plan.Verification.Manifest.SchemaHead))
+	}
 	if err := cleanup(); err != nil {
 		return OperationalRestoreDrillResult{}, &RestoreDatabaseFailure{
 			Kind: restoreauthority.KindOperational, Database: plan.TargetDatabase,

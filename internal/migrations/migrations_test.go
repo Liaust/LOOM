@@ -2519,6 +2519,22 @@ func TestCalendarSchedulesMigrationContract(t *testing.T) {
 	}
 }
 
+func TestHermesDeclarationOwnerMigrationContract(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "migrations", "00078_hermes_declaration_owner.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.Split(string(raw), "-- +goose Down")
+	if len(parts) != 2 || !strings.Contains(parts[0], "'automation','hermesschedules'") || strings.Contains(parts[1], "'hermesschedules'") {
+		t.Fatal("Hermes owner must be added only on upgrade")
+	}
+	for _, forbidden := range []string{"DELETE FROM", "DROP TABLE", "CREATE TABLE", "UPDATE projects."} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("migration must preserve journal history: %s", forbidden)
+		}
+	}
+}
+
 func TestDeclarationOperationJournalMigrationContract(t *testing.T) {
 	version, err := LatestVersion(filepath.Join("..", "..", "migrations"))
 	if err != nil || version < 75 {

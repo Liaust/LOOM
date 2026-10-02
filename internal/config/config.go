@@ -18,6 +18,7 @@ import (
 	"loom.local/loom/internal/filesystemlayout"
 
 	"loom.local/loom/internal/hermesprofile"
+	"loom.local/loom/internal/hermesschedules"
 )
 
 var restoreAuthorityIdentifierPattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]*$`)
@@ -75,6 +76,13 @@ const (
 )
 
 type Config struct {
+	NotesWorkspaceConfig string
+	// Explicit schedule observation binding, independent of gateway liveness.
+	HermesSchedulesProfile  string
+	HermesSchedulesHome     string
+	HermesSchedulesRevision string
+	HermesSchedulesSocket   string
+
 	ApplicationDataBackupRoot string
 
 	MinaSelected          bool
@@ -288,6 +296,10 @@ func Load(overrides Overrides) (Config, error) {
 }
 
 func (c Config) Validate() error {
+	if _, err := c.HermesScheduleSource(); err != nil {
+		return err
+	}
+
 	if _, err := c.HermesRecoveryPolicy(); err != nil {
 		return err
 	}
@@ -679,6 +691,7 @@ func applyEnv(cfg *Config) error {
 		"LOOM_STORAGE_RETENTION_ROOT":      os.Getenv("LOOM_STORAGE_RETENTION_ROOT"),
 		"LOOM_MAIN_DOCUMENTS_ROOT":         os.Getenv("LOOM_MAIN_DOCUMENTS_ROOT"),
 		"LOOM_NOTES_PROJECTION_ROOT":       os.Getenv("LOOM_NOTES_PROJECTION_ROOT"),
+		"LOOM_NOTES_WORKSPACE_CONFIG":      os.Getenv("LOOM_NOTES_WORKSPACE_CONFIG"),
 		"LOOM_BOX_PATH":                    os.Getenv("LOOM_BOX_PATH"),
 		"LOOM_BOX_PROFILE":                 os.Getenv("LOOM_BOX_PROFILE"),
 		"LOOM_MAIN_URL":                    os.Getenv("LOOM_MAIN_URL"),
@@ -708,6 +721,10 @@ func applyEnv(cfg *Config) error {
 		"LOOM_BOOTSTRAP_MODE":         os.Getenv("LOOM_BOOTSTRAP_MODE"),
 		"LOOM_LEGACY_SPLIT_ROOTS":     os.Getenv("LOOM_LEGACY_SPLIT_ROOTS"),
 
+		"LOOM_HERMES_SCHEDULES_SOCKET":                os.Getenv("LOOM_HERMES_SCHEDULES_SOCKET"),
+		"LOOM_HERMES_SCHEDULES_PROFILE":               os.Getenv("LOOM_HERMES_SCHEDULES_PROFILE"),
+		"LOOM_HERMES_SCHEDULES_HOME":                  os.Getenv("LOOM_HERMES_SCHEDULES_HOME"),
+		"LOOM_HERMES_SCHEDULES_REVISION":              os.Getenv("LOOM_HERMES_SCHEDULES_REVISION"),
 		"LOOM_MINA_SELECTED":                          os.Getenv("LOOM_MINA_SELECTED"),
 		"LOOM_MINA_ENABLED":                           os.Getenv("LOOM_MINA_ENABLED"),
 		"LOOM_MINA_RECOVERY_ENABLED":                  os.Getenv("LOOM_MINA_RECOVERY_ENABLED"),
@@ -813,6 +830,14 @@ func applyMap(cfg *Config, values map[string]string) error {
 			continue
 		}
 		switch key {
+		case "LOOM_HERMES_SCHEDULES_SOCKET":
+			cfg.HermesSchedulesSocket = value
+		case "LOOM_HERMES_SCHEDULES_PROFILE":
+			cfg.HermesSchedulesProfile = value
+		case "LOOM_HERMES_SCHEDULES_HOME":
+			cfg.HermesSchedulesHome = value
+		case "LOOM_HERMES_SCHEDULES_REVISION":
+			cfg.HermesSchedulesRevision = value
 		case "LOOM_ENV":
 			cfg.Env = value
 		case "LOOM_NODE_ID":
@@ -858,6 +883,8 @@ func applyMap(cfg *Config, values map[string]string) error {
 			cfg.MainDocuments = value
 		case "LOOM_NOTES_PROJECTION_ROOT":
 			cfg.NotesProjection = value
+		case "LOOM_NOTES_WORKSPACE_CONFIG":
+			cfg.NotesWorkspaceConfig = value
 		case "LOOM_BOX_PATH":
 			cfg.BoxPath = value
 		case "LOOM_BOX_PROFILE":
@@ -1262,4 +1289,43 @@ func LoadHermesRecoveryPolicy() (hermesprofile.Policy, error) {
 		return hermesprofile.Policy{}, err
 	}
 	return c.HermesRecoveryPolicy()
+}
+
+// HermesScheduleSource validates an explicit binding without reading a profile,
+// consulting HERMES_HOME, or executing Hermes. Nix supplies revision from the
+// same selected package used by the gateway. Other deployments must verify it.
+// A syntactically valid but different revision reaches the observer's unsupported
+// result; it must not be replaced with our compiled-in expected revision.
+func (c Config) HermesScheduleSource() (hermesschedules.Source, error) {
+	if c.HermesSchedulesProfile == "" && c.HermesSchedulesHome == "" && c.HermesSchedulesRevision == "" && c.HermesSchedulesSocket == "" {
+		return hermesschedules.Source{}, nil
+	}
+	invalid := func() (hermesschedules.Source, error) {
+		return hermesschedules.Source{}, fmt.Errorf("invalid Hermes schedule observation binding")
+	}
+	if c.HermesSchedulesSocket != "" && c.HermesSchedulesSocket != hermesschedules.SocketPath(c.HermesSchedulesProfile) {
+		return invalid()
+	}
+	policy, err := c.HermesRecoveryPolicy()
+	if err != nil {
+		return invalid()
+	}
+	if policy.Identity == "" {
+		policy.Identity = hermesprofile.MorathustraIdentity
+	}
+	if c.HermesSchedulesProfile != string(policy.Identity) || strings.TrimSpace(c.NodeID) == "" {
+		return invalid()
+	}
+	home := c.HermesSchedulesHome
+	if !filepath.IsAbs(home) || filepath.Clean(home) != home || home == string(filepath.Separator) || strings.ContainsAny(home, "\x00\r\n") {
+		return invalid()
+	}
+	rev := c.HermesSchedulesRevision
+	if len(rev) != 40 || strings.ToLower(rev) != rev {
+		return invalid()
+	}
+	if _, err := hex.DecodeString(rev); err != nil {
+		return invalid()
+	}
+	return hermesschedules.Source{Host: c.NodeID, Profile: c.HermesSchedulesProfile, Revision: rev}, nil
 }

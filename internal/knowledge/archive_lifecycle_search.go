@@ -44,6 +44,30 @@ func (s *Service) searchNotesLifecycles(ctx context.Context, input NotesSearchIn
 	}
 	defer tx.Rollback()
 	input.readTx = tx
+	input.Mode = mode
+	if err := s.prepareIndexedNotesSearch(ctx, &input, mode, fallback, settings); err != nil {
+		return NotesSearchResultSet{}, err
+	}
+	if input.indexed == nil && mode == NotesSearchModeHybrid && fallback == "" && input.queryEmbedding.err == nil {
+		input.visibleObjectIDsJSON, err = s.loadNotesVisibleObjectIDs(ctx, input)
+		if err != nil {
+			return NotesSearchResultSet{}, err
+		}
+	}
+	if mode != NotesSearchModeLexical && fallback == "" && input.queryEmbedding.err == nil {
+		semanticInput := input
+		semanticInput.Mode = mode
+		input.semanticBatch, err = s.loadNotesSemanticBatch(ctx, semanticInput, settings, input.queryEmbedding.vector)
+		if err != nil {
+			return NotesSearchResultSet{}, err
+		}
+	}
+	if mode != NotesSearchModeSemantic {
+		input.lexicalBatch, err = s.loadNotesLexicalBatch(ctx, input)
+		if err != nil {
+			return NotesSearchResultSet{}, err
+		}
+	}
 	now := s.currentTime()
 	active, archived := notesSearchPartition{}, notesSearchPartition{}
 	if input.SourceLifecycle != SourceLifecycleFilterArchived {
@@ -83,6 +107,7 @@ func (s *Service) searchNotesLifecycles(ctx context.Context, input NotesSearchIn
 		out.ArchivedMatchesOmitted, out.ArchivedMatchesOmittedTruncated = archived.matches, archived.truncated
 	}
 	out.ResultCount = len(out.Results)
+	out.CandidateRetrievalTruncated = active.truncated || archived.truncated
 	if input.SourceLifecycle != SourceLifecycleFilterArchived {
 		out.RefreshingMatchesOmitted += active.omitted
 		out.RefreshingMatchesOmittedTruncated = active.omittedTruncated
@@ -102,6 +127,36 @@ func (s *Service) queryNotesSearch(ctx context.Context, input NotesSearchInput, 
 		return input.readTx.QueryContext(ctx, query.SQL, query.Args...)
 	}
 	return s.store.db.QueryContext(ctx, query.SQL, query.Args...)
+}
+
+// Admission is shared only by lexical and semantic queries in this one
+// repeatable-read transaction. Never retain it across requests or transactions.
+func (s *Service) loadNotesVisibleObjectIDs(ctx context.Context, input NotesSearchInput) (string, error) {
+	if input.readTx == nil {
+		return "", fmt.Errorf("shared Notes admission requires a request snapshot")
+	}
+	input.SourceLifecycle = SourceLifecycleFilterAll
+	input.visibleObjectIDsJSON = ""
+	var args []any
+	query := "SELECT knowledge_object_id FROM (" + notesSearchObjectsSQL(input, &args) + ") visible_objects"
+	rows, err := input.readTx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return "", err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	raw, err := json.Marshal(ids)
+	return string(raw), err
 }
 
 func notesLifecycleGroupLimits(active, archived, limit int) (int, int) {
@@ -147,6 +202,10 @@ func (s *Service) searchNotesPartition(ctx context.Context, input NotesSearchInp
 		}
 	}
 	part.matches, part.truncated = notesPartitionMatchCount(lexicalResults, semanticResults, notesSearchCandidateLimit(input.Limit))
+	if input.indexed != nil {
+		key := notesLexicalVariant{input.SourceLifecycle, input.RequireCurrent, input.Limit}
+		part.truncated = part.truncated || input.indexed.exhausted[key]
+	}
 	switch mode {
 	case NotesSearchModeSemantic:
 		part.results = groupNotesSearchResults(rerankNotesSearchResults(semanticResults, input, now, NotesSearchModeSemantic), input.Limit)

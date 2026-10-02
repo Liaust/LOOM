@@ -45,6 +45,9 @@ func (s Service) RunDispatcher(ctx context.Context, req requestctx.Context, inpu
 		return DispatcherRunResult{}, fmt.Errorf("routing service is required")
 	}
 	input = normalizeDispatcherRunInput(input)
+	if err := s.recoverExpiredInvocations(ctx, req, input); err != nil {
+		return DispatcherRunResult{}, err
+	}
 
 	claimed, err := s.claimPendingInvocations(ctx, req, input)
 	if err != nil {
@@ -52,6 +55,9 @@ func (s Service) RunDispatcher(ctx context.Context, req requestctx.Context, inpu
 	}
 	result := DispatcherRunResult{Claimed: int64(len(claimed))}
 	for _, invocation := range claimed {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
 		outcome, err := s.dispatchClaimedInvocation(ctx, req, invocation, input)
 		if err != nil {
 			return result, err
@@ -407,6 +413,11 @@ func (s Service) markInvocationCalling(ctx context.Context, req requestctx.Conte
 }
 
 func (s Service) markInvocationFailedOrRetry(ctx context.Context, req requestctx.Context, invocation Invocation, now time.Time, outcome routing.CapabilityCallOutcome, code, message string) (dispatchOutcome, error) {
+	// Cancellation says nothing about whether an external side effect happened.
+	// Persist its receipt independently, without automatically executing it again.
+	if ctx.Err() != nil {
+		return s.markInvocationOutcome(ctx, req, invocation, time.Now().UTC(), outcome, InvocationStatusRequiresManualAction, FireStatusRequiresManualAction, events.TypeInvocationFailed, events.TypeScheduleFireFailed, "automation.dispatch_cancelled", "Dispatch cancelled; inspect the linked job before retrying")
+	}
 	if invocation.AttemptCount < invocation.MaxAttempts {
 		nextAttempt := now.Add(dispatcherRetryDelay(invocation.AttemptCount))
 		return s.markInvocationRetry(ctx, req, invocation, now, outcome, nextAttempt, code, message)
@@ -415,6 +426,8 @@ func (s Service) markInvocationFailedOrRetry(ctx context.Context, req requestctx
 }
 
 func (s Service) markInvocationRetry(ctx context.Context, req requestctx.Context, invocation Invocation, now time.Time, outcome routing.CapabilityCallOutcome, nextAttempt time.Time, code, message string) (dispatchOutcome, error) {
+	ctx, cancel := dispatchReceiptContext(ctx)
+	defer cancel()
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return dispatchOutcome{}, err
@@ -469,11 +482,28 @@ func (s Service) markInvocationRoutingError(ctx context.Context, req requestctx.
 }
 
 func (s Service) markInvocationOutcome(ctx context.Context, req requestctx.Context, invocation Invocation, now time.Time, outcome routing.CapabilityCallOutcome, invocationStatus, fireStatus, invocationEvent, fireEvent, code, message string) (dispatchOutcome, error) {
+	ctx, cancel := dispatchReceiptContext(ctx)
+	defer cancel()
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return dispatchOutcome{}, err
 	}
 	defer tx.Rollback()
+	result, err := markInvocationOutcomeTx(ctx, tx, req, invocation, now, outcome, invocationStatus, fireStatus, invocationEvent, fireEvent, code, message)
+	if err != nil {
+		return dispatchOutcome{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return dispatchOutcome{}, err
+	}
+	return result, nil
+}
+
+func dispatchReceiptContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+}
+
+func markInvocationOutcomeTx(ctx context.Context, tx *sql.Tx, req requestctx.Context, invocation Invocation, now time.Time, outcome routing.CapabilityCallOutcome, invocationStatus, fireStatus, invocationEvent, fireEvent, code, message string) (dispatchOutcome, error) {
 
 	refs := refsFromOutcome(outcome)
 	var completedAt any
@@ -505,9 +535,12 @@ func (s Service) markInvocationOutcome(ctx context.Context, req requestctx.Conte
 		return dispatchOutcome{}, err
 	}
 
-	fire, err := updateScheduleFireOutcomeTx(ctx, tx, invocation.SourceOccurrenceRef, fireStatus, refs, code, message, now)
-	if invocation.SourceKind == SourceKindSchedule && err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return dispatchOutcome{}, err
+	var fire ScheduleFire
+	if invocation.SourceKind == SourceKindSchedule {
+		fire, err = updateScheduleFireOutcomeTx(ctx, tx, invocation.SourceOccurrenceRef, fireStatus, refs, code, message, now)
+		if err != nil {
+			return dispatchOutcome{}, err
+		}
 	}
 	var directEvent DirectEvent
 	if invocation.SourceKind == SourceKindDirectEvent {
@@ -544,10 +577,6 @@ func (s Service) markInvocationOutcome(ctx context.Context, req requestctx.Conte
 			return dispatchOutcome{}, err
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return dispatchOutcome{}, err
-	}
-
 	return dispatchOutcome{
 		Invocation:         updated,
 		ScheduleFire:       fire,

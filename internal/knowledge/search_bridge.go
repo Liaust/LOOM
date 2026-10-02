@@ -26,29 +26,37 @@ const (
 )
 
 type NotesSearchInput struct {
-	RequireCurrent    bool                  `json:"require_current,omitempty"`
-	SourceLifecycle   SourceLifecycleFilter `json:"source_lifecycle,omitempty"`
-	queryEmbedding    *notesQueryEmbedding
-	readTx            *sql.Tx
-	SourceCategory    string   `json:"source_category,omitempty"`
-	Query             string   `json:"query"`
-	Mode              string   `json:"mode,omitempty"`
-	Phrases           []string `json:"phrases,omitempty"`
-	ProjectID         string   `json:"project_id,omitempty"`
-	ProjectRef        string   `json:"project_ref,omitempty"`
-	SourceNodeKey     string   `json:"source_node_key,omitempty"`
-	NotesSourceRootID string   `json:"notes_source_root_id,omitempty"`
-	RootRef           string   `json:"root_ref,omitempty"`
-	FileClass         string   `json:"file_class,omitempty"`
-	Path              string   `json:"path,omitempty"`
-	Tags              []string `json:"tags,omitempty"`
-	After             string   `json:"after,omitempty"`
-	Before            string   `json:"before,omitempty"`
-	Sort              string   `json:"sort,omitempty"`
-	Limit             int      `json:"limit,omitempty"`
+	RequireCurrent         bool                  `json:"require_current,omitempty"`
+	SourceLifecycle        SourceLifecycleFilter `json:"source_lifecycle,omitempty"`
+	queryEmbedding         *notesQueryEmbedding
+	readTx                 *sql.Tx
+	lexicalBatch           map[notesLexicalVariant][]NotesSearchResult
+	semanticBatch          map[notesLexicalVariant][]NotesSearchResult
+	visibleObjectIDsJSON   string
+	indexed                *notesIndexedSearch
+	indexedBudget          int
+	indexedExactScope      *bool
+	candidateObjectIDsJSON string
+	SourceCategory         string   `json:"source_category,omitempty"`
+	Query                  string   `json:"query"`
+	Mode                   string   `json:"mode,omitempty"`
+	Phrases                []string `json:"phrases,omitempty"`
+	ProjectID              string   `json:"project_id,omitempty"`
+	ProjectRef             string   `json:"project_ref,omitempty"`
+	SourceNodeKey          string   `json:"source_node_key,omitempty"`
+	NotesSourceRootID      string   `json:"notes_source_root_id,omitempty"`
+	RootRef                string   `json:"root_ref,omitempty"`
+	FileClass              string   `json:"file_class,omitempty"`
+	Path                   string   `json:"path,omitempty"`
+	Tags                   []string `json:"tags,omitempty"`
+	After                  string   `json:"after,omitempty"`
+	Before                 string   `json:"before,omitempty"`
+	Sort                   string   `json:"sort,omitempty"`
+	Limit                  int      `json:"limit,omitempty"`
 }
 
 type NotesSearchResultSet struct {
+	CandidateRetrievalTruncated       bool                        `json:"candidate_retrieval_truncated,omitempty"`
 	RefreshingMatchesOmitted          int                         `json:"refreshing_matches_omitted"`
 	RefreshingMatchesOmittedTruncated bool                        `json:"refreshing_matches_omitted_truncated"`
 	SourceLifecycle                   SourceLifecycleFilter       `json:"source_lifecycle"`
@@ -350,6 +358,13 @@ func ValidateNotesSearchInput(input NotesSearchInput) error {
 }
 
 func (s *Service) searchLexicalNotes(ctx context.Context, input NotesSearchInput) ([]NotesSearchResult, error) {
+	if input.lexicalBatch != nil {
+		results, ok := input.lexicalBatch[notesLexicalVariant{input.SourceLifecycle, input.RequireCurrent, input.Limit}]
+		if !ok {
+			return nil, fmt.Errorf("missing lexical request partition")
+		}
+		return append([]NotesSearchResult(nil), results...), nil
+	}
 	query, err := buildNotesSearchQuery(input)
 	if err != nil {
 		return nil, err
@@ -464,6 +479,13 @@ func normalizeNotesSearchTemporalInput(input NotesSearchInput) (NotesSearchInput
 }
 
 func buildNotesSearchQuery(input NotesSearchInput) (notesSearchQuery, error) {
+	return buildNotesSearchVariantsQuery(input, nil)
+}
+
+func buildNotesSearchVariantsQuery(input NotesSearchInput, variants []notesLexicalVariant) (notesSearchQuery, error) {
+	if input.indexed != nil {
+		return buildIndexedNotesLexicalHydration(input, variants)
+	}
 	if _, err := NormalizeSourceLifecycleFilter(input.SourceLifecycle); err != nil {
 		return notesSearchQuery{}, err
 	}
@@ -489,8 +511,21 @@ func buildNotesSearchQuery(input NotesSearchInput) (notesSearchQuery, error) {
 		return notesSearchQuery{}, err
 	}
 	candidateLimit := notesSearchCandidateLimit(input.Limit)
+	args := []any{strings.TrimSpace(input.Query), termsJSON, phrasesJSON}
+	objectsInput := input
+	if len(variants) > 0 {
+		objectsInput.SourceLifecycle = SourceLifecycleFilterAll
+	}
+	objectsSQL := notesSearchObjectsSQL(objectsInput, &args)
+	publishedSQL := notesPublishedVersionSQL("ko", "kc", "kov", false, false)
+	if input.RequireCurrent && len(variants) == 0 {
+		publishedSQL += " AND COALESCE(kov.source_revision,ko.source_revision)=ko.latest_source_revision AND COALESCE(kov.source_hash,ko.source_hash)=ko.latest_source_hash"
+	}
+	// Keep corpus intermediates narrow. Object evidence is evaluated once, term
+	// postings once per term, and full response context only for selected rows.
 	sqlText := `
-		WITH query_terms AS (
+		WITH visible_objects AS MATERIALIZED (` + objectsSQL + `),
+		query_terms AS (
 			SELECT DISTINCT lower(trim(value)) AS term
 			FROM jsonb_array_elements_text($2::jsonb) AS item(value)
 			WHERE trim(value) <> ''
@@ -500,16 +535,22 @@ func buildNotesSearchQuery(input NotesSearchInput) (notesSearchQuery, error) {
 			FROM jsonb_array_elements_text($3::jsonb) AS item(value)
 			WHERE trim(value) <> ''
 		),
-		filtered_docs AS (
+		chunk_refs AS MATERIALIZED (
+			SELECT chunk.knowledge_chunk_id, chunk.knowledge_object_id, chunk.knowledge_object_version_id,
+			       chunk.chunk_index, chunk.structural_path
+			FROM knowledge.knowledge_chunks chunk
+			JOIN visible_objects owner ON owner.knowledge_object_id=chunk.knowledge_object_id
+		),
+		lexical_lengths AS MATERIALIZED (
+			SELECT search_document_id, document_length FROM search.lexical_documents
+		),
+		raw_corpus AS (
 			SELECT sd.search_document_id,
+			       ld.search_document_id AS lexical_document_id, ld.document_length,
+			       ko.search_lifecycle,
+			       (COALESCE(kov.source_revision,ko.source_revision)=ko.latest_source_revision
+			        AND COALESCE(kov.source_hash,ko.source_hash)=ko.latest_source_hash) AS publication_current,
 			       sd.source_kind,
-			       sd.source_id,
-			       sd.source_version_id,
-			       sd.title AS search_title,
-			       sd.summary,
-			       sd.body,
-			       sd.tsv,
-			       sd.metadata,
 			       sd.source_created_at,
 			       sd.source_modified_at,
 			       COALESCE(sd.recency_at, ko.recency_at) AS recency_at,
@@ -519,72 +560,36 @@ func buildNotesSearchQuery(input NotesSearchInput) (notesSearchQuery, error) {
 			       ko.knowledge_object_id,
 			       COALESCE(kc.knowledge_object_version_id, '') AS knowledge_object_version_id,
 			       COALESCE(kov.source_hash, '') AS passage_source_hash,
-			       (COALESCE(kc.metadata->>'text_source', '') = 'metadata_text'
-			        OR COALESCE(sd.metadata->>'text_source', '') = 'metadata_text'
-			        OR COALESCE(sd.metadata->'metadata_only' = 'true'::jsonb, false)) AS passage_metadata_only,
 			       COALESCE(kc.knowledge_chunk_id, '') AS knowledge_chunk_id,
-			       root.notes_source_root_id,
-			       root.root_kind,
-			       ` + notesSearchReadContextSQL("root", "ko", "kov", false) + ` AS source_context_root,
+			       ko.notes_source_root_id,
+			       ko.root_kind,
 			       ko.source_node_key,
 			       COALESCE(ko.project_id, '') AS project_id,
 			       ko.relative_path,
 			       ko.source_path,
 			       COALESCE(NULLIF(ko.title, ''), NULLIF(sd.title, ''), ko.relative_path) AS title,
 			       ko.file_class,
-			       COALESCE(sd.metadata->>'text_source', '') AS text_source,
-			       COALESCE(sd.metadata->>'extraction_status', '') AS extraction_status,
-			       COALESCE((sd.metadata->>'metadata_only')::boolean, false) AS metadata_only,
 			       COALESCE(kc.chunk_index, 0) AS chunk_index,
 			       COALESCE(kc.structural_path, sd.summary, '') AS structural_path
 			FROM search.search_documents sd
-			LEFT JOIN knowledge.knowledge_chunks kc
+			LEFT JOIN lexical_lengths ld ON ld.search_document_id=sd.search_document_id
+			LEFT JOIN chunk_refs kc
 			  ON sd.source_kind = 'knowledge_chunk'
 				 AND kc.knowledge_chunk_id = sd.source_id
 			LEFT JOIN knowledge.knowledge_object_versions kov
 			  ON kov.knowledge_object_version_id = kc.knowledge_object_version_id
 			 AND kov.knowledge_object_id = kc.knowledge_object_id
-			JOIN knowledge.knowledge_objects ko
-			  ON (
-			       sd.source_kind = 'knowledge_chunk'
-			       AND ko.knowledge_object_id = kc.knowledge_object_id
-			     )
-			  OR (
-			       sd.source_kind = 'knowledge_object_metadata'
-			       AND ko.knowledge_object_id = sd.source_id
-			     )
-			JOIN knowledge.notes_source_roots root
-			  ON root.notes_source_root_id = ko.notes_source_root_id
+			JOIN visible_objects ko
+			  ON ko.knowledge_object_id = CASE sd.source_kind
+			       WHEN 'knowledge_chunk' THEN kc.knowledge_object_id
+			       WHEN 'knowledge_object_metadata' THEN sd.source_id END
 			WHERE sd.source_kind IN ('knowledge_chunk', 'knowledge_object_metadata')
 			  AND sd.index_version = 'knowledge_bm25_v1'
-			  AND ko.deleted_at IS NULL
-			  AND ` + visibleNotesCustodyObjectSQL("ko", true) + `
-			  AND ` + notesLifecycleSelectionSQL("ko", input.SourceLifecycle) + `
-			  AND ` + notesPublishedVersionSQL("ko", "kc", "kov", false, input.RequireCurrent) + `
-			  AND ` + visibleNotesKnowledgeRelativePathSQL("ko.relative_path") + `
+			  AND ` + publishedSQL + `
 	`
-	args := []any{strings.TrimSpace(input.Query), termsJSON, phrasesJSON}
 	add := func(condition string, value any) {
 		args = append(args, value)
 		sqlText += fmt.Sprintf(" AND %s $%d", condition, len(args))
-	}
-	if value := strings.TrimSpace(input.ProjectID); value != "" {
-		add("ko.project_id =", value)
-	}
-	if input.SourceCategory != "" {
-		add("("+sourceCategorySQL("root.root_kind")+") =", input.SourceCategory)
-	}
-	if value := strings.TrimSpace(input.SourceNodeKey); value != "" {
-		add("ko.source_node_key =", value)
-	}
-	if value := strings.TrimSpace(input.NotesSourceRootID); value != "" {
-		add("ko.notes_source_root_id =", value)
-	}
-	if value := strings.TrimSpace(input.FileClass); value != "" {
-		add("ko.file_class =", value)
-	}
-	if value := strings.TrimSpace(input.Path); value != "" {
-		add("ko.relative_path ILIKE", "%"+value+"%")
 	}
 	for _, tag := range normalizeTags(input.Tags) {
 		add("(sd.metadata->'tags') ?", tag)
@@ -597,18 +602,49 @@ func buildNotesSearchQuery(input NotesSearchInput) (notesSearchQuery, error) {
 		before, _ := ParseAbsoluteTimestamp(input.Before)
 		add("COALESCE(sd.recency_at, ko.recency_at) <", before)
 	}
+	limitSQL := "request.candidate_limit"
+	if len(variants) == 0 {
+		args = append(args, candidateLimit)
+		limitSQL = fmt.Sprintf("$%d", len(args))
+	}
 	sqlText += `
 		),
-		corpus_stats AS (
-			SELECT COUNT(ld.search_document_id)::double precision AS document_count,
-			       COALESCE(AVG(GREATEST(ld.document_length, 1))::double precision, 1.0) AS average_document_length
+		` + notesLexicalMatchSetsSQL() + `,
+		search_corpus AS MATERIALIZED (` + notesLexicalDocumentMatchesSQL() + `),
+		matching_terms AS MATERIALIZED (
+			SELECT lt.search_document_id, lt.term, lt.term_frequency, lt.field_key
+			FROM query_terms qt
+			JOIN search.lexical_terms lt ON lt.term=qt.term
+		)
+	`
+	if len(variants) > 0 {
+		values := make([]string, 0, len(variants))
+		for i, variant := range variants {
+			if variant.Lifecycle != SourceLifecycleFilterActive && variant.Lifecycle != SourceLifecycleFilterArchived {
+				return notesSearchQuery{}, fmt.Errorf("invalid lexical partition lifecycle")
+			}
+			values = append(values, fmt.Sprintf("(%d, '%s', %t, %d)", i, variant.Lifecycle, variant.Current, notesSearchCandidateLimit(variant.Limit)))
+		}
+		sqlText += `SELECT request.ordinal, result.* FROM (VALUES ` + strings.Join(values, ",") + `)
+		 AS request(ordinal,lifecycle,require_current,candidate_limit)
+		 CROSS JOIN LATERAL (
+		 WITH filtered_docs AS MATERIALIZED (
+			SELECT * FROM search_corpus
+			WHERE search_lifecycle=request.lifecycle AND (NOT request.require_current OR publication_current)
+		 ),`
+	} else {
+		sqlText += `, filtered_docs AS (SELECT * FROM search_corpus),`
+	}
+	sqlText += `
+		corpus_stats AS MATERIALIZED (
+			SELECT COUNT(fd.lexical_document_id)::double precision AS document_count,
+			       COALESCE((AVG(GREATEST(fd.document_length, 1)) FILTER (WHERE fd.lexical_document_id IS NOT NULL))::double precision, 1.0) AS average_document_length
 			FROM filtered_docs fd
-			JOIN search.lexical_documents ld
-			  ON ld.search_document_id = fd.search_document_id
 		),
 		doc_term_scores AS (
 			SELECT fd.search_document_id,
-			       qt.term,
+			       lt.term,
+			       MAX(fd.lexical_document_id) AS lexical_document_id, MAX(fd.document_length) AS document_length,
 			       SUM(lt.term_frequency::double precision *
 			           CASE lt.field_key
 			             WHEN 'title' THEN 3.0
@@ -618,11 +654,9 @@ func buildNotesSearchQuery(input NotesSearchInput) (notesSearchQuery, error) {
 			             ELSE 1.0
 			           END) AS weighted_frequency
 			FROM filtered_docs fd
-			JOIN search.lexical_terms lt
+			JOIN matching_terms lt
 			  ON lt.search_document_id = fd.search_document_id
-			JOIN query_terms qt
-			  ON qt.term = lt.term
-			GROUP BY fd.search_document_id, qt.term
+			GROUP BY fd.search_document_id, lt.term
 		),
 		term_stats AS (
 			SELECT term,
@@ -630,7 +664,7 @@ func buildNotesSearchQuery(input NotesSearchInput) (notesSearchQuery, error) {
 			FROM doc_term_scores
 			GROUP BY term
 		),
-		bm25_scores AS (
+		bm25_scores AS MATERIALIZED (
 			SELECT dts.search_document_id,
 			       SUM(
 			           LN(1 + ((cs.document_count - ts.document_frequency + 0.5) / (ts.document_frequency + 0.5))) *
@@ -640,7 +674,7 @@ func buildNotesSearchQuery(input NotesSearchInput) (notesSearchQuery, error) {
 			               dts.weighted_frequency +
 			               1.2 * (
 			                 1.0 - 0.75 +
-			                 0.75 * (GREATEST(ld.document_length, 1)::double precision / cs.average_document_length)
+			                 0.75 * (GREATEST(dts.document_length, 1)::double precision / cs.average_document_length)
 			               )
 			             )
 			           )
@@ -648,138 +682,170 @@ func buildNotesSearchQuery(input NotesSearchInput) (notesSearchQuery, error) {
 			FROM doc_term_scores dts
 			JOIN term_stats ts
 			  ON ts.term = dts.term
-			JOIN search.lexical_documents ld
-			  ON ld.search_document_id = dts.search_document_id
 			CROSS JOIN corpus_stats cs
 			WHERE cs.document_count > 0
 			  AND cs.average_document_length > 0
+			  AND dts.lexical_document_id IS NOT NULL
 			GROUP BY dts.search_document_id
 		),
-		match_flags AS (
-			SELECT fd.search_document_id,
-			       EXISTS (
-			         SELECT 1 FROM query_terms qt
-			         WHERE strpos(lower(COALESCE(fd.title, '')), qt.term) > 0
-			       ) AS title_match,
-			       EXISTS (
-			         SELECT 1 FROM query_terms qt
-			         WHERE strpos(lower(COALESCE(fd.structural_path, '')), qt.term) > 0
-			       ) AS heading_match,
-			       EXISTS (
-			         SELECT 1 FROM query_terms qt
-			         WHERE strpos(lower(COALESCE(fd.relative_path, '') || ' ' || COALESCE(fd.source_path, '')), qt.term) > 0
-			       ) AS path_match,
-			       EXISTS (
-			         SELECT 1 FROM query_terms qt
-			         WHERE (fd.metadata->'tags') ? qt.term
-			       ) AS tag_match,
-			       EXISTS (
-			         SELECT 1 FROM query_terms qt
-			         WHERE strpos(lower(COALESCE(fd.body, '')), qt.term) > 0
-			       ) AS body_match,
-			       EXISTS (
-			         SELECT 1 FROM query_phrases qp
-			         WHERE strpos(lower(COALESCE(fd.title, '') || ' ' || COALESCE(fd.structural_path, '') || ' ' || COALESCE(fd.relative_path, '') || ' ' || COALESCE(fd.body, '')), qp.phrase) > 0
-			       ) AS phrase_match
-			FROM filtered_docs fd
+		matched_docs AS (
+			SELECT * FROM filtered_docs
+			WHERE phrases_match AND (fts_score > 0 OR title_match OR heading_match OR path_match
+			 OR tag_match OR body_match OR phrase_match
+			 OR search_document_id IN (SELECT search_document_id FROM doc_term_scores))
 		),
 		scored AS (
 			SELECT fd.*,
 			       COALESCE(bm25.bm25_score, 0.0) AS bm25_score,
-			       CASE
-			         WHEN fd.tsv @@ websearch_to_tsquery('simple', $1)
-			         THEN ts_rank_cd(fd.tsv, websearch_to_tsquery('simple', $1))
-			         ELSE 0.0
-			       END AS fts_score,
 			       (
-			         CASE WHEN mf.title_match THEN 2.5 ELSE 0.0 END +
-			         CASE WHEN mf.heading_match THEN 1.4 ELSE 0.0 END +
-			         CASE WHEN mf.path_match THEN 1.2 ELSE 0.0 END +
-			         CASE WHEN mf.tag_match THEN 1.8 ELSE 0.0 END +
-			         CASE WHEN mf.phrase_match THEN 3.0 ELSE 0.0 END +
+			         CASE WHEN fd.title_match THEN 2.5 ELSE 0.0 END +
+			         CASE WHEN fd.heading_match THEN 1.4 ELSE 0.0 END +
+			         CASE WHEN fd.path_match THEN 1.2 ELSE 0.0 END +
+			         CASE WHEN fd.tag_match THEN 1.8 ELSE 0.0 END +
+			         CASE WHEN fd.phrase_match THEN 3.0 ELSE 0.0 END +
 			         CASE WHEN fd.source_kind = 'knowledge_chunk' THEN 0.4 ELSE 0.0 END +
-			         CASE WHEN fd.source_kind = 'knowledge_object_metadata' AND (mf.title_match OR mf.path_match) THEN 0.5 ELSE 0.0 END
-			       ) AS boost_score,
-			       mf.title_match,
-			       mf.heading_match,
-			       mf.path_match,
-			       mf.tag_match,
-			       mf.body_match,
-			       mf.phrase_match
-			FROM filtered_docs fd
+			         CASE WHEN fd.source_kind = 'knowledge_object_metadata' AND (fd.title_match OR fd.path_match) THEN 0.5 ELSE 0.0 END
+			       ) AS boost_score
+			FROM matched_docs fd
 			LEFT JOIN bm25_scores bm25
 			  ON bm25.search_document_id = fd.search_document_id
-			JOIN match_flags mf
-			  ON mf.search_document_id = fd.search_document_id
+		),
+		ranked AS MATERIALIZED (
+			SELECT s.*, (s.bm25_score + s.fts_score + s.boost_score) AS final_score
+			FROM scored s
+			WHERE (s.bm25_score > 0 OR s.fts_score > 0 OR s.title_match OR s.heading_match
+			 OR s.path_match OR s.tag_match OR s.body_match OR s.phrase_match) AND s.phrases_match
+			ORDER BY final_score DESC,s.bm25_score DESC,s.fts_score DESC,s.relative_path,s.search_document_id
+			LIMIT ` + limitSQL + `
 		)
 		SELECT s.search_document_id,
 		       s.source_kind,
 		       s.knowledge_object_id,
 		       s.knowledge_object_version_id,
 		       s.knowledge_chunk_id,
-		       s.notes_source_root_id,
-		       s.root_kind,
-		       s.source_node_key,
-		       s.project_id,
+		       detail_object.notes_source_root_id,
+		       detail_root.root_kind,
+		       detail_object.source_node_key,
+		       COALESCE(detail_object.project_id,''),
 		       s.relative_path,
-		       s.source_path,
-		       s.title,
-		       s.file_class,
-		       s.text_source,
-		       s.extraction_status,
-		       s.metadata_only,
-		       s.chunk_index,
-		       s.structural_path,
-		       CASE
+		       detail_object.source_path,
+		       COALESCE(NULLIF(detail_object.title,''),NULLIF(detail_document.title,''),detail_object.relative_path),
+		       detail_object.file_class,
+		       COALESCE(detail_document.metadata->>'text_source',''),
+		       COALESCE(detail_document.metadata->>'extraction_status',''),
+		       COALESCE((detail_document.metadata->>'metadata_only')::boolean,false),
+		       COALESCE(detail_chunk.chunk_index,0),
+		       COALESCE(detail_chunk.structural_path,detail_document.summary,''),
+		       (SELECT CASE
 		         WHEN s.fts_score > 0
-		         THEN ts_headline('simple', s.body, websearch_to_tsquery('simple', $1),
+		         THEN ts_headline('simple', snippet_source.body, websearch_to_tsquery('simple', $1),
 		                          'MaxWords=32, MinWords=8, ShortWord=3')
-		         ELSE left(s.body, 240)
-		       END AS snippet,
+		         ELSE left(snippet_source.body, 240)
+		       END FROM search.search_documents snippet_source
+		       WHERE snippet_source.search_document_id=s.search_document_id) AS snippet,
 		       (s.bm25_score + s.fts_score + s.boost_score) AS rank_score,
 		       s.bm25_score,
 		       s.fts_score,
 		       s.boost_score,
 		       (s.bm25_score + s.fts_score + s.boost_score) AS final_score,
-		       s.source_created_at,
-		       s.source_modified_at,
-		       s.recency_at,
-		       s.recency_basis,
-		       s.observed_at,
-		       s.indexed_at,
+		       detail_document.source_created_at,
+		       detail_document.source_modified_at,
+		       COALESCE(detail_document.recency_at,detail_object.recency_at),
+		       COALESCE(NULLIF(detail_document.recency_basis,''),detail_object.recency_basis),
+		       COALESCE(detail_version.observed_at,detail_object.last_seen_at),
+		       detail_document.indexed_at,
 		       s.title_match,
 		       s.heading_match,
 		       s.path_match,
 		       s.tag_match,
 		       s.body_match,
 		       s.phrase_match
-		       ,s.source_context_root
-		       ,s.passage_source_hash, s.passage_metadata_only
-		FROM scored s
-		WHERE (s.bm25_score > 0
-		   OR s.fts_score > 0
-		   OR s.title_match
-		   OR s.heading_match
-		   OR s.path_match
-		   OR s.tag_match
-		   OR s.body_match
-		   OR s.phrase_match)
-		 AND NOT EXISTS (SELECT 1 FROM query_phrases qp WHERE strpos(lower(COALESCE(s.title,'') || ' ' || COALESCE(s.structural_path,'') || ' ' || COALESCE(s.relative_path,'') || ' ' || COALESCE(s.body,'')), qp.phrase) = 0)
+		       ,(SELECT ` + notesSearchReadContextSQL("context_root", "context_object", "context_version", false) + `
+		         FROM knowledge.knowledge_objects context_object
+		         JOIN knowledge.notes_source_roots context_root
+		           ON context_root.notes_source_root_id=context_object.notes_source_root_id
+		         LEFT JOIN knowledge.knowledge_object_versions context_version
+		           ON context_version.knowledge_object_version_id=s.knowledge_object_version_id
+		          AND context_version.knowledge_object_id=context_object.knowledge_object_id
+		         WHERE context_object.knowledge_object_id=s.knowledge_object_id) AS source_context_root
+		       ,COALESCE(detail_version.source_hash,''),
+		       (SELECT COALESCE(detail_chunk.metadata->>'text_source','')='metadata_text'
+		          OR COALESCE(detail.metadata->>'text_source','')='metadata_text'
+		          OR COALESCE(detail.metadata->'metadata_only'='true'::jsonb,false)
+		        FROM search.search_documents detail
+		        LEFT JOIN knowledge.knowledge_chunks detail_chunk ON detail_chunk.knowledge_chunk_id=s.knowledge_chunk_id
+		        WHERE detail.search_document_id=s.search_document_id)
+		FROM ranked s
+		JOIN knowledge.knowledge_objects detail_object ON detail_object.knowledge_object_id=s.knowledge_object_id
+		JOIN knowledge.notes_source_roots detail_root ON detail_root.notes_source_root_id=detail_object.notes_source_root_id
+		JOIN search.search_documents detail_document ON detail_document.search_document_id=s.search_document_id
+		LEFT JOIN knowledge.knowledge_chunks detail_chunk ON detail_chunk.knowledge_chunk_id=s.knowledge_chunk_id
+		LEFT JOIN knowledge.knowledge_object_versions detail_version ON detail_version.knowledge_object_version_id=s.knowledge_object_version_id
+		 AND detail_version.knowledge_object_id=s.knowledge_object_id
 	`
-	args = append(args, candidateLimit)
-	sqlText += fmt.Sprintf(`
-		ORDER BY final_score DESC, s.bm25_score DESC, s.fts_score DESC,
-		         s.relative_path, s.search_document_id
-		LIMIT $%d`, len(args))
+	sqlText += `
+		ORDER BY s.final_score DESC, s.bm25_score DESC, s.fts_score DESC,
+		         s.relative_path, s.search_document_id`
+	if len(variants) > 0 {
+		sqlText += `) result ORDER BY request.ordinal, result.final_score DESC,
+		 result.bm25_score DESC,result.fts_score DESC,result.relative_path,result.search_document_id`
+	}
 	return notesSearchQuery{SQL: sqlText, Args: args}, nil
+}
+
+// Evaluate live object evidence once per request, before expanding it to chunks.
+// This is a statement-local result, never a cached permission or freshness grant.
+func notesSearchObjectsSQL(input NotesSearchInput, args *[]any) string {
+	visibility := visibleNotesCustodyObjectSQL("ko", true)
+	if input.visibleObjectIDsJSON != "" {
+		*args = append(*args, input.visibleObjectIDsJSON)
+		visibility = fmt.Sprintf("ko.knowledge_object_id IN (SELECT jsonb_array_elements_text($%d::jsonb))", len(*args))
+	}
+	query := `SELECT ko.knowledge_object_id, ko.notes_source_root_id, ko.source_node_key,
+	 ko.project_id, ko.relative_path, ko.source_path, ko.title, ko.file_class,
+	 ko.recency_at, ko.recency_basis, ko.last_seen_at, ko.lexical_version_id,
+	 ko.semantic_version_id, ko.semantic_runtime_key, ko.semantic_model_key, ko.semantic_dimensions,
+	 ko.source_revision, ko.source_hash, root.root_kind,
+	 (SELECT custody.source_lifecycle FROM knowledge.notes_object_custody custody
+	  WHERE custody.knowledge_object_id=ko.knowledge_object_id) AS search_lifecycle,
+	 ` + notesLatestSourceSQL("ko", "source_revision") + ` AS latest_source_revision,
+	 ` + notesLatestSourceSQL("ko", "source_hash") + ` AS latest_source_hash
+	 FROM knowledge.knowledge_objects ko
+	 JOIN knowledge.notes_source_roots root ON root.notes_source_root_id=ko.notes_source_root_id
+	 WHERE ` + visibility + `
+	 AND ` + notesLifecycleSelectionSQL("ko", input.SourceLifecycle) + `
+	 AND ` + visibleNotesKnowledgeRelativePathSQL("ko.relative_path")
+	add := func(condition, value string) {
+		if value != "" {
+			*args = append(*args, value)
+			query += fmt.Sprintf(" AND %s $%d", condition, len(*args))
+		}
+	}
+	add("ko.project_id =", strings.TrimSpace(input.ProjectID))
+	add("("+sourceCategorySQL("root.root_kind")+") =", input.SourceCategory)
+	add("ko.source_node_key =", strings.TrimSpace(input.SourceNodeKey))
+	add("ko.notes_source_root_id =", strings.TrimSpace(input.NotesSourceRootID))
+	add("ko.file_class =", strings.TrimSpace(input.FileClass))
+	if input.candidateObjectIDsJSON != "" {
+		*args = append(*args, input.candidateObjectIDsJSON)
+		query += fmt.Sprintf(" AND ko.knowledge_object_id IN (SELECT jsonb_array_elements_text($%d::jsonb))", len(*args))
+	}
+	if value := strings.TrimSpace(input.Path); value != "" {
+		add("ko.relative_path ILIKE", "%"+value+"%")
+	}
+	return query
 }
 
 func notesSearchTerms(input NotesSearchInput) []string {
 	text := strings.Join(append([]string{input.Query, strings.Join(input.Phrases, " "), strings.Join(input.Tags, " ")}, input.Path), " ")
 	// Identifier components must not become unrelated words such as the A in NOT_A_SECRET.
-	return lexical.UniqueTerms(strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+	terms := strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_'
-	}))
+	})
+	for i, term := range terms {
+		terms[i] = lexical.LexicalTermKey(term)
+	}
+	return lexical.UniqueTerms(terms)
 }
 
 func notesSearchCandidateLimit(limit int) int {

@@ -244,3 +244,23 @@ func TestKnowledgeNotesSearchAcceptsAbsoluteTimeFieldsAndValidatesDates(t *testi
 		t.Fatalf("empty-query response = %d %s", emptyResult.Code, emptyResult.Body.String())
 	}
 }
+
+func TestNotesEnrichmentRejectsInvalidRequestsBeforeDatabase(t *testing.T) {
+	server := NewServer(Services{}, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler()
+	for _, tc := range []struct {
+		method, path, body string
+		status             int
+	}{
+		{http.MethodGet, "/v1/knowledge/notes/enrich?ref=/source&kind=folder&recursive=perhaps", "", 400},
+		{http.MethodGet, "/v1/knowledge/notes/enrich?ref=/source&kind=folder&limit=101", "", 400},
+		{http.MethodPost, "/v1/knowledge/notes/enrich", `{"confirm":true,"stages":{"ocr":true},"bindings":[{"object_id":"object"}]}`, 400},
+		{http.MethodPost, "/v1/knowledge/notes/enrich", `{"unknown":true}`, 400},
+		{http.MethodDelete, "/v1/knowledge/notes/enrich", "", 405},
+	} {
+		out := httptest.NewRecorder()
+		server.ServeHTTP(out, httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body)))
+		if out.Code != tc.status {
+			t.Errorf("%s %s got %d: %s", tc.method, tc.path, out.Code, out.Body.String())
+		}
+	}
+}

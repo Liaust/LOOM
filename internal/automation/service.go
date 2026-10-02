@@ -291,7 +291,7 @@ func (s Service) ListAutomations(ctx context.Context, filter AutomationFilter) (
 	if sourceKind := strings.TrimSpace(filter.SourceKind); sourceKind != "" {
 		add("source_kind =", sourceKind)
 	}
-	query += archivedProjectByProjectColumnSQL("project_id")
+	query += archivedProjectByProjectColumnSQL("automations.project_id")
 	args = append(args, filter.Limit)
 	query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d", len(args))
 
@@ -359,7 +359,7 @@ func (s Service) ListSchedules(ctx context.Context, filter ScheduleFilter) ([]Sc
 		add("project_id =", projectID)
 	}
 	if !hasExplicitRuntimeRef(filter.AutomationRef, filter.ProjectRef) {
-		query += archivedProjectByProjectColumnSQL("project_id")
+		query += archivedProjectByProjectColumnSQL("schedules.project_id")
 	}
 	args = append(args, filter.Limit)
 	query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d", len(args))
@@ -463,7 +463,7 @@ func (s Service) ListScheduleFires(ctx context.Context, filter ScheduleFireFilte
 		add("automation_id =", automation.AutomationID)
 	}
 	if !hasExplicitRuntimeRef(filter.ScheduleRef, filter.AutomationRef) {
-		query += archivedProjectByAutomationColumnSQL("automation_id")
+		query += archivedProjectByAutomationColumnSQL("schedule_fires.automation_id")
 	}
 	args = append(args, filter.Limit)
 	query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d", len(args))
@@ -529,7 +529,7 @@ func (s Service) ListInvocations(ctx context.Context, filter InvocationFilter) (
 		add("project_id =", projectID)
 	}
 	if !hasExplicitRuntimeRef(filter.AutomationRef, filter.ProjectRef) {
-		query += archivedProjectByProjectColumnSQL("project_id")
+		query += archivedProjectByProjectColumnSQL("invocations.project_id")
 	}
 	args = append(args, filter.Limit)
 	query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d", len(args))

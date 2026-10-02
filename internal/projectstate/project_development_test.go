@@ -22,6 +22,23 @@ func projectDevelopmentFixture(t *testing.T) ProjectDevelopmentInput {
 	return input
 }
 
+func TestProjectDevelopmentVerifiedArchiveRetainsContextAndPosture(t *testing.T) {
+	input := projectDevelopmentFixture(t)
+	input.Lifecycle = "archived"
+	if got := ReadProjectDevelopment(t.Context(), input); len(got.Documents) != 0 {
+		t.Fatal("unverified archive read documents")
+	}
+	input.VerifiedArchive, input.ObserveGit = true, true
+	got := ReadProjectDevelopment(t.Context(), input)
+	if got.Posture != ProjectDevelopmentArchived || got.ReasonCode != "verified_archive_context" || got.Purpose != "Understand the source material." || got.Complete || got.Git != nil {
+		t.Fatalf("archive context: %+v", got)
+	}
+	input.OwnerNode = "other"
+	if got := ReadProjectDevelopment(t.Context(), input); got.CapturedBytes != 0 {
+		t.Fatal("verified archive flag bypassed local ownership")
+	}
+}
+
 func writeProjectDevelopmentFile(t *testing.T, input ProjectDevelopmentInput, name, body string) {
 	t.Helper()
 	file := filepath.Join(input.ProjectRoot, filepath.FromSlash(name))

@@ -319,17 +319,17 @@ func Check(ctx context.Context, opts Options) (Report, error) {
 	}
 
 	if opts.HermesRecovery.Enabled || opts.HermesPolicyError != nil {
-		entry := Entry{Key: "morathustra-recovery", Label: "Morathustra Hermes recovery", Category: "recovery_package", Critical: true, Status: StatusCovered, Policy: "authenticated_native_snapshot", Message: "fresh authenticated native Hermes recovery is available"}
+		entry := Entry{Key: "morathustra-recovery", Label: "Morathustra Hermes recovery", Category: "recovery_package", Critical: true, Status: StatusCovered, Policy: "authenticated_native_snapshot", Message: "authenticated native Hermes recovery is within the daily coverage window (26 hours)"}
 		if opts.HermesRecovery.Identity == hermesprofile.MinaIdentity {
 			entry.Key, entry.Label = "mina-recovery", "MINA Hermes recovery"
 		}
-		_, err := hermesprofile.Check(ctx, opts.HermesRecovery, now)
+		_, err := hermesprofile.CheckDailyCoverage(ctx, opts.HermesRecovery, now)
 		if opts.HermesPolicyError != nil {
 			err = opts.HermesPolicyError
 		}
 		if err != nil {
 			entry.Status = StatusMissing
-			entry.Message = "enabled " + entry.Label + " lacks fresh valid recovery evidence"
+			entry.Message = "enabled " + entry.Label + " lacks valid recovery evidence within the daily coverage window (26 hours)"
 		}
 		add(entry)
 	}

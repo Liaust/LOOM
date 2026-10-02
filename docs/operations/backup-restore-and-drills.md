@@ -631,6 +631,65 @@ packages, failed evidence, unknown entries, and active staging remain
 protected. Eligibility is not cleanup approval and this slice provides no
 cleanup apply operation.
 
+## Notes Workspace Recovery
+
+Writable Notes has more durable state than its visible Markdown files. A
+coherent Main recovery point includes enrolled sources and their hidden source
+journals, the operational database's Notes bindings and operations, the native
+replica, cold CouchDB data, and protected enrollment/connection settings.
+Restoring a newer database beside older source journals is not an equivalent
+recovery point. Generated search indexes remain rebuildable from their sources.
+
+When explicitly configured, `loom-notes-recovery.timer` runs at 02:50
+`Europe/Amsterdam`, before the existing Main backup/cloud pair. Its Notes-specific
+publisher shares a lock with the workspace worker, stops CouchDB temporarily,
+captures the configured collections, creates and verifies an exact operational
+package through the normal backup CLI, and checks that Notes rows and captured
+files did not change. The workspace worker reports `recovery_paused` while that
+lock is held; it does not advance its cursor. CouchDB restarts even after a
+failed capture. Local Obsidian editing can continue offline during this window.
+
+Completed cohorts are atomically published under the configured application-data
+root's `notes-recovery/` directory. Staging remains outside the cloud walker.
+These files contain private data and credentials: only root and the named LOOM
+backup service receive access, not the shared agents group. Publication requires
+the existing encrypted Borg backend. The normal cloud archive includes this
+root, but a cohort receipt starts with `cloud_verified: false`: only a subsequent
+verified archive inclusion proves off-node protection. No archive transfer or
+restore drill is needed merely to deploy a code patch.
+
+The optional Mac capture uses the already configured agent SSH connection and
+one explicit vault. It includes the vault and alternating complete client
+intent exports, after a stable-file check. An unavailable or changing client is
+reported in the cohort rather than falsely declared protected. This portable
+capture does **not** contain the live Chromium/IndexedDB database. Archives
+spool to temporary disk and are emitted only after the second inventory agrees.
+`loom.notesWorkspace.recovery.client.maxBytes` defaults to 16 GiB uncompressed;
+`timeoutSeconds` defaults to 900 seconds for compression and SSH transfer.
+Exceeding either boundary records an unavailable capture, not a partial success.
+These limits do not change Notes intake or enrichment policy.
+
+For same-client native recovery, use a closed-app backup of the vault and its
+matching Obsidian profile. Preserve its identity only when replacing that same
+client. For a new device, initialize a fresh identity; retained pending-intent
+exports are evidence for explicit reconciliation, not an automatic import or
+permission to discard missing native receipts. Preserve conflict variants.
+
+For a cosmetic working-vault rename, close Obsidian and protect both the vault
+and its closed native profile first. The pinned LOOM client supports a local
+`loomLocalVaultName` setting equal to that device's old vault name. It preserves
+the native database/key namespace while the visible folder changes. Preserve
+the registry appId and database suffix; do not reset sync or copy another
+device's identity. Update the explicit recovery path separately. An older client
+without this support must not be renamed using this procedure.
+
+Operator checks are `systemctl status loom-notes-recovery.service`, the timer's
+next elapse, the exact `cohort.json` hashes/package ID, client capture status, and
+the later cloud receipt. Failed staging and prior cohorts are retained; this
+publisher does not delete user data or implement retention. Account for that
+growth in capacity reviews. Neither phone acceptance nor real-vault migration
+is implied by a successful pilot capture.
+
 ## Morathustra Native Recovery
 
 The disposable acceptance gate covers the initialized native runtime through

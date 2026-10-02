@@ -154,14 +154,16 @@ in
           return
         fi
 
-        ${pkgs.findutils}/bin/find -P "$root" -xdev \
-          \( -path ${lib.escapeShellArg "${workspaceBoxRoot}/Topics/*"} -o -path ${lib.escapeShellArg "${workspaceBoxRoot}/Projects/*"} -o -path ${lib.escapeShellArg "${workspaceBoxRoot}/Library/*"} \) -prune -o -type d \
+        # Notes journals retain displaced source inodes. They are not ordinary
+        # agent-writable content; changing their ACLs invalidates recovery.
+        ${pkgs.findutils}/bin/find -P "$root" -xdev -regextype posix-extended \
+          \( -regex '.*/[.]loom-notes-[0-9a-f]{64}' -o -path ${lib.escapeShellArg "${workspaceBoxRoot}/Topics/*"} -o -path ${lib.escapeShellArg "${workspaceBoxRoot}/Projects/*"} -o -path ${lib.escapeShellArg "${workspaceBoxRoot}/Library/*"} \) -prune -o -type d \
           -exec ${pkgs.acl}/bin/setfacl -m u:agents:rwx,d:u:agents:rwx '{}' +
-        ${pkgs.findutils}/bin/find -P "$root" -xdev \
-          \( -path ${lib.escapeShellArg "${workspaceBoxRoot}/Topics/*"} -o -path ${lib.escapeShellArg "${workspaceBoxRoot}/Projects/*"} -o -path ${lib.escapeShellArg "${workspaceBoxRoot}/Library/*"} \) -prune -o -type f -perm /111 \
+        ${pkgs.findutils}/bin/find -P "$root" -xdev -regextype posix-extended \
+          \( -regex '.*/[.]loom-notes-[0-9a-f]{64}' -o -path ${lib.escapeShellArg "${workspaceBoxRoot}/Topics/*"} -o -path ${lib.escapeShellArg "${workspaceBoxRoot}/Projects/*"} -o -path ${lib.escapeShellArg "${workspaceBoxRoot}/Library/*"} \) -prune -o -type f -perm /111 \
           -exec ${pkgs.acl}/bin/setfacl -m u:agents:rwx '{}' +
-        ${pkgs.findutils}/bin/find -P "$root" -xdev \
-          \( -path ${lib.escapeShellArg "${workspaceBoxRoot}/Topics/*"} -o -path ${lib.escapeShellArg "${workspaceBoxRoot}/Projects/*"} -o -path ${lib.escapeShellArg "${workspaceBoxRoot}/Library/*"} \) -prune -o -type f ! -perm /111 \
+        ${pkgs.findutils}/bin/find -P "$root" -xdev -regextype posix-extended \
+          \( -regex '.*/[.]loom-notes-[0-9a-f]{64}' -o -path ${lib.escapeShellArg "${workspaceBoxRoot}/Topics/*"} -o -path ${lib.escapeShellArg "${workspaceBoxRoot}/Projects/*"} -o -path ${lib.escapeShellArg "${workspaceBoxRoot}/Library/*"} \) -prune -o -type f ! -perm /111 \
           -exec ${pkgs.acl}/bin/setfacl -m u:agents:rw- '{}' +
       }
 

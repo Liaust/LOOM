@@ -20,11 +20,12 @@ type ResourceKey string
 type DeclarationResourceKind string
 
 const (
-	DeclarationRepository  DeclarationResourceKind = "repository"
-	DeclarationKnowledge   DeclarationResourceKind = "knowledge"
-	DeclarationProtection  DeclarationResourceKind = "protection"
-	DeclarationApplication DeclarationResourceKind = "application"
-	DeclarationSchedule    DeclarationResourceKind = "schedule"
+	DeclarationRepository     DeclarationResourceKind = "repository"
+	DeclarationKnowledge      DeclarationResourceKind = "knowledge"
+	DeclarationProtection     DeclarationResourceKind = "protection"
+	DeclarationApplication    DeclarationResourceKind = "application"
+	DeclarationSchedule       DeclarationResourceKind = "schedule"
+	DeclarationHermesSchedule DeclarationResourceKind = "hermes_schedule"
 )
 
 // ProjectDeclaration is the future .loom/project.yaml source document.
@@ -60,12 +61,13 @@ type LegacyWatchReference struct {
 
 // ResourceDeclaration is a closed union: exactly the payload named by Kind.
 type ResourceDeclaration struct {
-	Kind        DeclarationResourceKind `json:"kind" yaml:"kind"`
-	Repository  *RepositoryDeclaration  `json:"repository,omitempty" yaml:"repository,omitempty"`
-	Knowledge   *KnowledgeDeclaration   `json:"knowledge,omitempty" yaml:"knowledge,omitempty"`
-	Protection  *ProtectionDeclaration  `json:"protection,omitempty" yaml:"protection,omitempty"`
-	Application *ApplicationDeclaration `json:"application,omitempty" yaml:"application,omitempty"`
-	Schedule    *ScheduleDeclaration    `json:"schedule,omitempty" yaml:"schedule,omitempty"`
+	HermesSchedule *HermesScheduleDeclaration `json:"hermes_schedule,omitempty" yaml:"hermes_schedule,omitempty"`
+	Kind           DeclarationResourceKind    `json:"kind" yaml:"kind"`
+	Repository     *RepositoryDeclaration     `json:"repository,omitempty" yaml:"repository,omitempty"`
+	Knowledge      *KnowledgeDeclaration      `json:"knowledge,omitempty" yaml:"knowledge,omitempty"`
+	Protection     *ProtectionDeclaration     `json:"protection,omitempty" yaml:"protection,omitempty"`
+	Application    *ApplicationDeclaration    `json:"application,omitempty" yaml:"application,omitempty"`
+	Schedule       *ScheduleDeclaration       `json:"schedule,omitempty" yaml:"schedule,omitempty"`
 }
 
 // Timing has one owner: the ordinary automation scheduler. InputJSON is a JSON
@@ -104,6 +106,8 @@ type KnowledgeDeclaration struct {
 	Path            string                       `json:"path" yaml:"path"`
 	ApplicationData *KnowledgeApplicationData    `json:"application_data,omitempty" yaml:"application_data,omitempty"`
 	Category        KnowledgeCategory            `json:"category" yaml:"category"`
+	Include         []string                     `json:"include,omitempty" yaml:"include,omitempty"`
+	Exclude         []string                     `json:"exclude,omitempty" yaml:"exclude,omitempty"`
 	Protection      ResourceKey                  `json:"protection,omitempty" yaml:"protection,omitempty"`
 	Refresh         *KnowledgeRefreshDeclaration `json:"refresh,omitempty" yaml:"refresh,omitempty"`
 	Processing      *KnowledgeProcessingPolicy   `json:"processing,omitempty" yaml:"processing,omitempty"`
@@ -130,9 +134,11 @@ type KnowledgeRefreshDeclaration struct {
 }
 
 type KnowledgeProcessingPolicy struct {
-	OCR               string `json:"ocr,omitempty" yaml:"ocr,omitempty"`
-	Embeddings        *bool  `json:"embeddings,omitempty" yaml:"embeddings,omitempty"`
-	ImageDescriptions *bool  `json:"image_descriptions,omitempty" yaml:"image_descriptions,omitempty"`
+	Paths              []string `json:"paths,omitempty" yaml:"paths,omitempty"`
+	EmbeddingFileTypes []string `json:"embedding_file_types,omitempty" yaml:"embedding_file_types,omitempty"`
+	OCR                string   `json:"ocr,omitempty" yaml:"ocr,omitempty"`
+	Embeddings         *bool    `json:"embeddings,omitempty" yaml:"embeddings,omitempty"`
+	ImageDescriptions  *bool    `json:"image_descriptions,omitempty" yaml:"image_descriptions,omitempty"`
 }
 
 // KnowledgeSourcePolicy is the normalized policy captured in enrollment evidence.
@@ -239,14 +245,15 @@ const (
 type DeclarationActionKind string
 
 const (
-	DeclarationRegisterProject     DeclarationActionKind = "register_project"
-	DeclarationRegisterRepository  DeclarationActionKind = "register_repository"
-	DeclarationEnrollKnowledge     DeclarationActionKind = "enroll_knowledge"
-	DeclarationReconcileProtection DeclarationActionKind = "reconcile_protection"
-	DeclarationApplyApplication    DeclarationActionKind = "apply_application"
-	DeclarationReconcileSchedule   DeclarationActionKind = "reconcile_schedule"
-	DeclarationRefreshProjection   DeclarationActionKind = "refresh_projection"
-	DeclarationRetireResource      DeclarationActionKind = "retire_resource"
+	DeclarationRegisterProject         DeclarationActionKind = "register_project"
+	DeclarationRegisterRepository      DeclarationActionKind = "register_repository"
+	DeclarationEnrollKnowledge         DeclarationActionKind = "enroll_knowledge"
+	DeclarationReconcileProtection     DeclarationActionKind = "reconcile_protection"
+	DeclarationApplyApplication        DeclarationActionKind = "apply_application"
+	DeclarationReconcileSchedule       DeclarationActionKind = "reconcile_schedule"
+	DeclarationReconcileHermesSchedule DeclarationActionKind = "reconcile_hermes_schedule"
+	DeclarationRefreshProjection       DeclarationActionKind = "refresh_projection"
+	DeclarationRetireResource          DeclarationActionKind = "retire_resource"
 )
 
 type DeclarationOwner string
@@ -257,6 +264,7 @@ const (
 	DeclarationOwnerProtection  DeclarationOwner = "backupcontracts"
 	DeclarationOwnerApplication DeclarationOwner = "serviceregistry"
 	DeclarationOwnerAutomation  DeclarationOwner = "automation"
+	DeclarationOwnerHermes      DeclarationOwner = "hermesschedules"
 	DeclarationOwnerNotes       DeclarationOwner = "notesprojection"
 	DeclarationOwnerProvenance  DeclarationOwner = "provenance"
 )

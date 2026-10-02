@@ -15,7 +15,10 @@ permission. Current sources and explicit instructions remain authoritative.
 Register new durable meaning through supported LOOM Provenance surfaces with
 source evidence and the actual producer identity. Reconcile when the task
 depends on a candidate or exposes a concrete conflict; do not invent a second
-Markdown ledger or replace the deterministic Archivist with a recurring agent.
+Markdown ledger. The configured nightly Hermes task performs agent review using
+the existing LOOM lifecycle API; it does not replace that ledger or enable a
+second LOOM worker timer. Follow `PROVENANCE-RECONCILIATION.md` for its explicit
+source-backed reconciliation authority.
 
 Main's ledger is reached through `loom provenance` and its supported local
 API. A standalone `provenance` executable on another host may own a different
@@ -28,7 +31,9 @@ candidate-registration API recipe. Coding agents share that same skill and Main
 ledger. A relevant durable preference, decision or correction can be recorded
 as pending during ordinary authorized work without a per-candidate approval
 queue. Do not register routine chatter or launch Archivist to finish capture.
-Acceptance and supersession are separate reviewed lifecycle operations.
+Acceptance and supersession are separate reviewed lifecycle operations. MINA
+may perform those reviews under the authorized reconciliation protocol without
+asking the operator to approve every source-supported outcome.
 Prepare exact source/producer and idempotency data before registration. Content verification
 must describe a real source read, never a claimed resolver result fabricated
 from a snippet. Newly registered candidates remain pending until reviewed.

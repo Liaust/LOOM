@@ -41,17 +41,34 @@ func (s Store) localSyncRootStatus(config Config, state State, root string) (Loc
 	if root == "" {
 		return s.LocalSyncStatus(config, state)
 	}
+	s, unlock, err := s.lockLocalSync(context.Background())
+	if err != nil {
+		return LocalSyncStatus{}, err
+	}
+	defer unlock()
+	if s.syncBatch != nil {
+		return s.localSyncRootStatusUncached(config, state, root)
+	}
+	return cachedLocalStatus("sync-root:"+root+":"+state.NodeID+":"+config.NodeKey,
+		[]string{s.syncOutboxPath(), s.syncObjectsPath()}, func() (LocalSyncStatus, error) {
+			return s.localSyncRootStatusUncached(config, state, root)
+		})
+}
+
+func (s Store) localSyncRootStatusUncached(config Config, state State, root string) (LocalSyncStatus, error) {
 	items, err := s.LoadSyncOutbox()
 	if err != nil {
 		return LocalSyncStatus{}, err
 	}
-	refs, err := s.localSyncObjectsByRef()
+	objects, err := s.LoadSyncObjects()
 	if err != nil {
 		return LocalSyncStatus{}, err
 	}
-	versions, err := s.localSyncObjectsByObjectVersion()
-	if err != nil {
-		return LocalSyncStatus{}, err
+	refs := make(map[string]LocalSyncObject, len(objects))
+	versions := make(map[string]LocalSyncObject, len(objects))
+	for _, object := range objects {
+		refs[object.LocalObjectID] = object
+		versions[localObjectVersionKey(object.LocalObjectID, object.LocalVersionID)] = object
 	}
 	status := LocalSyncStatus{NodeID: state.NodeID, NodeKey: config.NodeKey}
 	for _, item := range syncOutboxForRoot(items, refs, versions, root) {

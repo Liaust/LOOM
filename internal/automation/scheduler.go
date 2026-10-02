@@ -268,15 +268,27 @@ func schedulerFireDecision(profile MisfireProfile, now, scheduledFor time.Time) 
 	}
 }
 
+// Keep the existing exclusion until the linked job actually terminates, even
+// when dispatch returned early or its wait timed out. Routing metadata bridges
+// the window before an outcome has copied job_id back to the invocation.
 func hasPendingScheduleInvocationTx(ctx context.Context, tx *sql.Tx, scheduleID string) (bool, error) {
 	var exists bool
 	err := tx.QueryRowContext(ctx, `
 		SELECT EXISTS (
 			SELECT 1
-			FROM automation.invocations
-			WHERE source_kind = $1
-			  AND source_ref = $2
-			  AND status IN ($3, $4, $5)
+			FROM automation.invocations i
+			WHERE i.source_kind = $1
+			  AND i.source_ref = $2
+			  AND (i.status IN ($3, $4, $5) OR EXISTS (
+                SELECT 1 FROM jobs.jobs j
+                WHERE j.status IN ('created', 'queued', 'running')
+                  AND (j.job_id = i.job_id OR EXISTS (
+                    SELECT 1 FROM routing.capability_calls c
+                    WHERE c.metadata->>'invocation_id' = i.invocation_id
+                      AND (c.job_id = j.job_id OR
+                           j.metadata #>> '{routing,capability_call_id}' = c.capability_call_id)
+                  ))
+              ))
 		)
 	`, SourceKindSchedule, scheduleID, InvocationStatusPending, InvocationStatusLeased, InvocationStatusCalling).Scan(&exists)
 	return exists, err

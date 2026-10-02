@@ -142,6 +142,8 @@ type ProjectDevelopmentInput struct {
 	Lifecycle      string
 	SourceRevision int64
 	ObserveGit     bool
+	// Set only by the custody-owning adapter after physical archive verification.
+	VerifiedArchive bool
 }
 
 type ProjectDevelopmentInspector interface {
