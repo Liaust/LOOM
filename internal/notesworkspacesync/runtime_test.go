@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -68,6 +69,43 @@ func TestRuntimeConfiguration(t *testing.T) {
 	}
 	if _, err := LoadRuntimeConfig(path); err == nil || strings.Contains(err.Error(), "secret") {
 		t.Fatalf("unsafe configuration error: %v", err)
+	}
+}
+
+func TestRuntimeCollectionsAreNotPilotLimited(t *testing.T) {
+	for _, count := range []int{8, 10, 16, 17, 64} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			cfg := runtimeFixture()
+			cfg.Scopes = nil
+			for i := 0; i < count; i++ {
+				cfg.Scopes = append(cfg.Scopes, RuntimeSelection{Scope: Scope{
+					Workspace: "pilot", Collection: fmt.Sprintf("collection-%d", i),
+					SourceCollection: fmt.Sprintf("source-%d", i), Generation: "enrollment-1",
+					Root: fmt.Sprintf("Projects/Project-%d/Notes", i),
+				}, AdmissionPath: "welcome.md"})
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("%d collections: %v", count, err)
+			}
+		})
+	}
+}
+
+func TestRuntimeConfigurationSizeBound(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runtime.json")
+	raw, _ := json.Marshal(runtimeFixture())
+	raw = append(raw, []byte(strings.Repeat(" ", 65536-len(raw)))...)
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadRuntimeConfig(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(raw, ' '), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadRuntimeConfig(path); err == nil {
+		t.Fatal("oversized configuration accepted")
 	}
 }
 

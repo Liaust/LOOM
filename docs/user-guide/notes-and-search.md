@@ -149,9 +149,17 @@ distinct. Request embeddings again for the new derived text when wanted.
 
 An explicitly enrolled workspace presents selected personal and project
 collections in one client vault, organized by content rather than host disks.
-For example, `Notes/Workspace Pilot/welcome.md` and
-`Projects/Notes Sync Pilot/welcome.md` can map to different canonical Main files.
+For example, `Notes/Personal/overview.md` and
+`Projects/Research/Notes/overview.md` can map to different canonical source files.
 The binding, not their identical basename, determines the destination.
+
+The adopted workspace is the live LOOM NOTES vault, not a pilot. Its configured
+source collections determine visibility; there is no eight-collection limit.
+Adding a knowledge declaration enables indexing, while adding its workspace
+mapping enables client delivery. These are currently separate enrollment steps.
+Legacy opaque identifiers can still contain `pilot` without changing access or
+selecting another database. Preserve them when renaming a vault or cleaning up
+test content: source bindings and pending edit receipts refer to those identities.
 
 Use the LOOM-compatible pinned LiveSync client for this workspace. It carries
 stable file identity and exact edit/rename/delete bases in addition to native

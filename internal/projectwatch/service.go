@@ -162,6 +162,9 @@ func (s Service) ApplyDesiredState(ctx context.Context, req requestctx.Context, 
 	if detail.Registration == nil {
 		return projects.ApplyProjectWatchPolicyResult{}, fmt.Errorf("project has no registered project contract")
 	}
+	if detail.Registration.ContractSchemaVersion == projects.ProjectRepositoryProjectSchemaV05 && !input.DryRun {
+		return projects.ApplyProjectWatchPolicyResult{}, fmt.Errorf("v0.5 knowledge and backup declarations are applied by loom project apply; legacy watch-policy mutation is retired")
+	}
 	plan, err := s.BuildPlan(ctx, ref, BuildPlanInput{ProjectRoot: input.ProjectRoot, UseRegisteredSnapshot: input.UseRegisteredSnapshot})
 	if err != nil {
 		return projects.ApplyProjectWatchPolicyResult{}, err

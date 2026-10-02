@@ -18,7 +18,7 @@ let
   });
 in {
   options.loom.notesWorkspace = {
-    enable = lib.mkEnableOption "the manually triggered canonical Notes workspace worker";
+    enable = lib.mkEnableOption "the canonical Notes workspace worker";
     package = lib.mkOption {
       type = lib.types.package;
       default = self.packages.${pkgs.stdenv.hostPlatform.system}.notes-workspace-sync;
@@ -60,21 +60,21 @@ in {
         description = "Optional existing agents SSH alias and explicit vault; offline devices are reported, not reset.";
       };
     };
-    pilotCouchDB = {
-      enable = lib.mkEnableOption "the private Notes pilot CouchDB transport";
+    couchDB = {
+      enable = lib.mkEnableOption "the private Notes CouchDB transport";
       address = lib.mkOption { type = lib.types.str; default = "10.44.0.2"; };
       interface = lib.mkOption { type = lib.types.str; default = "wg0"; };
       secretsFile = lib.mkOption {
         type = lib.types.str;
         default = "/var/lib/loom-notes-workspace-secrets/couchdb.ini";
-        description = "Protected host INI containing pilot authentication, never imported into the Nix store.";
+        description = "Protected host INI containing transport authentication, never imported into the Nix store.";
       };
     };
   };
   config = lib.mkMerge [
     (lib.mkIf cfg.recovery.enable {
       assertions = [{
-        assertion = cfg.enable && cfg.pilotCouchDB.enable && cfg.recovery.collections != {};
+        assertion = cfg.enable && cfg.couchDB.enable && cfg.recovery.collections != {};
         message = "Notes recovery requires the configured native worker, CouchDB and explicit source collections.";
       }];
       systemd.tmpfiles.rules = [
@@ -111,15 +111,15 @@ in {
       systemd.services.loomd.environment.LOOM_NOTES_WORKSPACE_CONFIG = cfg.runtimeConfigPath;
       systemd.services.loomd.serviceConfig.ReadWritePaths = lib.mkAfter [ cfg.stateDir ];
     })
-    (lib.mkIf cfg.pilotCouchDB.enable {
+    (lib.mkIf cfg.couchDB.enable {
       assertions = [{
-        assertion = cfg.pilotCouchDB.address != "0.0.0.0" && cfg.pilotCouchDB.address != "::";
-        message = "Notes pilot CouchDB must bind a specific private-network address.";
+        assertion = cfg.couchDB.address != "0.0.0.0" && cfg.couchDB.address != "::";
+        message = "Notes CouchDB must bind a specific private-network address.";
       }];
       services.couchdb = {
         enable = true;
-        bindAddress = cfg.pilotCouchDB.address;
-        extraConfigFiles = [ cfg.pilotCouchDB.secretsFile ];
+        bindAddress = cfg.couchDB.address;
+        extraConfigFiles = [ cfg.couchDB.secretsFile ];
         extraConfig = {
           couchdb.single_node = true;
           chttpd = { require_valid_user = true; enable_cors = true; max_http_request_size = 33554432; };
@@ -127,8 +127,8 @@ in {
           cors = { origins = "app://obsidian.md,capacitor://localhost,http://localhost"; credentials = true; methods = "GET, PUT, POST, HEAD, DELETE"; headers = "accept, authorization, content-type, origin, referer"; };
         };
       };
-      networking.firewall.interfaces.${cfg.pilotCouchDB.interface}.allowedTCPPorts = [ config.services.couchdb.port ];
-      systemd.services.couchdb.after = [ "wireguard-${cfg.pilotCouchDB.interface}.service" ];
+      networking.firewall.interfaces.${cfg.couchDB.interface}.allowedTCPPorts = [ config.services.couchdb.port ];
+      systemd.services.couchdb.after = [ "wireguard-${cfg.couchDB.interface}.service" ];
     })
   ];
 }

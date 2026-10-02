@@ -57,7 +57,7 @@ npm run test:unit -- src/loomClient/control.unit.spec.ts
 Control JSON lives in ordinary native text-note chunks at
 `LOOM-Control-v1/<kind>/<immutable-id>.md`. Native encryption must be enabled;
 no sensitive custom PouchDB metadata is introduced. The path namespace carries
-only kind and opaque ID. Stock clients must not be connected to this pilot DB:
+only kind and opaque ID. Stock clients must not be connected to this workspace DB:
 they lack the reserved-namespace reflection guard. Source admission and Notes
 index exclusion remain C4 responsibilities.
 
@@ -178,8 +178,8 @@ C1-C3 are local implementation/build checks, not installed-device acceptance.
 C4 must implement operation-level source admission, reserved-control exclusion
 from Notes ingestion, source acknowledgement writing, live membership/lifecycle
 rechecks, and direct tiny Mac/iPad scenarios. Only patched clients with native
-encryption may share the pilot DB. Stock native writes are not canonical source
-permission. Do not enable plugin auto-updates for an installed pilot: a native
+encryption may share the workspace DB. Stock native writes are not canonical source
+permission. Do not enable plugin auto-updates for the installed client: a native
 upstream update must first be reviewed against this pinned overlay. Rollback
 stops write-back and preserves journals/source/conflicts, not a DB downgrade.
 
@@ -187,7 +187,7 @@ The optional commonlib hooks preserve native behavior when absent. Only the
 marked plugin composition installs `PathService.loomControlPath` for control
 selection and the file-handler `loomIntent` hook for reflection suppression.
 Hookless hosts still apply ordinary native selection rules and can reflect these
-paths; they must not be connected to the LOOM pilot DB.
+paths; they must not be connected to the LOOM workspace DB.
 
 If an ordinary edit is superseded before its verification read, a later ordinary
 edit may reuse the captured exact base and last durable predecessor. The skipped

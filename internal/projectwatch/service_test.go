@@ -6,7 +6,26 @@ import (
 	"testing"
 
 	"loom.local/loom/internal/projectcontracts"
+	"loom.local/loom/internal/projects"
+	"loom.local/loom/internal/requestctx"
 )
+
+type declaredProjectStore struct{ projectStore }
+type unusedNodeStore struct{ nodeStore }
+
+func (declaredProjectStore) GetProjectRegistrationStatus(context.Context, string) (projects.ProjectRegistrationDetail, error) {
+	return projects.ProjectRegistrationDetail{Registration: &projects.ProjectContractRegistration{
+		ContractSchemaVersion: projects.ProjectRepositoryProjectSchemaV05,
+	}}, nil
+}
+
+func TestLegacyWatchMutationCannotOverwriteDeclaredOwners(t *testing.T) {
+	s := NewService(Deps{Projects: declaredProjectStore{}, Nodes: unusedNodeStore{}})
+	_, err := s.ApplyDesiredState(context.Background(), requestctx.Context{}, "project", projects.ApplyProjectWatchPolicyInput{})
+	if err == nil || !strings.Contains(err.Error(), "loom project apply") {
+		t.Fatalf("expected declaration-owner guidance before mutation, got %v", err)
+	}
+}
 
 func TestBuildPlanLocalProjectUsesCompiledWatchedRoots(t *testing.T) {
 	result, err := projectcontracts.ScaffoldProject(projectcontracts.ScaffoldOptions{

@@ -99,7 +99,7 @@ func LoadRuntimeConfig(path string) (RuntimeConfig, error) {
 }
 
 func (c RuntimeConfig) Validate() error {
-	if c.SchemaVersion != "notes_workspace.runtime.v1" || !token(c.Replica) || len(c.Scopes) < 1 || len(c.Scopes) > 8 || c.WatchSeconds < 0 || c.WatchSeconds > 60 {
+	if c.SchemaVersion != "notes_workspace.runtime.v1" || !token(c.Replica) || len(c.Scopes) < 1 || c.WatchSeconds < 0 || c.WatchSeconds > 60 {
 		return ErrHeld
 	}
 	for _, p := range []string{c.Command, c.ReplicaDir, c.Settings} {
