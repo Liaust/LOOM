@@ -18,6 +18,7 @@ export interface ClientIO {
     readControl(path: string, revision: string): Promise<Control>;
     readRevision(path: string, revision: string): Promise<string | null>;
     readReference?(path: string, revision?: string): Promise<Uint8Array<ArrayBuffer> | null>;
+    referenceAllowed?(path: string, revision?: string): Promise<boolean>;
     descends(path: string, revision: string, ancestor: string): Promise<boolean>;
     reflect(binding: Binding): Promise<void>;
     conflictLeaves?(path: string): Promise<{ revision: string; text: string }[]>;
@@ -109,6 +110,7 @@ export class IntentClient implements LoomIntentHooks {
         this.started = true;
         // A retained reflection marker authorises only that exact revision/hash.
         for (const b of Object.values(this.journal.state.reflecting)) {
+            if (!await this.referenceAllowed(b.path)) continue;
             const text = await this.readBinding(b);
             if (text !== null && (await digest(text)) === b.sha256) await this.install(b);
             else await this.hold(b.path, "interrupted_reflection");
@@ -120,7 +122,11 @@ export class IntentClient implements LoomIntentHooks {
         }, s => s.holds[path] === reason);
         this.io.changed();
     }
-    private readBinding(b: Binding, revision?: string) {
+    private referenceAllowed(path: string, revision?: string): Promise<boolean> {
+        return referencePath(path) ? this.io.referenceAllowed?.(path, revision) ?? Promise.resolve(true) : Promise.resolve(true);
+    }
+    private async readBinding(b: Binding, revision?: string) {
+        if (!await this.referenceAllowed(b.path, revision)) return null;
         if (referencePath(b.path)) return this.io.readReference?.(b.path, revision) ?? Promise.resolve(null);
         return revision ? this.io.readRevision(b.path, revision) : this.io.read(b.path);
     }
@@ -205,11 +211,11 @@ export class IntentClient implements LoomIntentHooks {
             if (event.kind !== "rename" && event.kind !== "delete") return;
             const from = event.oldPath ?? event.path;
             const children = [...this.cursors.keys()].filter((p) => p.startsWith(from + "/"));
-            if (children.length === 0 || children.length > 256) {
+            if (children.length === 0) {
                 this.admissions = this.admissions.then(() => this.hold(from, "folder_scope_or_limit"));
                 return;
             }
-            // Synchronous bounded expansion. Every child remains an independent,
+            // Synchronous expansion of known identities. Every child is a durable,
             // durable operation. Untracked descendants are held by normal scans.
             for (const path of children)
                 this.capture({
@@ -398,6 +404,7 @@ export class IntentClient implements LoomIntentHooks {
         if (this.journal.failure) return false;
         const binding = this.journal.state.bindings[path];
         if (binding && !binding.writable) {
+            if (!await this.referenceAllowed(path)) return true;
             const content = await this.readBinding(binding);
             if (content === null || await digest(content) !== binding.sha256)
                 await this.hold(path, "reference_local_change");
@@ -516,6 +523,7 @@ export class IntentClient implements LoomIntentHooks {
             return true;
         }
         if (this.journal.failure) return true;
+        if (!await this.referenceAllowed(path, entry._rev)) return true;
         const candidates = this.pathCandidates(path).filter(
             (b) => b.nativeRevision === entry._rev,
         );
@@ -595,6 +603,7 @@ export class IntentClient implements LoomIntentHooks {
     async afterReflect(entry: MetaEntry, success: boolean) {
         const b = this.journal.state.reflecting[String(entry.path)];
         if (!b || b.nativeRevision !== entry._rev) return;
+        if (!await this.referenceAllowed(b.path)) return;
         const local = await this.readBinding(b);
         if (success && local !== null && (await digest(local)) === b.sha256) await this.install(b);
         else await this.hold(b.path, "reflection_not_confirmed");

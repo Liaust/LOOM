@@ -19,6 +19,31 @@ const base: Binding = {
     writable: true,
 };
 describe("client recovery export", () => {
+    it("honours device reference exclusions before payload reads and preserves durable state", async () => {
+        const f = await fixture();
+        const b = { ...f.b, path: "Notes/book.pdf", writable: false };
+        await f.j.update(s => {
+            s.bindings[b.path] = b;
+            s.candidates[b.id] = b;
+            s.reflecting[b.path] = b;
+        });
+        f.io.referenceAllowed = vi.fn(async () => false);
+        f.io.readReference = vi.fn(async () => { throw Error("must_not_load_excluded_reference"); });
+        const recovered = new IntentClient(f.j, f.io);
+        await recovered.ready;
+        expect(await recovered.mutation({ kind: "store", info: b.path as never })).toBe(true);
+        const entry = { path: b.path, _rev: b.nativeRevision } as any;
+        expect(await recovered.beforeReflect(entry)).toBe(true);
+        await recovered.afterReflect(entry, true);
+        expect(f.io.readReference).not.toHaveBeenCalled();
+        expect(f.j.state.bindings[b.path]).toEqual(b);
+        expect(f.j.state.reflecting[b.path]).toEqual(b);
+        expect(f.j.state.holds[b.path]).toBeUndefined();
+        // Markdown still follows the normal exact-base reflection path.
+        await f.j.update(s => { s.candidates[f.b.id] = f.b; });
+        expect(await recovered.beforeReflect({ path: f.b.path, _rev: f.b.nativeRevision } as any)).toBeUndefined();
+        expect(f.io.referenceAllowed).not.toHaveBeenCalledWith(f.b.path, f.b.nativeRevision);
+    });
     it.each(["canvas", "svg", "csv"])("decodes explicit binary %s metadata before extension fallback", async extension => {
         const expected = new TextEncoder().encode("Unicode \u03bb and independent chunks");
         const data = [expected.slice(0, 5), expected.slice(5)].map(bytes => btoa(String.fromCharCode(...bytes)));
@@ -501,5 +526,25 @@ describe("durable admission", () => {
         await f.c.settled();
         expect(f.j.state.operations[0].intent.target).toBe("Notes/sub/a.md");
         expect(f.j.state.operations[0].intent.fileId).toBe("f");
+    });
+    it.each(["rename", "delete"] as const)("captures every known descendant of a large folder %s", async kind => {
+        const f = await fixture();
+        await f.j.update(s => {
+            for (let k = 0; k < 257; k++) {
+                const path = `Notes/folder/${k}.md`;
+                s.bindings[path] = { ...f.b, id: `b${k}`, fileId: `f${k}`, path };
+                if (kind === "rename") f.files.set(`Notes/moved/${k}.md`, "A");
+            }
+        });
+        const c = new IntentClient(f.j, f.io);
+        await c.ready;
+        c.capture({ kind, folder: true, path: kind === "rename" ? "Notes/moved" : "Notes/folder",
+            ...(kind === "rename" ? { oldPath: "Notes/folder" } : {}) });
+        await c.settled();
+        expect(f.j.state.operations).toHaveLength(257);
+        expect(new Set(f.j.state.operations.map(o => o.intent.fileId)).size).toBe(257);
+        expect(f.j.state.operations.every(o => o.intent.operation === kind)).toBe(true);
+        expect(f.j.state.bindings[f.b.path]).toEqual(f.b);
+        expect(f.j.state.holds["Notes/folder"]).toBeUndefined();
     });
 });

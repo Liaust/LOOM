@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LOOM code-only client release",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "component", "adapter", "pluginId", "releaseId", "sequence", "version", "channel", "sourceCommit", "upstream", "compatibility", "files"],
+  "properties": {
+    "schema": {"const": "loom.client-release.v1"},
+    "component": {"const": "notes-workspace"},
+    "adapter": {"const": "obsidian-plugin"},
+    "pluginId": {"const": "obsidian-livesync"},
+    "releaseId": {"type": "string", "pattern": "^client-notes-[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "sequence": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"},
+    "channel": {"const": "stable"},
+    "sourceCommit": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "upstream": {
+      "type": "object", "additionalProperties": false, "required": ["revision", "version"],
+      "properties": {"revision": {"const": "7b3b6ff854f2ff10452be3eaf8e0cd76ac65ac2b"}, "version": {"const": "1.0.32"}}
+    },
+    "compatibility": {
+      "type": "object", "additionalProperties": false,
+      "required": ["minAppVersion", "platforms", "notesProtocol", "handoffAPI", "journalSchema", "activation", "rollback"],
+      "properties": {
+        "minAppVersion": {"const": "1.7.2"}, "platforms": {"const": ["desktop", "mobile"]},
+        "notesProtocol": {"const": 1}, "handoffAPI": {"const": 1}, "journalSchema": {"const": 1},
+        "activation": {"const": "reload"}, "rollback": {"const": "same-schema"}
+      }
+    },
+    "files": {
+      "type": "array", "minItems": 5, "maxItems": 5,
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["name", "bytes", "sha256"],
+        "properties": {
+          "name": {"enum": ["main.js", "manifest.json", "styles.css", "loom-client-build.json", "loom-release.json"]},
+          "bytes": {"type": "integer", "minimum": 1, "maximum": 16777216},
+          "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+        }
+      }
+    }
+  }
+}

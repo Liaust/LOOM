@@ -2,11 +2,13 @@ export const VERSION = 1;
 export const PREFIX = "LOOM-Control-v1/";
 export const MAX_BYTES = 8 * 1024 * 1024;
 export const MAX_CONTROL_BYTES = 1024 * 1024;
-export const MAX_REFERENCE_BYTES = 64 * 1024 * 1024;
+export const MAX_REFERENCE_BYTES = 2 * 1024 * 1024 * 1024;
+export const MAX_INLINE_REFERENCE_BYTES = 64 * 1024 * 1024;
 export function referenceBytes(content: string | ArrayBuffer): Uint8Array<ArrayBuffer> | null {
     // Native references can be text (Canvas/SVG/CSV) or binary. Preserve exact
     // UTF-8 bytes; the binding's hash remains the authority for either format.
     if (typeof content === "string" && content.length > MAX_REFERENCE_BYTES) return null;
+    if (typeof content !== "string" && content.byteLength > MAX_REFERENCE_BYTES) return null;
     const bytes = typeof content === "string" ? new TextEncoder().encode(content) : new Uint8Array(content);
     return bytes.byteLength <= MAX_REFERENCE_BYTES ? bytes : null;
 }

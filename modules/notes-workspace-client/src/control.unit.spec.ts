@@ -28,7 +28,9 @@ describe("encrypted native controls", () => {
         expect(await digest(referenceBytes(text)!)).not.toBe(await digest(text.replace("\r\n", "\n")));
         const binary = new Uint8Array([0, 255, 137, 80, 78, 71]);
         expect(referenceBytes(binary.buffer)).toEqual(binary);
-        expect(referenceBytes(new ArrayBuffer(MAX_REFERENCE_BYTES + 1))).toBeNull();
+        expect(MAX_REFERENCE_BYTES).toBe(2 * 1024 * 1024 * 1024);
+        expect(referenceBytes(new ArrayBuffer(65 * 1024 * 1024))?.byteLength).toBe(65 * 1024 * 1024);
+        expect(referenceBytes({ byteLength: MAX_REFERENCE_BYTES + 1 } as ArrayBuffer)).toBeNull();
     });
     it("orders retained bindings across a source enrollment transition", () => {
         const old = { ...binding, sourceSequence: 12 };

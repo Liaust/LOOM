@@ -1,0 +1,10 @@
+{
+  "id": "loom-client-updater",
+  "name": "LOOM Client Updates",
+  "version": "0.1.0",
+  "minAppVersion": "1.7.2",
+  "description": "Code-only updates for the LOOM Notes client, preserving local settings and pending edits.",
+  "author": "Liaust",
+  "authorUrl": "https://github.com/Liaust/LOOM",
+  "isDesktopOnly": false
+}

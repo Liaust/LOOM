@@ -194,22 +194,23 @@
 --- a/src/main.ts
 +++ b/src/main.ts
 @@ -1,3 +1,7 @@
-+import { createLoomClient, startLoomClient } from "./loomClient/obsidian";
++import { createLoomClient, startLoomClient, createUpdateHandoff } from "./loomClient/obsidian";
 +import type { IntentClient } from "./loomClient/client";
 +import { reserved } from "./loomClient/protocol";
 +import { pinLocalVaultName } from "./loomClient/namespace";
  import { useP2PSettingsPreparation } from "@/serviceFeatures/useP2PSettingsPreparation";
  import { getLanguage, Notice, Plugin, type App, type PluginManifest } from "./deps";
  import { setGetLanguage } from "@vrtmrz/livesync-commonlib/compat/common/coreEnvFunctions";
-@@ -54,6 +57,7 @@
+@@ -54,6 +58,8 @@
  export type LiveSyncCore = LiveSyncBaseCore<ObsidianServiceContext, LiveSyncCommands>;
  export default class ObsidianLiveSyncPlugin extends Plugin {
      core: LiveSyncCore;
 +    loomClient!: IntentClient;
++    loomClientUpdate = createUpdateHandoff(this);
 
      /**
       * Initialise service modules.
-@@ -98,7 +102,10 @@
+@@ -98,7 +104,10 @@
              vault: services.vault,
          });
 
@@ -220,9 +221,10 @@
              events: services.context.events,
              API: services.API,
              databaseFileAccess: databaseFileAccess,
-@@ -218,12 +226,16 @@
+@@ -218,12 +227,14 @@
      private async _startUp() {
 +        pinLocalVaultName(this.core.services.API, this.core.services.vault, await this.loadData());
++        if (!await this.loomClientUpdate.startupAllowed()) return;
          if (!(await this.core.services.control.onLoad())) return;
          const onReady = this.core.services.control.onReady.bind(this.core.services.control);
 -        this.app.workspace.onLayoutReady(onReady);
@@ -233,10 +235,7 @@
      }
      override onunload(): void {
 -        return void this.core.services.control.onUnload();
-+        void (async () => {
-+            try { await this.loomClient?.stopNative(); }
-+            finally { await this.core.services.control.onUnload(); }
-+        })();
++        void this.loomClientUpdate.shutdown().catch(() => console.error("LOOM client shutdown requires recovery; pending edits remain retained."));
      }
  }
 --- a/src/managers/ObsidianStorageEventManagerAdapter.ts
@@ -377,7 +376,7 @@
 diff --git a/node_modules/@vrtmrz/livesync-commonlib/dist/common/utils.js b/node_modules/@vrtmrz/livesync-commonlib/dist/common/utils.js
 --- a/node_modules/@vrtmrz/livesync-commonlib/dist/common/utils.js
 +++ b/node_modules/@vrtmrz/livesync-commonlib/dist/common/utils.js
-@@ -69,6 +69,8 @@
+@@ -70,6 +70,8 @@
  function isTextDocument(doc) {
    if (doc.type == "plain") return true;
    if (doc.datatype == "plain") return true;

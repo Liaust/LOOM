@@ -25,7 +25,7 @@
     {
       "path": "src/main.ts",
       "before": "cb09abcbce94c4058c98a2536af7b2bf5ef748c8ea03b4f0902bef091aa5d216",
-      "after": "1e5ad3d265802165bc6dcd33378483953dc250a4261dbbeb43166f29cb489c0b"
+      "after": "19a38cac6341e4e5983d6ec4b3a3c7053ecf6760775d7caec382cd32aa588c6b"
     },
     {
       "path": "src/managers/ObsidianStorageEventManagerAdapter.ts",
@@ -63,18 +63,18 @@
       "after": "5b2b4c70a9313959b81c26a965643483a10a5cebeaa4cb87d9228772ec25c05e"
     }
   ],
-  "patchSha256": "318dc3164fc8427e9494b20928e7f3143c42ce43c251ed96802674d6045f9032",
+  "patchSha256": "e8070cb71436157bb538bcfada2149db65635bde03c756d5644473c0700f9b09",
   "overlay": {
     "conflicts.ts": "c0b1a4d9006f3aaf30845207b1bb672bc5472d7640df39af5b3c30a7bb3bc957",
     "conflict-ui.ts": "9fb50a33ec8cd6a37717c1437a7a30a67f3f92fd224b9f4cf1bf5deb9656edb5",
-    "client.ts": "a88bf30dae5cda72a1e053a8356dcee17ada0719602289b8cee1a942a6419ce1",
-    "client.unit.spec.ts": "9b3fbd26e7222398f63c494a00a1862193d944bf46c576ce504d008e16afb7d7",
+    "client.ts": "c8cd8c59313b9df3d4a8362030030297f9078efac2a661d4192bd40fa5f42719",
+    "client.unit.spec.ts": "edce55278f6cc58a9eb05f2824d92a7b82103e5415bee94199946a4cc3585498",
     "control.ts": "46bc13baf6ed78b7f37121386595fdcf1c5070fa262fb96c33a1220b64997c5d",
-    "control.unit.spec.ts": "5935303908c4cde12bf4c4d1c646caddaa0381dfa7056f0af5c0a5a5f93c2224",
+    "control.unit.spec.ts": "f35951893a31ac4d5ad299e91c237375f9a946edcb00959c8057d04b02e0d03d",
     "journal.ts": "983e321fcbda89e7b8e2c4d4dc7b9744253461c6c385bba7ef1884e8ed2bd112",
     "nativeFixture.ts": "d957fb6a0fc31744c0bcd8b899a861c4d263b83cb9ab956bb19cc0d9607b24fd",
-    "obsidian.ts": "3361879368b1bf88382701c2c956839cd547d7d24d76267d05af8a1515b7b50e",
-    "protocol.ts": "1d1b0d0eed621fc80db6f6812a3b8b35a17f32631d5b2d640ff2b2c6d6312367",
+    "obsidian.ts": "507ec89ec4dfba832ff4acf4d1bbbac3e436ba93245c99d69d8a999e44c5bc93",
+    "protocol.ts": "88a7b20cf7c439f7fd1cc15a737df7e605681443b2660363c883dbd2c0c70e11",
     "publisher.ts": "6dd9e496cb03b7ce68895a7c7086500565b2926b746c69f2f906c88d80dbb299",
     "publisher.unit.spec.ts": "32f0e090f134f1956a286c5a59582128ac266b1f1abe1e388dbd36fa29f36ace",
     "work.ts": "e35a29fc94b5fa0eae3b5a974f58556e3cc691e7fa704cb3caa2cf2d18d06692",
@@ -82,6 +82,8 @@
     "draft.ts": "37397d39ef1e1d21394b71d2a4de647f7be60b7518eacae041a43868ba74ac9a",
     "journal.unit.spec.ts": "83408f194c5f8f82f1b354286104be72956c2dc2c5864adb77af705674b583a5",
     "namespace.ts": "4b2d85136bba0cf6e1c12885cdf3eb62ab319f581f953971e26b45679fda6391",
-    "namespace.unit.spec.ts": "93acd12158a6f72fad6cfebcbea8902b21ff713886b5bc40410d9ad2ef26f2a0"
+    "namespace.unit.spec.ts": "93acd12158a6f72fad6cfebcbea8902b21ff713886b5bc40410d9ad2ef26f2a0",
+    "update.unit.spec.ts": "c2586bad3ff2a28e2e966f76c77ac1bc63b486e31d3331b0b025ba5343f9b4a4",
+    "update.ts": "1496b7eca1ffb6ace66af848ed73e51a76888c501e3903d0e055ec9be14276b2"
   }
 }

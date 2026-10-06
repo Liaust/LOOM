@@ -13,6 +13,47 @@ import { MAX_BYTES, MAX_REFERENCE_BYTES, referenceBytes, reserved, type Binding 
 import { convergeNative } from "./conflicts";
 import { NotesConflictsModal } from "./conflict-ui";
 import { PathWork, WakeLoop } from "./work";
+import { TextFileView } from "obsidian";
+import { UpdateBarrier, startupHeld } from "./update";
+import release from "./release.json";
+
+export function createUpdateHandoff(plugin: ObsidianLiveSyncPlugin) {
+    let heldAtStartup = false;
+    let ready = false;
+    const barrier = new UpdateBarrier({
+        async flushAndFenceEditor() {
+            const views: TextFileView[] = [];
+            plugin.app.workspace.iterateAllLeaves(leaf => { if (leaf.view instanceof TextFileView) views.push(leaf.view); });
+            for (const view of views) await view.save();
+            // Obsidian exposes save(), but no public editor-input fence. Defer
+            // live replacement with editors open; a held startup has no writer.
+            return heldAtStartup || views.length === 0;
+        },
+        async stopLocal() { await plugin.loomClient?.ready; await plugin.loomClient?.stopNative(); },
+        async stopNative() { await plugin.core.services.control.onUnload(); },
+    });
+    return {
+        apiVersion: 1,
+        identity: release,
+        get ready() { return ready && !barrier.stopped; },
+        get held() { return heldAtStartup; },
+        prepared: () => barrier.stopped,
+        prepare: () => barrier.prepare(),
+        shutdown: () => barrier.shutdown(),
+        resume: () => barrier.resume(),
+        markReady() { ready = true; },
+        async startupAllowed() {
+            const path = `${plugin.app.vault.configDir}/plugins/loom-client-updater/install.json`;
+            try {
+                if (!await plugin.app.vault.adapter.exists(path)) return true;
+                const text = await plugin.app.vault.adapter.read(path);
+                heldAtStartup = text.length > 65536 || startupHeld(JSON.parse(text), release.releaseId);
+            } catch { heldAtStartup = true; }
+            if (heldAtStartup) new Notice("LOOM Notes sync is held until the client updater repairs an interrupted code installation.");
+            return !heldAtStartup;
+        },
+    };
+}
 export function createLoomClient(
     plugin: ObsidianLiveSyncPlugin,
     access: DatabaseFileAccess,
@@ -21,6 +62,22 @@ export function createLoomClient(
     const appId = "appId" in plugin.app ? String(plugin.app.appId) : "";
     if (!appId) throw new Error("LOOM intent requires a stable vault appId");
     const work = new PathWork();
+    // Device exclusions and size limits apply to background recovery too,
+    // before native chunks are assembled or local binary files are loaded.
+    const referenceAllowed = async (path: string, revision?: string) => {
+        if (!await plugin.core.services.vault.isTargetFile(path)) return false;
+        let size: number | undefined;
+        if (revision) {
+            const meta = await access.fetchEntryMeta(path as FilePathWithPrefix, revision, true);
+            if (!meta || meta.deleted || meta._deleted) return false;
+            size = meta.size;
+        } else {
+            const stat = await plugin.app.vault.adapter.stat(path);
+            if (stat?.type === "file") size = stat.size;
+        }
+        return size === undefined || (Number.isSafeInteger(size) && size >= 0 &&
+            size <= MAX_REFERENCE_BYTES && !plugin.core.services.vault.isFileSizeTooLarge(size));
+    };
     const revisionReady = async (path: string, revision: string) => {
         const meta = await access.fetchEntryMeta(path as FilePathWithPrefix, revision, true);
         if (!meta) { work.wait(path, []); return false; }
@@ -76,6 +133,7 @@ export function createLoomClient(
             return typeof text === "string" ? text : null;
         },
         async readReference(path, revision) {
+            if (!await referenceAllowed(path, revision)) return null;
             if (revision) {
                 if (!await revisionReady(path, revision)) return null;
                 const entry = await access.fetchEntry(path as FilePathWithPrefix, revision, false, true, true);
@@ -89,6 +147,7 @@ export function createLoomClient(
             if (bytes.byteLength > MAX_REFERENCE_BYTES) throw new Error("reference_limit");
             return new Uint8Array(bytes);
         },
+        referenceAllowed,
         async descends(path, revision, ancestor) {
             try {
                 const meta = await access.fetchEntryMeta(path as FilePathWithPrefix, undefined, true);
@@ -107,6 +166,7 @@ export function createLoomClient(
             }
         },
         async reflect(binding: Binding) {
+            if (!binding.writable && !await referenceAllowed(binding.path, binding.nativeRevision)) return;
             if (!await revisionReady(binding.path, binding.nativeRevision)) {
                 await client.hold(binding.path, "reflection_chunks_pending");
                 return;
@@ -301,4 +361,5 @@ export async function startLoomClient(plugin: ObsidianLiveSyncPlugin) {
     });
     client.io.changed();
     await client.resumeNative(true);
+    plugin.loomClientUpdate.markReady();
 }

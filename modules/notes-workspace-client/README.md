@@ -68,16 +68,55 @@ Exact native revisions and SHA-256 digests accompany every binding. Payloads
 are capped at 1 MiB to match the smaller transport boundary.
 
 PDF, PNG, JPEG, GIF and WebP references use native binary chunks and exact-hash
-non-writable bindings, up to the separate reference snapshot limit of 64 MiB. Their original
+non-writable bindings, up to the separate reference limit of 2 GiB. Their original
 relative paths are preserved for note links/embeds. Source changes may refresh an
 unchanged local reference; local changes or missing previously bound references
 are held rather than overwritten or sent back. This is reference delivery, not
-binary editing. Files above 64 MiB are not yet supported by this snapshot path.
-Text and control-message limits are unchanged. Reference snapshots are still
-buffered and retained in LOOM; native transport chunking is not streaming at
-every layer.
+binary editing. Main uses a private file-backed snapshot above 64 MiB, with
+bounded native binary splitting instead of a full base64 IPC/journal payload.
+Text and control-message limits are unchanged. Device materialization still
+uses native Obsidian/LiveSync binary APIs, so a large file's RAM/storage cost on
+an individual phone or editor is not eliminated by the server's streaming path.
+
+LiveSync also has an independent device-local `syncMaxSizeInMB` setting. Its
+upstream default is 50 MiB, so updating the LOOM bundle alone does not enable
+large references. Keep that default unless a device has demonstrated safe
+reception of its intended files. The 2 GiB protocol boundary is not an editor
+memory guarantee: native reception assembles whole binary files, and raising
+the device ceiling to 2048 MiB caused renderer fatal-aborts during large
+Goodnotes delivery on the actual Mac.
+
+The adopted Obsidian view is Markdown-first. Exclude the Goodnotes notebook
+collection with the device-local Selector exclusion pattern
+`^Projects/Goodnotes Intake/Notebooks(?:/|$)`. This leaves the project's Markdown
+Notes folder visible and does not disable Main's intake, search, indexing or
+backup configuration. Ordinary note attachments remain eligible within the
+device limit. Apply the exclusion separately on each client; it is not a remote
+source policy or a universal device receipt. Preserve already downloaded copies
+outside the vault while the plugin is stopped, rather than deleting canonical
+source files or interpreting that move as a source deletion.
+
+LOOM's reference recovery/reflection also checks native target selection and
+the device size limit before reading local binary bytes or assembling native
+revision chunks. Excluded references are skipped, not treated as missing edits
+or new conflicts. Existing bindings, pending operations and recovery markers
+remain retained. Native replication may still receive control/metadata records;
+exclusion prevents file materialization, not all metadata traffic.
 
 ## Build and package
+
+LOOM overlay identity is separate from the preserved native plugin version.
+Development builds emit `loom-release.json` with sequence zero. To prepare a
+reviewed stable bundle, pass `--bundle-version 0.1.0 --sequence 1 --source-commit
+<exact-audited-source-commit>` to the build command. That commit must be the
+actual checkout HEAD; stable builds require committed client/package source
+(unrelated dirty files are allowed). Never relabel a private build with a public
+commit. Increase the sequence for
+each later component release. The generated identity is compiled into the
+handoff API and recorded in the build receipt; file metadata alone is not proof
+of what is actually loaded. Use `../client-updates/package_release.py` to make
+a local code-only package. Neither tool publishes or installs it. Public release
+promotion and initial Mac/iPhone updater bootstrap are separate gates.
 
 Obtain the pinned GitHub source archive in an owned build directory, verify its
 archive checksum above, extract it, and install only the reviewed lockfile with
@@ -91,7 +130,7 @@ The recipe applies the overlay, runs upstream TypeScript and the three focused
 Vitest specs, then runs `npx --no-install vite build --mode original`. It refuses
 all `.env*` files and a nonempty `PATHS_TEST_INSTALL`. Native Vite's copy plugin
 has no destination. Outputs are `main.js`, `manifest.json`, `styles.css`, and a
-SHA-256 receipt `loom-client-build.json`. Plugin ID/version remain native;
+SHA-256 receipt `loom-client-build.json`, and `loom-release.json`. Plugin ID/version remain native;
 manifest name and status display visibly say `LOOM intent v1`. Keep the upstream
 MIT notice (`LICENSE.upstream`) with any distributed bundle. No upstream fork,
 publication, installation, or updater registration is part of this module.
@@ -168,8 +207,12 @@ new unsynced edits to a Main/cloud backup until it reconnects.
 
 Creation needs an already materialized writable binding declaring the collection
 folder. An empty/unbound collection holds until C4 establishes its enrollment.
-Folder rename expands at most 256 known descendants into individual intents;
-it is not atomic and does not invent unknown descendants. Case/path collisions,
+Folder rename/delete expands known descendants into individual durable intents;
+there is no arbitrary 256-child ceiling. It is not atomic and does not invent
+unknown descendants. Missing source subdirectories are created during admitted
+note creation or movement, never during a read. Empty folders have no native
+LiveSync document; source directories containing retained journals or unrelated
+files remain preserved rather than being recursively erased. Case/path collisions,
 unknown deletes and moves outside that source-declared folder stay held.
 
 ## Acceptance boundary
