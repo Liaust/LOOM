@@ -113,6 +113,7 @@ export class ReleaseFeed {
     constructor(private readonly fetch: Fetch, private readonly appVersion: string, public cache: PageCache[] = []) {}
     async latest(): Promise<{ release: Release; remote: RemoteRelease } | null> {
         const candidates: { release: Release; remote: RemoteRelease }[] = [];
+        let inspected = 0;
         for (let page = 1; page <= 3; page++) {
             const response = await this.fetch(`https://api.github.com/repos/${REPOSITORY}/releases?per_page=50&page=${page}`, this.cache[page - 1]?.etag);
             const body = response.status === 304 ? this.cache[page - 1]?.body :
@@ -129,12 +130,22 @@ export class ReleaseFeed {
                 if (names.join("|") !== [...FILES, "release.json", "LICENSE.upstream"].sort().join("|")) fail("release_assets_invalid");
                 const data = await this.fetch(asset(remote, "release.json"));
                 if (data.status !== 200) fail("release_manifest_unavailable");
-                const release = parseRelease(json(data.bytes), this.appVersion);
+                let release: Release;
+                inspected++;
+                try { release = parseRelease(json(data.bytes), this.appVersion); }
+                catch (error) {
+                    // Retained bundles from another journal generation must not
+                    // block discovery of a compatible update. Malformed code
+                    // manifests still fail; this does not cross schema boundaries.
+                    if (!(error instanceof Error) || error.message !== "release_incompatible") throw error;
+                    if (inspected === 10) break;
+                    continue;
+                }
                 if (release.releaseId !== remote.tag_name) fail("release_tag_mismatch");
                 candidates.push({ release, remote });
-                if (candidates.length === 10) break;
+                if (inspected === 10) break;
             }
-            if (body.length < 50 || candidates.length === 10) break;
+            if (body.length < 50 || inspected === 10) break;
         }
         candidates.sort((a, b) => b.release.sequence - a.release.sequence);
         if (candidates.length > 1 && candidates[0].release.sequence === candidates[1].release.sequence &&

@@ -70,4 +70,14 @@ describe("closed release contract", () => {
         now += 6 * 60 * 60 * 1000;
         const two = gate.run(false, action); finish(); await two; expect(calls).toBe(3);
     });
+    it("skips retained incompatible journal generations without crossing them", async () => {
+        const bundle=await fixture();
+        const compatible={...bundle.release,releaseId:"client-notes-0.2.1",version:"0.2.1",sequence:3};
+        const incompatible={...bundle.release,compatibility:{...COMPATIBILITY,journalSchema:1}};
+        const releases=[compatible,incompatible];
+        const feed=new ReleaseFeed(async url=>({status:200,bytes:url.startsWith("https://api.github.com/")?
+            encode(releases.map(r=>({draft:false,prerelease:false,tag_name:r.releaseId,assets:[...FILES,"release.json","LICENSE.upstream"].map(name=>({name,size:123,browser_download_url:`https://github.com/Liaust/LOOM/releases/download/${r.releaseId}/${name}`}))}))):
+            encode(url.includes(compatible.releaseId)?compatible:incompatible)}),"1.14.4");
+        expect((await feed.latest())?.release.releaseId).toBe("client-notes-0.2.1");
+    });
 });
