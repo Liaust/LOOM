@@ -25,7 +25,7 @@ if args.sequence:
 if os.environ.get('PATHS_TEST_INSTALL') or any(root.glob('.env*')):
     sys.exit('Refusing install environment or dotenv files')
 subprocess.run([sys.executable,str(here/'apply.py'),str(root)],check=True)
-release={'schema':'loom.client-bundle.v1','component':'notes-workspace','adapter':'obsidian-plugin','pluginId':'obsidian-livesync','releaseId':'client-notes-'+args.bundle_version,'sequence':args.sequence,'version':args.bundle_version,'channel':'stable' if args.sequence else 'development','sourceCommit':source,'upstream':{'revision':'7b3b6ff854f2ff10452be3eaf8e0cd76ac65ac2b','version':'1.0.32'},'compatibility':{'minAppVersion':'1.7.2','platforms':['desktop','mobile'],'notesProtocol':1,'handoffAPI':1,'journalSchema':1,'activation':'reload','rollback':'same-schema'}}
+release={'schema':'loom.client-bundle.v1','component':'notes-workspace','adapter':'obsidian-plugin','pluginId':'obsidian-livesync','releaseId':'client-notes-'+args.bundle_version,'sequence':args.sequence,'version':args.bundle_version,'channel':'stable' if args.sequence else 'development','sourceCommit':source,'upstream':{'revision':'7b3b6ff854f2ff10452be3eaf8e0cd76ac65ac2b','version':'1.0.32'},'compatibility':{'minAppVersion':'1.7.2','platforms':['desktop','mobile'],'notesProtocol':1,'handoffAPI':1,'journalSchema':2,'activation':'reload','rollback':'same-schema'}}
 release_json=json.dumps(release,indent=2)+'\n'
 (root/'loom-release.json').write_text(release_json)
 (root/'src/loomClient/release.json').write_text(release_json)

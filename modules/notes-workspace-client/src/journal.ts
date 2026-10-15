@@ -1,6 +1,6 @@
 import { openDB } from "idb";
 import { draft } from "./draft";
-import type { Ack, Binding, Intent, Publication } from "./protocol";
+import type { Ack, Binding, Intent, Publication, CollectionScope } from "./protocol";
 export type Operation = {
     intent: Intent;
     payload: string;
@@ -30,6 +30,8 @@ export type State = {
     intents?: Record<string, Intent>;
     publications?: Record<string, Publication>;
     resolutionDisplays?: Record<string, { binding: string; localHash: string }>;
+    scopes?: Record<string, CollectionScope>;
+    pathChanges?: Record<string, boolean>;
 };
 export const unfinished = (o: Operation) => o.state !== "applied" && !o.resolvedBy;
 export interface Persistence {
@@ -40,7 +42,7 @@ export interface Persistence {
     checkpointFailure?: string;
 }
 export type Change = { section: string; key: string; value?: unknown };
-const maps = ["bindings", "candidates", "reflecting", "acks", "holds", "retiredLeaves", "intents", "publications", "resolutionDisplays"] as const;
+const maps = ["bindings", "candidates", "reflecting", "acks", "holds", "retiredLeaves", "intents", "publications", "resolutionDisplays", "scopes", "pathChanges"] as const;
 const rows = (state: State): Change[] => [
     ...maps.flatMap(section => Object.entries(state[section] ?? {}).map(([key, value]) => ({ section, key, value }))),
     ...state.operations.map((value, index) => ({ section: "operations", key: String(index), value })),

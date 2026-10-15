@@ -205,15 +205,35 @@ blindly replay or clone a live device identity. Full same-client restoration can
 instead use a closed-app native-profile backup. An offline Mac cannot send its
 new unsynced edits to a Main/cloud backup until it reconnects.
 
-Creation needs an already materialized writable binding declaring the collection
-folder. An empty/unbound collection holds until C4 establishes its enrollment.
-Folder rename/delete expands known descendants into individual durable intents;
-there is no arbitrary 256-child ceiling. It is not atomic and does not invent
-unknown descendants. Missing source subdirectories are created during admitted
-note creation or movement, never during a read. Empty folders have no native
-LiveSync document; source directories containing retained journals or unrelated
-files remain preserved rather than being recursively erased. Case/path collisions,
-unknown deletes and moves outside that source-declared folder stay held.
+Creation uses the current source-declared collection scope, independently of
+whether a first file has materialized. A folder create is a durable directory
+intent: an empty folder reaches Main and other updated clients without a
+placeholder note, indexing or enrichment. Main-created directories use the
+same event-driven inventory and explicit directory bindings.
+
+Folder rename/delete retains directory identity and orders known child-file
+operations before directory finalization. This is resumable, not an atomic
+whole-tree transaction. Unknown source/target children stay held; private
+source journals are retained, never recursively erased. A source-ordered
+directory tombstone cannot remove a newer recreated directory identity.
+Case/path collisions and changes outside the enrolled collection remain held.
+
+Canvas is writable UTF-8 content, preserved byte-for-byte. Competing Canvas
+revisions are not automatically Markdown-merged. Canvas write-back does not
+enable JSON indexing, OCR, vision or embeddings. Legacy reference bindings and
+binary native revisions remain readable; an unchanged source reference is
+explicitly republished as writable text before ordinary edits use that base.
+
+Structural and new Canvas controls use the reserved
+`LOOM-Control-v1/payload/structure/` subtree. Earlier clients already suppress
+payload reflection and ignore this subtree, so they can continue ordinary
+Markdown sync until updated. They do not gain Canvas/directory support from
+the Main deployment alone.
+
+The release compatibility identity is journal schema 2. Existing local rows,
+pending operations and native databases are preserved; the new scope and
+path-receipt maps are additive. Bootstrap the matching updater/client together
+at a closed-application boundary. Older code is not a same-schema rollback.
 
 ## Acceptance boundary
 

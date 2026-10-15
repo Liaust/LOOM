@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { makeDevice, makeFile } from "./nativeFixture";
 import { ControlTransport } from "./control";
-import { controlPath, decode, encode, digest, pair, validate, newerSource, referenceBytes, MAX_REFERENCE_BYTES, type Binding, type Intent, reserved } from "./protocol";
+import { controlPath, decode, encode, digest, pair, validate, newerSource, referenceBytes, MAX_REFERENCE_BYTES, type Binding, type Intent, reserved, STRUCTURE_PREFIX, isControlPath } from "./protocol";
 import { getConfiguredFunctionsForEncryption } from "../../node_modules/@vrtmrz/livesync-commonlib/dist/pouchdb/encryption";
 import type { MetaEntry } from "@vrtmrz/livesync-commonlib/compat/common/types";
 export const binding: Binding = {
@@ -20,6 +20,16 @@ export const binding: Binding = {
     writable: true,
 };
 describe("encrypted native controls", () => {
+    it("places structural controls where older clients already suppress payload reflection",()=>{
+        const scope={version:1 as const,kind:"scope" as const,id:"scope",workspace:"w",collection:"c",generation:"g",
+            collectionRoot:"Topics",sourceSequence:1,writable:true};
+        const path=controlPath(scope);
+        expect(path.startsWith(STRUCTURE_PREFIX)).toBe(true);
+        expect(path.startsWith("LOOM-Control-v1/payload/")).toBe(true);
+        expect(isControlPath(path)).toBe(true);
+        expect(isControlPath("LOOM-Control-v1/payload/plain-payload.md")).toBe(false);
+        expect(decode(path,encode(scope))).toEqual(scope);
+    });
     it("preserves exact native text and binary reference bytes without relaxing hashes", async () => {
         const text = '{"label":"caf\u00e9"}\r\n';
         const utf8 = new TextEncoder().encode(text);
@@ -47,7 +57,8 @@ describe("encrypted native controls", () => {
             path: binding.path, sha256: binding.sha256, length: 1200000 };
         expect(validate(intent)).toEqual(intent);
         expect(() => validate({ ...intent, length: 8 * 1024 * 1024 + 1 })).toThrow();
-        for (const extension of ["canvas", "wav", "svg", "csv", "xlsx", "dat", "json"]) {
+        expect(validate({ ...binding, path: "Notes/board.canvas", writable: true }).kind).toBe("binding");
+        for (const extension of ["wav", "svg", "csv", "xlsx", "dat", "json"]) {
             const reference = { ...binding, path: `Notes/attachment.${extension}`, writable: false };
             expect(validate(reference)).toEqual(reference);
             expect(() => validate({ ...reference, writable: true })).toThrow();

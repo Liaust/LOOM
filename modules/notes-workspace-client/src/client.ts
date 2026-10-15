@@ -6,9 +6,12 @@ import {
     MAX_BYTES,
     digest,
     relativePath,
+    directoryPath,
     referencePath,
     reserved,
     newerSource,
+    pair,
+    isControlPath,
     type Binding,
     type Control,
     type Intent,
@@ -23,6 +26,9 @@ export interface ClientIO {
     reflect(binding: Binding): Promise<void>;
     conflictLeaves?(path: string): Promise<{ revision: string; text: string }[]>;
     changed(): void;
+    directoryExists?(path: string): Promise<boolean>;
+    reflectDirectory?(binding: Binding): Promise<void>;
+    removeNote?(path: string): Promise<void>;
 }
 type Cursor = { binding: Binding; path: string; predecessor?: string; absent?: boolean };
 type Event = {
@@ -101,7 +107,7 @@ export class IntentClient implements LoomIntentHooks {
                         this.cursors.delete(path);
             if (b)
                 this.cursors.set(i.target ?? i.path, {
-                    binding: { ...b, fileId: i.fileId },
+                    binding: { ...b, fileId: i.fileId, ...(i.entryKind ? { entryKind: i.entryKind } : {}) },
                     path: i.target ?? i.path,
                     predecessor: i.id,
                     absent: !i.base,
@@ -126,12 +132,13 @@ export class IntentClient implements LoomIntentHooks {
         return referencePath(path) ? this.io.referenceAllowed?.(path, revision) ?? Promise.resolve(true) : Promise.resolve(true);
     }
     private async readBinding(b: Binding, revision?: string) {
+        if (b.entryKind === "directory") return await this.io.directoryExists?.(b.path) ? "" : null;
         if (!await this.referenceAllowed(b.path, revision)) return null;
         if (referencePath(b.path)) return this.io.readReference?.(b.path, revision) ?? Promise.resolve(null);
         return revision ? this.io.readRevision(b.path, revision) : this.io.read(b.path);
     }
     private inside(b: Binding, path: string) {
-        return relativePath(path) && path.startsWith(b.collectionRoot + "/");
+        return directoryPath(path) && path.startsWith(b.collectionRoot + "/");
     }
     private pending(path: string) {
         return this.journal.state.operations.some(
@@ -143,9 +150,17 @@ export class IntentClient implements LoomIntentHooks {
         return x ? structuredClone(x) : undefined;
     }
     private creationBinding(path: string): Binding | undefined {
+        const scopes = Object.values(this.journal.state.scopes ?? {}).filter(s => s.writable && path.startsWith(s.collectionRoot + "/"));
+        const roots = new Set(scopes.map(s => s.collectionRoot));
+        if (roots.size === 1) {
+            const scope = scopes.sort((a,b) => b.sourceSequence - a.sourceSequence)[0];
+            return { ...scope, kind: "binding", fileId: scope.id, path, sourceBase: scope.id,
+                nativeRevision: "1-scope", sha256: "sha256:" + "0".repeat(64) };
+        }
+        if (roots.size > 1) return;
         const matches = Object.values(this.journal.state.bindings).filter(b => b.writable && this.inside(b, path));
-        const scopes = new Set(matches.map(b => JSON.stringify([b.workspace, b.collection, b.collectionRoot])));
-        if (scopes.size !== 1) return;
+        const knownScopes = new Set(matches.map(b => JSON.stringify([b.workspace, b.collection, b.collectionRoot])));
+        if (knownScopes.size !== 1) return;
         const first = matches[0];
         const evidence = [...matches, ...Object.values(this.journal.state.candidates).filter(b =>
             b.workspace === first.workspace && b.collection === first.collection && b.collectionRoot === first.collectionRoot)];
@@ -185,6 +200,13 @@ export class IntentClient implements LoomIntentHooks {
             this.pending(path) || this.journal.state.reflecting[path]) throw Error("local_note_already_tracked");
         if (!this.creationBinding(path)) throw Error("local_note_scope_ambiguous");
         if (await this.io.read(path) === null) throw Error("local_note_missing");
+        const scope = this.creationBinding(path)!;
+        const parents = String(path).split("/").slice(0,-1);
+        for (let n = scope.collectionRoot.split("/").length+1; n <= parents.length; n++) {
+            const directory = parents.slice(0,n).join("/");
+            if (!this.cursors.has(directory) && await this.io.directoryExists?.(directory))
+                this.capture({ kind:"create", path:directory, folder:true });
+        }
         // The file read yields; another creation or registration may have claimed
         // the path meanwhile. Never admit two independent creates for one note.
         if (this.cursors.has(path) || this.pathCandidates(path).length || this.pending(path))
@@ -195,7 +217,7 @@ export class IntentClient implements LoomIntentHooks {
     }
     // This call is synchronous at the original vault callback, before native
     // debounce/coalescing can turn rename/delete into a different operation.
-    capture(event: Event): void {
+    capture(event: Event): string | undefined {
         if (this.stopped) return;
         if (reserved(event.path) || (event.oldPath && reserved(event.oldPath))) return;
         this.parked.delete(event.path);
@@ -208,21 +230,31 @@ export class IntentClient implements LoomIntentHooks {
             return;
         }
         if (event.folder) {
-            if (event.kind !== "rename" && event.kind !== "delete") return;
+            if (event.kind === "edit") return;
             const from = event.oldPath ?? event.path;
-            const children = [...this.cursors.keys()].filter((p) => p.startsWith(from + "/"));
-            if (children.length === 0) {
-                this.admissions = this.admissions.then(() => this.hold(from, "folder_scope_or_limit"));
-                return;
-            }
-            // Synchronous expansion of known identities. Every child is a durable,
-            // durable operation. Untracked descendants are held by normal scans.
-            for (const path of children)
-                this.capture({
+            if (Object.values(this.journal.state.reflecting).some(b => b.entryKind === "directory" &&
+                (b.path === event.path || b.previousPath === from ||
+                    event.kind === "create" && b.path.startsWith(event.path + "/")))) return;
+            if (event.kind === "create") { this.captureDirectory(event); return; }
+            const children = [...this.cursors.keys()].filter(p => p.startsWith(from + "/") &&
+                this.cursors.get(p)!.binding.entryKind !== "directory");
+            const dependencies: string[] = [];
+            for (const path of children) {
+                const id = this.capture({
                     kind: event.kind,
                     path: event.kind === "rename" ? event.path + path.slice(from.length) : path,
                     oldPath: event.kind === "rename" ? path : undefined,
                 });
+                if (id) dependencies.push(id);
+            }
+            const directories = [...this.cursors.keys()].filter(p => p.startsWith(from + "/") &&
+                this.cursors.get(p)!.binding.entryKind === "directory").sort((a,b) => b.length-a.length);
+            for (const path of directories) {
+                const id = this.captureDirectory({ kind: event.kind, path: event.kind === "rename" ? event.path + path.slice(from.length) : path,
+                    oldPath: event.kind === "rename" ? path : undefined, folder: true }, dependencies);
+                if (id) dependencies.push(id);
+            }
+            this.captureDirectory(event, dependencies);
             return;
         }
         const path = event.oldPath ?? event.path;
@@ -233,7 +265,7 @@ export class IntentClient implements LoomIntentHooks {
             if (!reflection) this.admissions = this.admissions.then(() => this.hold(path, "reference_only"));
             return;
         }
-        const id = crypto.randomUUID();
+        const id = (/\.canvas$/i.test(event.path) || /\.canvas$/i.test(event.oldPath ?? "") ? "canvas_" : "") + crypto.randomUUID();
         // Only an explicit creation event may obtain a fresh logical identity.
         // A source binding declares scope; source owner still checks live membership.
         if (!cursor && event.kind === "create") {
@@ -351,16 +383,54 @@ export class IntentClient implements LoomIntentHooks {
                 this.io.changed();
             });
         void this.admissions.then(() => this.onPublish(id)).catch(() => this.io.changed());
+        return id;
     }
     async settled() {
         await this.admissions;
+    }
+    private captureDirectory(event: Event, dependencies: string[] = []): string | undefined {
+        const from = event.oldPath ?? event.path;
+        if (!directoryPath(from) || !directoryPath(event.path)) return;
+        const current = this.snapshot(from);
+        if (event.kind === "create" && current?.binding.entryKind === "directory") return;
+        if (current && current.binding.entryKind !== "directory") {
+            this.admissions = this.admissions.then(() => this.hold(from, "directory_path_is_file")); return;
+        }
+        const scope = current?.binding ?? this.creationBinding(event.path);
+        if (!scope || !this.inside(scope, event.path) || !this.inside(scope, from)) {
+            this.admissions = this.admissions.then(() => this.hold(from, "directory_scope_unavailable")); return;
+        }
+        const id = "dir_" + crypto.randomUUID();
+        const cursor: Cursor = current ?? { binding: { ...scope, fileId: crypto.randomUUID(), entryKind: "directory", path: event.path }, path: event.path, absent: true };
+        if (!current && event.kind !== "create") {
+            this.admissions = this.admissions.then(() => this.hold(from, "directory_base_unavailable")); return;
+        }
+        this.cursors.delete(from);
+        if (event.kind !== "delete") this.cursors.set(event.path, { ...cursor, path: event.path, predecessor: id });
+        this.admissions = this.admissions.then(async () => {
+            const intent: Intent = { version: 1, kind: "intent", id, device: this.journal.state.device,
+                operation: event.kind as Intent["operation"], entryKind: "directory",
+                workspace: scope.workspace, collection: scope.collection, generation: scope.generation,
+                fileId: cursor.binding.fileId, base: cursor.absent ? null : cursor.binding,
+                path: from, sha256: await digest(""), length: 0,
+                ...(event.kind === "rename" ? { target: event.path } : {}),
+                ...(cursor.predecessor ? { predecessor: cursor.predecessor } : {}),
+                ...(dependencies.length ? { dependencies: [...new Set(dependencies)] } : {}) };
+            await this.journal.update(s => {
+                s.operations.push({ intent, payload: "", state: "queued", revisions: [] });
+                delete s.holds[from];
+            });
+            this.io.changed();
+        }).catch(async () => { if (!this.journal.failure) await this.hold(from, "directory_capture_failed"); });
+        void this.admissions.then(() => this.onPublish(id)).catch(() => this.io.changed());
+        return id;
     }
     async resolve(review: ConflictReview, text: string): Promise<string> {
         checkResolutionText(text);
         await this.ready;
         await this.settled();
         if (this.stopped || this.journal.failure) throw Error("Notes sync is not ready.");
-        const id = crypto.randomUUID();
+        const id = (/\.canvas$/i.test(review.path) ? "canvas_" : "") + crypto.randomUUID();
         const previous = this.snapshot(review.path);
         this.cursors.set(review.path, { binding: review.binding, path: review.path, predecessor: id });
         const run = this.admissions.then(async () => {
@@ -443,7 +513,12 @@ export class IntentClient implements LoomIntentHooks {
     }
     async ingest(record: Control) {
         await this.ready;
-        if (record.kind === "intent" || record.kind === "publication") {
+        if (record.kind === "scope") {
+            const key = record.workspace + "/" + record.collection;
+            const previous = this.journal.state.scopes?.[key];
+            if (previous && previous.sourceSequence >= record.sourceSequence) return;
+            await this.journal.update(s => { (s.scopes ??= {})[key] = record; });
+        } else if (record.kind === "intent" || record.kind === "publication") {
             await this.journal.update(s => {
                 const map = record.kind === "intent" ? (s.intents ??= {}) : (s.publications ??= {});
                 if (map[record.id] && JSON.stringify(map[record.id]) !== JSON.stringify(record)) throw Error("control_collision");
@@ -468,6 +543,24 @@ export class IntentClient implements LoomIntentHooks {
         await this.ready;
         if (this.parked.get(b.path) === b.id) return;
         if (this.pending(b.path)) return;
+        if (b.entryKind === "directory") {
+            const from = b.previousPath ?? b.path;
+            if (this.journal.state.operations.some(o => unfinished(o) &&
+                (o.intent.path === from || o.intent.path.startsWith(from + "/")))) return;
+            const newer = [...Object.values(this.journal.state.bindings), ...Object.values(this.journal.state.candidates)]
+                .some(next => next.entryKind === "directory" && (next.fileId === b.fileId || next.path === b.path) &&
+                    next.collection === b.collection && next.workspace === b.workspace && (next.sourceSequence ?? 0) > (b.sourceSequence ?? 0));
+            if (newer) return;
+            const old = this.journal.state.bindings[b.path];
+            if (old?.id === b.id) return;
+            if (!this.io.reflectDirectory) return this.hold(b.path, "directory_client_unavailable");
+            await this.journal.update(s => { s.reflecting[b.path] = b; });
+            try {
+                await this.io.reflectDirectory(b);
+                await this.install(b);
+            } catch { await this.hold(b.path, "directory_reflection_pending"); }
+            return;
+        }
         const current = this.journal.state.bindings[b.path];
         if (current && newerSource(current, b)) return;
         if (current?.id === b.id && this.journal.state.holds[b.path] !== "native_conflict_requires_resolution") return;
@@ -504,6 +597,7 @@ export class IntentClient implements LoomIntentHooks {
         )
             return;
         await this.io.reflect(b);
+        await this.reflectPathChanges();
         if (["reflection_hash_mismatch", "reflection_preserves_local_edit", "native_conflict_requires_resolution",
             "reflection_ancestry_ambiguous", "missing_local_file"].includes(this.journal.state.holds[b.path]))
             this.parked.set(b.path, b.id);
@@ -513,7 +607,7 @@ export class IntentClient implements LoomIntentHooks {
         await this.ready;
         await this.admissions;
         const path = String(entry.path);
-        if (path.startsWith("LOOM-Control-v1/payload/")) return true;
+        if (reserved(path) && !isControlPath(path)) return true;
         if (reserved(path)) {
             try {
                 await this.ingest(await this.io.readControl(path, entry._rev!));
@@ -618,13 +712,45 @@ export class IntentClient implements LoomIntentHooks {
                     path !== b.path
                 )
                     delete s.bindings[path];
-            s.bindings[b.path] = b;
+            if (b.deleted) delete s.bindings[b.path];
+            else s.bindings[b.path] = b;
             delete s.reflecting[b.path];
             delete s.holds[b.path];
             delete s.resolutionDisplays?.[b.path];
         });
-        this.cursors.set(b.path, { binding: b, path: b.path });
+        if (b.deleted) this.cursors.delete(b.path);
+        else this.cursors.set(b.path, { binding: b, path: b.path });
         this.io.changed();
+    }
+    // Applied foreign path receipts retire only the exact locally held source
+    // base. A later device edit is never a reason to erase its old pathname.
+    async reflectPathChanges() {
+        if (!this.io.removeNote) return;
+        for (const ack of Object.values(this.journal.state.acks ?? {})) {
+            const i = this.journal.state.intents?.[ack.intentId];
+            const p = this.journal.state.publications?.[ack.publicationId];
+            if (!i || !p || i.entryKind || ack.status !== "applied" ||
+                !["rename","delete"].includes(i.operation) || !i.base || this.pending(i.path) ||
+                this.journal.state.pathChanges?.[i.id] || !pair(i,p) ||
+                ack.intentDigest !== await digest(JSON.stringify(i)) || p.intentDigest !== ack.intentDigest) continue;
+            const old = this.journal.state.bindings[i.path] ?? this.journal.state.candidates[i.base.id];
+            if (!old || old.fileId !== i.fileId || old.sourceBase !== i.base.sourceBase ||
+                old.workspace!==i.workspace||old.collection!==i.collection||old.generation!==i.generation) continue;
+            if (i.operation === "rename") {
+                const b=ack.binding,text=await this.io.read(i.target!);
+                if (!b||b.path!==i.target||b.fileId!==i.fileId||b.sha256!==i.sha256||
+                    b.nativeRevision!==p.revisions.find(r=>r.role==="content")?.revision ||
+                    text===null || await digest(text)!==b.sha256) continue;
+            }
+            const local = await this.io.read(i.path);
+            if (local !== null && await digest(local) !== old.sha256) {
+                await this.hold(i.path,"path_change_preserves_local_edit"); continue;
+            }
+            if (local !== null) await this.io.removeNote(i.path);
+            await this.journal.update(s => { delete s.bindings[i.path]; delete s.holds[i.path];
+                (s.pathChanges??={})[i.id]=true; });
+            this.cursors.delete(i.path);
+        }
     }
     details() {
         if (this.journal.failure) return "LOOM held: " + this.journal.failure;

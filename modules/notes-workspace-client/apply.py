@@ -20,7 +20,7 @@ originals = root / '.loom-client-originals'
 # Preflight every target before changing any source; refuse unknown edits.
 for target in manifest['targets']:
     p = root / target['path']; actual = sha(p)
-    if actual not in [target['before'], previous['files'].get(target['path'])]: sys.exit('Unexpected edit: '+str(p))
+    if actual not in [target['before'], target['after'], previous['files'].get(target['path'])]: sys.exit('Unexpected edit: '+str(p))
     backup = originals / target['path']
     if backup.exists() and sha(backup) != target['before']: sys.exit('Original integrity mismatch')
 for name, expected in manifest['overlay'].items():
@@ -35,7 +35,7 @@ subprocess.run(['git','apply','--check',str(here/'patches/native-hooks.patch')],
 subprocess.run(['git','apply',str(here/'patches/native-hooks.patch')],cwd=root,check=True)
 files={}
 for target in manifest['targets']:
-    if sha(root/target['path']) != target['after']: sys.exit('Applied patch mismatch')
+    if sha(root/target['path']) != target['after']: sys.exit('Applied patch mismatch: '+target['path'])
     files[target['path']]=target['after']
 for name,expected in manifest['overlay'].items():
     dest=root/'src/loomClient'/name;dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes((here/'src'/name).read_bytes());files['src/loomClient/'+name]=expected

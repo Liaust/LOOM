@@ -83,6 +83,13 @@ export class Publisher {
             return;
         }
         this.get(""); // Index only newly appended operations; history is retained.
+        // Reserve a folder's logical paths before publishing its child moves.
+        // The complete publication still waits for exact child acknowledgements.
+        for (const id of this.active) {
+            const op = this.get(id);
+            if (op?.intent.entryKind === "directory" && op.state === "queued")
+                await this.transport.put(op.intent);
+        }
         for (const id of [...this.active]) {
             let op = this.get(id);
             if (!op || !unfinished(op) || ["conflict", "held", "uploaded"].includes(op.state)) {
@@ -103,6 +110,7 @@ export class Publisher {
                 (!pred || !pred.publication || ["held", "conflict"].includes(pred.state))
             )
                 continue;
+            if (op.intent.dependencies?.some(id => this.get(id)?.state !== "applied")) continue;
             try {
                 await this.io.locked(
                     [op.intent.path, ...(op.intent.target ? [op.intent.target] : [])],
@@ -116,7 +124,15 @@ export class Publisher {
                         await this.transport.put(i);
                         // CouchDB transfers leaf bodies, not every historical body.
                         // Retain each exact payload independently of the mutable note.
-                        await this.transport.putPayload(i.id, op.payload);
+                        const payloadRevision = await this.transport.putPayload(i.id, op.payload);
+                        if (i.entryKind === "directory" && !op.publication) {
+                            const publication: Publication = { version: 1, kind: "publication", id: "dir_pub_" + id,
+                                intentId: id, intentDigest, entryKind: "directory",
+                                revisions: [{ path: i.target ?? i.path, revision: payloadRevision,
+                                    role: i.operation === "delete" ? "deletion" : "content" }] };
+                            await this.update(id, o => { o.publication = publication; });
+                            op = this.get(id);
+                        }
                         if (!op.publication) {
                             const parent = pred
                                 ? pred.publication?.revisions.find(
@@ -187,7 +203,7 @@ export class Publisher {
                             const publication: Publication = {
                                 version: 1,
                                 kind: "publication",
-                                id: "pub_" + id,
+                                id: (id.startsWith("canvas_") ? "canvas_pub_" : "pub_") + id,
                                 intentId: id,
                                 intentDigest,
                                 revisions: this.get(id).revisions,
@@ -286,6 +302,7 @@ export class Publisher {
                     this.pendingAcks.delete(id);
                     this.client.onReflect(b.path);
                 }
+                await this.client.reflectPathChanges();
                 continue;
             }
             if (!op.publication) continue; // arrival order is not authority
@@ -361,7 +378,8 @@ export class Publisher {
                     });
                 } else if (b) {
                     // An acknowledgement does not prove which bytes are in the editor.
-                    const text = await this.client.io.read(b.path);
+                    const text = b.entryKind === "directory" ?
+                        await this.client.io.directoryExists?.(b.path) ? "" : null : await this.client.io.read(b.path);
                     if (text !== null && (await digest(text)) === b.sha256) {
                         if (i.operation === "rename")
                             await this.client.journal.update((s) => {
@@ -373,6 +391,12 @@ export class Publisher {
                 }
             }
         }
+        for (const o of this.client.journal.state.operations)
+            if (o.intent.dependencies?.length && o.state === "queued" &&
+                o.intent.dependencies.every(id => this.get(id)?.state === "applied")) {
+                this.active.add(o.intent.id);
+                this.requested = true;
+            }
         // Retain immutable receipt/intent metadata; retire only acknowledged
         // payloads with no unresolved descendant dependency. Never GC a conflict.
         await this.client.journal.update((s) => {

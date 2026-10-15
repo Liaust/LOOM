@@ -19,6 +19,49 @@ const base: Binding = {
     writable: true,
 };
 describe("client recovery export", () => {
+    it("does not replay an older directory tombstone over a recreated path",async()=>{
+        const f=await fixture();
+        const old:Binding={...f.b,id:"dir_old",fileId:"oldDir",path:"Notes/Recreated",entryKind:"directory",deleted:true,sourceSequence:8,sha256:await digest("")};
+        const fresh:Binding={...old,id:"dir_new",fileId:"newDir",deleted:false,sourceSequence:9};
+        await f.j.update(s=>{s.candidates[old.id]=old;s.candidates[fresh.id]=fresh});
+        f.io.reflectDirectory=vi.fn(async()=>{});
+        await f.c.reflectCandidate(old);
+        expect(f.io.reflectDirectory).not.toHaveBeenCalled();
+        await f.c.reflectCandidate(fresh);
+        expect(f.io.reflectDirectory).toHaveBeenCalledWith(fresh);
+        await f.c.reflectCandidate(old);
+        expect(f.io.reflectDirectory).toHaveBeenCalledTimes(1);
+    });
+    it("captures an empty directory before any note or file binding exists", async () => {
+        const j = new Journal({ load:async()=>undefined, save:async()=>{} });
+        const c = new IntentClient(j,{read:async()=>null,readControl:async()=>{throw Error("unused")},
+            readRevision:async()=>null,descends:async()=>false,reflect:async()=>{},changed:()=>{}});
+        await c.ready;
+        await c.ingest({version:1,kind:"scope",id:"scope",workspace:"w",collection:"c",generation:"g",
+            collectionRoot:"Topics",sourceSequence:1,writable:true});
+        c.capture({kind:"create",folder:true,path:"Topics/Empty folder"});
+        await c.settled();
+        expect(j.state.operations).toHaveLength(1);
+        const op=j.state.operations[0];
+        expect(op.intent.entryKind).toBe("directory");
+        expect(op.intent.base).toBeNull();
+        expect(op.intent.path).toBe("Topics/Empty folder");
+        expect(op.payload).toBe("");
+        expect(validate(op.intent)).toEqual(op.intent);
+        c.capture({kind:"rename",folder:true,path:"Topics/Renamed",oldPath:"Topics/Empty folder"});
+        await c.settled();
+        expect(j.state.operations[1].intent.predecessor).toBe(op.intent.id);
+        expect(j.state.operations[1].intent.fileId).toBe(op.intent.fileId);
+    });
+    it("uses collection scope for a byte-exact Canvas create", async () => {
+        const f=await fixture();
+        const path="Notes/folder/board.canvas",text='{"nodes":[],"edges":[]}\r\n';
+        f.files.set(path,text);
+        f.c.capture({kind:"create",path});await f.c.settled();
+        expect(f.j.state.operations[0].payload).toBe(text);
+        expect(f.j.state.operations[0].intent.sha256).toBe(await digest(text));
+        expect(validate(f.j.state.operations[0].intent).kind).toBe("intent");
+    });
     it("honours device reference exclusions before payload reads and preserves durable state", async () => {
         const f = await fixture();
         const b = { ...f.b, path: "Notes/book.pdf", writable: false };
@@ -545,6 +588,6 @@ describe("durable admission", () => {
         expect(new Set(f.j.state.operations.map(o => o.intent.fileId)).size).toBe(257);
         expect(f.j.state.operations.every(o => o.intent.operation === kind)).toBe(true);
         expect(f.j.state.bindings[f.b.path]).toEqual(f.b);
-        expect(f.j.state.holds["Notes/folder"]).toBeUndefined();
+        expect(f.j.state.holds["Notes/folder"]).toBe("directory_base_unavailable");
     });
 });

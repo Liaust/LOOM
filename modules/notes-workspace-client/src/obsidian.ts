@@ -9,11 +9,11 @@ import { readContent } from "@vrtmrz/livesync-commonlib/compat/common/utils";
 import { ControlTransport } from "./control";
 import { Journal, indexedDBPersistence, recoveryPersistence } from "./journal";
 import { IntentClient } from "./client";
-import { MAX_BYTES, MAX_REFERENCE_BYTES, referenceBytes, reserved, type Binding } from "./protocol";
+import { MAX_BYTES, MAX_REFERENCE_BYTES, referenceBytes, reserved, isControlPath, type Binding } from "./protocol";
 import { convergeNative } from "./conflicts";
 import { NotesConflictsModal } from "./conflict-ui";
 import { PathWork, WakeLoop } from "./work";
-import { TextFileView } from "obsidian";
+import { TextFileView, TFolder } from "obsidian";
 import { UpdateBarrier, startupHeld } from "./update";
 import release from "./release.json";
 
@@ -199,6 +199,47 @@ export function createLoomClient(
         changed() {
             /* The status element is connected after the native startup lifecycle. */
         },
+        async directoryExists(path) {
+            return (await plugin.app.vault.adapter.stat(path))?.type === "folder";
+        },
+        async reflectDirectory(binding) {
+            const vault = plugin.app.vault;
+            const ensure = async (path: string) => {
+                let current = "";
+                for (const part of path.split("/")) {
+                    current = current ? current + "/" + part : part;
+                    const at = vault.getAbstractFileByPath(current);
+                    if (at && !(at instanceof TFolder)) throw Error("directory_path_collision");
+                    if (!at) await vault.createFolder(current);
+                }
+            };
+            const path = binding.previousPath ?? binding.path;
+            const old = vault.getAbstractFileByPath(path);
+            if (old && !(old instanceof TFolder)) throw Error("directory_path_collision");
+            if (binding.deleted) {
+                if (old instanceof TFolder) {
+                    if (old.children.length) throw Error("directory_preserves_local_children");
+                    await vault.trash(old, false);
+                }
+                return;
+            }
+            if (binding.previousPath && old) {
+                const target = vault.getAbstractFileByPath(binding.path);
+                if (!target) {
+                    const parent = binding.path.split("/").slice(0,-1).join("/");
+                    if (parent) await ensure(parent);
+                    await vault.rename(old,binding.path);
+                } else {
+                    if (!(target instanceof TFolder) || !(old instanceof TFolder) || old.children.length)
+                        throw Error("directory_preserves_local_children");
+                    await vault.trash(old,false);
+                }
+            } else await ensure(binding.path);
+        },
+        async removeNote(path) {
+            const file = plugin.app.vault.getAbstractFileByPath(path);
+            if (file && !("children" in file)) await plugin.app.vault.trash(file, false);
+        },
     });
     const publisher = new Publisher(client, access, {
         encrypted: () =>
@@ -219,7 +260,7 @@ export function createLoomClient(
     const consume = (change: { id: string; doc?: { path?: unknown; _rev?: string } }) => {
         const doc = change.doc;
         const path = doc?.path === undefined ? undefined : String(doc.path);
-        if (path && reserved(path) && !path.startsWith("LOOM-Control-v1/payload/")) {
+        if (path && isControlPath(path)) {
             if (!retry.has(path) && retry.size >= 256) return false;
             retry.set(path, doc!._rev!);
         } else work.changed(change.id, path);

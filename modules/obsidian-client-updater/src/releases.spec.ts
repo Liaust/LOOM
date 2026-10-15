@@ -26,7 +26,7 @@ describe("closed release contract", () => {
         for (const mutate of [
             (r: any) => r.files[0].name = "../data.json",
             (r: any) => r.files[0].name = r.files[1].name,
-            (r: any) => r.compatibility.journalSchema = 2,
+            (r: any) => r.compatibility.journalSchema = 3,
             (r: any) => r.pluginId = "some-other-plugin",
             (r: any) => r.releaseId = "v0.9.0",
             (r: any) => r.files[0].bytes = 17 * 1024 * 1024,

@@ -1,5 +1,6 @@
 export const VERSION = 1;
 export const PREFIX = "LOOM-Control-v1/";
+export const STRUCTURE_PREFIX = PREFIX + "payload/structure/";
 export const MAX_BYTES = 8 * 1024 * 1024;
 export const MAX_CONTROL_BYTES = 1024 * 1024;
 export const MAX_REFERENCE_BYTES = 2 * 1024 * 1024 * 1024;
@@ -27,6 +28,9 @@ export type Binding = {
     sha256: string;
     writable: boolean;
     sourceSequence?: number;
+    entryKind?: "directory";
+    deleted?: boolean;
+    previousPath?: string;
 };
 export type Intent = {
     version: 1;
@@ -45,6 +49,19 @@ export type Intent = {
     target?: string;
     sha256: string;
     length: number;
+    entryKind?: "directory";
+    dependencies?: string[];
+};
+export type CollectionScope = {
+    version: 1;
+    kind: "scope";
+    id: string;
+    workspace: string;
+    collection: string;
+    generation: string;
+    collectionRoot: string;
+    sourceSequence: number;
+    writable: boolean;
 };
 
 export function newerSource(a: Binding, b: Binding): boolean {
@@ -61,6 +78,7 @@ export type Publication = {
     intentId: string;
     intentDigest: string;
     revisions: { path: string; revision: string; role: "content" | "deletion" }[];
+    entryKind?: "directory";
 };
 export type Ack = {
     version: 1;
@@ -74,7 +92,7 @@ export type Ack = {
     binding?: Binding;
     resolves?: string[];
 };
-export type Control = Binding | Intent | Publication | Ack;
+export type Control = Binding | Intent | Publication | Ack | CollectionScope;
 export const token = (v: unknown): v is string =>
     typeof v === "string" &&
     !["__proto__", "constructor", "prototype"].includes(v) &&
@@ -83,11 +101,12 @@ export const revision = (v: unknown): v is string =>
     typeof v === "string" && /^[1-9][0-9]*-[a-zA-Z0-9]+$/.test(v);
 export const digestPattern = /^sha256:[0-9a-f]{64}$/;
 export function relativePath(v: unknown): v is string {
-    return workspacePath(v) && /\.(md|markdown|txt)$/i.test(v);
+    return workspacePath(v) && /\.(md|markdown|txt|canvas)$/i.test(v);
 }
 export function referencePath(v: unknown): v is string {
-    return workspacePath(v) && /\.(pdf|png|jpe?g|gif|webp|canvas|wav|svg|csv|xlsx|dat|json)$/i.test(v);
+    return workspacePath(v) && /\.(pdf|png|jpe?g|gif|webp|wav|svg|csv|xlsx|dat|json)$/i.test(v);
 }
+export const directoryPath = workspacePath;
 function workspacePath(v: unknown): v is string {
     return (
         typeof v === "string" &&
@@ -110,8 +129,11 @@ export function collectionRoot(v: unknown): v is string {
     return typeof v === "string" && relativePath(v + "/placeholder.md");
 }
 export function controlPath(record: Control): string {
-    return `${PREFIX}${record.kind}/${record.id}.md`;
+    const prefix = record.kind === "scope" || record.id.startsWith("dir_") || record.id.startsWith("canvas_") ? STRUCTURE_PREFIX : PREFIX;
+    return `${prefix}${record.kind}/${record.id}.md`;
 }
+export const isControlPath = (path: string) => reserved(path) &&
+    (!path.startsWith(PREFIX + "payload/") || path.startsWith(STRUCTURE_PREFIX));
 export const reserved = (path: string) => path === PREFIX.slice(0, -1) || path.startsWith(PREFIX);
 export async function digest(text: string | Uint8Array<ArrayBuffer>): Promise<string> {
     const bytes = typeof text === "string" ? new TextEncoder().encode(text) : text;
@@ -141,6 +163,13 @@ export function validate(value: unknown): Control {
     if (!object(value) || value.version !== VERSION || !token(value.id)) throw new Error("unknown_protocol");
     const v = value;
     switch (v.kind) {
+        case "scope":
+            fields(v, ["workspace", "collection", "generation", "collectionRoot", "sourceSequence", "writable"]);
+            if (!["workspace", "collection", "generation"].every(k => token(v[k])) ||
+                !collectionRoot(v.collectionRoot) || typeof v.writable !== "boolean" ||
+                !Number.isSafeInteger(v.sourceSequence) || Number(v.sourceSequence) < 1)
+                throw Error("invalid_scope");
+            break;
         case "binding":
             fields(v, [
                 "workspace",
@@ -154,17 +183,22 @@ export function validate(value: unknown): Control {
                 "sha256",
                 "writable",
                 "sourceSequence",
+                "entryKind", "deleted", "previousPath",
             ]);
             if (
                 !scope(v) ||
                 !collectionRoot(v.collectionRoot) ||
-                !(relativePath(v.path) || (v.writable === false && referencePath(v.path))) ||
+                !(v.entryKind === "directory" ? directoryPath(v.path) : relativePath(v.path) ||
+                    (v.writable === false && (referencePath(v.path) || String(v.path).toLowerCase().endsWith(".canvas")))) ||
                 !String(v.path).startsWith(String(v.collectionRoot) + "/") ||
                 !token(v.sourceBase) ||
                 !revision(v.nativeRevision) ||
                 !hash(v.sha256) ||
                 typeof v.writable !== "boolean" ||
-                (v.sourceSequence !== undefined && (!Number.isSafeInteger(v.sourceSequence) || Number(v.sourceSequence) < 1))
+                (v.sourceSequence !== undefined && (!Number.isSafeInteger(v.sourceSequence) || Number(v.sourceSequence) < 1)) ||
+                (v.entryKind !== undefined && v.entryKind !== "directory") ||
+                (v.deleted !== undefined && (v.entryKind !== "directory" || typeof v.deleted !== "boolean")) ||
+                (v.previousPath !== undefined && (v.entryKind !== "directory" || !directoryPath(v.previousPath)))
             )
                 throw new Error("invalid_binding");
             break;
@@ -183,16 +217,21 @@ export function validate(value: unknown): Control {
                 "target",
                 "sha256",
                 "length",
+                "entryKind", "dependencies",
             ]);
             if (
                 !scope(v) ||
                 !token(v.device) ||
-                !relativePath(v.path) ||
+                !(v.entryKind === "directory" ? directoryPath(v.path) : relativePath(v.path)) ||
                 !hash(v.sha256) ||
                 !Number.isSafeInteger(v.length) ||
                 Number(v.length) < 0 ||
                 Number(v.length) > MAX_BYTES ||
-                (v.predecessor !== undefined && !token(v.predecessor))
+                (v.predecessor !== undefined && !token(v.predecessor)) ||
+                (v.entryKind !== undefined && v.entryKind !== "directory") ||
+                (v.entryKind === "directory" && (v.length !== 0 || v.operation === "edit")) ||
+                (v.dependencies !== undefined && (v.entryKind !== "directory" || !Array.isArray(v.dependencies) ||
+                    v.dependencies.length > 10000 || !v.dependencies.every(id => token(id) && id !== v.id)))
             )
                 throw new Error("invalid_intent");
             if (!["create", "edit", "delete", "rename"].includes(String(v.operation)))
@@ -213,33 +252,33 @@ export function validate(value: unknown): Control {
                     b.workspace !== v.workspace ||
                     b.collection !== v.collection ||
                     b.generation !== v.generation ||
-                    b.fileId !== v.fileId
+                    b.fileId !== v.fileId || b.entryKind !== v.entryKind || b.deleted
                 )
                     throw new Error("invalid_base");
             }
             if (
                 v.operation === "rename"
-                    ? !relativePath(v.target) || v.target === v.path
+                    ? !(v.entryKind === "directory" ? directoryPath(v.target) : relativePath(v.target)) || v.target === v.path
                     : v.target !== undefined
             )
                 throw new Error("invalid_target");
             if (v.operation === "delete" && v.length !== 0) throw new Error("invalid_deletion");
             break;
         case "publication":
-            fields(v, ["intentId", "intentDigest", "revisions"]);
+            fields(v, ["intentId", "intentDigest", "revisions", "entryKind"]);
             if (
                 !token(v.intentId) ||
                 !hash(v.intentDigest) ||
                 !Array.isArray(v.revisions) ||
                 v.revisions.length < 1 ||
-                v.revisions.length > 2
+                v.revisions.length > 2 || (v.entryKind !== undefined && v.entryKind !== "directory")
             )
                 throw new Error("invalid_publication");
             for (const r of v.revisions) {
                 if (
                     !object(r) ||
                     Object.keys(r).some((k) => !["path", "revision", "role"].includes(k)) ||
-                    !relativePath(r.path) ||
+                    !(v.entryKind === "directory" ? directoryPath(r.path) : relativePath(r.path)) ||
                     !revision(r.revision) ||
                     !["content", "deletion"].includes(String(r.role))
                 )
@@ -279,6 +318,10 @@ export function decode(path: string, text: string): Control {
 export function pair(intent: Intent, publication: Publication): boolean {
     const r = publication.revisions;
     if (publication.intentId !== intent.id) return false;
+    if (publication.entryKind !== intent.entryKind) return false;
+    if (intent.entryKind === "directory") return r.length === 1 &&
+        r[0].path === (intent.target ?? intent.path) &&
+        r[0].role === (intent.operation === "delete" ? "deletion" : "content");
     if (intent.operation === "rename")
         return (
             r.length === 2 &&

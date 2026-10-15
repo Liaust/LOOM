@@ -373,7 +373,6 @@
          }
          return true;
      };
-diff --git a/node_modules/@vrtmrz/livesync-commonlib/dist/common/utils.js b/node_modules/@vrtmrz/livesync-commonlib/dist/common/utils.js
 --- a/node_modules/@vrtmrz/livesync-commonlib/dist/common/utils.js
 +++ b/node_modules/@vrtmrz/livesync-commonlib/dist/common/utils.js
 @@ -70,6 +70,8 @@

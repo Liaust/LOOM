@@ -70,6 +70,25 @@ async function fixture() {
     return { d, b, c, j, files, publisher, persistence };
 }
 describe("native exact-base publication and source acknowledgement", () => {
+    it("publishes a directory through encrypted control records without a visible placeholder", async()=>{
+        const f=await fixture();
+        try {
+            const p=f.publisher();
+            f.c.io.directoryExists=async()=>true;
+            f.c.capture({kind:"create",folder:true,path:"Notes/Empty"});
+            await f.c.settled();await p.pump();
+            const op=f.j.state.operations[0];
+            expect(op.state).toBe("uploaded");
+            expect(op.publication?.entryKind).toBe("directory");
+            expect(await f.d.access.fetchEntryMeta("Notes/Empty" as never,undefined,true)).toBe(false);
+            const b:Binding={...f.b,id:"directoryBinding",entryKind:"directory",fileId:op.intent.fileId,
+                path:op.intent.path,nativeRevision:op.publication!.revisions[0].revision,sha256:await digest(""),sourceSequence:1};
+            await p.acknowledge({version:1,kind:"ack",id:"dirAck",intentId:op.intent.id,
+                publicationId:op.publication!.id,intentDigest:await digest(encode(op.intent)),status:"applied",reason:"source_applied",binding:b});
+            expect(f.j.state.operations[0].state).toBe("applied");
+            expect(f.j.state.bindings[b.path]).toEqual(b);
+        } finally {await f.d.db.destroy()}
+    });
     it("does not republish uploaded operations on unrelated wakeups", async () => {
         const f = await fixture();
         try {

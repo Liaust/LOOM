@@ -5,6 +5,12 @@ An independent updater for the LOOM Notes overlay on desktop and iOS. It updates
 bootstrap; subsequent compatible target releases use the reviewed public feed.
 Actual device installation and acceptance are separate from a source build.
 
+The Canvas/directory client uses journal compatibility schema 2. Its additive
+local scope/path-receipt sections require a coordinated closed-app bootstrap
+of updater 0.2.0 and the reviewed client bundle. Updater 0.1.0 intentionally
+does not automatically cross that boundary or downgrade the resulting journal.
+Existing settings, native database and unacknowledged edits stay in place.
+
 ## What Changes
 
 The fixed target remains `obsidian-livesync`, upstream version `1.0.32`. A
