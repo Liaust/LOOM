@@ -19,6 +19,24 @@ const base: Binding = {
     writable: true,
 };
 describe("client recovery export", () => {
+    it("retains child-first delete dependencies after child cursors have gone",async()=>{
+        const f=await fixture();
+        await f.j.update(s=>{
+            for(const [name,id] of [["Folder","parent"],["Folder/Empty","child"]]){
+                const path="Notes/"+name;
+                s.bindings[path]={...f.b,id:"dir_"+id,fileId:id,path,entryKind:"directory",sha256:"sha256:"+"0".repeat(64)};
+            }
+        });
+        const c=new IntentClient(f.j,f.io);await c.ready;
+        c.capture({kind:"delete",folder:true,path:"Notes/Folder/Empty"});
+        c.capture({kind:"delete",folder:true,path:"Notes/Folder"});
+        c.capture({kind:"delete",folder:true,path:"Notes/Folder/Empty"});
+        await c.settled();
+        const ops=f.j.state.operations;
+        expect(ops).toHaveLength(2);
+        expect(ops[1].intent.dependencies).toEqual([ops[0].intent.id]);
+        expect(f.j.state.holds["Notes/Folder/Empty"]).toBeUndefined();
+    });
     it("freezes directory dependencies to only prior operations in that subtree", async () => {
         const f=await fixture();
         await f.j.update(s=>{
@@ -35,8 +53,10 @@ describe("client recovery export", () => {
         });
         const c=new IntentClient(f.j,f.io);await c.ready;
         c.capture({kind:"rename",folder:true,oldPath:"Notes/tree",path:"Notes/moved"});await c.settled();
+        c.capture({kind:"rename",folder:true,oldPath:"Notes/tree/Left",path:"Notes/moved/Left"});await c.settled();
         const ops=f.j.state.operations;
         expect(ops).toHaveLength(5);
+        expect(f.j.state.holds["Notes/tree/Left"]).toBeUndefined();
         for(const op of ops){
             expect(validate(op.intent)).toEqual(op.intent);
             for(const id of op.intent.dependencies??[]){

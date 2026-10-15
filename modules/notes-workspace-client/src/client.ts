@@ -70,6 +70,22 @@ export class IntentClient implements LoomIntentHooks {
         setTimeout(() => { void this.reflectPath(path).catch(() => this.io.changed()); }, 0);
     };
     private parked = new Map<string, string>();
+    private directoryEvents = new Map<string, string>();
+    private childChanges = new Map<string, Map<string, { id: string; kind: string; target?: string }>>();
+    private rememberChild(event: Event, id: string) {
+        const from = event.oldPath ?? event.path;
+        const parts = from.split("/");
+        while (parts.length > 1) {
+            parts.pop();
+            const parent = this.cursors.get(parts.join("/"));
+            if (parent?.binding.entryKind !== "directory") continue;
+            const changes = this.childChanges.get(parent.binding.fileId) ?? new Map();
+            if (event.kind === "create") changes.delete(from);
+            else if (event.kind === "rename" || event.kind === "delete")
+                changes.set(from, { id, kind: event.kind, ...(event.kind === "rename" ? { target: event.path } : {}) });
+            this.childChanges.set(parent.binding.fileId, changes);
+        }
+    }
     async reflectPath(path: string, retry = false) {
         if (retry) this.parked.delete(path);
         for (const b of this.pathCandidates(path)) await this.reflectCandidate(b);
@@ -238,7 +254,11 @@ export class IntentClient implements LoomIntentHooks {
             if (event.kind === "create") { this.captureDirectory(event); return; }
             const children = [...this.cursors.keys()].filter(p => p.startsWith(from + "/") &&
                 this.cursors.get(p)!.binding.entryKind !== "directory");
-            const dependencies: string[] = [];
+            const parent = this.cursors.get(from);
+            const dependencies = [...(this.childChanges.get(parent?.binding.fileId ?? "") ?? [])]
+                .filter(([path, change]) => path.startsWith(from + "/") && change.kind === event.kind &&
+                    (event.kind !== "rename" || change.target === event.path + path.slice(from.length)))
+                .map(([, change]) => change.id);
             for (const path of children) {
                 const id = this.capture({
                     kind: event.kind,
@@ -283,6 +303,7 @@ export class IntentClient implements LoomIntentHooks {
         const payloadRead = event.kind === "delete" ? Promise.resolve("") : this.io.read(event.path);
         void payloadRead.catch(() => {});
         if (captured) {
+            this.rememberChild(event, id);
             const next = { ...captured, path: event.path, predecessor: id };
             if (event.kind === "rename" || event.kind === "delete") this.cursors.delete(path);
             if (event.kind !== "delete") this.cursors.set(event.path, next);
@@ -393,6 +414,19 @@ export class IntentClient implements LoomIntentHooks {
         const childIDs = [...dependencies];
         if (!directoryPath(from) || !directoryPath(event.path)) return;
         const current = this.snapshot(from);
+        const eventKey = JSON.stringify([event.kind, from, event.path]);
+        const target = event.kind === "rename" ? this.snapshot(event.path) : undefined;
+        const prior = this.directoryEvents.get(eventKey) ?? this.journal.state.operations.find(o =>
+            o.intent.entryKind === "directory" && o.intent.operation === event.kind && o.intent.path === from &&
+            (o.intent.target ?? o.intent.path) === event.path)?.intent.fileId;
+        if (!current && prior && (event.kind === "delete" || target?.binding.fileId === prior)) {
+            // A parent event already captured the child; Obsidian can emit its
+            // own descendant callback after our cursor moved to the new path.
+            this.admissions = this.admissions.then(() => this.journal.update(s => {
+                if (s.holds[from] === "directory_base_unavailable") delete s.holds[from];
+            }, s => s.holds[from] !== "directory_base_unavailable"));
+            return;
+        }
         if (event.kind === "create" && current?.binding.entryKind === "directory") return;
         if (current && current.binding.entryKind !== "directory") {
             this.admissions = this.admissions.then(() => this.hold(from, "directory_path_is_file")); return;
@@ -406,6 +440,9 @@ export class IntentClient implements LoomIntentHooks {
         if (!current && event.kind !== "create") {
             this.admissions = this.admissions.then(() => this.hold(from, "directory_base_unavailable")); return;
         }
+        this.directoryEvents.set(eventKey, cursor.binding.fileId);
+        this.rememberChild(event, id);
+        this.childChanges.delete(cursor.binding.fileId);
         this.cursors.delete(from);
         if (event.kind !== "delete") this.cursors.set(event.path, { ...cursor, path: event.path, predecessor: id });
         this.admissions = this.admissions.then(async () => {

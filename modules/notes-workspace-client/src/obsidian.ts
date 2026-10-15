@@ -23,11 +23,15 @@ export function createUpdateHandoff(plugin: ObsidianLiveSyncPlugin) {
     const barrier = new UpdateBarrier({
         async flushAndFenceEditor() {
             const views: TextFileView[] = [];
-            plugin.app.workspace.iterateAllLeaves(leaf => { if (leaf.view instanceof TextFileView) views.push(leaf.view); });
+            let canvasOpen = false;
+            plugin.app.workspace.iterateAllLeaves(leaf => {
+                if (leaf.view instanceof TextFileView) views.push(leaf.view);
+                if (leaf.view.getViewType() === "canvas") canvasOpen = true;
+            });
             for (const view of views) await view.save();
             // Obsidian exposes save(), but no public editor-input fence. Defer
             // live replacement with editors open; a held startup has no writer.
-            return heldAtStartup || views.length === 0;
+            return heldAtStartup || views.length === 0 && !canvasOpen;
         },
         async stopLocal() { await plugin.loomClient?.ready; await plugin.loomClient?.stopNative(); },
         async stopNative() { await plugin.core.services.control.onUnload(); },

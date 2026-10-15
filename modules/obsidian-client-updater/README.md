@@ -95,7 +95,7 @@ signatures. Independent signing is deferred.
 
 The Notes handoff calls the public editor save path, drains already captured
 work, checkpoints the journal/recovery exports, then awaits native shutdown.
-Public Obsidian APIs do not fence typing, so an open text editor causes a safe
+Public Obsidian APIs do not fence typing, so an open text editor or Canvas causes a safe
 restart deferral. On the next open the target holds native startup while the
 independent updater completes the staged replacement. Do not interrupt typing
 to force plugin reload. A suspended/closed iPhone cannot update until Obsidian
