@@ -54,9 +54,11 @@ describe("client recovery export", () => {
         const c=new IntentClient(f.j,f.io);await c.ready;
         c.capture({kind:"rename",folder:true,oldPath:"Notes/tree",path:"Notes/moved"});await c.settled();
         c.capture({kind:"rename",folder:true,oldPath:"Notes/tree/Left",path:"Notes/moved/Left"});await c.settled();
+        c.capture({kind:"rename",oldPath:"Notes/tree/Left/a.md",path:"Notes/moved/Left/a.md"});await c.settled();
         const ops=f.j.state.operations;
         expect(ops).toHaveLength(5);
         expect(f.j.state.holds["Notes/tree/Left"]).toBeUndefined();
+        expect(f.j.state.holds["Notes/tree/Left/a.md"]).toBeUndefined();
         for(const op of ops){
             expect(validate(op.intent)).toEqual(op.intent);
             for(const id of op.intent.dependencies??[]){

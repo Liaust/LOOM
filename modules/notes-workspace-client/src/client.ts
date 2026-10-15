@@ -70,10 +70,11 @@ export class IntentClient implements LoomIntentHooks {
         setTimeout(() => { void this.reflectPath(path).catch(() => this.io.changed()); }, 0);
     };
     private parked = new Map<string, string>();
-    private directoryEvents = new Map<string, string>();
+    private pathEvents = new Map<string, string>();
     private childChanges = new Map<string, Map<string, { id: string; kind: string; target?: string }>>();
-    private rememberChild(event: Event, id: string) {
+    private rememberChild(event: Event, id: string, fileId: string) {
         const from = event.oldPath ?? event.path;
+        this.pathEvents.set(JSON.stringify([event.kind, from, event.path]), fileId);
         const parts = from.split("/");
         while (parts.length > 1) {
             parts.pop();
@@ -279,6 +280,14 @@ export class IntentClient implements LoomIntentHooks {
         }
         const path = event.oldPath ?? event.path;
         let cursor = this.snapshot(path);
+        if (!cursor && (event.kind === "rename" || event.kind === "delete")) {
+            const target = this.snapshot(event.path);
+            const previous = this.pathEvents.get(JSON.stringify([event.kind,path,event.path])) ??
+                this.journal.state.operations.find(o=>o.intent.operation===event.kind && o.intent.path===path &&
+                    (o.intent.target??o.intent.path)===event.path &&
+                    (event.kind==="delete" || o.intent.fileId===target?.binding.fileId))?.intent.fileId;
+            if (previous && (event.kind==="delete" || target?.binding.fileId===previous)) return;
+        }
         const reflection = this.journal.state.reflecting[event.path];
         if (referencePath(path) && reflection) return;
         if (cursor && !cursor.binding.writable) {
@@ -303,7 +312,7 @@ export class IntentClient implements LoomIntentHooks {
         const payloadRead = event.kind === "delete" ? Promise.resolve("") : this.io.read(event.path);
         void payloadRead.catch(() => {});
         if (captured) {
-            this.rememberChild(event, id);
+            this.rememberChild(event, id, captured.binding.fileId);
             const next = { ...captured, path: event.path, predecessor: id };
             if (event.kind === "rename" || event.kind === "delete") this.cursors.delete(path);
             if (event.kind !== "delete") this.cursors.set(event.path, next);
@@ -416,7 +425,7 @@ export class IntentClient implements LoomIntentHooks {
         const current = this.snapshot(from);
         const eventKey = JSON.stringify([event.kind, from, event.path]);
         const target = event.kind === "rename" ? this.snapshot(event.path) : undefined;
-        const prior = this.directoryEvents.get(eventKey) ?? this.journal.state.operations.find(o =>
+        const prior = this.pathEvents.get(eventKey) ?? this.journal.state.operations.find(o =>
             o.intent.entryKind === "directory" && o.intent.operation === event.kind && o.intent.path === from &&
             (o.intent.target ?? o.intent.path) === event.path)?.intent.fileId;
         if (!current && prior && (event.kind === "delete" || target?.binding.fileId === prior)) {
@@ -440,8 +449,7 @@ export class IntentClient implements LoomIntentHooks {
         if (!current && event.kind !== "create") {
             this.admissions = this.admissions.then(() => this.hold(from, "directory_base_unavailable")); return;
         }
-        this.directoryEvents.set(eventKey, cursor.binding.fileId);
-        this.rememberChild(event, id);
+        this.rememberChild(event, id, cursor.binding.fileId);
         this.childChanges.delete(cursor.binding.fileId);
         this.cursors.delete(from);
         if (event.kind !== "delete") this.cursors.set(event.path, { ...cursor, path: event.path, predecessor: id });

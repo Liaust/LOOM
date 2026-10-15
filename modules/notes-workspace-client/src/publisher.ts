@@ -384,6 +384,8 @@ export class Publisher {
                         if (i.operation === "rename")
                             await this.client.journal.update((s) => {
                                 delete s.bindings[i.path];
+                                if (["missing_writable_binding","directory_base_unavailable"].includes(s.holds[i.path]))
+                                    delete s.holds[i.path];
                             });
                         await this.client.install(b);
                     } else if (op.resolution) await this.client.reflectCandidate(b);
