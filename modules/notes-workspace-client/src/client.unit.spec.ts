@@ -19,6 +19,35 @@ const base: Binding = {
     writable: true,
 };
 describe("client recovery export", () => {
+    it("freezes directory dependencies to only prior operations in that subtree", async () => {
+        const f=await fixture();
+        await f.j.update(s=>{
+            for(const part of ["tree","tree/Left","tree/Right"]){
+                const path="Notes/"+part;
+                s.bindings[path]={...f.b,id:"dir_"+part.replace(/\//g,"_"),fileId:part.replace(/\//g,"_"),path,
+                    entryKind:"directory",sha256:"sha256:"+"0".repeat(64)};
+            }
+            for(const part of ["Left","Right"]){
+                const path=`Notes/tree/${part}/a.md`;
+                s.bindings[path]={...f.b,id:"b"+part,fileId:"f"+part,path};
+                f.files.set(`Notes/moved/${part}/a.md`,"A");
+            }
+        });
+        const c=new IntentClient(f.j,f.io);await c.ready;
+        c.capture({kind:"rename",folder:true,oldPath:"Notes/tree",path:"Notes/moved"});await c.settled();
+        const ops=f.j.state.operations;
+        expect(ops).toHaveLength(5);
+        for(const op of ops){
+            expect(validate(op.intent)).toEqual(op.intent);
+            for(const id of op.intent.dependencies??[]){
+                const child=ops.find(o=>o.intent.id===id)!;
+                expect(child.intent.path.startsWith(op.intent.path+"/")).toBe(true);
+            }
+        }
+        expect(ops.find(o=>o.intent.path==="Notes/tree/Left")?.intent.dependencies).toHaveLength(1);
+        expect(ops.find(o=>o.intent.path==="Notes/tree/Right")?.intent.dependencies).toHaveLength(1);
+        expect(ops.find(o=>o.intent.path==="Notes/tree")?.intent.dependencies).toHaveLength(4);
+    });
     it("does not replay an older directory tombstone over a recreated path",async()=>{
         const f=await fixture();
         const old:Binding={...f.b,id:"dir_old",fileId:"oldDir",path:"Notes/Recreated",entryKind:"directory",deleted:true,sourceSequence:8,sha256:await digest("")};

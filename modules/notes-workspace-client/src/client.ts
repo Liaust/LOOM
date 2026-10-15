@@ -390,6 +390,7 @@ export class IntentClient implements LoomIntentHooks {
     }
     private captureDirectory(event: Event, dependencies: string[] = []): string | undefined {
         const from = event.oldPath ?? event.path;
+        const childIDs = [...dependencies];
         if (!directoryPath(from) || !directoryPath(event.path)) return;
         const current = this.snapshot(from);
         if (event.kind === "create" && current?.binding.entryKind === "directory") return;
@@ -408,6 +409,8 @@ export class IntentClient implements LoomIntentHooks {
         this.cursors.delete(from);
         if (event.kind !== "delete") this.cursors.set(event.path, { ...cursor, path: event.path, predecessor: id });
         this.admissions = this.admissions.then(async () => {
+            const children = childIDs.filter(id => this.journal.state.operations.some(o =>
+                o.intent.id === id && o.intent.path.startsWith(from + "/")));
             const intent: Intent = { version: 1, kind: "intent", id, device: this.journal.state.device,
                 operation: event.kind as Intent["operation"], entryKind: "directory",
                 workspace: scope.workspace, collection: scope.collection, generation: scope.generation,
@@ -415,7 +418,7 @@ export class IntentClient implements LoomIntentHooks {
                 path: from, sha256: await digest(""), length: 0,
                 ...(event.kind === "rename" ? { target: event.path } : {}),
                 ...(cursor.predecessor ? { predecessor: cursor.predecessor } : {}),
-                ...(dependencies.length ? { dependencies: [...new Set(dependencies)] } : {}) };
+                ...(children.length ? { dependencies: [...new Set(children)] } : {}) };
             await this.journal.update(s => {
                 s.operations.push({ intent, payload: "", state: "queued", revisions: [] });
                 delete s.holds[from];
