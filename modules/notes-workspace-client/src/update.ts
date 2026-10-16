@@ -51,7 +51,7 @@ function validRelease(value: unknown): value is { releaseId: string } {
         typeof r.sourceCommit !== "string" || !/^[a-f0-9]{40}$/.test(r.sourceCommit) ||
         canonical(r.upstream) !== canonical({ revision: "7b3b6ff854f2ff10452be3eaf8e0cd76ac65ac2b", version: "1.0.32" }) ||
         canonical(r.compatibility) !== canonical({ minAppVersion: "1.7.2", platforms: ["desktop", "mobile"], notesProtocol: 1,
-            handoffAPI: 1, journalSchema: 1, activation: "reload", rollback: "same-schema" }) ||
+            handoffAPI: 1, journalSchema: 3, activation: "reload", rollback: "same-schema" }) ||
         !Array.isArray(r.files) || r.files.length !== 5) return false;
     const seen = new Set<string>(); let total = 0;
     for (const file of r.files) {

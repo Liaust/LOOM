@@ -2,6 +2,9 @@ import type { MetaEntry } from "@vrtmrz/livesync-commonlib/compat/common/types";
 import type { LoomIntentHooks } from "@vrtmrz/livesync-commonlib/compat/serviceModules/ServiceFileHandlerBase";
 import { Journal, unfinished } from "./journal";
 import { checkResolutionText, inspectConflict, type ConflictReview } from "./conflicts";
+import { SourceLayouts } from "./layout";
+import type { CreateRecoveryReview } from "./native-target";
+import { NotesStatus, type StatusPageOptions } from "./status";
 import {
     MAX_BYTES,
     digest,
@@ -29,6 +32,7 @@ export interface ClientIO {
     directoryExists?(path: string): Promise<boolean>;
     reflectDirectory?(binding: Binding): Promise<void>;
     removeNote?(path: string): Promise<void>;
+    relocate?(previous: Binding, binding: Binding): Promise<void>;
 }
 type Cursor = { binding: Binding; path: string; predecessor?: string; absent?: boolean };
 type Event = {
@@ -38,10 +42,12 @@ type Event = {
     folder?: boolean;
 };
 export class IntentClient implements LoomIntentHooks {
+    readonly layouts = new SourceLayouts(this);
     readonly ready: Promise<void>;
     private cursors = new Map<string, Cursor>();
     private admissions = Promise.resolve();
     private started = false;
+    private readonly status = new NotesStatus();
     private indexedCandidates?: Record<string, Binding>;
     private candidatesByPath = new Map<string, Binding[]>();
     private pathCandidates(path: string): Binding[] {
@@ -64,6 +70,8 @@ export class IntentClient implements LoomIntentHooks {
     stopped = false;
     stopNative: () => Promise<void> = async () => { this.stopped = true; };
     onPublish: (id?: string) => Promise<void> = async () => {};
+    inspectCreateRecovery: (id: string) => Promise<CreateRecoveryReview> = async () => { throw Error("Native recovery is unavailable."); };
+    recoverCreate: (review: CreateRecoveryReview) => Promise<void> = async () => { throw Error("Native recovery is unavailable."); };
     onAck: (record: Extract<Control, { kind: "ack" }>) => Promise<void> = async () => {};
     onControl: (record: Control) => Promise<void> = async () => {};
     onReflect: (path: string) => void = path => {
@@ -88,6 +96,9 @@ export class IntentClient implements LoomIntentHooks {
         }
     }
     async reflectPath(path: string, retry = false) {
+        await this.ready;
+        await this.settled();
+        await this.layouts.resume(path, retry);
         if (retry) this.parked.delete(path);
         for (const b of this.pathCandidates(path)) await this.reflectCandidate(b);
     }
@@ -133,6 +144,7 @@ export class IntentClient implements LoomIntentHooks {
         this.started = true;
         // A retained reflection marker authorises only that exact revision/hash.
         for (const b of Object.values(this.journal.state.reflecting)) {
+            if (Object.values(this.journal.state.layouts ?? {}).some(r => r.state === "moving" && r.control.binding.id === b.id)) continue;
             if (!await this.referenceAllowed(b.path)) continue;
             const text = await this.readBinding(b);
             if (text !== null && (await digest(text)) === b.sha256) await this.install(b);
@@ -237,6 +249,11 @@ export class IntentClient implements LoomIntentHooks {
     capture(event: Event): string | undefined {
         if (this.stopped) return;
         if (reserved(event.path) || (event.oldPath && reserved(event.oldPath))) return;
+        const moving = this.layouts.active;
+        if (moving && (event.kind === "rename" && event.oldPath === moving.previous.path && event.path === moving.binding.path ||
+            event.kind === "delete" && (event.path === moving.previous.path || event.folder &&
+                event.path !== "Projects" && moving.previous.path.startsWith(event.path + "/")) ||
+            event.kind === "create" && event.folder && moving.binding.path.startsWith(event.path + "/"))) return;
         this.parked.delete(event.path);
         if (event.oldPath) this.parked.delete(event.oldPath);
         if (!this.started) {
@@ -561,7 +578,9 @@ export class IntentClient implements LoomIntentHooks {
     }
     async ingest(record: Control) {
         await this.ready;
-        if (record.kind === "scope") {
+        if (record.kind === "layout") {
+            await this.layouts.ingest(record);
+        } else if (record.kind === "scope") {
             const key = record.workspace + "/" + record.collection;
             const previous = this.journal.state.scopes?.[key];
             if (previous && previous.sourceSequence >= record.sourceSequence) return;
@@ -589,6 +608,16 @@ export class IntentClient implements LoomIntentHooks {
     async reflectCandidate(b: Binding) {
         if (this.stopped) return;
         await this.ready;
+        if (this.journal.state.bindings[b.path]?.id === b.id &&
+            this.journal.state.holds[b.path] !== "native_conflict_requires_resolution") return;
+        if (this.layouts.suppress(b)) return;
+        if (referencePath(b.path) && !await this.referenceAllowed(b.path, b.nativeRevision)) {
+            await this.journal.update(s => {
+                if (["layout_reference_excluded", "layout_waiting_for_control"].includes(s.holds[b.path])) delete s.holds[b.path];
+            }, s => !["layout_reference_excluded", "layout_waiting_for_control"].includes(s.holds[b.path]));
+            return;
+        }
+        if (this.layouts.waiting(b)) return this.hold(b.path, "layout_waiting_for_control");
         if (this.parked.get(b.path) === b.id) return;
         if (this.pending(b.path)) return;
         if (b.entryKind === "directory") {
@@ -675,6 +704,7 @@ export class IntentClient implements LoomIntentHooks {
         }
         const b = candidates[0],
             current = this.journal.state.bindings[path];
+        if (this.layouts.suppress(b) || this.layoutTarget !== b.id && this.layouts.waiting(b)) return true;
         if (this.parked.get(path) === b.id) return true;
         if (current && newerSource(current, b)) return true;
         if (
@@ -766,10 +796,27 @@ export class IntentClient implements LoomIntentHooks {
             delete s.holds[b.path];
             delete s.resolutionDisplays?.[b.path];
         });
+        for (const [path, cursor] of this.cursors)
+            if (path !== b.path && cursor.binding.fileId === b.fileId && cursor.binding.workspace === b.workspace &&
+                cursor.binding.collection === b.collection) this.cursors.delete(path);
         if (b.deleted) this.cursors.delete(b.path);
         else this.cursors.set(b.path, { binding: b, path: b.path });
         this.io.changed();
     }
+    async reflectLayoutTarget(b: Binding) {
+        // Only the layout owner may bypass cross-path admission for a device
+        // that has never materialized the previous path.
+        this.layoutTarget = b.id;
+        try {
+            if (b.entryKind === "directory") {
+                if (!this.io.reflectDirectory) return;
+                await this.io.reflectDirectory(b);
+                await this.install(b);
+            } else await this.io.reflect(b);
+        }
+        finally { this.layoutTarget = undefined; }
+    }
+    private layoutTarget?: string;
     // Applied foreign path receipts retire only the exact locally held source
     // base. A later device edit is never a reason to erase its old pathname.
     async reflectPathChanges() {
@@ -799,6 +846,22 @@ export class IntentClient implements LoomIntentHooks {
                 (s.pathChanges??={})[i.id]=true; });
             this.cursors.delete(i.path);
         }
+    }
+    summary() {
+        return this.status.summary(this.started ? this.journal.state : undefined, {
+            starting: !this.started, failure: this.journal.failure, checkpointFailure: this.journal.checkpointFailure,
+        });
+    }
+    statusDetails(options: StatusPageOptions = {}) {
+        return this.status.overview(this.started ? this.journal.state : undefined, options, {
+            starting: !this.started, failure: this.journal.failure, checkpointFailure: this.journal.checkpointFailure,
+        });
+    }
+    statusItem(id: string, options: StatusPageOptions = {}) {
+        return this.status.item(this.started ? this.journal.state : undefined, id, options);
+    }
+    statusOperation(id: string) {
+        return this.status.operation(this.started ? this.journal.state : undefined, id);
     }
     details() {
         if (this.journal.failure) return "LOOM held: " + this.journal.failure;

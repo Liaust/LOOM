@@ -5,9 +5,11 @@ import { ControlTransport } from "./control";
 import { IntentClient } from "./client";
 import { encode, digest, pair, validate, type Ack, type Publication, type Control } from "./protocol";
 import { unfinished, type Operation } from "./journal";
+import type { CreateRecoveryReview, NativeTarget } from "./native-target";
 export interface PublicationIO {
     encrypted(): boolean;
     locked(paths: string[], run: () => Promise<boolean>): Promise<boolean>;
+    target?(path: string): Promise<NativeTarget>;
 }
 export class Publisher {
     private running?: Promise<void>;
@@ -28,6 +30,8 @@ export class Publisher {
         client.onPublish = id => this.pump(id);
         client.onAck = (ack) => this.acknowledge(ack);
         client.onControl = record => this.controlArrived(record);
+        client.inspectCreateRecovery = id => this.inspectRecovery(id);
+        client.recoverCreate = review => this.recover(review);
     }
     pump(id?: string): Promise<void> {
         if (this.client.stopped) return Promise.resolve();
@@ -54,10 +58,56 @@ export class Publisher {
         const index = this.operationIndex.get(id);
         return index === undefined ? undefined! : operations[index];
     }
-    get needsRetry() { return [...this.active].some(id => {
+    private runnable(op: Operation | undefined) {
+        if (!op || !unfinished(op) || ["held", "conflict", "uploaded"].includes(op.state)) return false;
+        const pred = op.intent.predecessor ? this.get(op.intent.predecessor) : undefined;
+        if (op.intent.predecessor && (!pred?.publication || ["held", "conflict"].includes(pred.state))) return false;
+        const seen = new Set<string>();
+        let ancestor = pred;
+        while (ancestor) {
+            if (seen.has(ancestor.intent.id)) return false;
+            seen.add(ancestor.intent.id);
+            if (ancestor.nativeRecovery && ancestor.state !== "applied") return false;
+            ancestor = ancestor.intent.predecessor ? this.get(ancestor.intent.predecessor) : undefined;
+        }
+        return !op.intent.dependencies?.some(id => this.get(id)?.state !== "applied") &&
+            !this.client.journal.state.operations.some(attempt => unfinished(attempt) &&
+                !attempt.ack && attempt.resolution?.covered.includes(op.intent.id));
+    }
+    get needsRetry() { this.get(""); return [...this.active].some(id => this.runnable(this.get(id))); }
+    private async target(path: string): Promise<NativeTarget> {
+        if (this.io.target) return this.io.target(path);
+        return { kind: await this.db.fetchEntryMeta(path as FilePathWithPrefix, undefined, true) ? "occupied" : "absent", token: "" };
+    }
+    private async inspectRecovery(id: string): Promise<CreateRecoveryReview> {
+        await this.client.ready; await this.client.settled();
         const op = this.get(id);
-        return op && unfinished(op) && !["held", "conflict", "uploaded"].includes(op.state);
-    }); }
+        if (!op || op.state !== "held" || op.reason !== "native_target_exists" || op.intent.operation !== "create" ||
+            op.intent.entryKind || op.intent.predecessor || op.intent.base || op.ack || op.publication || op.writing ||
+            op.revisions.length || await digest(op.payload) !== op.intent.sha256)
+            throw Error("This operation needs a different recovery; no edits were changed.");
+        const target = await this.target(op.intent.path);
+        if (!["deleted", "absent"].includes(target.kind)) throw Error("The destination has live or unknown revisions; recreation is refused.");
+        const chain = new Set([id]);
+        const descendants: Operation[] = [];
+        for (const child of this.client.journal.state.operations) if (child.intent.predecessor && chain.has(child.intent.predecessor)) {
+            chain.add(child.intent.id); descendants.push(child);
+        }
+        return { intentId: id, path: op.intent.path, descendants: descendants.length,
+            token: await digest(JSON.stringify([encode(op.intent), op.payload, target.token,
+                descendants.map(child => [encode(child.intent), child.payload, child.state, child.publication, child.ack])])) };
+    }
+    private async recover(review: CreateRecoveryReview) {
+        const acquired = await this.io.locked([review.path], async () => {
+            const current = await this.inspectRecovery(review.intentId);
+            if (JSON.stringify(current) !== JSON.stringify(review)) throw Error("Recovery evidence changed; inspect it again.");
+            await this.update(review.intentId, op => { op.state = "queued"; delete op.reason; op.nativeRecovery = true; });
+            this.active.add(review.intentId);
+            return true;
+        });
+        if (!acquired) throw Error("This note is busy; recovery was not applied.");
+        await this.pump(review.intentId);
+    }
     private indexAck(ack: Ack) {
         const ids = this.ackIndex.get(ack.intentId) ?? new Set<string>();
         ids.add(ack.id); this.ackIndex.set(ack.intentId, ids);
@@ -66,6 +116,7 @@ export class Publisher {
         const id = record.kind === "publication" ? record.intentId : record.id;
         for (const ack of this.ackIndex.get(id) ?? []) this.pendingAcks.add(ack);
         await this.drainAcks();
+        if (this.requested) void this.pump().catch(() => this.client.io.changed());
     }
     async settled() { await this.running; }
     private async update(id: string, fn: (o: Operation) => void) {
@@ -104,6 +155,7 @@ export class Publisher {
                 });
                 continue;
             }
+            if (!this.runnable(op)) continue;
             const pred = op.intent.predecessor ? this.get(op.intent.predecessor) : undefined;
             if (
                 op.intent.predecessor &&
@@ -165,13 +217,8 @@ export class Publisher {
                                     w.role === "content" &&
                                     (i.operation === "create" || i.operation === "rename")
                                 ) {
-                                    if (
-                                        await this.db.fetchEntryMeta(
-                                            w.path as FilePathWithPrefix,
-                                            undefined,
-                                            true,
-                                        )
-                                    )
+                                    const target = await this.target(w.path);
+                                    if (!["absent", "deleted"].includes(target.kind))
                                         throw new Error("native_target_exists");
                                 }
                                 await this.update(id, (o) => {
@@ -258,6 +305,7 @@ export class Publisher {
         this.indexAck(ack);
         this.pendingAcks.add(ack.id);
         await this.drainAcks();
+        if (this.requested) void this.pump().catch(() => this.client.io.changed());
     }
     async drainAcks(recover = false) {
         if (!this.receiptsSeeded || recover) {
@@ -367,6 +415,7 @@ export class Publisher {
             });
             this.pendingAcks.delete(id);
             this.active.delete(i.id);
+            if (ack.status === "applied") this.requested = true;
             this.client.onReflect(i.target ?? i.path);
             const later = this.client.journal.state.operations.some(
                 (o) => unfinished(o) && o.intent.path === i.path,

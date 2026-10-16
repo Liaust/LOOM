@@ -5,11 +5,22 @@ An independent updater for the LOOM Notes overlay on desktop and iOS. It updates
 bootstrap; subsequent compatible target releases use the reviewed public feed.
 Actual device installation and acceptance are separate from a source build.
 
-The Canvas/directory client uses journal compatibility schema 2. Its additive
-local scope/path-receipt sections require a coordinated closed-app bootstrap
-of updater 0.2.0 and the reviewed client bundle. Updater 0.1.0 intentionally
-does not automatically cross that boundary or downgrade the resulting journal.
+The project-layout client uses journal compatibility schema 3. Its retained
+layout/alias records require a coordinated closed-app bootstrap of updater
+0.3.x and the matching client bundle. Earlier updaters intentionally do not
+cross that boundary or downgrade the resulting journal. The preceding
+Canvas/directory release used schema 2; its records remain readable.
 Existing settings, native database and unacknowledged edits stay in place.
+
+The status command shows the updater version, target compatibility, loaded and
+initialized identity. A successful check with no compatible published release
+is reported separately from an installed current compatible release. It is not
+permission to cross journal generations. Before a closed-app cross-schema
+bootstrap, inspect any `install.json`: resolve unfinished transactions with
+their matching code, preserve completed old-schema recovery records separately,
+and adopt the exact new release manifest. Never delete an unknown transaction
+to bypass startup checks. iOS checks only while Obsidian can execute; suspension
+does not provide background update delivery.
 
 ## What Changes
 

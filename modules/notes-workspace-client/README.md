@@ -17,6 +17,13 @@ There is no vault reset, purge, timestamp winner or automatic AI merge.
 Rename/delete conflicts and reference-only PDF/image edits still need operator
 attention; these controls resolve writable text notes.
 
+The review window also distinguishes a saved creation blocked by a reused native
+filename. Its explicit recovery checks every native leaf and resumes only the
+original unambiguous prepublication intent. Logical deletion can receive a new
+independent root; live/unknown revisions and a write-receipt gap stay refused.
+Old branches and dependent edits remain retained. Main still checks source
+absence and exact ancestry, and dependent recovery edits wait for its receipt.
+
 Agents use the same source-checked workflow:
 
 ```sh
@@ -88,7 +95,9 @@ Goodnotes delivery on the actual Mac.
 
 The adopted Obsidian view is Markdown-first. Exclude the Goodnotes notebook
 collection with the device-local Selector exclusion pattern
-`^Projects/Goodnotes Intake/Notebooks(?:/|$)`. This leaves the project's Markdown
+`^Projects/(?:_Passive/)?Goodnotes\x20Intake/Notebooks(?:/|$)`. Native selection
+normalizes literal spaces in regex settings, so preserve the `\x20` encoding.
+This leaves the project's Markdown
 Notes folder visible and does not disable Main's intake, search, indexing or
 backup configuration. Ordinary note attachments remain eligible within the
 device limit. Apply the exclusion separately on each client; it is not a remote
@@ -230,7 +239,7 @@ payload reflection and ignore this subtree, so they can continue ordinary
 Markdown sync until updated. They do not gain Canvas/directory support from
 the Main deployment alone.
 
-The release compatibility identity is journal schema 2. Existing local rows,
+The release compatibility identity is journal schema 3. Existing local rows,
 pending operations and native databases are preserved; the new scope and
 path-receipt maps are additive. Bootstrap the matching updater/client together
 at a closed-application boundary. Older code is not a same-schema rollback.

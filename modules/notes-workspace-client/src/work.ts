@@ -53,7 +53,15 @@ export class PathWork {
     private waiting = new Map<string, Set<string>>();
     private dependencies = new Map<string, Set<string>>();
     add(path: string) { this.dirty.add(path); }
-    take() { const paths = [...this.dirty]; this.dirty.clear(); return paths; }
+    take(limit = Infinity) {
+        const paths: string[] = [];
+        for (const path of this.dirty) {
+            if (paths.length >= limit) break;
+            paths.push(path);
+            this.dirty.delete(path);
+        }
+        return paths;
+    }
     wait(path: string, chunks: string[]) {
         this.clear(path);
         this.waiting.set(path, new Set(chunks));
@@ -76,6 +84,14 @@ export class PathWork {
         if (path) this.add(path);
     }
     interested(id: string) { return this.dependencies.has(id); }
+    isDirty(path: string) { return this.dirty.has(path); }
+    isWaiting(path: string) { return this.waiting.has(path); }
+    restart() {
+        this.retry();
+        this.waiting.clear();
+        this.dependencies.clear();
+    }
     retry() { for (const p of this.waiting.keys()) this.add(p); }
     get pending() { return this.waiting.size > 0; }
+    get runnable() { return this.dirty.size > 0; }
 }

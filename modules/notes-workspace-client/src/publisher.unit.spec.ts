@@ -6,9 +6,10 @@ import { Journal, type State } from "./journal";
 import { IntentClient } from "./client";
 import { Publisher } from "./publisher";
 import { ControlTransport } from "./control";
-import { digest, encode, type Binding, type Ack } from "./protocol";
+import { controlPath, digest, encode, type Binding, type Ack, type Control, type Intent, type Publication } from "./protocol";
 import { createConflictResolutionOperations } from "../serviceFeatures/conflictResolution/operations";
 import { inspectConflict, convergeNative, conflictPaths } from "./conflicts";
+import { classifyNativeTarget, type NativeLeaf } from "./native-target";
 const file = (path: string, text: string) =>
     ({
         path,
@@ -66,10 +67,138 @@ async function fixture() {
         new Publisher(c, d.access, {
             encrypted: () => true,
             locked: (paths, run) => d.handler.loomPublish(paths as FilePathWithPrefix[], run),
+            async target(path) {
+                let rows;
+                try { rows = await d.db.get(path, { open_revs: "all" }); }
+                catch (error) { if ((error as { status?: number }).status === 404) return classifyNativeTarget(path, []); throw error; }
+                const leaves: NativeLeaf[] = [];
+                for (const row of rows) {
+                    if (!("ok" in row)) { leaves.push({ revision: "" }); continue; }
+                    const raw = row.ok;
+                    if (raw._deleted) { leaves.push({ revision: raw._rev!, branchDeleted: true }); continue; }
+                    const meta = await d.access.fetchEntryMeta(path as FilePathWithPrefix, raw._rev, true);
+                    leaves.push(meta ? { revision: raw._rev!, path: String(meta.path), type: meta.type,
+                        deleted: meta.deleted, branchDeleted: meta._deleted } : { revision: raw._rev! });
+                }
+                return classifyNativeTarget(path, leaves);
+            },
         });
     return { d, b, c, j, files, publisher, persistence };
 }
 describe("native exact-base publication and source acknowledgement", () => {
+    it("recovers the exact held creation and wakes descendants only after its source receipt", async () => {
+        const f = await fixture();
+        try {
+            const path = "Notes/reused.md" as FilePathWithPrefix;
+            const old = await f.d.access.storeIndependentRevision(file(path, "old"), true);
+            const tombstone = await f.d.access.storeDeletionWithBaseRevision(path, old as string);
+            f.files.set(path, ""); f.c.capture({ kind: "create", path }); await f.c.settled();
+            await f.j.update(s => { s.operations[0].state = "held"; s.operations[0].reason = "native_target_exists"; });
+            for (const text of ["second", "latest"]) {
+                f.files.set(path, text); f.c.capture({ kind: "edit", path }); await f.c.settled();
+            }
+            const intents = f.j.state.operations.map(op => encode(op.intent));
+            const p = f.publisher(); await p.pump();
+            expect(p.needsRetry).toBe(false);
+            const review = await f.c.inspectCreateRecovery(f.j.state.operations[0].intent.id);
+            expect(review.descendants).toBe(2);
+            await f.c.recoverCreate(review);
+            expect(f.j.state.operations.map(op => encode(op.intent))).toEqual(intents);
+            expect(f.j.state.operations.map(op => op.state)).toEqual(["uploaded", "queued", "queued"]);
+            expect(p.needsRetry).toBe(false);
+            const root = f.j.state.operations[0];
+            expect(root.revisions[0].revision).toMatch(/^1-/);
+            expect(await f.d.db.get(path, { rev: tombstone as string })).toMatchObject({ deleted: true });
+            await p.acknowledge({ version: 1, kind: "ack", id: "recreated_ack", intentId: root.intent.id,
+                publicationId: root.publication!.id, intentDigest: root.publication!.intentDigest,
+                status: "applied", reason: "source_applied", binding: { ...f.b, id: "recreated_binding", path,
+                    fileId: root.intent.fileId, nativeRevision: root.revisions[0].revision,
+                    sha256: root.intent.sha256, sourceBase: "recreated_source" } });
+            await p.settled();
+            expect(f.j.state.operations.map(op => op.state)).toEqual(["applied", "uploaded", "uploaded"]);
+            expect(f.j.state.operations.map(op => op.payload)).toEqual(["", "second", "latest"]);
+        } finally { await f.d.db.destroy(); }
+    });
+    it("refuses held-create recovery with ambiguous prior writing or changed native evidence", async () => {
+        const f = await fixture();
+        try {
+            const path = "Notes/new.md" as FilePathWithPrefix;
+            f.files.set(path, "draft"); f.c.capture({ kind: "create", path }); await f.c.settled();
+            await f.j.update(s => { s.operations[0].state = "held"; s.operations[0].reason = "native_target_exists"; });
+            f.publisher(); const id = f.j.state.operations[0].intent.id;
+            const review = await f.c.inspectCreateRecovery(id);
+            await f.d.access.storeIndependentRevision(file(path, "someone else's native draft"), true);
+            await expect(f.c.recoverCreate(review)).rejects.toThrow("destination");
+            expect(f.j.state.operations[0].state).toBe("held");
+            await f.j.update(s => { s.operations[0].writing = path; });
+            await expect(f.c.inspectCreateRecovery(id)).rejects.toThrow("different recovery");
+        } finally { await f.d.db.destroy(); }
+    });
+    it.each(["md", "canvas"])("reflects native %s creates and accepted renames after grouping in the layout_ namespace", async extension => {
+        const f = await fixture();
+        try {
+            f.c.onReflect = vi.fn();
+            const transport = new ControlTransport(f.d.access);
+            const receive = async (record: Control) => f.c.ingest(await transport.get(controlPath(record), await transport.put(record)));
+            const root = "Projects/_Passive/Test";
+            const seedPath = root + "/a.md";
+            const seedRevision = await f.d.access.storeIndependentRevision(file(seedPath, "A"), true);
+            if (!seedRevision) throw Error("moved_seed");
+            const previous = { ...f.b, sourceSequence: 1 };
+            const moved = { ...previous, id: "layout_moved", path: seedPath, collectionRoot: root,
+                nativeRevision: seedRevision, sourceSequence: 2 };
+            await f.c.install(previous);
+            f.c.io.relocate = async (a, b) => { f.files.set(b.path, f.files.get(a.path)!); f.files.delete(a.path); };
+            await receive({ version: 1, kind: "layout", id: "layout_move", previous, binding: moved });
+            await f.c.layouts.resume();
+            await receive({ version: 1, kind: "scope", id: "scope", workspace: moved.workspace, collection: moved.collection,
+                generation: moved.generation, collectionRoot: root, sourceSequence: 2, writable: true });
+            const p = f.publisher();
+            f.c.io.reflect = async binding => {
+                const entry = await f.d.access.fetchEntry(binding.path as FilePathWithPrefix, binding.nativeRevision, false, true, true);
+                const meta = await f.d.access.fetchEntryMeta(binding.path as FilePathWithPrefix, binding.nativeRevision, true);
+                if (!entry || !meta) throw Error("native_reflection_missing");
+                expect(await f.c.beforeReflect(meta)).toBeUndefined();
+                f.files.set(binding.path, String(readContent(entry)));
+                await f.c.afterReflect(meta, true);
+            };
+            f.c.io.removeNote = async path => { f.files.delete(path); };
+            const text = extension === "canvas" ? '{"nodes":[],"edges":[]}\r\n' : "created in grouped scope\n";
+            const createdPath = root + "/created." + extension;
+            const revision = await f.d.access.storeIndependentRevision(file(createdPath, text), true);
+            if (!revision) throw Error("native_create");
+            const created = { ...moved, id: "layout_created", fileId: "created", path: createdPath, sourceBase: "created_base",
+                nativeRevision: revision, sha256: await digest(text), sourceSequence: 3 };
+            await receive(created); await f.c.reflectPath(created.path);
+            expect(f.files.get(created.path)).toBe(text); expect(f.j.state.bindings[created.path]).toEqual(created);
+            const rename = async (base: Binding, target: string, content: string, sequence: number) => {
+                const nextRevision = await f.d.access.storeIndependentRevision(file(target, content), true);
+                const deletion = await f.d.access.storeDeletionWithBaseRevision(base.path as FilePathWithPrefix, base.nativeRevision);
+                if (!nextRevision || !deletion) throw Error("native_rename");
+                const intent: Intent = { version: 1, kind: "intent", id: "rename_" + sequence, device: "source_device", operation: "rename",
+                    workspace: base.workspace, collection: base.collection, generation: base.generation, fileId: base.fileId,
+                    base, path: base.path, target, sha256: base.sha256, length: new TextEncoder().encode(content).length };
+                const publication: Publication = { version: 1, kind: "publication", id: "publication_" + sequence,
+                    intentId: intent.id, intentDigest: await digest(encode(intent)), revisions: [
+                        { path: base.path, revision: deletion, role: "deletion" }, { path: target, revision: nextRevision, role: "content" }] };
+                const binding = { ...base, id: "layout_renamed_" + sequence, path: target, nativeRevision: nextRevision,
+                    sourceBase: "renamed_base_" + sequence, sourceSequence: sequence };
+                await receive(intent); await receive(publication);
+                await receive({ version: 1, kind: "ack", id: "ack_" + sequence, intentId: intent.id,
+                    publicationId: publication.id, intentDigest: publication.intentDigest, status: "applied", reason: "source_applied", binding });
+                await receive(binding); await f.c.reflectPath(binding.path); await p.drainAcks();
+                expect(f.files.get(target)).toBe(content); expect(f.files.has(base.path)).toBe(false);
+                expect(f.j.state.bindings[target]).toEqual(binding);
+            };
+            await rename(created, root + "/renamed." + extension, text, 4);
+            // This identity also retains the pre-grouping, different-root alias.
+            await rename(moved, root + "/renamed-seed.md", "A", 5);
+            expect(f.j.state.candidates[previous.id]).toEqual(previous);
+            expect(f.c.layouts.suppress(previous)).toBe(true);
+            expect(Object.keys(f.j.state.layouts!)).toHaveLength(1);
+            expect(f.j.state.operations).toHaveLength(0); expect(f.j.state.holds).toEqual({});
+        } finally { await f.d.db.destroy(); }
+    });
     it("publishes a directory through encrypted control records without a visible placeholder", async()=>{
         const f=await fixture();
         try {

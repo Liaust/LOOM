@@ -14,7 +14,7 @@ FILES = ("main.js", "manifest.json", "styles.css", "loom-client-build.json", "lo
 MAX_FILE = 16 * 1024 * 1024
 MAX_TOTAL = 32 * 1024 * 1024
 IDENTITY_KEYS = {"schema", "component", "adapter", "pluginId", "releaseId", "sequence", "version", "channel", "sourceCommit", "upstream", "compatibility"}
-COMPATIBILITY = {"minAppVersion": "1.7.2", "platforms": ["desktop", "mobile"], "notesProtocol": 1, "handoffAPI": 1, "journalSchema": 2, "activation": "reload", "rollback": "same-schema"}
+COMPATIBILITY = {"minAppVersion": "1.7.2", "platforms": ["desktop", "mobile"], "notesProtocol": 1, "handoffAPI": 1, "journalSchema": 3, "activation": "reload", "rollback": "same-schema"}
 
 
 def json_bytes(value):

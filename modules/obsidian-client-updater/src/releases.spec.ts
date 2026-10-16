@@ -26,7 +26,7 @@ describe("closed release contract", () => {
         for (const mutate of [
             (r: any) => r.files[0].name = "../data.json",
             (r: any) => r.files[0].name = r.files[1].name,
-            (r: any) => r.compatibility.journalSchema = 3,
+            (r: any) => r.compatibility.journalSchema = 4,
             (r: any) => r.pluginId = "some-other-plugin",
             (r: any) => r.releaseId = "v0.9.0",
             (r: any) => r.files[0].bytes = 17 * 1024 * 1024,
@@ -79,5 +79,14 @@ describe("closed release contract", () => {
             encode(releases.map(r=>({draft:false,prerelease:false,tag_name:r.releaseId,assets:[...FILES,"release.json","LICENSE.upstream"].map(name=>({name,size:123,browser_download_url:`https://github.com/Liaust/LOOM/releases/download/${r.releaseId}/${name}`}))}))):
             encode(url.includes(compatible.releaseId)?compatible:incompatible)}),"1.14.4");
         expect((await feed.latest())?.release.releaseId).toBe("client-notes-0.2.1");
+    });
+    it("returns no compatible release when the feed contains only older journal schemas", async () => {
+        const bundle = await fixture();
+        const old = { ...bundle.release, compatibility: { ...COMPATIBILITY, journalSchema: 2 } };
+        const feed = new ReleaseFeed(async url => ({ status: 200, bytes: url.startsWith("https://api.github.com/") ?
+            encode([{ draft: false, prerelease: false, tag_name: old.releaseId,
+                assets: [...FILES, "release.json", "LICENSE.upstream"].map(name => ({ name, size: 123,
+                    browser_download_url: `https://github.com/Liaust/LOOM/releases/download/${old.releaseId}/${name}` })) }]) : encode(old) }), "1.14.4");
+        expect(await feed.latest()).toBeNull();
     });
 });

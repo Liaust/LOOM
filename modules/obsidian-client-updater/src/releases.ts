@@ -6,7 +6,7 @@ export const MAX_FILE = 16 * 1024 * 1024;
 export const MAX_TOTAL = 32 * 1024 * 1024;
 export const MAX_MANIFEST = 65536;
 export const COMPATIBILITY = { minAppVersion: "1.7.2", platforms: ["desktop", "mobile"], notesProtocol: 1,
-    handoffAPI: 1, journalSchema: 2, activation: "reload", rollback: "same-schema" };
+    handoffAPI: 1, journalSchema: 3, activation: "reload", rollback: "same-schema" };
 export interface Identity {
     schema: "loom.client-bundle.v1"; component: "notes-workspace"; adapter: "obsidian-plugin";
     pluginId: typeof TARGET; releaseId: string; sequence: number; version: string; channel: "stable";

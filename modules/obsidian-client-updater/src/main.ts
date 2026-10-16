@@ -82,6 +82,7 @@ export default class ClientUpdater extends Plugin {
             const installed = await this.installer.installed(), staged = await this.installer.staged();
             const tx = await this.installer.transaction();
             new Status(this.app, [`Device: ${Platform.isMobile ? "mobile" : "desktop"}`,
+                `Updater: ${this.manifest.version}; target journal compatibility: ${installed.compatibility.journalSchema}`,
                 `Installed: ${installed.releaseId}`, `Loaded: ${this.current()?.identity.releaseId ?? "not observed"}`,
                 `Initialized: ${this.current()?.ready === true ? "yes" : "no"}`,
                 `Staged: ${staged?.releaseId ?? "none"}`, `State: ${tx?.phase ?? this.settings.lastState}`,
@@ -138,10 +139,17 @@ export default class ClientUpdater extends Plugin {
             const installed = await this.installer.installed();
             try {
                 const candidate = await this.feed.latest();
-                if (!candidate || candidate.release.sequence <= installed.sequence) {
+                if (!candidate) {
+                    await this.state("no-compatible-release");
+                    if (manual) new Notice(`No compatible published Notes client was found for journal schema ${installed.compatibility.journalSchema}. ` +
+                        "Installed code and pending edits are unchanged. A different schema needs a coordinated client/updater bootstrap.");
+                    return;
+                }
+                if (candidate.release.sequence <= installed.sequence) {
                     if (candidate?.release.sequence === installed.sequence && canonical(candidate.release) !== canonical(installed))
                         fail("release_sequence_conflict");
-                    if (manual) new Notice("No newer compatible LOOM Notes client release.");
+                    await this.state("current-compatible-release");
+                    if (manual) new Notice(`Installed ${installed.releaseId}; newest compatible published release: ${candidate.release.releaseId}.`);
                     return;
                 }
                 const staged = await this.installer.staged();

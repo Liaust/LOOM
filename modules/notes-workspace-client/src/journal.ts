@@ -1,6 +1,9 @@
 import { openDB } from "idb";
 import { draft } from "./draft";
-import type { Ack, Binding, Intent, Publication, CollectionScope } from "./protocol";
+import type { Ack, Binding, Intent, Publication, CollectionScope, Layout } from "./protocol";
+import { NATIVE_REPLAY_ROWS, replayKey, type ReplayPersistence } from "./native-replay";
+export type LayoutRecord = { control: Layout; state: "pending" | "moving" | "applied" | "superseded";
+    disposition?: "excluded"; reason?: string; supersededBy?: string };
 export type Operation = {
     intent: Intent;
     payload: string;
@@ -10,6 +13,7 @@ export type Operation = {
     publication?: Publication;
     ack?: Ack;
     writing?: string;
+    nativeRecovery?: boolean;
     resolvedBy?: string;
     resolution?: {
         localHash: string;
@@ -32,6 +36,7 @@ export type State = {
     resolutionDisplays?: Record<string, { binding: string; localHash: string }>;
     scopes?: Record<string, CollectionScope>;
     pathChanges?: Record<string, boolean>;
+    layouts?: Record<string, LayoutRecord>;
 };
 export const unfinished = (o: Operation) => o.state !== "applied" && !o.resolvedBy;
 export interface Persistence {
@@ -42,7 +47,7 @@ export interface Persistence {
     checkpointFailure?: string;
 }
 export type Change = { section: string; key: string; value?: unknown };
-const maps = ["bindings", "candidates", "reflecting", "acks", "holds", "retiredLeaves", "intents", "publications", "resolutionDisplays", "scopes", "pathChanges"] as const;
+const maps = ["bindings", "candidates", "reflecting", "acks", "holds", "retiredLeaves", "intents", "publications", "resolutionDisplays", "scopes", "pathChanges", "layouts"] as const;
 const rows = (state: State): Change[] => [
     ...maps.flatMap(section => Object.entries(state[section] ?? {}).map(([key, value]) => ({ section, key, value }))),
     ...state.operations.map((value, index) => ({ section: "operations", key: String(index), value })),
@@ -123,13 +128,55 @@ export function recoveryPersistence(inner: Persistence, vaultId: string,
     };
     return result;
 }
-export function indexedDBPersistence(vaultId: string): Persistence {
+function journalDatabase(vaultId: string) {
     // Deliberately outside LiveSync's rebuild/reset database namespace.
-    const db = openDB("loom-client-intent-v1:" + vaultId, 1, {
+    return openDB("loom-client-intent-v1:" + vaultId, 1, {
         upgrade(db) {
             db.createObjectStore("journal");
         },
     });
+}
+export function indexedDBReplayPersistence(vaultId: string): ReplayPersistence {
+    const db = journalDatabase(vaultId);
+    const prefix = "native-replay-v1";
+    const headerKey = (reader: string) => [prefix, reader, "header"];
+    const rowKey = (reader: string, key: string) => [prefix, reader, "row", key];
+    const range = (reader: string) => IDBKeyRange.bound([prefix, reader], [prefix, reader, []]);
+    return {
+        async load(reader) {
+            const tx = (await db).transaction("journal", "readonly");
+            const header = await tx.store.get(headerKey(reader));
+            const rows: { key: string; value: unknown }[] = [];
+            let cursor = await tx.store.openCursor(range(reader));
+            while (cursor) {
+                if (Array.isArray(cursor.key) && cursor.key[2] === "row") {
+                    rows.push({ key: cursor.key.length === 4 && typeof cursor.key[3] === "string" ? cursor.key[3] : "", value: cursor.value });
+                    if (rows.length > NATIVE_REPLAY_ROWS) break; // Enough to invalidate an oversized cache.
+                }
+                cursor = await cursor.continue();
+            }
+            await tx.done;
+            return { header, rows };
+        },
+        async reset(reader, header) {
+            const tx = (await db).transaction("journal", "readwrite", { durability: "strict" });
+            await tx.store.delete(range(reader));
+            await tx.store.put(header, headerKey(reader));
+            await tx.done;
+        },
+        async commit(reader, header, put, remove) {
+            const tx = (await db).transaction("journal", "readwrite", { durability: "strict" });
+            await Promise.all([
+                ...remove.map(key => tx.store.delete(rowKey(reader, key))),
+                ...put.map(row => tx.store.put(row, rowKey(reader, replayKey(row)))),
+                tx.store.put(header, headerKey(reader)),
+            ]);
+            await tx.done;
+        },
+    };
+}
+export function indexedDBPersistence(vaultId: string): Persistence {
+    const db = journalDatabase(vaultId);
     return {
         async load() {
             const tx = (await db).transaction("journal", "readonly");

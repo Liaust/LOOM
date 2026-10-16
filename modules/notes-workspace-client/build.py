@@ -25,12 +25,12 @@ if args.sequence:
 if os.environ.get('PATHS_TEST_INSTALL') or any(root.glob('.env*')):
     sys.exit('Refusing install environment or dotenv files')
 subprocess.run([sys.executable,str(here/'apply.py'),str(root)],check=True)
-release={'schema':'loom.client-bundle.v1','component':'notes-workspace','adapter':'obsidian-plugin','pluginId':'obsidian-livesync','releaseId':'client-notes-'+args.bundle_version,'sequence':args.sequence,'version':args.bundle_version,'channel':'stable' if args.sequence else 'development','sourceCommit':source,'upstream':{'revision':'7b3b6ff854f2ff10452be3eaf8e0cd76ac65ac2b','version':'1.0.32'},'compatibility':{'minAppVersion':'1.7.2','platforms':['desktop','mobile'],'notesProtocol':1,'handoffAPI':1,'journalSchema':2,'activation':'reload','rollback':'same-schema'}}
+release={'schema':'loom.client-bundle.v1','component':'notes-workspace','adapter':'obsidian-plugin','pluginId':'obsidian-livesync','releaseId':'client-notes-'+args.bundle_version,'sequence':args.sequence,'version':args.bundle_version,'channel':'stable' if args.sequence else 'development','sourceCommit':source,'upstream':{'revision':'7b3b6ff854f2ff10452be3eaf8e0cd76ac65ac2b','version':'1.0.32'},'compatibility':{'minAppVersion':'1.7.2','platforms':['desktop','mobile'],'notesProtocol':1,'handoffAPI':1,'journalSchema':3,'activation':'reload','rollback':'same-schema'}}
 release_json=json.dumps(release,indent=2)+'\n'
 (root/'loom-release.json').write_text(release_json)
 (root/'src/loomClient/release.json').write_text(release_json)
 subprocess.run(['npm','run','tsc-check'],cwd=root,check=True)
-subprocess.run(['npm','run','test:unit','--','src/loomClient/control.unit.spec.ts','src/loomClient/client.unit.spec.ts','src/loomClient/publisher.unit.spec.ts','src/loomClient/work.unit.spec.ts','src/loomClient/journal.unit.spec.ts','src/loomClient/namespace.unit.spec.ts','src/loomClient/update.unit.spec.ts'],cwd=root,check=True)
+subprocess.run(['npm','run','test:unit','--','src/loomClient/control.unit.spec.ts','src/loomClient/client.unit.spec.ts','src/loomClient/publisher.unit.spec.ts','src/loomClient/work.unit.spec.ts','src/loomClient/journal.unit.spec.ts','src/loomClient/layout.unit.spec.ts','src/loomClient/namespace.unit.spec.ts','src/loomClient/update.unit.spec.ts','src/loomClient/native-target.unit.spec.ts','src/loomClient/native-replay.unit.spec.ts','src/loomClient/status.unit.spec.ts'],cwd=root,check=True)
 subprocess.run(['npx','--no-install','vite','build','--mode','original'],cwd=root,check=True)
 files=['main.js','manifest.json','styles.css','loom-release.json']
 receipt={'upstream':'7b3b6ff854f2ff10452be3eaf8e0cd76ac65ac2b','patchManifestSha256':hashlib.sha256((here/'patch-manifest.json').read_bytes()).hexdigest(),'node':subprocess.check_output(['node','--version'],text=True).strip(),'files':{f:hashlib.sha256((root/f).read_bytes()).hexdigest() for f in files},'release':release,'installed':False}

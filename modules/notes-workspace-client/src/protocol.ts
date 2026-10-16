@@ -1,6 +1,7 @@
 export const VERSION = 1;
 export const PREFIX = "LOOM-Control-v1/";
 export const STRUCTURE_PREFIX = PREFIX + "payload/structure/";
+export const LAYOUT_PREFIX = PREFIX + "payload/layout/";
 export const MAX_BYTES = 8 * 1024 * 1024;
 export const MAX_CONTROL_BYTES = 1024 * 1024;
 export const MAX_REFERENCE_BYTES = 2 * 1024 * 1024 * 1024;
@@ -63,6 +64,18 @@ export type CollectionScope = {
     sourceSequence: number;
     writable: boolean;
 };
+export type Layout = {
+    version: 1;
+    kind: "layout";
+    id: string;
+    previous: Binding;
+    binding: Binding;
+};
+export const sameFile = (a: Binding, b: Binding) => a.workspace === b.workspace &&
+    a.collection === b.collection && a.fileId === b.fileId;
+export const exactBinding = (a: Binding, b: Binding) =>
+    Object.keys(a).length === Object.keys(b).length &&
+    Object.entries(a).every(([key, value]) => b[key as keyof Binding] === value);
 
 export function newerSource(a: Binding, b: Binding): boolean {
     // The source sequence follows the stable file across an explicit server-side
@@ -92,7 +105,7 @@ export type Ack = {
     binding?: Binding;
     resolves?: string[];
 };
-export type Control = Binding | Intent | Publication | Ack | CollectionScope;
+export type Control = Binding | Intent | Publication | Ack | CollectionScope | Layout;
 export const token = (v: unknown): v is string =>
     typeof v === "string" &&
     !["__proto__", "constructor", "prototype"].includes(v) &&
@@ -129,11 +142,12 @@ export function collectionRoot(v: unknown): v is string {
     return typeof v === "string" && relativePath(v + "/placeholder.md");
 }
 export function controlPath(record: Control): string {
-    const prefix = record.kind === "scope" || record.id.startsWith("dir_") || record.id.startsWith("canvas_") ? STRUCTURE_PREFIX : PREFIX;
+    const prefix = record.kind === "layout" || record.kind === "binding" && record.id.startsWith("layout_") ? LAYOUT_PREFIX :
+        record.kind === "scope" || record.id.startsWith("dir_") || record.id.startsWith("canvas_") ? STRUCTURE_PREFIX : PREFIX;
     return `${prefix}${record.kind}/${record.id}.md`;
 }
 export const isControlPath = (path: string) => reserved(path) &&
-    (!path.startsWith(PREFIX + "payload/") || path.startsWith(STRUCTURE_PREFIX));
+    (!path.startsWith(PREFIX + "payload/") || path.startsWith(STRUCTURE_PREFIX) || path.startsWith(LAYOUT_PREFIX));
 export const reserved = (path: string) => path === PREFIX.slice(0, -1) || path.startsWith(PREFIX);
 export async function digest(text: string | Uint8Array<ArrayBuffer>): Promise<string> {
     const bytes = typeof text === "string" ? new TextEncoder().encode(text) : text;
@@ -163,6 +177,21 @@ export function validate(value: unknown): Control {
     if (!object(value) || value.version !== VERSION || !token(value.id)) throw new Error("unknown_protocol");
     const v = value;
     switch (v.kind) {
+        case "layout": {
+            fields(v, ["previous", "binding"]);
+            const a = validate(v.previous), b = validate(v.binding);
+            if (typeof v.id !== "string" || !v.id.startsWith("layout_") || !token(v.id.slice(7)) ||
+                a.kind !== "binding" || b.kind !== "binding" || !sameFile(a, b) ||
+                a.id === b.id || a.collectionRoot === b.collectionRoot ||
+                a.path.slice(a.collectionRoot.length) !== b.path.slice(b.collectionRoot.length) ||
+                a.entryKind !== b.entryKind || a.sha256 !== b.sha256 ||
+                (a.writable && b.writable &&
+                    (a.generation !== b.generation || a.sourceBase !== b.sourceBase || a.writable !== b.writable)) ||
+                a.deleted || b.deleted || (a.previousPath !== undefined && a.entryKind !== "directory") || b.previousPath !== undefined ||
+                !b.sourceSequence || b.sourceSequence <= (a.sourceSequence ?? 0))
+                throw Error("invalid_layout");
+            break;
+        }
         case "scope":
             fields(v, ["workspace", "collection", "generation", "collectionRoot", "sourceSequence", "writable"]);
             if (!["workspace", "collection", "generation"].every(k => token(v[k])) ||

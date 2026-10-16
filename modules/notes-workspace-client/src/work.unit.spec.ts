@@ -2,6 +2,22 @@ import { describe, it, expect, vi } from "vitest";
 import { WakeLoop, PathWork } from "./work";
 
 describe("event-driven client work", () => {
+    it("pages dirty work without losing arrivals and reconstructs dependencies after restart", () => {
+        const work = new PathWork();
+        work.add("a"); work.add("b"); work.add("c");
+        expect(work.take(2)).toEqual(["a", "b"]);
+        expect(work.runnable).toBe(true);
+        work.add("a");
+        expect(work.isDirty("a")).toBe(true);
+        expect(work.take(2)).toEqual(["c", "a"]);
+        work.wait("a", ["old-db-chunk"]);
+        expect(work.isWaiting("a")).toBe(true);
+        work.restart();
+        expect(work.isWaiting("a")).toBe(false);
+        expect(work.interested("old-db-chunk")).toBe(false);
+        expect(work.take()).toEqual(["a"]);
+        expect(work.runnable).toBe(false);
+    });
     it("routes chunk arrivals only to their waiting paths", () => {
         const w = new PathWork();
         w.wait("a", ["chunk-a"]); w.wait("b", ["chunk-b"]);

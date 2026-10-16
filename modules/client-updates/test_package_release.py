@@ -63,7 +63,7 @@ class PackageTests(unittest.TestCase):
             package(self.build, self.root / "out")
 
     def test_unknown_compatibility_and_development_refused(self):
-        self.identity["compatibility"] = {**COMPATIBILITY, "journalSchema": 3}
+        self.identity["compatibility"] = {**COMPATIBILITY, "journalSchema": 4}
         self.receipt()
         with self.assertRaises(ValueError):
             package(self.build, self.root / "out")

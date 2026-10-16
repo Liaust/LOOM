@@ -18,6 +18,32 @@ const base: Binding = {
     sha256: "",
     writable: true,
 };
+describe("client compact status API", () => {
+    it("never calls full diagnostic formatting for summary or paged status", async () => {
+        const f = await fixture();
+        const report = vi.spyOn(f.c, "details").mockImplementation(() => { throw Error("full_report_not_for_status"); });
+        const first = f.c.summary();
+        expect(f.c.summary()).toBe(first);
+        expect(first).toMatchObject({ phase: "ready", unfinished: 0, holds: 0 });
+        await f.c.hold("Notes/no-operation.md", "missing_writable_binding");
+        expect(f.c.summary()).toMatchObject({ holds: 1, captureHolds: 1 });
+        const overview = f.c.statusDetails();
+        expect(overview.groups.total).toBe(1);
+        expect(f.c.statusItem(overview.groups.items[0].id)!.hold?.reason).toBe("missing_writable_binding");
+        expect(report).not.toHaveBeenCalled();
+    });
+    it("exposes retained full operations separately from the bounded overview", async () => {
+        const f = await fixture();
+        f.files.set(f.b.path, "retained edit");
+        f.c.capture({ kind: "edit", path: f.b.path });
+        await f.c.settled();
+        const row = f.c.statusDetails().groups.items[0];
+        expect(f.c.summary()).toMatchObject({ unfinished: 1, pendingPublication: 1 });
+        expect(f.c.statusOperation(row.operationId!)!.payload).toBe("retained edit");
+        expect(f.c.statusItem(row.id)!.operations.total).toBe(1);
+        expect(f.c.details()).toContain("pending source acceptance");
+    });
+});
 describe("client recovery export", () => {
     it("retains child-first delete dependencies after child cursors have gone",async()=>{
         const f=await fixture();

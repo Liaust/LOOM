@@ -49,10 +49,13 @@ describe("safe code update handoff", () => {
             pluginId: "obsidian-livesync", releaseId: "client-notes-0.1.0", sequence: 1, version: "0.1.0", channel: "stable",
             sourceCommit: "a".repeat(40), upstream: { revision: "7b3b6ff854f2ff10452be3eaf8e0cd76ac65ac2b", version: "1.0.32" },
             compatibility: { minAppVersion: "1.7.2", platforms: ["desktop", "mobile"], notesProtocol: 1,
-                handoffAPI: 1, journalSchema: 1, activation: "reload", rollback: "same-schema" }, files:
+                handoffAPI: 1, journalSchema: 3, activation: "reload", rollback: "same-schema" }, files:
             ["main.js", "manifest.json", "styles.css", "loom-client-build.json", "loom-release.json"].map(name => ({ name, bytes: 1, sha256: "a".repeat(64) })) };
         const marker = { schema: "loom.client-install.v1", phase: "installed", previous: release, next: release };
         expect(startupHeld(marker, "client-notes-0.1.0")).toBe(false);
         expect(startupHeld({ ...marker, extra: true }, "client-notes-0.1.0")).toBe(true);
+        const old = { ...release, compatibility: { ...release.compatibility, journalSchema: 2 } };
+        expect(startupHeld({ ...marker, previous: old }, release.releaseId)).toBe(true);
+        expect(startupHeld({ ...marker, phase: "rolled-back", previous: old }, release.releaseId)).toBe(true);
     });
 });

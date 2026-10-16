@@ -23,7 +23,7 @@
       "required": ["minAppVersion", "platforms", "notesProtocol", "handoffAPI", "journalSchema", "activation", "rollback"],
       "properties": {
         "minAppVersion": {"const": "1.7.2"}, "platforms": {"const": ["desktop", "mobile"]},
-        "notesProtocol": {"const": 1}, "handoffAPI": {"const": 1}, "journalSchema": {"const": 1},
+        "notesProtocol": {"const": 1}, "handoffAPI": {"const": 1}, "journalSchema": {"const": 3},
         "activation": {"const": "reload"}, "rollback": {"const": "same-schema"}
       }
     },

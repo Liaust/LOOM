@@ -6,12 +6,15 @@ import type { DatabaseFileAccess } from "@vrtmrz/livesync-commonlib/compat/inter
 import type { LiveSyncLocalDB } from "@vrtmrz/livesync-commonlib/compat/pouchdb/LiveSyncLocalDB";
 import type { FilePathWithPrefix } from "@vrtmrz/livesync-commonlib/compat/common/types";
 import { readContent } from "@vrtmrz/livesync-commonlib/compat/common/utils";
-import { ControlTransport } from "./control";
-import { Journal, indexedDBPersistence, recoveryPersistence } from "./journal";
+import { ControlTransport, nativeChunk, nativeMetadataChange } from "./control";
+import { Journal, indexedDBPersistence, indexedDBReplayPersistence, recoveryPersistence } from "./journal";
+import { NativeReplay, nativeDatabaseIdentity, replayControlPaths, NATIVE_REPLAY_BATCH, type ReplayWork } from "./native-replay";
 import { IntentClient } from "./client";
-import { MAX_BYTES, MAX_REFERENCE_BYTES, referenceBytes, reserved, isControlPath, type Binding } from "./protocol";
+import { MAX_BYTES, MAX_REFERENCE_BYTES, referenceBytes, reserved, isControlPath, digest, referencePath, type Binding } from "./protocol";
+import { layoutAlias, layoutPolicyPaths, relocateLocal } from "./layout";
 import { convergeNative } from "./conflicts";
-import { NotesConflictsModal } from "./conflict-ui";
+import { NotesConflictsModal, NotesStatusModal } from "./conflict-ui";
+import { classifyNativeTarget, type NativeLeaf } from "./native-target";
 import { PathWork, WakeLoop } from "./work";
 import { TextFileView, TFolder } from "obsidian";
 import { UpdateBarrier, startupHeld } from "./update";
@@ -69,7 +72,9 @@ export function createLoomClient(
     // Device exclusions and size limits apply to background recovery too,
     // before native chunks are assembled or local binary files are loaded.
     const referenceAllowed = async (path: string, revision?: string) => {
-        if (!await plugin.core.services.vault.isTargetFile(path)) return false;
+        for (const policyPath of layoutPolicyPaths(journal?.state, path))
+            if (!await plugin.core.services.vault.isTargetFile(policyPath) ||
+                !local().isTargetFile(policyPath as FilePathWithPrefix)) return false;
         let size: number | undefined;
         if (revision) {
             const meta = await access.fetchEntryMeta(path as FilePathWithPrefix, revision, true);
@@ -152,6 +157,44 @@ export function createLoomClient(
             return new Uint8Array(bytes);
         },
         referenceAllowed,
+        async relocate(previous, binding) {
+            const vault = plugin.app.vault;
+            await (plugin.core.serviceModules.fileHandler as ServiceFileHandler).loomPublish(
+                [previous.path, binding.path] as FilePathWithPrefix[], async () => {
+                    await relocateLocal(previous, binding, {
+                        async stat(path) { return (await vault.adapter.stat(path))?.type ?? null; },
+                        async hash(path) {
+                            if ((await vault.adapter.stat(path))?.type !== "file") return null;
+                            if (referencePath(path)) {
+                                if (!await referenceAllowed(path)) throw Error("layout_reference_excluded");
+                                return digest(new Uint8Array(await vault.adapter.readBinary(path)));
+                            }
+                            const stat = await vault.adapter.stat(path);
+                            if (!stat || stat.size > MAX_BYTES) throw Error("layout_content_limit");
+                            return digest(await vault.adapter.read(path));
+                        },
+                        async mkdir(path) { await vault.createFolder(path); },
+                        async rename(from, to) {
+                            const file = vault.getAbstractFileByPath(from);
+                            if (!file || file instanceof TFolder || await vault.adapter.exists(to)) throw Error("layout_move_pending");
+                            // vault.rename does not invoke FileManager's authored-link rewrite.
+                            await vault.rename(file, to);
+                        },
+                        async removeFile(path) {
+                            const file = vault.getAbstractFileByPath(path);
+                            if (file && !(file instanceof TFolder)) await vault.trash(file, false);
+                        },
+                        async removeEmpty(path) {
+                            if (path !== previous.path && journal.state.bindings[path]?.entryKind === "directory") return;
+                            const folder = vault.getAbstractFileByPath(path);
+                            if (folder instanceof TFolder && !folder.children.length &&
+                                !(await vault.adapter.list(path)).files.length && !(await vault.adapter.list(path)).folders.length)
+                                await vault.trash(folder, false);
+                        },
+                    });
+                    return true;
+                });
+        },
         async descends(path, revision, ancestor) {
             try {
                 const meta = await access.fetchEntryMeta(path as FilePathWithPrefix, undefined, true);
@@ -249,39 +292,69 @@ export function createLoomClient(
         encrypted: () =>
             !!plugin.core.services.setting.currentSettings().encrypt &&
             !!plugin.core.services.setting.currentSettings().passphrase,
+        async target(path) {
+            let rows;
+            try { rows = await local().localDatabase.get(await plugin.core.services.path.path2id(path as FilePathWithPrefix), { open_revs: "all" }); }
+            catch (error) {
+                if ((error as { status?: number }).status === 404) return classifyNativeTarget(path, []);
+                throw error;
+            }
+            const leaves: NativeLeaf[] = [];
+            for (const row of rows) {
+                if (!("ok" in row)) { leaves.push({ revision: "" }); continue; }
+                const raw = row.ok;
+                if (raw._deleted) { leaves.push({ revision: raw._rev!, branchDeleted: true }); continue; }
+                const meta = await access.fetchEntryMeta(path as FilePathWithPrefix, raw._rev, true);
+                leaves.push(meta ? { revision: raw._rev!, path: String(meta.path), type: meta.type,
+                    deleted: meta.deleted, branchDeleted: meta._deleted } : { revision: raw._rev! });
+            }
+            return classifyNativeTarget(path, leaves);
+        },
         locked: async (paths, run) =>
             (plugin.core.serviceModules.fileHandler as ServiceFileHandler).loomPublish(
                 paths as FilePathWithPrefix[],
                 run,
             ),
     });
-    let cursor: string | number = 0;
-    const retry = new Map<string, string>();
+    const replayPersistence = indexedDBReplayPersistence(appId);
+    let replay: NativeReplay | undefined;
+    let replayDatabase: LiveSyncLocalDB["localDatabase"] | undefined;
+    let replayIdentity: string | undefined;
+    let replayBlocked = false;
     let recoveryRequested = false;
+    let recoveryWalked = false;
     let watching = false;
     let cancelFeed: (() => void) | undefined;
     let feedFailed = false;
-    const consume = (change: { id: string; doc?: { path?: unknown; _rev?: string } }) => {
-        const doc = change.doc;
-        const path = doc?.path === undefined ? undefined : String(doc.path);
-        if (path && isControlPath(path)) {
-            if (!retry.has(path) && retry.size >= 256) return false;
-            retry.set(path, doc!._rev!);
-        } else work.changed(change.id, path);
-        return true;
+    const retryPaths = () => {
+        work.retry();
+        for (const path of replay?.pendingPaths ?? []) work.add(path);
     };
     const loop = new WakeLoop(async () => {
             await client.ready;
             if (client.stopped) return;
+            const database = local().localDatabase;
+            const identity = await nativeDatabaseIdentity(database);
+            if (!replay || replayDatabase !== database || replayIdentity !== identity) {
+                cancelFeed?.();
+                watching = false;
+                replay = await NativeReplay.open(replayPersistence, identity);
+                replayDatabase = database;
+                replayIdentity = identity;
+                work.restart();
+                for (const row of replay.pending) if (row.kind === "path") work.add(row.path);
+                recoveryWalked = !replay.recoveryNeeded;
+                recoveryRequested ||= replay.requiresRecovery();
+            }
+            const activeReplay = replay;
             const recovery = recoveryRequested;
-            recoveryRequested = false;
             if (!watching) {
-                const feed = local().localDatabase.changes({ since: "now", live: true, include_docs: true });
+                const feed = database.changes({ since: "now", live: true, include_docs: false });
                 watching = true;
                 feedFailed = false;
                 cancelFeed = () => feed.cancel();
                 feed.on("change", change => {
-                    if (change.doc && "path" in change.doc || work.interested(change.id)) loop.wake();
+                    if (!nativeChunk(change.id) || work.interested(change.id)) loop.wake();
                 });
                 feed.on("error", () => {
                     watching = false;
@@ -295,57 +368,116 @@ export function createLoomClient(
                 plugin.register(() => feed.cancel());
                 await journal.update(s => { delete s.holds["native-change-feed"]; }, s => !s.holds["native-change-feed"]);
             }
-            const batch = await local().localDatabase.changes({ since: cursor, include_docs: true, limit: 128 });
-            let overflow = false;
-            for (const change of batch.results) {
-                if (!consume(change)) {
-                    overflow = true;
-                    await client.hold("transport", "control_backlog_limit");
-                    break;
-                }
-            }
-            if (!overflow) cursor = batch.last_seq;
-            if (!overflow && batch.results.length === 128) loop.wake();
-            for (const [path, rev] of retry) {
+            // Rehydrate and attempt pending records BEFORE catch-up. This rebuilds
+            // exact chunk dependencies before processing header-only arrivals.
+            for (const row of activeReplay.controls) {
+                const path = row.path;
+                work.clear(path);
                 try {
-                    await client.ingest(await transport.get(path, rev));
+                    const record = await transport.get(path, row.revision);
+                    await client.ingest(record);
                     work.clear(path);
                     await journal.update(s => { delete s.holds[path]; }, s => !s.holds[path]);
-                    retry.delete(path);
+                    const paths = [...new Set([...replayControlPaths(record),
+                        ...work.take(NATIVE_REPLAY_BATCH).filter(path => !isControlPath(path))])];
+                    try { await activeReplay.complete(row, paths); }
+                    finally { for (const path of paths) work.add(path); }
                 } catch { await client.hold(path, "control_pending_or_invalid"); }
             }
             await publisher.drainAcks(recovery);
             let processed = 0;
             if (recovery) {
-                for (const b of Object.values(journal.state.bindings)) {
-                    if (client.stopped) return;
-                    await client.mutation({ kind: "store", info: b.path as FilePathWithPrefix });
-                    if (++processed % 32 === 0) await new Promise(resolve => setTimeout(resolve, 0));
+                recoveryRequested = false;
+                recoveryWalked = false;
+                try {
+                    await activeReplay.beginRecovery();
+                    for (const b of Object.values(journal.state.bindings)) {
+                        if (client.stopped) return;
+                        await client.mutation({ kind: "store", info: b.path as FilePathWithPrefix });
+                        if (++processed % 32 === 0) await new Promise(resolve => setTimeout(resolve, 0));
+                    }
+                    for (const b of Object.values(journal.state.candidates)) work.add(b.path);
+                    recoveryWalked = true;
+                } catch (error) {
+                    recoveryRequested = true;
+                    throw error;
                 }
-                for (const b of Object.values(journal.state.candidates)) work.add(b.path);
             }
             await publisher.pump();
             await publisher.drainAcks();
-            const paths = work.take();
+            await client.layouts.resume(undefined, recovery);
+            const paths = work.take(NATIVE_REPLAY_BATCH).filter(path => !isControlPath(path));
+            try { await activeReplay.enqueue(paths); }
+            catch (error) {
+                for (const path of paths) work.add(path);
+                throw error;
+            }
             for (let index = 0; index < paths.length; index++) {
                 const path = paths[index];
                 if (client.stopped) return;
-                try { await client.reflectPath(path, recovery); }
+                const row = activeReplay.path(path)!;
+                work.clear(path);
+                try {
+                    await client.reflectPath(path, recovery);
+                    // Journal candidates/operations/terminal holds retain their
+                    // own outcomes. Missing chunks still need this replay row.
+                    if (!client.stopped && !work.isWaiting(path) && !work.isDirty(path))
+                        await activeReplay.complete(row);
+                }
                 catch (error) {
                     for (const remaining of paths.slice(index)) work.add(remaining);
                     throw error;
                 }
                 if (++processed % 32 === 0) await new Promise(resolve => setTimeout(resolve, 0));
             }
+            const batch = await database.changes({ since: activeReplay.cursor, include_docs: false, limit: NATIVE_REPLAY_BATCH });
+            const pending: ReplayWork[] = [];
+            for (const change of batch.results) {
+                const metadata = await nativeMetadataChange(change, (id, revision) => database.get(id, { rev: revision }));
+                const path = metadata.doc?.path === undefined ? undefined : String(metadata.doc.path);
+                if (path && isControlPath(path)) {
+                    if (!metadata.doc?._rev) throw Error("native_change_revision_missing");
+                    pending.push({ kind: "control", path, revision: metadata.doc._rev });
+                } else if (path) pending.push({ kind: "path", path });
+                else work.changed(change.id);
+            }
+            const awakened = work.take(NATIVE_REPLAY_BATCH).filter(path => !isControlPath(path));
+            pending.push(...awakened.map(path => ({ kind: "path" as const, path })));
+            replayBlocked = false;
+            try {
+                await activeReplay.accept(batch.last_seq, pending);
+                for (const row of pending) if (row.kind === "path") work.add(row.path);
+                if (pending.length || batch.results.length === NATIVE_REPLAY_BATCH) loop.wake();
+            } catch (error) {
+                for (const path of awakened) work.add(path);
+                if (!(error instanceof Error) || error.message !== "native_replay_backlog_limit") throw error;
+                replayBlocked = true;
+                await client.hold("transport", "native_replay_backlog_limit");
+            }
             feedFailed = false;
-            if (!overflow && !retry.size) await journal.update(s => { delete s.holds.transport; }, s => !s.holds.transport);
+            // Until every initial candidate path is durable (or completed), a
+            // crash must request full recovery again, even with a valid cursor.
+            if (recoveryWalked && activeReplay.recoveryNeeded && !work.runnable && !replayBlocked)
+                await activeReplay.finishRecovery();
+            if (!replayBlocked && work.runnable) loop.wake();
+            if (!replayBlocked && !activeReplay.controls.length) await journal.update(s => { delete s.holds.transport; }, s => !s.holds.transport);
             client.io.changed();
-        }, () => !watching || feedFailed || retry.size > 0 || work.pending || publisher.needsRetry,
-        () => work.retry(), async () => {
+        }, () => !watching || feedFailed || replayBlocked || !!replay?.hasPending || work.pending || work.runnable || publisher.needsRetry,
+        retryPaths, async () => {
             feedFailed = true;
             if (!client.stopped && !journal.failure) await client.hold("transport", "native_resume_pending");
         });
     client.onReflect = path => { work.add(path); loop.wake(); };
+    const cache = plugin.app.metadataCache;
+    const originalDest = cache.getFirstLinkpathDest;
+    const aliasDest: typeof originalDest = function(path, source) {
+        const result = originalDest.call(cache, path, source);
+        if (result) return result;
+        const alias = journal.state && layoutAlias(journal.state, path);
+        return alias ? originalDest.call(cache, alias, source) : null;
+    };
+    cache.getFirstLinkpathDest = aliasDest;
+    plugin.register(() => { if (cache.getFirstLinkpathDest === aliasDest) cache.getFirstLinkpathDest = originalDest; });
     client.onPublish = id => { const result = publisher.pump(id); loop.wake(); return result; };
     client.stopNative = async () => {
         client.stopped = true;
@@ -358,7 +490,7 @@ export function createLoomClient(
     client.resumeNative = async (recover = false) => {
         if (client.stopped) return;
         recoveryRequested ||= recover;
-        work.retry();
+        retryPaths();
         loop.wake();
         await loop.flush();
     };
@@ -368,11 +500,19 @@ export function createLoomClient(
 export async function startLoomClient(plugin: ObsidianLiveSyncPlugin) {
     const client = plugin.loomClient;
     const status = plugin.addStatusBarItem();
-    status.setAttribute("aria-label", "Review LOOM note conflicts");
-    status.setAttribute("title", "Review LOOM note conflicts");
-    plugin.registerDomEvent(status, "click", () => new NotesConflictsModal(plugin, client).open());
+    status.setAttribute("aria-label", "Review LOOM Notes status");
+    status.setAttribute("title", "Review LOOM Notes status");
+    plugin.registerDomEvent(status, "click", () => new NotesStatusModal(plugin, client).open());
+    let shown: string | undefined;
+    let scheduled = false;
     client.io.changed = () => {
-        status.setText(client.details().split("\n")[0]);
+        if (scheduled) return;
+        scheduled = true;
+        queueMicrotask(() => {
+            scheduled = false;
+            const text = client.summary().text;
+            if (text !== shown) { shown = text; status.setText(text); }
+        });
     };
     plugin.addCommand({
         id: "loom-conflicts",
@@ -383,7 +523,7 @@ export async function startLoomClient(plugin: ObsidianLiveSyncPlugin) {
         id: "loom-intent-status",
         name: "LOOM: show source acknowledgement and holds",
         callback: () => {
-            new Notice(client.details(), 15000);
+            new NotesStatusModal(plugin, client).open();
         },
     });
     plugin.addCommand({
@@ -405,6 +545,6 @@ export async function startLoomClient(plugin: ObsidianLiveSyncPlugin) {
         },
     });
     client.io.changed();
-    await client.resumeNative(true);
+    await client.resumeNative(false);
     plugin.loomClientUpdate.markReady();
 }

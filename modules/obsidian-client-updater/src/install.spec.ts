@@ -128,4 +128,14 @@ describe("mobile-adapter code transactions", () => {
         expect(f.files.get(`${root}/install.json`)).toEqual(bad); f.assertPreserved();
         expect(() => new Installer(f.store, f.host, "1.13.0", "../other-vault")).toThrow("config_path_invalid");
     });
+    it.each(["activated", "writing"])("preserves a %s old-schema transaction instead of bypassing it", async phase => {
+        const f = await setup();
+        const old = { ...f.old.release, compatibility: { ...COMPATIBILITY, journalSchema: 2 } };
+        const marker = encode({ schema: "loom.client-install.v1", phase, previous: old, next: old,
+            ...(phase === "activated" ? { loaded: old.releaseId } : {}) });
+        f.files.set(`${root}/install.json`, marker);
+        await expect(f.installer.recover()).rejects.toThrow("release_incompatible");
+        expect(f.files.get(`${root}/install.json`)).toEqual(marker);
+        f.assertPreserved();
+    });
 });

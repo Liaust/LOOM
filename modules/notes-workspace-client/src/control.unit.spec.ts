@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { makeDevice, makeFile } from "./nativeFixture";
-import { ControlTransport } from "./control";
+import { ControlTransport, nativeChunk, nativeMetadataChange } from "./control";
+import { layoutPolicyPaths } from "./layout";
 import { controlPath, decode, encode, digest, pair, validate, newerSource, referenceBytes, MAX_REFERENCE_BYTES, type Binding, type Intent, reserved, STRUCTURE_PREFIX, isControlPath } from "./protocol";
 import { getConfiguredFunctionsForEncryption } from "../../node_modules/@vrtmrz/livesync-commonlib/dist/pouchdb/encryption";
 import type { MetaEntry } from "@vrtmrz/livesync-commonlib/compat/common/types";
@@ -92,6 +93,40 @@ describe("encrypted native controls", () => {
             expect(read).not.toHaveBeenCalled();
             ready = true;
             expect(await c.get(controlPath(binding), rev)).toEqual(binding);
+        } finally {
+            await d.db.destroy();
+        }
+    });
+    it("replays exact file metadata without loading chunk bodies", async () => {
+        const read = vi.fn(async (id: string, rev: string) => ({ path: "Notes/n.md", _rev: rev }));
+        for (const id of ["h:plain", "h:+encrypted"])
+            expect(await nativeMetadataChange({ id, changes: [{ rev: "1-chunk" }] }, read)).toEqual({ id });
+        expect(read).not.toHaveBeenCalled();
+        expect(nativeChunk("Notes/n.md")).toBe(false);
+        expect(await nativeMetadataChange({ id: "file", changes: [{ rev: "2-exact" }] }, read))
+            .toEqual({ id: "file", doc: { path: "Notes/n.md", _rev: "2-exact" } });
+        expect(read).toHaveBeenCalledWith("file", "2-exact");
+        await expect(nativeMetadataChange({ id: "file", changes: [] }, read)).rejects.toThrow("native_change_revision_missing");
+        const d = await makeDevice("metadata-replay-" + crypto.randomUUID(), true);
+        try {
+            const transport = new ControlTransport(d.access);
+            const revision = await transport.put(binding);
+            const batch = await d.db.changes({ since: 0, include_docs: false });
+            const change = batch.results.find(c => c.id === controlPath(binding))!;
+            expect(change.doc).toBeUndefined();
+            const metadata = await nativeMetadataChange(change, (id, rev) => d.db.get(id, { rev }));
+            expect(metadata.doc?.path).toBe(controlPath(binding));
+            expect(metadata.doc?._rev).toBe(revision);
+        } finally { await d.db.destroy(); }
+    });
+    it("honors native custom filters on original and grouped paths before vault handlers load", async () => {
+        const d = await makeDevice("layout-native-filter-" + crypto.randomUUID());
+        try {
+            // Commonlib strips literal spaces from regex settings; encode them.
+            d.settings.syncIgnoreRegEx = "^Projects/Goodnotes\\x20Intake/Notebooks(?:/|$)" as typeof d.settings.syncIgnoreRegEx;
+            for (const path of ["Projects/Goodnotes Intake/Notebooks/a.pdf", "Projects/_Passive/Goodnotes Intake/Notebooks/a.pdf"])
+                expect(layoutPolicyPaths(undefined, path).every(p => d.localDatabase.isTargetFile(p as never))).toBe(false);
+            expect(d.localDatabase.isTargetFile("Projects/_Passive/Zotero WebDAV/Notes/overview.md" as never)).toBe(true);
         } finally {
             await d.db.destroy();
         }

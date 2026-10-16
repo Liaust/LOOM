@@ -1,7 +1,21 @@
 import { createTextBlob, readContent } from "@vrtmrz/livesync-commonlib/compat/common/utils";
 import type { DatabaseFileAccess } from "@vrtmrz/livesync-commonlib/compat/interfaces/DatabaseFileAccess";
 import type { FilePathWithPrefix, UXFileInfo } from "@vrtmrz/livesync-commonlib/compat/common/types";
+import { IDPrefixes } from "@vrtmrz/livesync-commonlib/compat/common/types";
 import { controlPath, decode, encode, MAX_CONTROL_BYTES, token, type Control } from "./protocol";
+
+export function nativeChunk(id: string) { return id.startsWith(IDPrefixes.Chunk); }
+
+export async function nativeMetadataChange(
+    change: { id: string; changes: { rev?: string }[] },
+    read: (id: string, revision: string) => Promise<{ path?: unknown; _rev?: string }>,
+) {
+    // Chunk arrivals wake exact dependencies by ID; their bodies are not controls.
+    if (nativeChunk(change.id)) return { id: change.id };
+    const revision = change.changes[0]?.rev;
+    if (!revision) throw Error("native_change_revision_missing");
+    return { id: change.id, doc: await read(change.id, revision) };
+}
 
 // Ordinary native note payloads go through native splitting/encryption. No
 // source path/base/intent is added as a plaintext custom PouchDB field.
