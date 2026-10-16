@@ -158,7 +158,7 @@ export class NotesStatus {
                 seen.add(id); chain.push(id);
                 const ancestor = this.byId.get(id);
                 if (!ancestor) break;
-                if (ancestor.nativeRecovery && ancestor.state !== "applied") { root = id; break; }
+                if (ancestor.nativeRecovery) { root = id; break; }
                 id = ancestor.intent.predecessor;
             }
             for (const child of chain) recovering.set(child, root);
@@ -176,9 +176,10 @@ export class NotesStatus {
                     seen.add(predecessor);
                 }
                 const root = recoveryRoot(predecessor);
-                if (root && !seen.has(root)) {
-                    waits.push({ id: root, reason: "recreated_root_acceptance_pending" });
-                    seen.add(root);
+                if (root && parent?.state !== "applied" && !seen.has(predecessor)) {
+                    waits.push({ id: predecessor, reason: root === predecessor ?
+                        "recreated_root_acceptance_pending" : "recovery_predecessor_acceptance_pending" });
+                    seen.add(predecessor);
                 }
             }
             for (const id of op.intent.dependencies ?? []) {

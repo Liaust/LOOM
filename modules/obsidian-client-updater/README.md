@@ -19,7 +19,12 @@ permission to cross journal generations. Before a closed-app cross-schema
 bootstrap, inspect any `install.json`: resolve unfinished transactions with
 their matching code, preserve completed old-schema recovery records separately,
 and adopt the exact new release manifest. Never delete an unknown transaction
-to bypass startup checks. iOS checks only while Obsidian can execute; suspension
+to bypass startup checks. Also inspect `staged/release.json`: a verified unused
+stage from an older schema must be retained outside the active updater during
+the coordinated bootstrap, after confirming no unfinished transaction uses it.
+Otherwise its incompatibility check correctly prevents replacement with a new
+stage. Preserve the old code rather than weakening compatibility validation.
+iOS checks only while Obsidian can execute; suspension
 does not provide background update delivery.
 
 ## What Changes

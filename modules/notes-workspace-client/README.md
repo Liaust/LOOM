@@ -22,7 +22,9 @@ filename. Its explicit recovery checks every native leaf and resumes only the
 original unambiguous prepublication intent. Logical deletion can receive a new
 independent root; live/unknown revisions and a write-receipt gap stay refused.
 Old branches and dependent edits remain retained. Main still checks source
-absence and exact ancestry, and dependent recovery edits wait for its receipt.
+absence and exact ancestry. Only the retained recovery chain waits for each
+predecessor's source receipt, so a long backlog cannot prune its early native
+revision proof before Main verifies it. Ordinary live edits remain pipelined.
 
 Agents use the same source-checked workflow:
 

@@ -28,6 +28,11 @@ describe("compact actionable Notes status", () => {
         expect(view.overview(s, { kind: "operations" }).groups.total).toBe(1);
         expect(view.overview(s, { kind: "holds" }).groups.total).toBe(1);
         expect(view.summary(state([{ ...root, state: "applied" }, child]))).toMatchObject({ pendingPublication: 1, waiting: 0 });
+        const next = published(operation("next", "uploaded", { predecessor: "root" }));
+        const later = operation("later", "queued", { predecessor: "next" });
+        const recovering = state([{ ...root, state: "applied" }, next, later]);
+        expect(view.summary(recovering)).toMatchObject({ accepted: 1, pendingAcceptance: 1, pendingPublication: 0, waiting: 1 });
+        expect(view.overview(recovering, { kind: "operations" }).groups.total).toBe(1);
     });
     it("partitions every unfinished edit without counting a blocked chain as independent failures", () => {
         const operations = chain(145);

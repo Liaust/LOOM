@@ -73,11 +73,11 @@
     "control.unit.spec.ts": "a207dc6d483cb5582ad235d42d89311cadc033eb084bc03851308526e0539b49",
     "journal.ts": "68b34b9a1da251bd2e9ffeb6fac33b4201d762b538ab60e6deec08b81ffa43b3",
     "nativeFixture.ts": "d957fb6a0fc31744c0bcd8b899a861c4d263b83cb9ab956bb19cc0d9607b24fd",
-    "obsidian.ts": "ec7851c6d167224190ebece9fe9e89f4a16e1fd02af4b518c1206d7cb1bee6f8",
+    "obsidian.ts": "25d8856bf5e95c861ae11f5802d4df8b494ffb8b33dcdc297763fb28619c59e1",
     "protocol.ts": "6f738241f74cb30cc942cb698b5e7652b67a28aa004499d6eaf2d38d5241ecff",
-    "publisher.ts": "a7704309aed4a313ef92079d19a7ed8cd61dc67ffaffd28b66b02d04b1378c5c",
-    "publisher.unit.spec.ts": "6ed3f67e8a4ce202d84ddece7b3a4beca9baacab3583f663cfa0f7b5a243c3fd",
-    "work.ts": "5fe6e4be86a88dc3cddbb0d641d91df4984a9e9968ef6797a27bb87098974fba",
+    "publisher.ts": "44f7da4f29b82d47575256b5de813ad9c7ed0da0523931a194ab3c8e4ef5fb1a",
+    "publisher.unit.spec.ts": "a0bb345ef847c19c136ae7e4285a9e2b92cb2e7ff88b7a894ac50c7fedaca621",
+    "work.ts": "139221821eb043acf758083766543591f60b8a95ce35e4fdfa250dce2a1736bf",
     "work.unit.spec.ts": "2017b6b1b18a18044186aac6fd48b28142f150ce3c5885494d056049298575d1",
     "draft.ts": "37397d39ef1e1d21394b71d2a4de647f7be60b7518eacae041a43868ba74ac9a",
     "journal.unit.spec.ts": "2e41d2eba59761df0b0b901273ca7de1b1bf6ab12e7594a12a2dc38f8a68c386",
@@ -89,9 +89,9 @@
     "layout.unit.spec.ts": "85c3745793dd1e9c7c733f618e5bdeb841f99616fecc94038c24bb55074a765d",
     "native-target.ts": "395143bad7b0f5a8a3563a8900eaca2d9fd78b313ffc3ac035b595fcc2892133",
     "native-target.unit.spec.ts": "e479fd021789c0137e3a00b98f9a4c804ca8874b777ad6d3b39c9d92eade3cc7",
-    "status.ts": "3a72f530c2e979d3dfad56b8b388bee403df916be413d3f2146a7dcdfff3ec15",
-    "status.unit.spec.ts": "0b507cecbd91c99a880baf2589a1777f3532574755bfb50f4b2760f8bb73bb31",
-    "native-replay.ts": "574019a62d58fe0a62797bf2832cfb6430d9ed7e5c211d6afc8d6857111375a8",
-    "native-replay.unit.spec.ts": "d7935401db80015c0cd38448bc1552f95d7ff3adcedfe9a63fe7d2ded1cfc0dc"
+    "status.ts": "9a01155f4f4b0df312b4cde10422cacc42806d71c638efc93cc27bd23452b96c",
+    "status.unit.spec.ts": "350f8b5b76c7441302eadeec5f724cc4012d6460acdf908b7b675e0d4e012201",
+    "native-replay.ts": "a147128c424f8926ad4d2f5180d76c58aba5ee0925bd6d71ecb35374b1bc8d89",
+    "native-replay.unit.spec.ts": "87c5efd46f8b9e953871c239fea203502007ffac9c421ab935639645187c3ea5"
   }
 }

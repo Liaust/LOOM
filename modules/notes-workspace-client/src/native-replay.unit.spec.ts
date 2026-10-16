@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { NativeReplay, nativeDatabaseIdentity, replayControlPaths, NATIVE_REPLAY_READER, replayKey, type ReplayHeader, type ReplayPersistence, type ReplayRow } from "./native-replay";
+import { NativeReplay, nativeDatabaseIdentity, replayBacklog, replayControlPaths, NATIVE_REPLAY_READER, NATIVE_REPLAY_BATCH, replayKey, type ReplayHeader, type ReplayPersistence, type ReplayRow } from "./native-replay";
 import { PathWork, WakeLoop } from "./work";
 
 function memory() {
@@ -26,6 +26,69 @@ const control = (revision = "1-exact") => ({ kind: "control" as const, path: "LO
 const path = (path = "Notes/a.md") => ({ kind: "path" as const, path });
 
 describe("durable native replay", () => {
+    it("drains a full inbox ahead of >1024 recovery paths and exact control handoffs without skipping an unpersisted batch", async () => {
+        const store = memory(), replay = await NativeReplay.open(store.persistence, "db");
+        const retained = Array.from({ length: 952 }, (_, n) => `Notes/retained-${n}.md`);
+        const controls = Array.from({ length: 19 }, (_, n) => ({ ...control(), path: `LOOM-Control-v1/layout/${n}.md` }));
+        await replay.accept(143, [...retained.map(p => path(p)), ...controls]);
+        const padding = Array.from({ length: 53 }, (_, n) => `Notes/padding-${n}.md`);
+        expect(await replay.enqueueAvailable(padding)).toBe(53); // Actual row bound, not a smaller test bound.
+        expect(replay.pending).toHaveLength(1024);
+        const recovery = Array.from({ length: 2049 }, (_, n) => `Notes/recovery-${n}.md`);
+        const work = new PathWork();
+        for (const p of recovery) work.add(p); // Reproduce transient work ahead of durable paths.
+        for (const p of replay.pendingPaths) work.add(p);
+        const batch = Array.from({ length: 128 }, (_, n) => path(`Notes/catchup-${n}.md`));
+        await expect(replay.accept(144, batch)).rejects.toThrow("native_replay_backlog_limit");
+        expect(replay.cursor).toBe(143);
+        const hints = (row: ReplayRow) => [`Notes/${row.path.split("/").pop()}-from.md`, `Notes/${row.path.split("/").pop()}-to.md`];
+        await expect(replay.complete(replay.controls[0], hints(replay.controls[0]))).rejects.toThrow("native_replay_backlog_limit");
+        expect(replay.controls).toHaveLength(19); // Failed two-path handoff did not erase its control.
+        expect(await replay.enqueueAvailable(recovery.slice(0, 128))).toBe(0);
+        const reflected = new Set<string>(), ingested = new Set<string>();
+        const reflect = async (p: string) => {
+            expect(replay.path(p)).toBeDefined(); // Never reflect an unpersisted recovery path.
+            reflected.add(p); // Existing durable reflection/terminal outcome.
+        };
+        let consumed = false, peak = replay.pending.length;
+        for (let turn = 0; turn < 100 && (work.runnable || replay.hasPending || !consumed); turn++) {
+            await replay.drainPaths(work, reflect);
+            for (const row of replay.controls) {
+                ingested.add(row.path);
+                await replay.complete(row, hints(row)); // Only this exact control's paths.
+                for (const p of hints(row)) work.add(p);
+            }
+            await replay.drainPaths(work, reflect);
+            if (!replay.hasRunnablePaths(work)) {
+                const fresh = work.take(NATIVE_REPLAY_BATCH, p => !replay.path(p));
+                await replay.enqueueAvailable(fresh);
+                for (const p of fresh) work.add(p);
+            }
+            if (!consumed) {
+                try {
+                    await replay.accept(144, batch);
+                    consumed = true;
+                    const durable = await store.persistence.load(NATIVE_REPLAY_READER);
+                    expect((durable.header as ReplayHeader).cursor).toBe(144);
+                    for (const row of batch) expect(durable.rows.some(saved => saved.key === replayKey(row))).toBe(true);
+                    for (const row of batch) work.add(row.path);
+                } catch (error) {
+                    if (!replayBacklog(error)) throw error;
+                    expect(replay.cursor).toBe(143);
+                    expect((await store.persistence.load(NATIVE_REPLAY_READER)).header).toMatchObject({ cursor: 143 });
+                }
+            }
+            peak = Math.max(peak, replay.pending.length);
+        }
+        expect(consumed).toBe(true);
+        expect(replay.cursor).toBe(144);
+        expect(replay.pending).toEqual([]);
+        expect(work.runnable).toBe(false);
+        expect(peak).toBe(1024);
+        expect(ingested.size).toBe(19);
+        expect(reflected).toEqual(new Set([...retained, ...padding, ...recovery,
+            ...controls.flatMap(row => hints({ ...row, ticket: "expected" })), ...batch.map(row => row.path)]));
+    });
     it("does not request the full binding walk on a completed second start; invalid cache and manual resume do", async () => {
         const store = memory();
         let replay = await NativeReplay.open(store.persistence, "db");

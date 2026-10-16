@@ -64,12 +64,19 @@ export class Publisher {
         if (op.intent.predecessor && (!pred?.publication || ["held", "conflict"].includes(pred.state))) return false;
         const seen = new Set<string>();
         let ancestor = pred;
+        let recovering = false;
         while (ancestor) {
             if (seen.has(ancestor.intent.id)) return false;
             seen.add(ancestor.intent.id);
-            if (ancestor.nativeRecovery && ancestor.state !== "applied") return false;
+            if (ancestor.nativeRecovery) {
+                recovering = true;
+                if (ancestor.state !== "applied") return false;
+            }
             ancestor = ancestor.intent.predecessor ? this.get(ancestor.intent.predecessor) : undefined;
         }
+        // A retained recovery can exceed native revision-tree retention. Main
+        // must verify each exact parent before later writes can prune it.
+        if (recovering && pred?.state !== "applied") return false;
         return !op.intent.dependencies?.some(id => this.get(id)?.state !== "applied") &&
             !this.client.journal.state.operations.some(attempt => unfinished(attempt) &&
                 !attempt.ack && attempt.resolution?.covered.includes(op.intent.id));

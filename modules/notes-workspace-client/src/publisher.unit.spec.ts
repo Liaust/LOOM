@@ -94,9 +94,10 @@ describe("native exact-base publication and source acknowledgement", () => {
             const tombstone = await f.d.access.storeDeletionWithBaseRevision(path, old as string);
             f.files.set(path, ""); f.c.capture({ kind: "create", path }); await f.c.settled();
             await f.j.update(s => { s.operations[0].state = "held"; s.operations[0].reason = "native_target_exists"; });
-            for (const text of ["second", "latest"]) {
-                f.files.set(path, text); f.c.capture({ kind: "edit", path }); await f.c.settled();
-            }
+            const target = "Notes/recovered.md" as FilePathWithPrefix;
+            f.files.delete(path); f.files.set(target, "second");
+            f.c.capture({ kind: "rename", path: target, oldPath: path }); await f.c.settled();
+            f.files.set(target, "latest"); f.c.capture({ kind: "edit", path: target }); await f.c.settled();
             const intents = f.j.state.operations.map(op => encode(op.intent));
             const p = f.publisher(); await p.pump();
             expect(p.needsRetry).toBe(false);
@@ -115,7 +116,18 @@ describe("native exact-base publication and source acknowledgement", () => {
                     fileId: root.intent.fileId, nativeRevision: root.revisions[0].revision,
                     sha256: root.intent.sha256, sourceBase: "recreated_source" } });
             await p.settled();
-            expect(f.j.state.operations.map(op => op.state)).toEqual(["applied", "uploaded", "uploaded"]);
+            expect(f.j.state.operations.map(op => op.state)).toEqual(["applied", "uploaded", "queued"]);
+            await p.pump(); await p.pump();
+            expect(f.j.state.operations[2].state).toBe("queued");
+            expect(p.needsRetry).toBe(false);
+            const child = f.j.state.operations[1];
+            await p.acknowledge({ version: 1, kind: "ack", id: "recreated_child_ack", intentId: child.intent.id,
+                publicationId: child.publication!.id, intentDigest: child.publication!.intentDigest,
+                status: "applied", reason: "source_applied", binding: { ...f.b, id: "recreated_child_binding", path: target,
+                    fileId: child.intent.fileId, nativeRevision: child.revisions[0].revision,
+                    sha256: child.intent.sha256, sourceBase: "recreated_child_source" } });
+            await p.settled();
+            expect(f.j.state.operations.map(op => op.state)).toEqual(["applied", "applied", "uploaded"]);
             expect(f.j.state.operations.map(op => op.payload)).toEqual(["", "second", "latest"]);
         } finally { await f.d.db.destroy(); }
     });

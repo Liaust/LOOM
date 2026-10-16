@@ -1,9 +1,11 @@
 // Disposable transport progress, not part of the authoritative edit journal.
 // Change the reader key when control interpretation changes, not just its format.
 import type { Control } from "./protocol";
+import type { PathWork } from "./work";
 export const NATIVE_REPLAY_READER = "control-path-v1";
 export const NATIVE_REPLAY_BATCH = 128;
 export const NATIVE_REPLAY_ROWS = 1024;
+export const replayBacklog = (error: unknown) => error instanceof Error && error.message === "native_replay_backlog_limit";
 export type ReplaySequence = string | number;
 export type ReplayWork = { kind: "control"; path: string; revision: string } | { kind: "path"; path: string };
 export type ReplayRow = ReplayWork & { ticket: string };
@@ -84,6 +86,32 @@ export class NativeReplay {
     // prevent completion of an older path attempt from erasing a newer arrival.
     accept(cursor: ReplaySequence, work: ReplayWork[]) { return this.write(cursor, work); }
     enqueue(paths: string[]) { return this.write(undefined, paths.map(path => ({ kind: "path", path }))); }
+    async enqueueAvailable(paths: string[]): Promise<number> {
+        // Admit only a fitting prefix. Failed probes never write or move progress.
+        for (let count = paths.length; count > 0; count = Math.floor(count / 2)) {
+            try { await this.enqueue(paths.slice(0, count)); return count; }
+            catch (error) { if (!replayBacklog(error)) throw error; }
+        }
+        return 0;
+    }
+    hasRunnablePaths(work: PathWork) { return this.pendingPaths.some(path => work.isDirty(path)); }
+    async drainPaths(work: PathWork, reflect: (path: string) => Promise<boolean | void>) {
+        const paths = work.take(NATIVE_REPLAY_BATCH, path => !!this.path(path));
+        for (let index = 0; index < paths.length; index++) {
+            const path = paths[index], row = this.path(path)!;
+            work.clear(path);
+            try {
+                if (await reflect(path) === false) {
+                    for (const remaining of paths.slice(index)) work.add(remaining);
+                    return;
+                }
+                if (!work.isWaiting(path) && !work.isDirty(path)) await this.complete(row);
+            } catch (error) {
+                for (const remaining of paths.slice(index)) work.add(remaining);
+                throw error;
+            }
+        }
+    }
     complete(row: ReplayRow, paths: string[] = []) { return this.write(undefined,
         paths.map(path => ({ kind: "path", path })), row); }
     beginRecovery() { return this.write(undefined, [], undefined, false); }

@@ -8,7 +8,7 @@ import type { FilePathWithPrefix } from "@vrtmrz/livesync-commonlib/compat/commo
 import { readContent } from "@vrtmrz/livesync-commonlib/compat/common/utils";
 import { ControlTransport, nativeChunk, nativeMetadataChange } from "./control";
 import { Journal, indexedDBPersistence, indexedDBReplayPersistence, recoveryPersistence } from "./journal";
-import { NativeReplay, nativeDatabaseIdentity, replayControlPaths, NATIVE_REPLAY_BATCH, type ReplayWork } from "./native-replay";
+import { NativeReplay, nativeDatabaseIdentity, replayBacklog, replayControlPaths, NATIVE_REPLAY_BATCH, type ReplayWork } from "./native-replay";
 import { IntentClient } from "./client";
 import { MAX_BYTES, MAX_REFERENCE_BYTES, referenceBytes, reserved, isControlPath, digest, referencePath, type Binding } from "./protocol";
 import { layoutAlias, layoutPolicyPaths, relocateLocal } from "./layout";
@@ -348,6 +348,14 @@ export function createLoomClient(
             }
             const activeReplay = replay;
             const recovery = recoveryRequested;
+            replayBlocked = false;
+            let processed = 0;
+            const reflect = async (path: string) => {
+                if (client.stopped) return false;
+                await client.reflectPath(path, recovery);
+                if (++processed % 32 === 0) await new Promise(resolve => setTimeout(resolve, 0));
+                return !client.stopped;
+            };
             if (!watching) {
                 const feed = database.changes({ since: "now", live: true, include_docs: false });
                 watching = true;
@@ -368,8 +376,9 @@ export function createLoomClient(
                 plugin.register(() => feed.cancel());
                 await journal.update(s => { delete s.holds["native-change-feed"]; }, s => !s.holds["native-change-feed"]);
             }
-            // Rehydrate and attempt pending records BEFORE catch-up. This rebuilds
-            // exact chunk dependencies before processing header-only arrivals.
+            // Retire persisted work before admitting controls or transient recovery
+            // paths, including when the inbox starts completely full.
+            await activeReplay.drainPaths(work, reflect);
             for (const row of activeReplay.controls) {
                 const path = row.path;
                 work.clear(path);
@@ -378,14 +387,15 @@ export function createLoomClient(
                     await client.ingest(record);
                     work.clear(path);
                     await journal.update(s => { delete s.holds[path]; }, s => !s.holds[path]);
-                    const paths = [...new Set([...replayControlPaths(record),
-                        ...work.take(NATIVE_REPLAY_BATCH).filter(path => !isControlPath(path))])];
+                    const paths = replayControlPaths(record);
                     try { await activeReplay.complete(row, paths); }
                     finally { for (const path of paths) work.add(path); }
-                } catch { await client.hold(path, "control_pending_or_invalid"); }
+                } catch (error) {
+                    if (replayBacklog(error)) replayBlocked = true;
+                    else await client.hold(path, "control_pending_or_invalid");
+                }
             }
             await publisher.drainAcks(recovery);
-            let processed = 0;
             if (recovery) {
                 recoveryRequested = false;
                 recoveryWalked = false;
@@ -406,29 +416,17 @@ export function createLoomClient(
             await publisher.pump();
             await publisher.drainAcks();
             await client.layouts.resume(undefined, recovery);
-            const paths = work.take(NATIVE_REPLAY_BATCH).filter(path => !isControlPath(path));
-            try { await activeReplay.enqueue(paths); }
-            catch (error) {
-                for (const path of paths) work.add(path);
-                throw error;
-            }
-            for (let index = 0; index < paths.length; index++) {
-                const path = paths[index];
-                if (client.stopped) return;
-                const row = activeReplay.path(path)!;
-                work.clear(path);
+            await activeReplay.drainPaths(work, reflect);
+            work.take(Infinity, isControlPath); // Controls retry through their durable rows.
+            if (!activeReplay.hasRunnablePaths(work)) {
+                const paths = work.take(NATIVE_REPLAY_BATCH, path => !isControlPath(path) && !activeReplay.path(path));
                 try {
-                    await client.reflectPath(path, recovery);
-                    // Journal candidates/operations/terminal holds retain their
-                    // own outcomes. Missing chunks still need this replay row.
-                    if (!client.stopped && !work.isWaiting(path) && !work.isDirty(path))
-                        await activeReplay.complete(row);
+                    if (await activeReplay.enqueueAvailable(paths) < paths.length) replayBlocked = true;
+                } finally {
+                    // Admitted paths are now runnable durable work; the rest stay
+                    // transient for a later page, never dropped to make room.
+                    for (const path of paths) work.add(path);
                 }
-                catch (error) {
-                    for (const remaining of paths.slice(index)) work.add(remaining);
-                    throw error;
-                }
-                if (++processed % 32 === 0) await new Promise(resolve => setTimeout(resolve, 0));
             }
             const batch = await database.changes({ since: activeReplay.cursor, include_docs: false, limit: NATIVE_REPLAY_BATCH });
             const pending: ReplayWork[] = [];
@@ -439,27 +437,24 @@ export function createLoomClient(
                     if (!metadata.doc?._rev) throw Error("native_change_revision_missing");
                     pending.push({ kind: "control", path, revision: metadata.doc._rev });
                 } else if (path) pending.push({ kind: "path", path });
-                else work.changed(change.id);
+                else for (const path of work.changed(change.id))
+                    if (!isControlPath(path)) pending.push({ kind: "path", path });
             }
-            const awakened = work.take(NATIVE_REPLAY_BATCH).filter(path => !isControlPath(path));
-            pending.push(...awakened.map(path => ({ kind: "path" as const, path })));
-            replayBlocked = false;
             try {
                 await activeReplay.accept(batch.last_seq, pending);
                 for (const row of pending) if (row.kind === "path") work.add(row.path);
                 if (pending.length || batch.results.length === NATIVE_REPLAY_BATCH) loop.wake();
             } catch (error) {
-                for (const path of awakened) work.add(path);
-                if (!(error instanceof Error) || error.message !== "native_replay_backlog_limit") throw error;
+                if (!replayBacklog(error)) throw error;
                 replayBlocked = true;
-                await client.hold("transport", "native_replay_backlog_limit");
             }
+            if (replayBlocked) await client.hold("transport", "native_replay_backlog_limit");
             feedFailed = false;
             // Until every initial candidate path is durable (or completed), a
             // crash must request full recovery again, even with a valid cursor.
             if (recoveryWalked && activeReplay.recoveryNeeded && !work.runnable && !replayBlocked)
                 await activeReplay.finishRecovery();
-            if (!replayBlocked && work.runnable) loop.wake();
+            if (activeReplay.hasRunnablePaths(work) || !replayBlocked && work.runnable) loop.wake();
             if (!replayBlocked && !activeReplay.controls.length) await journal.update(s => { delete s.holds.transport; }, s => !s.holds.transport);
             client.io.changed();
         }, () => !watching || feedFailed || replayBlocked || !!replay?.hasPending || work.pending || work.runnable || publisher.needsRetry,

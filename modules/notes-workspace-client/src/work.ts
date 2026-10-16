@@ -53,10 +53,11 @@ export class PathWork {
     private waiting = new Map<string, Set<string>>();
     private dependencies = new Map<string, Set<string>>();
     add(path: string) { this.dirty.add(path); }
-    take(limit = Infinity) {
+    take(limit = Infinity, eligible: (path: string) => boolean = () => true) {
         const paths: string[] = [];
         for (const path of this.dirty) {
             if (paths.length >= limit) break;
+            if (!eligible(path)) continue;
             paths.push(path);
             this.dirty.delete(path);
         }
@@ -80,8 +81,10 @@ export class PathWork {
         this.waiting.delete(path);
     }
     changed(id: string, path?: string) {
-        for (const p of this.dependencies.get(id) ?? []) this.add(p);
+        const paths = [...(this.dependencies.get(id) ?? [])];
+        for (const p of paths) this.add(p);
         if (path) this.add(path);
+        return paths;
     }
     interested(id: string) { return this.dependencies.has(id); }
     isDirty(path: string) { return this.dirty.has(path); }
