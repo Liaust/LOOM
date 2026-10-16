@@ -86,6 +86,34 @@ async function fixture() {
     return { d, b, c, j, files, publisher, persistence };
 }
 describe("native exact-base publication and source acknowledgement", () => {
+    it("keeps a long offline chain inside native ancestry retention without blocking another note", async () => {
+        const f = await fixture();
+        try {
+            for (let n = 0; n < 110; n++) {
+                f.files.set(f.b.path, "offline " + n);
+                f.c.capture({ kind: "edit", path: f.b.path }); await f.c.settled();
+            }
+            const p = f.publisher(); await p.pump();
+            expect(f.j.state.operations.filter(o => o.state === "uploaded")).toHaveLength(32);
+            expect(f.j.state.operations.filter(o => o.state === "queued")).toHaveLength(78);
+            expect(p.needsRetry).toBe(false);
+            const first = f.j.state.operations[0];
+            const current = await f.d.db.get(f.b.path, { revs: true });
+            expect(current._revisions!.ids).toContain(first.revisions[0].revision.split("-")[1]);
+            f.files.set("Notes/independent.md", "other note");
+            f.c.capture({ kind: "create", path: "Notes/independent.md" }); await f.c.settled(); await p.settled();
+            expect(f.j.state.operations.at(-1)!.state).toBe("uploaded");
+            await p.acknowledge({ version: 1, kind: "ack", id: "offline_first_ack", intentId: first.intent.id,
+                publicationId: first.publication!.id, intentDigest: first.publication!.intentDigest,
+                status: "applied", reason: "source_applied", binding: { ...f.b, id: "offline_first_binding",
+                    nativeRevision: first.revisions[0].revision, sha256: first.intent.sha256, sourceBase: "offline_first_source" } });
+            await p.settled();
+            expect(f.j.state.operations[32].state).toBe("uploaded");
+            expect(f.j.state.operations[33].state).toBe("queued");
+            expect(f.j.state.operations[109].payload).toBe("offline 109");
+            expect(p.needsRetry).toBe(false);
+        } finally { await f.d.db.destroy(); }
+    });
     it("recovers the exact held creation and wakes descendants only after its source receipt", async () => {
         const f = await fixture();
         try {

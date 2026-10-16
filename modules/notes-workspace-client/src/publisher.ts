@@ -6,6 +6,9 @@ import { IntentClient } from "./client";
 import { encode, digest, pair, validate, type Ack, type Publication, type Control } from "./protocol";
 import { unfinished, type Operation } from "./journal";
 import type { CreateRecoveryReview, NativeTarget } from "./native-target";
+// Pinned native trees retain 100 revisions. Leave room for exact source bases
+// and rename branches while keeping ordinary editor publication pipelined.
+const MAX_UNACCEPTED_PREDECESSORS = 32;
 export interface PublicationIO {
     encrypted(): boolean;
     locked(paths: string[], run: () => Promise<boolean>): Promise<boolean>;
@@ -65,9 +68,11 @@ export class Publisher {
         const seen = new Set<string>();
         let ancestor = pred;
         let recovering = false;
+        let unaccepted = 0;
         while (ancestor) {
             if (seen.has(ancestor.intent.id)) return false;
             seen.add(ancestor.intent.id);
+            if (ancestor.state !== "applied" && ++unaccepted >= MAX_UNACCEPTED_PREDECESSORS) return false;
             if (ancestor.nativeRecovery) {
                 recovering = true;
                 if (ancestor.state !== "applied") return false;
