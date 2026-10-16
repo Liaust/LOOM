@@ -102,7 +102,7 @@ describe("native exact-base publication and source acknowledgement", () => {
             expect(current._revisions!.ids).toContain(first.revisions[0].revision.split("-")[1]);
             f.files.set("Notes/independent.md", "other note");
             f.c.capture({ kind: "create", path: "Notes/independent.md" }); await f.c.settled(); await p.settled();
-            expect(f.j.state.operations.at(-1)!.state).toBe("uploaded");
+            expect(f.j.state.operations[f.j.state.operations.length - 1].state).toBe("uploaded");
             await p.acknowledge({ version: 1, kind: "ack", id: "offline_first_ack", intentId: first.intent.id,
                 publicationId: first.publication!.id, intentDigest: first.publication!.intentDigest,
                 status: "applied", reason: "source_applied", binding: { ...f.b, id: "offline_first_binding",
