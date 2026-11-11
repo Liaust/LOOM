@@ -1,0 +1,15 @@
+kind: loom.script
+id: hermes_codex_dispatch
+name: Hermes scheduled standalone Codex task
+version: 0.1.0
+description: Native Hermes owns timing; the existing Main Codex job owner retains execution and saved-thread results.
+entrypoint:
+  command: [/run/current-system/sw/bin/loom-hermes-codex-dispatch, --job]
+execution:
+  timeout_seconds: 1830
+  network: true
+  filesystem:
+    mode: read_only
+artifacts:
+  - {key: answer, path: answer.txt, type: file}
+  - {key: codex_run, path: codex-run.json, type: file}

@@ -1,6 +1,7 @@
 package portal
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"loom.local/loom/internal/knowledge"
 	"loom.local/loom/internal/loomcli/ui"
+	"loom.local/loom/internal/notesworkspacesync"
 )
 
 func renderNotes(builder *strings.Builder, state ScreenState) {
@@ -20,7 +22,9 @@ func renderNotes(builder *strings.Builder, state ScreenState) {
 
 	renderNotesSearchAffordance(builder, state.Data.Notes.Search)
 	renderNotesPipelineStatus(builder, state.Data.Notes.Pipelines, state.Data.Notes.PipelinesAvailable, state.RawDetails)
-	renderNotesEmbeddingStatus(builder, state.Data.Notes.Embeddings, state.Data.Notes.EmbeddingsAvailable, state.RawDetails)
+	if state.Data.Notes.Pipelines.Progress == nil {
+		renderNotesEmbeddingStatus(builder, state.Data.Notes.Embeddings, state.Data.Notes.EmbeddingsAvailable, state.RawDetails)
+	}
 	renderNotesSearchResults(builder, state, state.Data.Notes.Search, row+len(roots))
 	renderNotesAttention(builder, summary.IndexHealth, summary.ExtractionStates, overview.Projection, state.RawDetails)
 
@@ -48,6 +52,10 @@ func renderNotesPipelineStatus(builder *strings.Builder, status knowledge.Pipeli
 		renderMetricLine(builder, "Pipelines: unavailable (read-only cached overview remains visible)")
 		return
 	}
+	if status.Progress != nil {
+		renderNotesProgress(builder, status, raw)
+		return
+	}
 	active := len(status.Current)
 	parts := []string{fmt.Sprintf("active=%d", active), fmt.Sprintf("waiting_heavy=%d", status.Operations.WaitingHeavy), fmt.Sprintf("lexical=%d", status.Operations.LexicalDocuments), fmt.Sprintf("semantic=%d", status.Operations.ActiveVectors)}
 	if status.Operations.Blocked > 0 {
@@ -71,6 +79,100 @@ func renderNotesPipelineStatus(builder *strings.Builder, status knowledge.Pipeli
 		missingModels := unavailablePipelineComponents(status.Operations.Models)
 		renderMetricLine(builder, fmt.Sprintf("stale_claims=%d", status.Operations.StaleClaims), fmt.Sprintf("activation_mismatches=%d", status.Operations.ActivationMismatches), fmt.Sprintf("oldest_active_seconds=%d", status.Operations.OldestActiveSeconds), "missing_tools="+strings.Join(missing, ","))
 		renderMetricLine(builder, "missing_runtimes="+strings.Join(missingRuntimes, ","), "missing_models="+strings.Join(missingModels, ","))
+	}
+}
+
+func renderNotesProgress(builder *strings.Builder, status knowledge.PipelineOverallStatus, raw bool) {
+	p := status.Progress
+	renderMetricLine(builder, "Pipelines", fmt.Sprintf("observed=%d limit=%d window_full=%t known=%t", len(status.Current), p.Limit, p.WindowFull, p.CurrentKnown), "totals=unknown")
+	if len(p.Runs) > 0 {
+		run := p.Runs[0]
+		renderMetricLine(builder, "selected="+run.ObjectID, fmt.Sprintf("generation=%d age=%.0fs", run.Generation, run.RunAgeSeconds), "reason="+run.Reason)
+		if run.NextEligibleAt != nil {
+			renderMetricLine(builder, "next_eligible="+timeOrDash(*run.NextEligibleAt))
+		}
+		if publication := run.Publication; publication != nil {
+			renderMetricLine(builder, fmt.Sprintf("Publication: catalog_current=%t body=%t lexical=%t semantic=%t", publication.CatalogCurrent, publication.BodyCurrent, publication.LexicalCurrent, publication.SemanticCurrent))
+		}
+		for _, stage := range run.Stages {
+			if stage.StageKey != knowledge.FilePipelineStageEmbedding && stage.StageKey != knowledge.FilePipelineStagePDFOCR && stage.StageKey != knowledge.FilePipelineStageImageOCR && stage.StageKey != knowledge.FilePipelineStageImageDescription {
+				continue
+			}
+			total := "unknown"
+			if stage.TotalUnits != nil {
+				total = fmt.Sprint(*stage.TotalUnits)
+			}
+			renderMetricLine(builder, fmt.Sprintf("%s=%s units=%d/%s reused=unknown", stage.StageKey, stage.Status, stage.CompletedUnits, total), stage.SkipReason)
+		}
+	}
+	if pipelinePartial(p.PartialErrors, "policy_unavailable") {
+		renderMetricLine(builder, "Policies: unknown")
+	} else {
+		renderMetricLine(builder, fmt.Sprintf("Policies: OCR=%t vision=%t embeddings=%t", status.Policy.Policy.PDFOCREnabled, status.Policy.Policy.ImageDescriptionsEnabled, status.Policy.Policy.EmbeddingsEnabled))
+	}
+	if status.Operations.CapacityKnown {
+		renderMetricLine(builder, fmt.Sprintf("Heavy capacity=%d leases=%d", status.Operations.HeavyCapacity, status.Operations.HeavyActiveLeases))
+	} else {
+		renderMetricLine(builder, "Heavy capacity: unknown")
+	}
+	for _, worker := range p.Workers {
+		for _, turn := range worker.Turns {
+			admission := turn.Observation.Admission
+			if admission == nil {
+				continue
+			}
+			renderMetricLine(builder, "Pressure observation: "+admission.Reason, "observed="+timeOrDash(admission.SampledAt))
+			if admission.NextEligibleAt != nil {
+				renderMetricLine(builder, "pressure_next_eligible="+timeOrDash(*admission.NextEligibleAt))
+			}
+		}
+	}
+	var native notesworkspacesync.WorkspaceProgress
+	if len(status.NativePublication) > 0 && json.Unmarshal(status.NativePublication, &native) == nil {
+		renderMetricLine(builder, "Native selection: "+native.SelectionScope, "current=unknown", "checkpoint="+native.CheckpointID)
+		for _, inventory := range native.Inventory {
+			renderMetricLine(builder, "Native publication: "+firstNonEmpty(inventory.NativeCollection, inventory.Collection), "source="+inventory.Collection, "generation="+inventory.Generation, fmt.Sprintf("inventory_complete=%t totals_known=%t", inventory.Complete, inventory.TotalsKnown))
+			if inventory.CountersKnown {
+				renderMetricLine(builder, fmt.Sprintf("pending_text=%d pending_assets=%d excluded=%d", inventory.Counts.TextPending, inventory.Counts.AssetPending, inventory.Counts.Excluded))
+			} else {
+				renderMetricLine(builder, "native counts=unknown")
+			}
+			renderMetricLine(builder, "published_text="+notesProgressCount(inventory.TextPublished), "published_assets="+notesProgressCount(inventory.AssetPublished))
+			if inventory.Degraded != "" {
+				renderMetricLine(builder, "inventory="+inventory.Degraded)
+			}
+			if inventory.TextReason != "" || inventory.AssetReason != "" {
+				renderMetricLine(builder, "text_wait="+notesProgressWait(inventory.TextOldestAgeSeconds, inventory.TextReason), "asset_wait="+notesProgressWait(inventory.AssetOldestAgeSeconds, inventory.AssetReason))
+			}
+			if inventory.TextRetryAt != nil {
+				renderMetricLine(builder, "text_retry="+timeOrDash(*inventory.TextRetryAt))
+			}
+			if inventory.AssetRetryAt != nil {
+				renderMetricLine(builder, "asset_retry="+timeOrDash(*inventory.AssetRetryAt))
+			}
+		}
+		for _, failure := range native.PartialErrors {
+			renderMetricLine(builder, "Partial: "+failure)
+		}
+		if raw {
+			renderMetricLine(builder, "Selection: "+native.SelectionScope, "checkpoint="+native.CheckpointID, "checkpoint_run="+native.CheckpointRunID)
+		}
+	}
+	renderMetricLine(builder, "Client receipt: unknown", "Source acceptance: unknown", "Protected generation/receipt: unknown")
+	renderMetricLine(builder, "Rates/ETA: unknown (stable total and observed throughput unavailable)")
+	for _, failure := range p.PartialErrors {
+		renderMetricLine(builder, "Partial: "+failure)
+	}
+	if raw {
+		keys := make([]string, 0, len(p.Unknown))
+		for key := range p.Unknown {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			renderMetricLine(builder, "Unknown "+key+": "+p.Unknown[key])
+		}
+		renderMetricLine(builder, "Integrity: explicit loom notes pipelines status --inspect-integrity", "Runtime/model availability: unknown (not probed)")
 	}
 }
 
@@ -420,6 +522,16 @@ func renderNotesSearchResults(builder *strings.Builder, state ScreenState, searc
 }
 
 func renderNotesSearchResultRow(builder *strings.Builder, row int, selected int, result knowledge.NotesSearchResult, raw bool) {
+	if result.FileID != "" {
+		fmt.Fprintf(builder, "  %s %s\n      %s\n", renderSelectedMarker(row, selected), trimForWidth(result.Title, usableWidth(portalRenderContext().Width, 8)), trimForWidth(result.CanonicalPath, usableWidth(portalRenderContext().Width, 8)))
+		fmt.Fprintf(builder, "      %s\n", strings.Join([]string{result.FileID, firstNonEmpty(result.ProjectName, result.SourceCategory), string(result.SourceLifecycle)}, "  "))
+		if result.Snippet != "" {
+			fmt.Fprintf(builder, "      %s\n", compactPortalText(result.Snippet, usableWidth(portalRenderContext().Width, 8)))
+		} else {
+			fmt.Fprintln(builder, "      metadata only")
+		}
+		return
+	}
 	title := firstNonEmpty(result.Title, result.RelativePath, result.Citation.Label, result.KnowledgeObjectID, result.SearchDocumentID)
 	snippet := compactPortalText(result.Snippet, usableWidth(portalRenderContext().Width, 12))
 	location := notesSearchResultLocation(result)
@@ -774,4 +886,26 @@ func copyPortalTimePtr(value *time.Time) *time.Time {
 	}
 	out := value.UTC()
 	return &out
+}
+
+func pipelinePartial(failures []string, target string) bool {
+	for _, failure := range failures {
+		if failure == target {
+			return true
+		}
+	}
+	return false
+}
+
+func notesProgressCount(value *int64) string {
+	if value == nil {
+		return "unknown"
+	}
+	return fmt.Sprint(*value)
+}
+func notesProgressWait(age float64, reason string) string {
+	if reason == "waiting_outside_bounded_window" {
+		return "unknown (bounded lane window)"
+	}
+	return fmt.Sprintf("%.0fs %s", age, reason)
 }

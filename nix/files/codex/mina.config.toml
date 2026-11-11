@@ -1,0 +1,5 @@
+# Settings only: MINA's identity comes from her workspace bootstrap and wrappers.
+model = "gpt-6-astra"
+model_provider = "openai"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"

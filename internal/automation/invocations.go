@@ -8,6 +8,7 @@ import (
 	"loom.local/loom/internal/events"
 	"loom.local/loom/internal/ids"
 	"loom.local/loom/internal/requestctx"
+	"loom.local/loom/internal/workers"
 )
 
 type CreateInvocationTxInput struct {
@@ -98,6 +99,9 @@ func (s Service) createInvocationTx(ctx context.Context, tx *sql.Tx, req request
 	payload["invocation_idempotency"] = invocation.IdempotencyKey
 	payload["dispatcher_idempotency"] = "automation-dispatch:" + invocation.InvocationID + ":attempt:1"
 	if err := appendLifecycleEventTx(ctx, tx, req, events.TypeInvocationCreated, "invocation", invocation.InvocationID, invocation.Status, payload); err != nil {
+		return Invocation{}, err
+	}
+	if err := workers.NotifyQueueTx(ctx, tx, workers.KindAutomationDispatcher); err != nil {
 		return Invocation{}, err
 	}
 	return invocation, nil

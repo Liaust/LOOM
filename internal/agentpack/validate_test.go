@@ -54,7 +54,7 @@ func TestValidateReportsSkillMetadataFailures(t *testing.T) {
 func TestValidateReportsCatalogueReferenceAndManifestMetadataFailures(t *testing.T) {
 	pack := loadValidPack(t)
 	pack.Manifest.Skills[0].Hash = ""
-	delete(pack.Manifest.Harnesses, "orca")
+	delete(pack.Manifest.Harnesses, "codex")
 	pack.Catalogue.Skills[0].Status = "unreviewed"
 	pack.Catalogue.Skills[0].References = []string{"references/missing.md"}
 	report := Validate(pack)
@@ -169,7 +169,7 @@ func TestArchivistSkillRoutesRetrievalWithoutOperationalSurfaceWidening(t *testi
 	content := combined.String()
 	for _, required := range []string{
 		"loom object", "loom notes", "loom provenance", "loom project",
-		"one first engine", "exact", "candidates", "manual",
+		"Independent retrievals", "exact", "candidates", "manual", "--details --json",
 	} {
 		if !strings.Contains(strings.ToLower(content), strings.ToLower(required)) {
 			t.Errorf("Archivist skill omits routing/control marker %q", required)

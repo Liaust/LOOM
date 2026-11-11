@@ -259,6 +259,9 @@ func enqueueMessageTx(ctx context.Context, tx *sql.Tx, req requestctx.Context, n
 	}); err != nil {
 		return Message{}, err
 	}
+	if _, err := tx.ExecContext(ctx, `SELECT pg_notify('loom_node_delivery',$1)`, nodeID); err != nil {
+		return Message{}, err
+	}
 	return message, nil
 }
 

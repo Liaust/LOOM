@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Only rendered activation functions and tiny self-owned fixtures are executed.
 [[ $(uname -s) == Linux && $(id -u) == 0 && $# == 1 ]] || {
-  echo 'Requires Linux/root and one rendered loomOrcaAccess text file' >&2
+  echo 'Requires Linux/root and one rendered loomAgentsAccess text file' >&2
   exit 1
 }
 for tool in python3 bash find setfacl getfacl readlink stat setpriv; do
@@ -61,7 +61,7 @@ def command(*args, check=True):
     return subprocess.run(args, check=check, capture_output=True, text=True)
 
 def activate(check=True):
-    invocation = script + '\n' + f'grant_agent_read_write {box}\ngrant_agent_read_only {storage}\nprotect_workspace_archive_categories\n'
+    invocation = script + '\n' + f'grant_agent_read_write {box}\ngrant_agent_read_only {storage}\ngrant_agent_read_only {root / "state"}\nprotect_workspace_archive_categories\n'
     return command('bash', '-euo', 'pipefail', '-c', invocation, check=check)
 
 def snapshot(path):
@@ -81,6 +81,17 @@ for kind in ('Topics', 'Projects', 'Library'):
     category.mkdir(parents=True)
     os.chmod(category, 0o2750)
     command('setfacl', '-m', 'u:65534:r-x,d:u:65534:r-x', str(category))
+
+protected_intakes = []
+for intake in (storage / 'imports', root / 'state/lane', storage / 'Boxes/company'):
+    batch = intake / 'node/date/batch'
+    batch.mkdir(parents=True)
+    file = batch / 'committed.bin'
+    file.write_bytes(b'committed intake permission fixture\n')
+    os.chmod(batch, 0o700)
+    os.chmod(file, 0o600)
+    command('setfacl', '-m', 'u:65534:r--,m::---', str(file))
+    protected_intakes.append((intake, snapshot(intake)))
 
 source = box / 'Topics/pilot'
 (source / '.loom-acceptance').mkdir(parents=True)
@@ -105,10 +116,12 @@ for _ in range(2):
     activate()
     assert snapshot(source) == before, 'pending source changed'
     assert snapshot(intent) == intent_before, 'authenticated intent changed'
+    for intake, expected in protected_intakes:
+        assert snapshot(intake) == expected, 'committed or staged Lane payload ACL/mode changed'
 after = (archive / 'topics').stat()
 assert (after.st_dev, after.st_ino, after.st_mode, after.st_mtime_ns) == (
     category_before.st_dev, category_before.st_ino, category_before.st_mode, category_before.st_mtime_ns)
-print('PASS pending activation x2: exact source/intent and category binding')
+print('PASS pending activation x2: exact source/intent/category and Lane intake ACL/mode binding')
 
 destination = container / 'content'
 source.rename(destination)
@@ -120,9 +133,12 @@ test = 'import os,sys; os.open(sys.argv[1], int(sys.argv[2]))'
 for flags in (os.O_RDONLY, os.O_WRONLY):
     attempt = command('setpriv', '--reuid=65534', '--regid=65534', '--clear-groups',
                       'python3', '-c', test, str(destination / '.loom-acceptance/payload.md'), str(flags), check=False)
-    assert attempt.returncode != 0 and 'PermissionError' in attempt.stderr, 'nonowner reached archived payload'
+    if flags == os.O_RDONLY:
+        assert attempt.returncode == 0, 'declared archive reader lost read access'
+    else:
+        assert attempt.returncode != 0 and 'PermissionError' in attempt.stderr, 'archive reader gained write access'
 assert (destination / '.loom-acceptance/payload.md').read_bytes() == payload_bytes
-print('PASS archived activation x2: exact fidelity, nonowner read/write denied, owner read works')
+print('PASS archived activation x2: exact fidelity, declared reader read works/write denied, owner read works')
 
 destination.rename(source)
 for _ in range(2):

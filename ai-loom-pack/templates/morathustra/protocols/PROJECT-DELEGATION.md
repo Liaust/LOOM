@@ -3,8 +3,9 @@
 Identify the owning repository from supported LOOM project/Provenance surfaces
 and verify its current root contracts. Ordinary coding work belongs to a
 project-root worker in the owning project's native worktree/task workflow.
-ORCA owns interactive lifecycle; respect a repository's accepted Codex-managed
+The current native harness owns interactive lifecycle; respect a repository's Codex-managed
 worker policy where it applies. Never create a competing LOOM task registry.
+ORCA is retired, not an availability fallback.
 
 Give the worker the outcome, exact accepted base, canonical source root,
 relevant planning files, expected files, forbidden systems, dependencies,

@@ -187,6 +187,8 @@ type WorkspacePathMapping struct {
 }
 
 type TrustedWorkspaceRoots struct {
+	BoxID       string
+	Primary     bool
 	BoxRoot     string
 	StorageRoot string
 }
@@ -221,6 +223,13 @@ type WorkspacePathBinding struct {
 	ParentIdentity PathIdentity     `json:"parent_identity"`
 }
 
+// WorkspaceArchivePlacement separates custody metadata from the retained payload.
+type WorkspaceArchivePlacement struct {
+	Metadata          WorkspacePathBinding       `json:"metadata"`
+	MetadataAncestors []WorkspaceAncestorBinding `json:"metadata_ancestors"`
+	RelocationID      string                     `json:"relocation_id,omitempty"`
+}
+
 // WorkspaceAncestorBinding records every already-existing directory traversed
 // from a trusted root to a planned parent. RelativePath is "." for the trusted
 // root itself. Slice 2 requires this evidence so replacing an intermediate
@@ -242,6 +251,12 @@ type WorkspaceCatalogRebind struct {
 	NewOriginalPath         string `json:"new_original_path,omitempty"`
 	ExpectedCurrentViewPath string `json:"expected_current_view_path,omitempty"`
 	NewCurrentViewPath      string `json:"new_current_view_path,omitempty"`
+}
+
+type WorkspaceCatalogObservation struct {
+	StorageEntryID  string `json:"storage_entry_id"`
+	OriginalPath    string `json:"original_path"`
+	CurrentViewPath string `json:"current_view_path"`
 }
 
 type NoFollowInventoryEntry struct {
@@ -270,6 +285,7 @@ type NoFollowInventory struct {
 }
 
 type WorkspaceArchivePlan struct {
+	BoxID                 string                         `json:"box_id,omitempty"`
 	SchemaVersion         string                         `json:"schema_version"`
 	EvidenceKind          string                         `json:"evidence_kind"`
 	OperationID           string                         `json:"operation_id"`
@@ -290,6 +306,9 @@ type WorkspaceArchivePlan struct {
 	Reason                string                         `json:"reason"`
 	PlannedAt             time.Time                      `json:"planned_at"`
 	PlanDigest            string                         `json:"plan_digest"`
+	Placement             *WorkspaceArchivePlacement     `json:"placement,omitempty"`
+	CatalogObservations   []WorkspaceCatalogObservation  `json:"catalog_observations,omitempty"`
+	ActiveLocation        *WorkspaceActiveLocation       `json:"active_location,omitempty"`
 }
 
 type WorkspaceArchivePreviousCycle struct {
@@ -317,6 +336,7 @@ type WorkspaceArchiveFinding struct {
 }
 
 type WorkspaceArchiveOperation struct {
+	BoxID                  string                          `json:"box_id,omitempty"`
 	SchemaVersion          string                          `json:"schema_version"`
 	EvidenceKind           string                          `json:"evidence_kind"`
 	OperationID            string                          `json:"operation_id"`
@@ -339,6 +359,7 @@ type WorkspaceArchiveOperation struct {
 	ProjectionsCommittedAt *time.Time                      `json:"projections_committed_at,omitempty"`
 	CompletedAt            *time.Time                      `json:"completed_at,omitempty"`
 	UpdatedAt              time.Time                       `json:"updated_at"`
+	Placement              *WorkspaceArchivePlacement      `json:"placement,omitempty"`
 }
 
 type WorkspaceArchiveStatus struct {
@@ -358,6 +379,7 @@ type ManifestAuthentication struct {
 }
 
 type WorkspaceArchiveManifest struct {
+	BoxID                 string                  `json:"box_id,omitempty"`
 	SchemaVersion         string                  `json:"schema_version"`
 	EvidenceKind          string                  `json:"evidence_kind"`
 	ArchiveOperationID    string                  `json:"archive_operation_id"`
@@ -378,9 +400,11 @@ type WorkspaceArchiveManifest struct {
 	ArchivedAt            time.Time               `json:"archived_at"`
 	RestoredAt            *time.Time              `json:"restored_at,omitempty"`
 	Authentication        ManifestAuthentication  `json:"authentication"`
+	RestoredFromPath      *WorkspacePathRef       `json:"restored_from_path,omitempty"`
 }
 
 type WorkspaceLifecycleEvent struct {
+	BoxID           string                       `json:"box_id,omitempty"`
 	SchemaVersion   string                       `json:"schema_version"`
 	EventID         string                       `json:"event_id"`
 	EventKind       string                       `json:"event_kind"`
@@ -488,8 +512,34 @@ func InventoryMappedSource(ctx context.Context, roots TrustedWorkspaceRoots, ope
 }
 
 func ValidateWorkspaceArchivePlan(plan WorkspaceArchivePlan, roots TrustedWorkspaceRoots) error {
-	if plan.SchemaVersion != WorkspaceArchivePlanSchemaVersion {
+	if err := validateWorkspaceBoxBinding(plan.BoxID, roots); err != nil {
+		return err
+	}
+	if err := validateWorkspacePlanActiveLocation(plan, roots); err != nil {
+		return err
+	}
+	if len(plan.CatalogObservations) > 0 {
+		if plan.SchemaVersion != WorkspaceArchivePlanSchemaVersionV2 && plan.SchemaVersion != WorkspaceArchivePlanSchemaVersionV3 {
+			return fmt.Errorf("v1 plan cannot contain catalog observations")
+		}
+		last := ""
+		for _, item := range plan.CatalogObservations {
+			if !storageEntryIDPattern.MatchString(item.StorageEntryID) || item.StorageEntryID <= last || len(item.OriginalPath) > 4096 || len(item.CurrentViewPath) > 4096 {
+				return fmt.Errorf("invalid sorted catalog observations")
+			}
+			for _, r := range plan.CatalogRebinds {
+				if r.StorageEntryID == item.StorageEntryID && r.StoragePhysicalRefID == "" {
+					return fmt.Errorf("catalog observation overlaps an entry mutation")
+				}
+			}
+			last = item.StorageEntryID
+		}
+	}
+	if plan.SchemaVersion != WorkspaceArchivePlanSchemaVersion && plan.SchemaVersion != WorkspaceArchivePlanSchemaVersionV2 && plan.SchemaVersion != WorkspaceArchivePlanSchemaVersionV3 {
 		return fmt.Errorf("unsupported workspace archive plan schema %q", plan.SchemaVersion)
+	}
+	if plan.SchemaVersion == WorkspaceArchivePlanSchemaVersion && plan.Placement != nil {
+		return fmt.Errorf("v1 plan cannot contain placement evidence")
 	}
 	if plan.EvidenceKind != PhysicalWorkspaceMoveEvidence {
 		return fmt.Errorf("plan evidence_kind must be %q", PhysicalWorkspaceMoveEvidence)
@@ -509,7 +559,7 @@ func ValidateWorkspaceArchivePlan(plan WorkspaceArchivePlan, roots TrustedWorksp
 	if plan.PlannedAt.IsZero() {
 		return fmt.Errorf("planned_at is required")
 	}
-	paths, err := ResolveWorkspacePaths(roots, plan.Kind, plan.Slug)
+	paths, err := ResolveWorkspacePlanPaths(roots, plan)
 	if err != nil {
 		return err
 	}
@@ -544,6 +594,11 @@ func ValidateWorkspaceArchivePlan(plan WorkspaceArchivePlan, roots TrustedWorksp
 	}
 	if plan.Source.Identity.DeviceID != plan.Destination.ParentIdentity.DeviceID {
 		return fmt.Errorf("source and destination roots must be on the same filesystem")
+	}
+	if plan.SchemaVersion == WorkspaceArchivePlanSchemaVersionV2 || plan.SchemaVersion == WorkspaceArchivePlanSchemaVersionV3 {
+		if err := validateWorkspacePlanPlacement(plan); err != nil {
+			return err
+		}
 	}
 	if err := ValidateNoFollowInventory(plan.Inventory); err != nil {
 		return err
@@ -645,7 +700,15 @@ func SealWorkspaceArchivePlan(plan *WorkspaceArchivePlan) error {
 }
 
 func ValidateNoFollowInventory(inventory NoFollowInventory) error {
-	if inventory.SchemaVersion != NoFollowInventorySchemaVersion {
+	return validateNoFollowInventory(inventory, false)
+}
+
+func validateNoFollowInventory(inventory NoFollowInventory, opaqueLinks bool) error {
+	schema := NoFollowInventorySchemaVersion
+	if opaqueLinks {
+		schema = retainedInventorySchema
+	}
+	if inventory.SchemaVersion != schema {
 		return fmt.Errorf("unsupported no-follow inventory schema %q", inventory.SchemaVersion)
 	}
 	if err := validatePathIdentity(inventory.RootIdentity, PathPresent, InventoryEntryDirectory); err != nil {
@@ -685,7 +748,7 @@ func ValidateNoFollowInventory(inventory NoFollowInventory) error {
 			}
 		case InventoryEntrySymlink:
 			symlinks++
-			if err := validateSymlinkTarget(entry.RelativePath, entry.SymlinkTarget); err != nil {
+			if err := validateInventoryLink(entry.RelativePath, entry.SymlinkTarget, opaqueLinks); err != nil {
 				return err
 			}
 			if !sha256DigestPattern.MatchString(entry.TargetDigest) || entry.ContentDigest != "" {
@@ -723,10 +786,10 @@ func EvaluatePlanEvidence(plan WorkspaceArchivePlan, observedSource, observedDes
 	}
 	if !samePathRef(plan.Source.Path, observedSource.Path) ||
 		!SamePathIdentity(plan.Source.Identity, observedSource.Identity) ||
-		!SamePathIdentity(plan.Source.ParentIdentity, observedSource.ParentIdentity) {
+		!sameStableDirectoryIdentity(plan.Source.ParentIdentity, observedSource.ParentIdentity) {
 		add(FindingSourceDrift, "source path, identity, or parent identity changed after plan review")
 	}
-	if !samePathRef(plan.Destination.Path, observedDestination.Path) || !SamePathIdentity(plan.Destination.ParentIdentity, observedDestination.ParentIdentity) {
+	if !samePathRef(plan.Destination.Path, observedDestination.Path) || !sameStableDirectoryIdentity(plan.Destination.ParentIdentity, observedDestination.ParentIdentity) {
 		add(FindingDestinationSubstitution, "destination path or parent identity changed after plan review")
 	}
 	if plan.Destination.Identity.Presence == PathAbsent && observedDestination.Identity.Presence == PathPresent {
@@ -757,8 +820,11 @@ func EvaluateReplay(existing WorkspaceArchiveOperation, incoming WorkspaceArchiv
 }
 
 func ValidateWorkspaceArchiveOperation(operation WorkspaceArchiveOperation) error {
-	if operation.SchemaVersion != WorkspaceArchiveOperationSchemaVersion || operation.EvidenceKind != PhysicalWorkspaceMoveEvidence {
+	if (operation.SchemaVersion != WorkspaceArchiveOperationSchemaVersion && operation.SchemaVersion != WorkspaceArchiveOperationSchemaVersionV2 && operation.SchemaVersion != WorkspaceArchiveOperationSchemaVersionV3) || operation.EvidenceKind != PhysicalWorkspaceMoveEvidence {
 		return fmt.Errorf("unsupported workspace archive operation contract")
+	}
+	if operation.SchemaVersion == WorkspaceArchiveOperationSchemaVersion && operation.Placement != nil {
+		return fmt.Errorf("v1 operation cannot contain placement evidence")
 	}
 	if !workspaceOperationID.MatchString(operation.OperationID) || !sha256DigestPattern.MatchString(operation.PlanDigest) {
 		return fmt.Errorf("invalid operation identity or plan digest")
@@ -766,7 +832,7 @@ func ValidateWorkspaceArchiveOperation(operation WorkspaceArchiveOperation) erro
 	if err := validateWorkspaceObject(operation.Kind, operation.ObjectID, operation.Slug); err != nil {
 		return err
 	}
-	if err := validateMappedBindings(operation.OperationKind, operation.Kind, operation.Slug, operation.Source, operation.Destination); err != nil {
+	if err := validateWorkspaceOperationPaths(operation); err != nil {
 		return err
 	}
 	if err := validatePathIdentity(operation.Source.Identity, PathPresent, InventoryEntryDirectory); err != nil {
@@ -783,6 +849,11 @@ func ValidateWorkspaceArchiveOperation(operation WorkspaceArchiveOperation) erro
 	}
 	if operation.Source.Identity.DeviceID != operation.Destination.ParentIdentity.DeviceID {
 		return fmt.Errorf("operation source and destination are cross-device")
+	}
+	if operation.SchemaVersion == WorkspaceArchiveOperationSchemaVersionV2 || operation.SchemaVersion == WorkspaceArchiveOperationSchemaVersionV3 {
+		if err := validateWorkspaceOperationPlacement(operation); err != nil {
+			return err
+		}
 	}
 	if !validWorkspaceActorID(operation.ActorID) {
 		return fmt.Errorf("invalid actor_id")
@@ -839,8 +910,14 @@ func ValidateWorkspaceArchiveOperation(operation WorkspaceArchiveOperation) erro
 }
 
 func ValidateWorkspaceArchiveOperationForRoots(operation WorkspaceArchiveOperation, roots TrustedWorkspaceRoots) error {
+	if err := validateWorkspaceBoxBinding(operation.BoxID, roots); err != nil {
+		return err
+	}
 	if err := ValidateWorkspaceArchiveOperation(operation); err != nil {
 		return err
+	}
+	if operation.SchemaVersion == WorkspaceArchiveOperationSchemaVersionV2 || operation.SchemaVersion == WorkspaceArchiveOperationSchemaVersionV3 {
+		return validateWorkspaceOperationRoots(operation, roots)
 	}
 	paths, err := ResolveWorkspacePaths(roots, operation.Kind, operation.Slug)
 	if err != nil {
@@ -923,8 +1000,11 @@ func ValidateWorkspaceArchiveFinding(finding WorkspaceArchiveFinding) error {
 }
 
 func ValidateWorkspaceArchiveManifest(manifest WorkspaceArchiveManifest) error {
-	if manifest.SchemaVersion != WorkspaceArchiveManifestSchemaVersion || manifest.EvidenceKind != PhysicalWorkspaceMoveEvidence {
+	if (manifest.SchemaVersion != WorkspaceArchiveManifestSchemaVersion && manifest.SchemaVersion != WorkspaceArchiveManifestSchemaVersionV2 && manifest.SchemaVersion != WorkspaceArchiveManifestSchemaVersionV3) || manifest.EvidenceKind != PhysicalWorkspaceMoveEvidence {
 		return fmt.Errorf("manifest is not physical workspace move evidence")
+	}
+	if manifest.SchemaVersion == WorkspaceArchiveManifestSchemaVersion && manifest.RestoredFromPath != nil {
+		return fmt.Errorf("v1 manifest cannot contain restored_from_path")
 	}
 	if !workspaceOperationID.MatchString(manifest.ArchiveOperationID) || !workspaceLifecycleID.MatchString(manifest.LifecycleEventID) {
 		return fmt.Errorf("invalid physical manifest operation or event identity")
@@ -936,10 +1016,19 @@ func ValidateWorkspaceArchiveManifest(manifest WorkspaceArchiveManifest) error {
 		return err
 	}
 	mapping, _ := WorkspaceMapping(manifest.Kind, manifest.Slug)
-	if err := validateMappedPathRef("active_path", manifest.ActivePath, mapping.ActiveRoot, mapping.ActiveRelativePath); err != nil {
-		return err
+	if manifest.SchemaVersion == WorkspaceArchiveManifestSchemaVersionV3 {
+		if manifest.Kind != WorkspaceKindProject {
+			return fmt.Errorf("v3 manifests support only projects")
+		}
+		if err := validateWorkspaceV3ActivePath(manifest.ActivePath); err != nil {
+			return err
+		}
+	} else {
+		if err := validateMappedPathRef("active_path", manifest.ActivePath, mapping.ActiveRoot, mapping.ActiveRelativePath); err != nil {
+			return err
+		}
 	}
-	if err := validateMappedPathRef("archive_payload_path", manifest.ArchivePayloadPath, mapping.ArchiveRoot, mapping.ArchivePayloadPath); err != nil {
+	if err := validateWorkspaceManifestPaths(manifest); err != nil {
 		return err
 	}
 	if err := validatePathIdentity(manifest.ArchiveSourceIdentity, PathPresent, InventoryEntryDirectory); err != nil {
@@ -976,8 +1065,14 @@ func ValidateWorkspaceArchiveManifest(manifest WorkspaceArchiveManifest) error {
 }
 
 func ValidateWorkspaceArchiveManifestForRoots(manifest WorkspaceArchiveManifest, roots TrustedWorkspaceRoots) error {
+	if err := validateWorkspaceBoxBinding(manifest.BoxID, roots); err != nil {
+		return err
+	}
 	if err := ValidateWorkspaceArchiveManifest(manifest); err != nil {
 		return err
+	}
+	if manifest.SchemaVersion == WorkspaceArchiveManifestSchemaVersionV2 || manifest.SchemaVersion == WorkspaceArchiveManifestSchemaVersionV3 {
+		return validateWorkspaceManifestRoots(manifest, roots)
 	}
 	paths, err := ResolveWorkspacePaths(roots, manifest.Kind, manifest.Slug)
 	if err != nil {
@@ -990,11 +1085,17 @@ func ValidateWorkspaceArchiveManifestForRoots(manifest WorkspaceArchiveManifest,
 }
 
 func ValidateWorkspaceArchiveManifestForOperations(manifest WorkspaceArchiveManifest, archiveOperation WorkspaceArchiveOperation, restoreOperation *WorkspaceArchiveOperation) error {
+	if manifest.BoxID != archiveOperation.BoxID || restoreOperation != nil && restoreOperation.BoxID != manifest.BoxID {
+		return fmt.Errorf("manifest Box identity differs from its original operation")
+	}
 	if err := ValidateWorkspaceArchiveManifest(manifest); err != nil {
 		return err
 	}
 	if err := ValidateWorkspaceArchiveOperation(archiveOperation); err != nil {
 		return fmt.Errorf("archive operation: %w", err)
+	}
+	if err := validateWorkspaceManifestOperationSchemas(manifest, archiveOperation, restoreOperation); err != nil {
+		return err
 	}
 	if archiveOperation.OperationKind != WorkspaceOperationArchive ||
 		archiveOperation.OperationID != manifest.ArchiveOperationID ||
@@ -1026,13 +1127,17 @@ func ValidateWorkspaceArchiveManifestForOperations(manifest WorkspaceArchiveMani
 	if err := ValidateWorkspaceArchiveOperation(*restoreOperation); err != nil {
 		return fmt.Errorf("restore operation: %w", err)
 	}
+	restoredFrom := manifest.ArchivePayloadPath
+	if manifest.RestoredFromPath != nil {
+		restoredFrom = *manifest.RestoredFromPath
+	}
 	if restoreOperation.OperationKind != WorkspaceOperationRestore ||
 		restoreOperation.OperationID != manifest.RestoreOperationID ||
 		restoreOperation.Kind != manifest.Kind ||
 		restoreOperation.ObjectID != manifest.ObjectID ||
 		restoreOperation.Slug != manifest.Slug ||
 		restoreOperation.PlanDigest != manifest.RestorePlanDigest ||
-		!samePathRef(restoreOperation.Source.Path, manifest.ArchivePayloadPath) ||
+		!samePathRef(restoreOperation.Source.Path, restoredFrom) ||
 		!samePathRef(restoreOperation.Destination.Path, manifest.ActivePath) {
 		return fmt.Errorf("manifest does not match its restore operation")
 	}
@@ -1045,7 +1150,7 @@ func ValidateWorkspaceArchiveManifestForOperations(manifest WorkspaceArchiveMani
 }
 
 func ValidateWorkspaceLifecycleEvent(event WorkspaceLifecycleEvent) error {
-	if event.SchemaVersion != WorkspaceLifecycleEventSchemaVersion || event.EventKind != WorkspaceLifecycleEventKind {
+	if (event.SchemaVersion != WorkspaceLifecycleEventSchemaVersion && event.SchemaVersion != WorkspaceLifecycleEventSchemaVersionV2 && event.SchemaVersion != WorkspaceLifecycleEventSchemaVersionV3) || event.EventKind != WorkspaceLifecycleEventKind {
 		return fmt.Errorf("unsupported workspace lifecycle event contract")
 	}
 	if !workspaceLifecycleID.MatchString(event.EventID) || !workspaceOperationID.MatchString(event.OperationID) {
@@ -1054,7 +1159,10 @@ func ValidateWorkspaceLifecycleEvent(event WorkspaceLifecycleEvent) error {
 	if err := validateWorkspaceObject(event.Kind, event.ObjectID, event.Slug); err != nil {
 		return err
 	}
-	mapping, _ := WorkspaceMapping(event.Kind, event.Slug)
+	mapping, err := workspaceLifecycleMapping(event)
+	if err != nil {
+		return err
+	}
 	switch event.Transition {
 	case WorkspaceTransitionArchived:
 		if event.FromState != WorkspaceLifecycleActive || event.ToState != WorkspaceLifecycleArchived {
@@ -1086,8 +1194,14 @@ func ValidateWorkspaceLifecycleEvent(event WorkspaceLifecycleEvent) error {
 }
 
 func ValidateWorkspaceLifecycleEventForRoots(event WorkspaceLifecycleEvent, roots TrustedWorkspaceRoots) error {
+	if err := validateWorkspaceBoxBinding(event.BoxID, roots); err != nil {
+		return err
+	}
 	if err := ValidateWorkspaceLifecycleEvent(event); err != nil {
 		return err
+	}
+	if event.SchemaVersion == WorkspaceLifecycleEventSchemaVersionV2 || event.SchemaVersion == WorkspaceLifecycleEventSchemaVersionV3 {
+		return validateWorkspaceEventRoots(event, roots)
 	}
 	paths, err := ResolveWorkspacePaths(roots, event.Kind, event.Slug)
 	if err != nil {
@@ -1104,11 +1218,18 @@ func ValidateWorkspaceLifecycleEventForRoots(event WorkspaceLifecycleEvent, root
 }
 
 func ValidateWorkspaceLifecycleEventForOperation(event WorkspaceLifecycleEvent, operation WorkspaceArchiveOperation) error {
+	if event.BoxID != operation.BoxID {
+		return fmt.Errorf("lifecycle event Box identity differs from its operation")
+	}
 	if err := ValidateWorkspaceLifecycleEvent(event); err != nil {
 		return err
 	}
 	if err := ValidateWorkspaceArchiveOperation(operation); err != nil {
 		return err
+	}
+	if (event.SchemaVersion == WorkspaceLifecycleEventSchemaVersionV2) != (operation.SchemaVersion == WorkspaceArchiveOperationSchemaVersionV2) ||
+		(event.SchemaVersion == WorkspaceLifecycleEventSchemaVersionV3) != (operation.SchemaVersion == WorkspaceArchiveOperationSchemaVersionV3) {
+		return fmt.Errorf("lifecycle event schema does not match its owning operation")
 	}
 	wantTransition := WorkspaceTransitionArchived
 	if operation.OperationKind == WorkspaceOperationRestore {
@@ -1248,6 +1369,10 @@ func openMappedDirectoryNoFollow(roots TrustedWorkspaceRoots, ref WorkspacePathR
 }
 
 func inventoryOpenRootNoFollow(ctx context.Context, root *os.Root, rootInfo os.FileInfo) (NoFollowInventory, error) {
+	return inventoryOpenRootMode(ctx, root, rootInfo, false)
+}
+
+func inventoryOpenRootMode(ctx context.Context, root *os.Root, rootInfo os.FileInfo, opaqueLinks bool) (NoFollowInventory, error) {
 	if err := ctx.Err(); err != nil {
 		return NoFollowInventory{}, err
 	}
@@ -1275,6 +1400,9 @@ func inventoryOpenRootNoFollow(ctx context.Context, root *os.Root, rootInfo os.F
 	}
 
 	inventory := NoFollowInventory{SchemaVersion: NoFollowInventorySchemaVersion, RootIdentity: rootIdentity}
+	if opaqueLinks {
+		inventory.SchemaVersion = retainedInventorySchema
+	}
 	err = fs.WalkDir(root.FS(), ".", func(current string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -1356,7 +1484,7 @@ func inventoryOpenRootNoFollow(ctx context.Context, root *os.Root, rootInfo os.F
 			if err != nil {
 				return err
 			}
-			if err := validateSymlinkTarget(relative, target); err != nil {
+			if err := validateInventoryLink(relative, target, opaqueLinks); err != nil {
 				return err
 			}
 			item.SymlinkTarget = target
@@ -1385,7 +1513,7 @@ func inventoryOpenRootNoFollow(ctx context.Context, root *os.Root, rootInfo os.F
 	if err != nil || !os.SameFile(rootInfo, rootAfter) {
 		return NoFollowInventory{}, fmt.Errorf("inventory root changed while scanning")
 	}
-	if err := ValidateNoFollowInventory(inventory); err != nil {
+	if err := validateNoFollowInventory(inventory, opaqueLinks); err != nil {
 		return NoFollowInventory{}, err
 	}
 	return inventory, nil
@@ -1408,6 +1536,18 @@ func validateSymlinkTarget(relativePath, target string) error {
 	resolved := pathpkg.Clean(pathpkg.Join(pathpkg.Dir(relativePath), targetSlash))
 	if resolved == ".." || strings.HasPrefix(resolved, "../") || pathpkg.IsAbs(resolved) {
 		return fmt.Errorf("symlink %q escapes inventory root", relativePath)
+	}
+	return nil
+}
+
+func validateInventoryLink(relativePath, target string, opaque bool) error {
+	if !opaque {
+		return validateSymlinkTarget(relativePath, target)
+	}
+	// A retained move preserves link text; it never dereferences the target.
+	// This schema is deliberately rejected by executable v1 archive contracts.
+	if target == "" || len(target) > maxWorkspacePathBytes || strings.ContainsRune(target, 0) {
+		return fmt.Errorf("retained symlink %q has an invalid literal target", relativePath)
 	}
 	return nil
 }

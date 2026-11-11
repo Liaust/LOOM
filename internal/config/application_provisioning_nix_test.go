@@ -22,6 +22,8 @@ func TestNixApplicationProvisioningNodePolicy(t *testing.T) {
 	apply := `system: let
   base = system.config;
   configured = cloud: valid: system.extendModules { modules = [ ({ lib, ... }: {
+    # This policy check does not need to build Linux agent sources on macOS.
+    loom.hermesPlatform.enable = lib.mkForce false;
     loom.projectApplications.enable = lib.mkForce true;
     loom.projectApplications.grants = lib.mkForce [];
     loom.projectApplications.provisioning = {
@@ -59,6 +61,8 @@ in {
   caddyRequires = c.systemd.services.caddy.requires;
   backupPolicy = builtins.fromJSON backup.environment.etc."loom/project-applications.json".text;
   backupRoot = backup.systemd.services.loomd.environment.LOOM_APPLICATION_DATA_BACKUP_ROOT;
+  backupCLIEnv = backup.environment.etc."loom/loom.env".text;
+  noBackupCLIEnv = c.environment.etc."loom/loom.env".text;
   backupCapabilities = backup.systemd.services.loomd.serviceConfig.AmbientCapabilities;
   backupMounts = backup.systemd.services.loomd.unitConfig.RequiresMountsFor;
   appUmask = backup.systemd.services."loom-application@".serviceConfig.UMask;
@@ -68,7 +72,7 @@ in {
 }`
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, nix, "--extra-experimental-features", "nix-command flakes", "eval", "--no-write-lock-file", "--json", ".#nixosConfigurations.hardware-main", "--apply", apply)
+	cmd := exec.CommandContext(ctx, nix, "--extra-experimental-features", "nix-command flakes", "eval", "--offline", "--no-write-lock-file", "--json", ".#nixosConfigurations.hardware-main", "--apply", apply)
 	cmd.Dir = repoRoot(t)
 	raw, err := cmd.Output()
 	if err != nil {
@@ -84,9 +88,9 @@ in {
 			DataDir, Global, Import, Firewall string
 			Allowed                           []int
 		}
-		BackupRoot, AppUmask                             string
-		BackupCapabilities, BackupMounts, BackupFailures []string
-		BackupPolicy                                     struct {
+		BackupRoot, BackupCLIEnv, NoBackupCLIEnv, AppUmask string
+		BackupCapabilities, BackupMounts, BackupFailures   []string
+		BackupPolicy                                       struct {
 			Provisioning struct {
 				CloudBackup bool `json:"cloud_backup"`
 			} `json:"provisioning"`
@@ -130,6 +134,9 @@ in {
 	}
 	if got.BackupRoot != "/srv/loom/application-data" || !got.BackupPolicy.Provisioning.CloudBackup || !slices.Equal(got.BackupCapabilities, []string{"CAP_DAC_READ_SEARCH"}) || !slices.Contains(got.BackupMounts, got.BackupRoot) || got.AppUmask != "0077" || len(got.BackupFailures) != 0 {
 		t.Fatalf("backup root/authority/app privacy mismatch: %+v", got)
+	}
+	if !strings.Contains(got.BackupCLIEnv, "LOOM_APPLICATION_DATA_BACKUP_ROOT="+got.BackupRoot+"\n") || !strings.Contains(got.NoBackupCLIEnv, "LOOM_APPLICATION_DATA_BACKUP_ROOT=\n") {
+		t.Fatal("operator configuration must match the daemon's enabled backup root without enabling it by default")
 	}
 	p := got.Policy.Provisioning
 	if got.HelperHome != "tmpfs" || got.BootHome != "tmpfs" || !got.AppHome || !slices.Equal(got.HelperCapabilities, []string{"CAP_SETUID", "CAP_SETGID"}) || !slices.Equal(got.SessionPaths, []string{"/home/agents/.config/proton-pass-cli", "/home/agents/.local/state/proton-pass-cli", "/home/agents/.local/share/proton-pass-cli"}) {

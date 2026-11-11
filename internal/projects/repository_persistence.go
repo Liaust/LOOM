@@ -13,6 +13,7 @@ const (
 	ProjectRepositoryProjectSchemaV03 = "project.contract.v0.3"
 	ProjectRepositoryProjectSchemaV04 = "project.contract.v0.4"
 	ProjectRepositoryProjectSchemaV05 = "project.contract.v0.5"
+	ProjectRepositoryProjectSchemaV06 = "project.contract.v0.6"
 	ProjectRepositoryReposSchemaV03   = "repos.contract.v0.3"
 	ProjectRepositoryReposSchemaV04   = "repos.contract.v0.4"
 )
@@ -136,6 +137,7 @@ const (
 	ProjectRepositorySourceVersionSame              ProjectRepositorySourceVersionTransitionKind = "same_version"
 	ProjectRepositorySourceVersionV03ToV04          ProjectRepositorySourceVersionTransitionKind = "v0.3_to_v0.4"
 	ProjectRepositorySourceVersionToV05             ProjectRepositorySourceVersionTransitionKind = "to_v0.5"
+	ProjectRepositorySourceVersionToV06             ProjectRepositorySourceVersionTransitionKind = "to_v0.6"
 )
 
 var (
@@ -160,6 +162,7 @@ var (
 	projectRepositorySourceV04V03 = ProjectRepositorySourceVersions{ProjectContract: ProjectRepositoryProjectSchemaV04, ReposContract: ProjectRepositoryReposSchemaV03}
 	projectRepositorySourceV04V04 = ProjectRepositorySourceVersions{ProjectContract: ProjectRepositoryProjectSchemaV04, ReposContract: ProjectRepositoryReposSchemaV04}
 	projectRepositorySourceV05V05 = ProjectRepositorySourceVersions{ProjectContract: ProjectRepositoryProjectSchemaV05, ReposContract: ProjectRepositoryProjectSchemaV05}
+	projectRepositorySourceV06V06 = ProjectRepositorySourceVersions{ProjectContract: ProjectRepositoryProjectSchemaV06, ReposContract: ProjectRepositoryProjectSchemaV06}
 )
 
 var supportedProjectRepositorySourceVersions = []ProjectRepositorySourceVersions{
@@ -168,6 +171,7 @@ var supportedProjectRepositorySourceVersions = []ProjectRepositorySourceVersions
 	projectRepositorySourceV04V03,
 	projectRepositorySourceV04V04,
 	projectRepositorySourceV05V05,
+	projectRepositorySourceV06V06,
 }
 
 // Keep the graph literal: a missing edge is a rejection, including every
@@ -187,6 +191,17 @@ var supportedProjectRepositorySourceVersionTransitions = map[projectRepositorySo
 	{from: projectRepositorySourceV04V03, to: projectRepositorySourceV05V05}: ProjectRepositorySourceVersionToV05,
 	{from: projectRepositorySourceV04V04, to: projectRepositorySourceV05V05}: ProjectRepositorySourceVersionToV05,
 	{from: projectRepositorySourceV05V05, to: projectRepositorySourceV05V05}: ProjectRepositorySourceVersionSame,
+	{from: projectRepositorySourceV03V03, to: projectRepositorySourceV06V06}: ProjectRepositorySourceVersionToV06,
+	{from: projectRepositorySourceV03V04, to: projectRepositorySourceV06V06}: ProjectRepositorySourceVersionToV06,
+	{from: projectRepositorySourceV04V03, to: projectRepositorySourceV06V06}: ProjectRepositorySourceVersionToV06,
+	{from: projectRepositorySourceV04V04, to: projectRepositorySourceV06V06}: ProjectRepositorySourceVersionToV06,
+	{from: projectRepositorySourceV05V05, to: projectRepositorySourceV06V06}: ProjectRepositorySourceVersionToV06,
+	{from: projectRepositorySourceV06V06, to: projectRepositorySourceV06V06}: ProjectRepositorySourceVersionSame,
+}
+
+// Keep this local to avoid a projectcontracts dependency cycle.
+func isDeclarationSchemaVersion(version string) bool {
+	return version == ProjectRepositoryProjectSchemaV05 || version == ProjectRepositoryProjectSchemaV06
 }
 
 func SupportedProjectRepositorySourceVersions() []ProjectRepositorySourceVersions {

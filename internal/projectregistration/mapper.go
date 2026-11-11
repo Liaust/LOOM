@@ -14,11 +14,22 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"loom.local/loom/internal/boxregistry"
 	"loom.local/loom/internal/projectcontracts"
 	"loom.local/loom/internal/projects"
 )
 
 var sourceHashPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// BuildInputForBoxes adds deployment placement evidence without changing the
+// portable declaration or accepting ownership from arbitrary client metadata.
+func BuildInputForBoxes(analysis projectcontracts.Analysis, source string, catalog boxregistry.Catalog) (projects.RegisterProjectContractInput, error) {
+	input, err := BuildInput(analysis, source)
+	if err != nil {
+		return input, err
+	}
+	return projects.BindBoxMembership(input, catalog)
+}
 
 // BuildInput consumes only analysis evidence. In particular, it never reopens
 // the project or repositories contracts after validation.
@@ -86,16 +97,22 @@ func mapAnalyzedInput(analysis projectcontracts.Analysis, source string) (projec
 	if strings.TrimSpace(contract.Project.ID) != strings.TrimSpace(analysis.Plan.Project.ID) {
 		return projects.RegisterProjectContractInput{}, fmt.Errorf("validated project contract and registration plan project IDs do not match")
 	}
+	if contract.Project.WorkState != analysis.Plan.Project.WorkState {
+		return projects.RegisterProjectContractInput{}, fmt.Errorf("validated project.work_state differs from registration output")
+	}
 
 	repositorySource, err := mapRepositorySource(analysis)
 	if err != nil {
 		return projects.RegisterProjectContractInput{}, err
 	}
 	var contractSource any = contract
-	if contract.SchemaVersion == projectcontracts.ProjectSchemaV05 {
+	if projectcontracts.IsDeclarationSchemaVersion(contract.SchemaVersion) {
 		d, err := projectcontracts.ParseProjectDeclaration(analysis.Loaded.Raw)
 		if err != nil {
 			return projects.RegisterProjectContractInput{}, err
+		}
+		if d.SchemaVersion != contract.SchemaVersion {
+			return projects.RegisterProjectContractInput{}, fmt.Errorf("declaration schema differs from parsed project contract")
 		}
 		compilationEqual := reflect.DeepEqual(analysis.Report.Declaration, analysis.Plan.Declaration)
 		if d.LegacyContracts != nil {
@@ -107,19 +124,25 @@ func mapAnalyzedInput(analysis projectcontracts.Analysis, source string) (projec
 			return projects.RegisterProjectContractInput{}, fmt.Errorf("declaration source, report and plan disagree")
 		}
 		expected := projectcontracts.NormalizeContract(projectcontracts.ProjectContract{Project: d.Project}).Project
-		if analysis.Report.Project != (projectcontracts.PlanProject{ID: expected.ID, Slug: expected.Slug, Name: expected.Name, Description: expected.Description, OwnerNode: expected.OwnerNode, Status: expected.Status}) {
+		if analysis.Report.Project != (projectcontracts.PlanProject{ID: expected.ID, Slug: expected.Slug, Name: expected.Name, Description: expected.Description, OwnerNode: expected.OwnerNode, Status: expected.Status, WorkState: expected.WorkState}) {
 			return projects.RegisterProjectContractInput{}, fmt.Errorf("declaration project identity differs from registration output")
 		}
 		rootRef, pathErr := filepath.Rel(analysis.Loaded.RootPath, analysis.Loaded.ContractPath)
-		if pathErr != nil || analysis.Report.ProjectRoot != analysis.Loaded.RootPath || analysis.Plan.ProjectRoot != analysis.Loaded.RootPath || analysis.Report.ContractPath != analysis.Loaded.ContractPath || analysis.Plan.ContractPath != analysis.Loaded.ContractPath {
+		if pathErr != nil || (d.SchemaVersion == projectcontracts.ProjectSchemaV06 && filepath.ToSlash(rootRef) != projectcontracts.CanonicalRootContractPath) || analysis.Report.ProjectRoot != analysis.Loaded.RootPath || analysis.Plan.ProjectRoot != analysis.Loaded.RootPath || analysis.Report.ContractPath != analysis.Loaded.ContractPath || analysis.Plan.ContractPath != analysis.Loaded.ContractPath {
 			return projects.RegisterProjectContractInput{}, fmt.Errorf("declaration source location differs from analysis")
 		}
-		expectedSources := map[string]string{filepath.ToSlash(rootRef): projectcontracts.ProjectSchemaV05}
+		expectedSources := map[string]string{filepath.ToSlash(rootRef): d.SchemaVersion}
 		for _, resource := range d.Resources {
+			if resource.Agent != nil {
+				expectedSources[resource.Agent.InstructionsRef] = projectcontracts.AgentInstructionsSchema
+			}
 			if resource.Protection != nil {
 				expectedSources[resource.Protection.PolicyRef] = projectcontracts.BackupPolicySchemaV03
 			}
 			if resource.Application != nil {
+				if resource.Application.Source != nil {
+					continue
+				}
 				if ref := resource.Application.ArtifactDescriptor; ref != "" {
 					expectedSources[ref] = "application.artifact.v1"
 				}
@@ -155,7 +178,7 @@ func mapAnalyzedInput(analysis projectcontracts.Analysis, source string) (projec
 			if hash != snapshot.Hash || hash != snapshot.Revision {
 				return projects.RegisterProjectContractInput{}, fmt.Errorf("declaration source snapshot hash mismatch")
 			}
-			if snapshot.Ref == filepath.ToSlash(rootRef) && snapshot.SchemaVersion == projectcontracts.ProjectSchemaV05 && bytes.Equal(snapshot.Raw, analysis.Loaded.Raw) {
+			if snapshot.Ref == filepath.ToSlash(rootRef) && snapshot.SchemaVersion == d.SchemaVersion && bytes.Equal(snapshot.Raw, analysis.Loaded.Raw) {
 				rootBound = true
 			}
 		}
@@ -223,6 +246,7 @@ func mapAnalyzedInput(analysis projectcontracts.Analysis, source string) (projec
 			Description: analysis.Plan.Project.Description,
 			OwnerNode:   analysis.Plan.Project.OwnerNode,
 			Status:      analysis.Plan.Project.Status,
+			WorkState:   analysis.Plan.Project.WorkState,
 		},
 		RepositorySource: repositorySource,
 		DerivedProviders: json.RawMessage(providersJSON),

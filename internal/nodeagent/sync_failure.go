@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"loom.local/loom/internal/correlation"
+	"loom.local/loom/internal/nodeagent/watchedroots"
 	loomsync "loom.local/loom/internal/sync"
 )
 
@@ -17,24 +18,29 @@ func syncOutboxForRoot(items []LocalSyncOutboxItem, byRef, byVersion map[string]
 	}
 	filtered := make([]LocalSyncOutboxItem, 0)
 	for _, item := range items {
-		key := ""
-		switch item.ItemKind {
-		case loomsync.ItemKindObjectBlob, loomsync.ItemKindObjectMetadata:
-			ref := item
-			if item.ItemKind == loomsync.ItemKindObjectMetadata {
-				ref.LocalRef = metadataString(item.PayloadJSON, "local_object_ref")
-			}
-			if object, ok := localSyncObjectForOutbox(ref, byRef, byVersion); ok {
-				key = metadataString(object.Metadata, "watched_root")
-			}
-		case loomsync.ItemKindDeletionRequest:
-			key = metadataString(item.PayloadJSON, "root_key")
-		}
-		if key == root {
+		if syncOutboxRoot(item, byRef, byVersion) == root {
 			filtered = append(filtered, item)
 		}
 	}
 	return filtered
+}
+
+func syncOutboxRoot(item LocalSyncOutboxItem, byRef, byVersion map[string]LocalSyncObject) string {
+	switch item.ItemKind {
+	case loomsync.ItemKindObjectBlob, loomsync.ItemKindObjectMetadata:
+		if item.ItemKind == loomsync.ItemKindObjectMetadata {
+			if metadataString(item.PayloadJSON, "schema_version") == loomsync.FileObservationSchema {
+				return metadataString(item.PayloadJSON, "root_key")
+			}
+			item.LocalRef = metadataString(item.PayloadJSON, "local_object_ref")
+		}
+		if object, ok := localSyncObjectForOutbox(item, byRef, byVersion); ok {
+			return metadataString(object.Metadata, "watched_root")
+		}
+	case loomsync.ItemKindDeletionRequest:
+		return metadataString(item.PayloadJSON, "root_key")
+	}
+	return ""
 }
 
 func (s Store) localSyncRootStatus(config Config, state State, root string) (LocalSyncStatus, error) {
@@ -46,46 +52,76 @@ func (s Store) localSyncRootStatus(config Config, state State, root string) (Loc
 		return LocalSyncStatus{}, err
 	}
 	defer unlock()
-	if s.syncBatch != nil {
-		return s.localSyncRootStatusUncached(config, state, root)
-	}
-	return cachedLocalStatus("sync-root:"+root+":"+state.NodeID+":"+config.NodeKey,
-		[]string{s.syncOutboxPath(), s.syncObjectsPath()}, func() (LocalSyncStatus, error) {
-			return s.localSyncRootStatusUncached(config, state, root)
-		})
+	counts, err := s.syncCountsByRoot()
+	return LocalSyncStatus{NodeID: state.NodeID, NodeKey: config.NodeKey, Counts: counts[root]}, err
 }
 
-func (s Store) localSyncRootStatusUncached(config Config, state State, root string) (LocalSyncStatus, error) {
-	items, err := s.LoadSyncOutbox()
-	if err != nil {
-		return LocalSyncStatus{}, err
+type syncSourceContentChanged struct {
+	Path, Expected, Actual string
+}
+
+func (e syncSourceContentChanged) Error() string {
+	return fmt.Sprintf("local file hash changed for %s: expected %s got %s", e.Path, e.Expected, e.Actual)
+}
+
+// A mutable source cannot supply an overwritten queued revision. Retain that
+// exact record only after the current bytes have a newer real acknowledgement.
+func (s Store) retainSupersededSyncUpload(item LocalSyncOutboxItem, old LocalSyncObject, versions map[string]LocalSyncObject, uploadErr error) (bool, error) {
+	var changed syncSourceContentChanged
+	root, relative := metadataString(old.Metadata, "watched_root"), metadataString(old.Metadata, "relative_path")
+	contentPath := old.ContentPath
+	if contentPath == "" {
+		contentPath = old.SourcePath
 	}
-	objects, err := s.LoadSyncObjects()
-	if err != nil {
-		return LocalSyncStatus{}, err
+	if !errors.As(uploadErr, &changed) || item.Status != localSyncStatusPending || item.ItemKind != loomsync.ItemKindObjectBlob ||
+		root == "" || relative == "" || changed.Expected != old.HashURI || changed.Actual == old.HashURI ||
+		changed.Path != contentPath || changed.Actual == "" ||
+		item.LocalRef != old.LocalObjectID || metadataString(item.PayloadJSON, "local_version_ref") != old.LocalVersionID ||
+		item.SyncedAt != nil || item.GlobalRef != "" {
+		return false, nil
 	}
-	refs := make(map[string]LocalSyncObject, len(objects))
-	versions := make(map[string]LocalSyncObject, len(objects))
-	for _, object := range objects {
-		refs[object.LocalObjectID] = object
-		versions[localObjectVersionKey(object.LocalObjectID, object.LocalVersionID)] = object
-	}
-	status := LocalSyncStatus{NodeID: state.NodeID, NodeKey: config.NodeKey}
-	for _, item := range syncOutboxForRoot(items, refs, versions, root) {
-		switch item.Status {
-		case localSyncStatusAccepted:
-			status.Counts.Accepted++
-		case localSyncStatusDuplicate:
-			status.Counts.Duplicates++
-		case localSyncStatusFailed:
-			status.Counts.Failed++
-		case localSyncStatusConflicted:
-			status.Counts.Conflicted++
-		default:
-			status.Counts.Pending++
+	current := old
+	for _, candidate := range versions {
+		if candidate.LocalObjectID == old.LocalObjectID && candidate.LocalSequence > current.LocalSequence {
+			current = candidate
 		}
 	}
-	return status, nil
+	if current.LocalVersionID == old.LocalVersionID || current.HashURI != changed.Actual ||
+		(current.SyncStatus != localSyncStatusAccepted && current.SyncStatus != localSyncStatusDuplicate) ||
+		current.MainObjectID == "" || current.MainVersionID == "" || current.SyncedAt == nil ||
+		current.SourcePath != old.SourcePath || current.ContentPath != old.ContentPath ||
+		current.ProjectRef != old.ProjectRef || current.ScopeRef != old.ScopeRef || current.LogicalName != old.LogicalName ||
+		metadataString(current.Metadata, "watched_root") != root || metadataString(current.Metadata, "relative_path") != relative ||
+		metadataString(current.Metadata, "node_key") != metadataString(old.Metadata, "node_key") {
+		return false, nil
+	}
+	err := s.ApplySyncedObjectResult(loomsync.SyncedObjectResult{Item: loomsync.SyncItemResult{
+		LocalRef: item.LocalRef, ItemKind: item.ItemKind, Status: localSyncStatusRetainedSuperseded,
+		ErrorCode:    "sync.source_revision_superseded",
+		ErrorMessage: fmt.Sprintf("Original queued revision retained without remote acceptance; current source matches acknowledged successor %s (%s).", current.LocalVersionID, current.MainVersionID),
+		Metadata:     localSyncItemMetadata(nil, item),
+	}})
+	if err != nil {
+		return false, err
+	}
+	// Older local-error handling could mark the already-acknowledged current
+	// path pending. Repair only that status, with its existing exact receipt.
+	pathState, err := s.loadQueuePathState(root, relative)
+	if watchedroots.IsNotExist(err) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if pathState.LocalObjectID == current.LocalObjectID && pathState.LocalVersionID == current.LocalVersionID &&
+		pathState.MainObjectID == current.MainObjectID && pathState.MainVersionID == current.MainVersionID &&
+		pathState.LastSyncedHashURI == current.HashURI && pathState.SyncStatus == localSyncStatusPending &&
+		pathState.LastOutputErrorCode == "sync.upload_unavailable" {
+		pathState.SyncStatus = current.SyncStatus
+		pathState.LastOutputErrorCode, pathState.LastOutputErrorMessage = "", ""
+		err = s.saveQueuePathState(pathState)
+	}
+	return err == nil, err
 }
 
 func (s Store) recordSyncUploadError(item LocalSyncOutboxItem, err error) error {

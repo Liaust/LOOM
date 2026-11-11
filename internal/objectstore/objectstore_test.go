@@ -54,6 +54,37 @@ func TestPutFileStoresByHash(t *testing.T) {
 	}
 }
 
+func TestPutFileVerifiedRejectsBeforePermanentPublication(t *testing.T) {
+	store := New(t.TempDir())
+	source := filepath.Join(t.TempDir(), "source")
+	if err := os.WriteFile(source, []byte("actual bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutFileVerified(t.Context(), source, "sha256:"+strings.Repeat("0", 64), 12); err == nil {
+		t.Fatal("accepted incorrect checksum")
+	}
+	if _, err := os.Stat(filepath.Join(store.Root, "blobs")); !os.IsNotExist(err) {
+		t.Fatalf("rejected payload was permanently published: %v", err)
+	}
+}
+
+func TestReadVerified(t *testing.T) {
+	store, blob, content := materializeFixture(t)
+	got, err := store.ReadVerified(t.Context(), blob, int64(len(content)))
+	if err != nil || string(got) != content {
+		t.Fatalf("bytes=%q error=%v", got, err)
+	}
+	if _, err = store.ReadVerified(t.Context(), blob, int64(len(content)-1)); !errors.Is(err, ErrReadLimit) {
+		t.Fatalf("limit not enforced: %v", err)
+	}
+	if err = os.WriteFile(blob.StoragePath, []byte("same-length-v2\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = store.ReadVerified(t.Context(), blob, 100); !errors.Is(err, ErrMaterializeContent) || got != nil {
+		t.Fatalf("unverified bytes returned: %q %v", got, err)
+	}
+}
+
 func TestMaterializeVerified(t *testing.T) {
 	for _, variant := range []string{"absolute", "relative", "root_link", "root_link_resolved_path", "empty"} {
 		t.Run(variant, func(t *testing.T) {

@@ -15,6 +15,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"loom.local/loom/internal/correlation"
+	loomerrors "loom.local/loom/internal/errors"
+	"loom.local/loom/internal/localclient"
 	"loom.local/loom/internal/response"
 )
 
@@ -142,6 +144,19 @@ func executeCLIEntry(root *cobra.Command, opts *options, args []string, stdout, 
 	var owned interface{ cliOutputOwned() }
 	if errors.As(err, &owned) {
 		return err
+	}
+	// Commands may return a typed failure without rendering it. Keep its
+	// backend identity and any durable partial result, not a generic usage hint.
+	if !usage {
+		var declaration *localclient.DeclarationRequestError
+		if errors.As(err, &declaration) {
+			return renderDeclarationFailure(selected, opts, correlation.Normalize(opts.correlationID), err, nil)
+		}
+		var request *localclient.RequestError
+		var failure *loomerrors.Error
+		if errors.As(err, &request) || errors.As(err, &failure) {
+			return renderError(selected, opts, correlation.Normalize(opts.correlationID), err)
+		}
 	}
 	return renderCLIEntryFailure(selected, recovered, err, usage)
 }

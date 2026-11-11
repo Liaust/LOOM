@@ -67,6 +67,9 @@ func (s WorkspaceMoveService) readCompletedCycle(ctx context.Context, fd int, ki
 }
 
 func (s WorkspaceMoveService) previousArchiveCycle(ctx context.Context, plan WorkspaceArchivePlan) (*WorkspaceArchivePreviousCycle, error) {
+	if plan.Placement != nil {
+		return nil, nil
+	}
 	paths, err := ResolveWorkspacePaths(s.Roots, plan.Kind, plan.Slug)
 	if err != nil {
 		return nil, err
@@ -155,6 +158,9 @@ func (s WorkspaceMoveService) retainPreviousArchiveCycle(ctx context.Context, pl
 }
 
 func (s WorkspaceMoveService) retainedRestoreHistory(ctx context.Context, plan WorkspaceArchivePlan) (*WorkspaceArchiveManifest, error) {
+	if plan.Placement != nil {
+		return s.placementRestoreHistory(ctx, plan)
+	}
 	if err := s.validateExecutableRestorePlan(plan); err != nil {
 		return nil, err
 	}

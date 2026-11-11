@@ -31,7 +31,7 @@ func safeError(err error, code pc.DeclarationErrorCode, cause string) error {
 }
 func knownCode(c pc.DeclarationErrorCode) bool {
 	switch c {
-	case pc.DeclarationInvalid, pc.DeclarationUnsupported, pc.DeclarationIdentityConflict, pc.DeclarationReferenceMissing, pc.DeclarationTargetUnavailable, pc.DeclarationPlanStale, pc.DeclarationUnauthorized, pc.DeclarationApprovalRequired, pc.DeclarationOperationConflict, pc.DeclarationOwnerFailed:
+	case pc.DeclarationInvalid, pc.DeclarationUnsupported, pc.DeclarationIdentityConflict, pc.DeclarationReferenceMissing, pc.DeclarationTargetUnavailable, pc.DeclarationPlanStale, pc.DeclarationUnauthorized, pc.DeclarationApprovalRequired, pc.DeclarationOperationConflict, pc.DeclarationOwnerFailed, pc.DeclarationOwnerPending:
 		return true
 	}
 	return false
@@ -63,8 +63,14 @@ func validPrincipal(p Principal) error {
 	return nil
 }
 func effects(xs []pc.DeclarationEffect) error {
+	if _, ok := pc.ApplicationDeployResource(xs); ok {
+		return nil
+	}
 	if len(xs) == 0 {
 		return fail(pc.DeclarationInvalid, "effects_required")
+	}
+	if len(xs) == 1 && xs[0] == pc.DeclarationWatches {
+		return nil
 	}
 	seen := map[pc.DeclarationEffect]bool{}
 	for _, x := range xs {
@@ -124,7 +130,7 @@ func validBinding(b pc.DeclarationBinding) bool {
 		if b.RepositoryID != "" && ids.Validate("repo", b.RepositoryID) != nil {
 			return false
 		}
-	case pc.DeclarationKnowledge, pc.DeclarationProtection, pc.DeclarationApplication, pc.DeclarationSchedule, pc.DeclarationHermesSchedule:
+	case pc.DeclarationKnowledge, pc.DeclarationProtection, pc.DeclarationApplication, pc.DeclarationSchedule, pc.DeclarationHermesSchedule, pc.DeclarationAgent:
 		if b.RepositoryID != "" {
 			return false
 		}
@@ -147,7 +153,7 @@ func validPrerequisites(p Prerequisites) error {
 			return fail(pc.DeclarationInvalid, "invalid_source")
 		}
 		seen[s.Ref] = true
-		root = root || (s.Ref == pc.CanonicalRootContractPath && s.SchemaVersion == pc.ProjectSchemaV05)
+		root = root || (s.Ref == pc.CanonicalRootContractPath && pc.IsDeclarationSchemaVersion(s.SchemaVersion))
 	}
 	if !root {
 		return fail(pc.DeclarationInvalid, "root_source_missing")
@@ -185,7 +191,7 @@ func actionOwner(a pc.DeclarationAction) bool {
 		return a.Owner == pc.DeclarationOwnerProtection
 	case pc.DeclarationApplyApplication:
 		return a.Owner == pc.DeclarationOwnerApplication
-	case pc.DeclarationReconcileHermesSchedule:
+	case pc.DeclarationReconcileHermesSchedule, pc.DeclarationReconcileAgent:
 		return a.Owner == pc.DeclarationOwnerHermes
 	case pc.DeclarationReconcileSchedule:
 		return a.Owner == pc.DeclarationOwnerAutomation
@@ -231,6 +237,9 @@ func (s *Service) validate(ctx context.Context, p Principal, x *Resolution, requ
 			return fail(pc.DeclarationUnsupported, "owner_not_configured")
 		}
 		id := string(a.Kind) + ":" + string(a.Resource)
+		if a.Kind == pc.DeclarationApplyApplication && strings.HasPrefix(a.ID, "apply_application_browse:") {
+			id = "apply_application_browse:" + string(a.Resource)
+		}
 		target := b.Target.ProjectID + "/" + string(a.Resource)
 		if a.Kind == pc.DeclarationRegisterProject {
 			if a.Resource != "" {
@@ -243,18 +252,30 @@ func (s *Service) validate(ctx context.Context, p Principal, x *Resolution, requ
 			if !ok {
 				return fail(pc.DeclarationInvalid, "action_binding_missing")
 			}
-			expected := map[pc.DeclarationActionKind]pc.DeclarationResourceKind{pc.DeclarationRegisterRepository: pc.DeclarationRepository, pc.DeclarationEnrollKnowledge: pc.DeclarationKnowledge, pc.DeclarationReconcileProtection: pc.DeclarationProtection, pc.DeclarationApplyApplication: pc.DeclarationApplication, pc.DeclarationReconcileSchedule: pc.DeclarationSchedule, pc.DeclarationReconcileHermesSchedule: pc.DeclarationHermesSchedule}
+			expected := map[pc.DeclarationActionKind]pc.DeclarationResourceKind{pc.DeclarationRegisterRepository: pc.DeclarationRepository, pc.DeclarationEnrollKnowledge: pc.DeclarationKnowledge, pc.DeclarationReconcileProtection: pc.DeclarationProtection, pc.DeclarationApplyApplication: pc.DeclarationApplication, pc.DeclarationReconcileSchedule: pc.DeclarationSchedule, pc.DeclarationReconcileHermesSchedule: pc.DeclarationHermesSchedule, pc.DeclarationReconcileAgent: pc.DeclarationAgent}
 			if kind, ok := expected[a.Kind]; ok && kind != binding.Kind {
 				return fail(pc.DeclarationInvalid, "action_binding_kind")
 			}
 			if a.Kind == pc.DeclarationRetireResource {
-				owners := map[pc.DeclarationResourceKind]pc.DeclarationOwner{pc.DeclarationRepository: pc.DeclarationOwnerProjects, pc.DeclarationKnowledge: pc.DeclarationOwnerKnowledge, pc.DeclarationProtection: pc.DeclarationOwnerProtection, pc.DeclarationApplication: pc.DeclarationOwnerApplication, pc.DeclarationSchedule: pc.DeclarationOwnerAutomation, pc.DeclarationHermesSchedule: pc.DeclarationOwnerHermes}
+				owners := map[pc.DeclarationResourceKind]pc.DeclarationOwner{pc.DeclarationRepository: pc.DeclarationOwnerProjects, pc.DeclarationKnowledge: pc.DeclarationOwnerKnowledge, pc.DeclarationProtection: pc.DeclarationOwnerProtection, pc.DeclarationApplication: pc.DeclarationOwnerApplication, pc.DeclarationSchedule: pc.DeclarationOwnerAutomation, pc.DeclarationHermesSchedule: pc.DeclarationOwnerHermes, pc.DeclarationAgent: pc.DeclarationOwnerHermes}
 				if owners[binding.Kind] != a.Owner {
 					return fail(pc.DeclarationInvalid, "retirement_owner")
 				}
 			}
 		}
 		effect := pc.DeclarationReconcile
+		if resource, selected := pc.ApplicationDeployResource(b.Effects); selected {
+			if a.Kind != pc.DeclarationRegisterProject && (a.Kind != pc.DeclarationApplyApplication || a.Resource != resource) {
+				return fail(pc.DeclarationInvalid, "application_deploy_action_required")
+			}
+			effect = b.Effects[0]
+		}
+		if len(b.Effects) == 1 && b.Effects[0] == pc.DeclarationWatches {
+			if a.Kind != pc.DeclarationEnrollKnowledge && a.Kind != pc.DeclarationReconcileProtection {
+				return fail(pc.DeclarationInvalid, "watch_configuration_action_required")
+			}
+			effect = pc.DeclarationWatches
+		}
 		if a.Kind == pc.DeclarationRefreshProjection {
 			effect = pc.DeclarationProjections
 		}

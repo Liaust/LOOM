@@ -6,9 +6,44 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	loomsync "loom.local/loom/internal/sync"
 )
+
+func TestNativeDeliveryDeadlineKeepsPendingTransportLive(t *testing.T) {
+	store, config, state, _ := localSyncObjectTestStore(t)
+	now := time.Now().UTC()
+	safety := now.Add(15 * time.Minute)
+	check := func(want time.Time) {
+		t.Helper()
+		got, err := watchedRootDeliveryDeadline(store, config, state, "notes", safety, now, 15*time.Minute)
+		if err != nil || !got.Equal(want) {
+			t.Fatalf("delivery deadline=%v want=%v err=%v", got, want, err)
+		}
+	}
+	check(safety)
+	items := []LocalSyncOutboxItem{{LocalOutboxID: "deadline-pending", ItemKind: loomsync.ItemKindDeletionRequest, Status: localSyncStatusPending, PayloadJSON: json.RawMessage(`{"root_key":"notes"}`)}}
+	if err := store.SaveSyncOutbox(items); err != nil {
+		t.Fatal(err)
+	}
+	check(now.Add(time.Minute))
+	items[0].Status = localSyncStatusAccepted
+	if err := store.SaveSyncOutbox(items); err != nil {
+		t.Fatal(err)
+	}
+	check(safety)
+	backup := []LocalWatchedRootBackupOutboxItem{{LocalOutboxID: "backup-deadline", RootKey: "notes", Status: localBackupStatusPending}}
+	if err := store.SaveWatchedRootBackupOutbox(backup); err != nil {
+		t.Fatal(err)
+	}
+	check(now.Add(time.Minute))
+	backup[0].Status = localBackupStatusAccepted
+	if err := store.SaveWatchedRootBackupOutbox(backup); err != nil {
+		t.Fatal(err)
+	}
+	check(safety)
+}
 
 func TestLocalStatusCacheDetachesAndInvalidatesAtomicReplacement(t *testing.T) {
 	t.Parallel()

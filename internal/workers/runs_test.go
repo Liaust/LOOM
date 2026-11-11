@@ -81,3 +81,33 @@ func TestNormalizeRunOnceInputRejectsInvalidTrigger(t *testing.T) {
 		t.Fatalf("error = %v, want ErrInvalid", err)
 	}
 }
+
+func TestFailedIntervalNextRunAfterSurvivesWake(t *testing.T) {
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		policy, trigger string
+		delay           time.Duration
+	}{
+		{`{"mode":"interval","interval_seconds":5}`, TriggerSupervisorTick, time.Minute},
+		{`{"mode":"interval","interval_seconds":120}`, TriggerSupervisorTick, 2 * time.Minute},
+		{`{"mode":"interval","interval_seconds":5}`, TriggerManual, 0},
+		{`{"mode":"manual"}`, TriggerSupervisorTick, 0},
+		{`{"mode":"daily_local","local_time":"03:15","timezone":"Europe/Amsterdam"}`, TriggerSupervisorTick, 0},
+	} {
+		worker := WorkerInstance{TickPolicyJSON: json.RawMessage(tc.policy)}
+		next := failedIntervalNextRunAfter(worker, WorkerRun{TriggerKind: tc.trigger}, now)
+		if tc.delay == 0 {
+			if next != nil {
+				t.Fatalf("changed manual/daily schedule: %v", next)
+			}
+			continue
+		}
+		if next == nil || !next.Equal(now.Add(tc.delay)) {
+			t.Fatalf("failure deadline=%v, want %v", next, now.Add(tc.delay))
+		}
+		policy, _ := ParseTickPolicy(worker.TickPolicyJSON)
+		if policy.Due(now.Add(time.Second), next) {
+			t.Fatal("completion wake can bypass durable failure delay")
+		}
+	}
+}

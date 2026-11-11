@@ -10,7 +10,7 @@
   "context_limits": {
     "unit": "unicode_code_points",
     "maximum_match_explanation": 280,
-    "maximum_compact_result": 800,
+    "maximum_compact_result": 1600,
     "maximum_compact_response": 6000,
     "maximum_repository_accepted_context_items": 4,
     "exact_get_maximum_sources": 16,

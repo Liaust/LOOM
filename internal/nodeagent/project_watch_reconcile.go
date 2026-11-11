@@ -91,11 +91,14 @@ func reconcileProjectWatchLocked(ctx context.Context, store Store, config Config
 	if err != nil {
 		return failure("project_root_unavailable")
 	}
-	box, err := canonicalDirectoryPath(config.BoxRootPath)
+	if config.BoxesFile != "" && root != payload.Group.ProjectRoot {
+		return failure("project_root_binding_changed")
+	}
+	binding, err := nodeBoxForPath(config, root)
 	if err != nil {
 		return failure("configured_box_required")
 	}
-	rel, err := filepath.Rel(box, root)
+	rel, err := filepath.Rel(binding.RootPath, root)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return failure("outside_configured_box")
 	}

@@ -11,8 +11,10 @@ import (
 	loomerrors "loom.local/loom/internal/errors"
 	"loom.local/loom/internal/events"
 	"loom.local/loom/internal/ids"
+	"loom.local/loom/internal/jobs"
 	"loom.local/loom/internal/requestctx"
 	"loom.local/loom/internal/routing"
+	"loom.local/loom/internal/workers"
 )
 
 type Service struct {
@@ -34,9 +36,10 @@ func hasExplicitRuntimeRef(refs ...string) bool {
 }
 
 func archivedProjectByProjectColumnSQL(projectColumn string) string {
-	projectColumn = strings.TrimSpace(projectColumn)
-	if projectColumn == "" {
-		projectColumn = "project_id"
+	switch projectColumn {
+	case "automations.project_id", "schedules.project_id", "invocations.project_id":
+	default:
+		panic("unsupported archive project column")
 	}
 	return fmt.Sprintf(`
 		AND (%[1]s IS NULL OR NOT EXISTS (
@@ -49,9 +52,10 @@ func archivedProjectByProjectColumnSQL(projectColumn string) string {
 }
 
 func archivedProjectByAutomationColumnSQL(automationColumn string) string {
-	automationColumn = strings.TrimSpace(automationColumn)
-	if automationColumn == "" {
-		automationColumn = "automation_id"
+	switch automationColumn {
+	case "schedule_fires.automation_id", "direct_event_endpoints.automation_id", "direct_events.automation_id":
+	default:
+		panic("unsupported archive automation column")
 	}
 	return fmt.Sprintf(`
 		AND NOT EXISTS (
@@ -150,6 +154,9 @@ func ensureScheduleTx(ctx context.Context, tx *sql.Tx, req requestctx.Context, n
 	}
 	// Editing input/limits or replaying a declaration must not postpone an
 	// unchanged interval or re-arm a completed one-shot.
+	if err := guardScheduleEnsure(ctx, tx, existing, &normalized); err != nil {
+		return ScheduleDetail{}, false, err
+	}
 	if existing.ScheduleKind == normalized.ScheduleKind && existing.ScheduleExpr == normalized.ScheduleExpr && existing.Timezone == normalized.Timezone {
 		normalized.StartAt, normalized.NextFireAt = existing.StartAt, existing.NextFireAt
 		if existing.Status == ScheduleStatusCompleted && normalized.Status == ScheduleStatusActive {
@@ -175,7 +182,7 @@ func ensureScheduleTx(ctx context.Context, tx *sql.Tx, req requestctx.Context, n
 		    run_as_actor_id = $12,
 		    scope_id = $13,
 		    project_id = $14,
-		    metadata_json = $15::jsonb,
+		    metadata_json = metadata_json || $15::jsonb,
 		    updated_at = now()
 		WHERE automation_id = $1
 		RETURNING automation_id, automation_key, display_name, description, status,
@@ -227,7 +234,7 @@ func ensureScheduleTx(ctx context.Context, tx *sql.Tx, req requestctx.Context, n
 		    run_as_actor_id = $17,
 		    scope_id = $18,
 		    project_id = $19,
-		    metadata_json = $20::jsonb,
+		    metadata_json = metadata_json || $20::jsonb,
 		    updated_at = now()
 		WHERE schedule_id = $1
 		RETURNING schedule_id, automation_id, schedule_key, display_name, description,
@@ -271,6 +278,9 @@ func ensureScheduleTx(ctx context.Context, tx *sql.Tx, req requestctx.Context, n
 	}); err != nil {
 		return ScheduleDetail{}, false, err
 	}
+	if err := workers.NotifyQueueTx(ctx, tx, workers.KindAutomationScheduler); err != nil {
+		return ScheduleDetail{}, false, err
+	}
 	return ScheduleDetail{Schedule: updatedSchedule, Automation: updatedAutomation}, false, nil
 }
 
@@ -292,6 +302,7 @@ func (s Service) ListAutomations(ctx context.Context, filter AutomationFilter) (
 		add("source_kind =", sourceKind)
 	}
 	query += archivedProjectByProjectColumnSQL("automations.project_id")
+	query += " AND " + automationBoxPredicate(ctx, &args)
 	args = append(args, filter.Limit)
 	query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d", len(args))
 
@@ -352,7 +363,7 @@ func (s Service) ListSchedules(ctx context.Context, filter ScheduleFilter) ([]Sc
 		add("automation_id =", automation.AutomationID)
 	}
 	if ref := strings.TrimSpace(filter.ProjectRef); ref != "" {
-		projectID, err := resolveProjectID(ctx, s.DB, ref)
+		projectID, err := resolveProjectIDIncludingArchive(ctx, s.DB, ref, true)
 		if err != nil {
 			return nil, err
 		}
@@ -361,6 +372,7 @@ func (s Service) ListSchedules(ctx context.Context, filter ScheduleFilter) ([]Sc
 	if !hasExplicitRuntimeRef(filter.AutomationRef, filter.ProjectRef) {
 		query += archivedProjectByProjectColumnSQL("schedules.project_id")
 	}
+	query += " AND " + scheduleBoxPredicate(ctx, &args)
 	args = append(args, filter.Limit)
 	query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d", len(args))
 
@@ -388,10 +400,12 @@ func (s Service) ListSchedulesForMaintenance(ctx context.Context, status string)
 	if status == "" {
 		status = ScheduleStatusActive
 	}
+	args := []any{status}
+	predicate := scheduleBoxPredicate(ctx, &args)
 	rows, err := s.DB.QueryContext(ctx, scheduleSelectSQL()+`
-		WHERE status = $1
+		WHERE status = $1 AND `+predicate+`
 		ORDER BY created_at DESC
-	`, status)
+	`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -465,6 +479,7 @@ func (s Service) ListScheduleFires(ctx context.Context, filter ScheduleFireFilte
 	if !hasExplicitRuntimeRef(filter.ScheduleRef, filter.AutomationRef) {
 		query += archivedProjectByAutomationColumnSQL("schedule_fires.automation_id")
 	}
+	query += " AND " + fireBoxPredicate(ctx, &args)
 	args = append(args, filter.Limit)
 	query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d", len(args))
 
@@ -492,9 +507,11 @@ func (s Service) GetScheduleFire(ctx context.Context, ref string) (ScheduleFire,
 	if ref == "" {
 		return ScheduleFire{}, fmt.Errorf("schedule fire ref is required")
 	}
+	args := []any{ref}
+	predicate := fireBoxPredicate(ctx, &args)
 	return scanScheduleFire(s.DB.QueryRowContext(ctx, scheduleFireSelectSQL()+`
 		WHERE schedule_fire_id = $1
-	`, ref))
+		AND `+predicate, args...))
 }
 
 func (s Service) ListInvocations(ctx context.Context, filter InvocationFilter) ([]Invocation, error) {
@@ -522,7 +539,7 @@ func (s Service) ListInvocations(ctx context.Context, filter InvocationFilter) (
 		add("automation_id =", automation.AutomationID)
 	}
 	if ref := strings.TrimSpace(filter.ProjectRef); ref != "" {
-		projectID, err := resolveProjectID(ctx, s.DB, ref)
+		projectID, err := resolveProjectIDIncludingArchive(ctx, s.DB, ref, true)
 		if err != nil {
 			return nil, err
 		}
@@ -531,6 +548,7 @@ func (s Service) ListInvocations(ctx context.Context, filter InvocationFilter) (
 	if !hasExplicitRuntimeRef(filter.AutomationRef, filter.ProjectRef) {
 		query += archivedProjectByProjectColumnSQL("invocations.project_id")
 	}
+	query += " AND " + invocationBoxPredicate(ctx, &args)
 	args = append(args, filter.Limit)
 	query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d", len(args))
 
@@ -558,9 +576,11 @@ func (s Service) GetInvocation(ctx context.Context, ref string) (Invocation, err
 	if ref == "" {
 		return Invocation{}, fmt.Errorf("invocation ref is required")
 	}
+	args := []any{ref}
+	predicate := invocationBoxPredicate(ctx, &args)
 	return scanInvocation(s.DB.QueryRowContext(ctx, invocationSelectSQL()+`
 		WHERE invocation_id = $1
-	`, ref))
+		AND `+predicate, args...))
 }
 
 type normalizedCreateSchedule struct {
@@ -648,7 +668,20 @@ func (s Service) normalizeCreateSchedule(ctx context.Context, req requestctx.Con
 		return normalizedCreateSchedule{}, fmt.Errorf("timezone is invalid: %w", err)
 	}
 
+	projectID := ""
+	if strings.TrimSpace(input.ProjectRef) != "" {
+		projectID, err = resolveProjectID(ctx, s.DB, input.ProjectRef)
+		if err != nil {
+			return normalizedCreateSchedule{}, err
+		}
+	}
 	scopeRef := strings.TrimSpace(input.ScopeRef)
+	if scopeRef == "" && projectID != "" {
+		if err := s.DB.QueryRowContext(ctx, `SELECT project_scope_id FROM projects.projects
+			WHERE project_id=$1 AND status IN ('active', 'paused', 'blocked')`, projectID).Scan(&scopeRef); err != nil {
+			return normalizedCreateSchedule{}, fmt.Errorf("resolve project scope: %w", err)
+		}
+	}
 	if scopeRef == "" {
 		scopeRef = req.ScopeID
 	}
@@ -656,12 +689,21 @@ func (s Service) normalizeCreateSchedule(ctx context.Context, req requestctx.Con
 	if err != nil {
 		return normalizedCreateSchedule{}, err
 	}
-	projectID := ""
-	if strings.TrimSpace(input.ProjectRef) != "" {
-		projectID, err = resolveProjectID(ctx, s.DB, input.ProjectRef)
-		if err != nil {
-			return normalizedCreateSchedule{}, err
-		}
+	// A known project scope is ownership, even for internal declaration creates.
+	var scopeProjectID string
+	err = s.DB.QueryRowContext(ctx, `SELECT project_id FROM projects.projects WHERE project_scope_id=$1`, scopeID).Scan(&scopeProjectID)
+	if err != nil && err != sql.ErrNoRows {
+		return normalizedCreateSchedule{}, err
+	}
+	if projectID != "" && scopeProjectID != projectID {
+		return normalizedCreateSchedule{}, fmt.Errorf("scope does not belong to schedule project")
+	}
+	if projectID == "" {
+		projectID = scopeProjectID
+	}
+	metadata, err = jobs.BindBoxMetadata(ctx, s.DB, projectID, "", metadata)
+	if err != nil {
+		return normalizedCreateSchedule{}, err
 	}
 	createdBy, err := resolveActorID(ctx, s.DB, req.ActorID)
 	if err != nil {
@@ -863,6 +905,9 @@ func createScheduleTx(ctx context.Context, tx *sql.Tx, req requestctx.Context, n
 	}); err != nil {
 		return ScheduleDetail{}, err
 	}
+	if err := workers.NotifyQueueTx(ctx, tx, workers.KindAutomationScheduler); err != nil {
+		return ScheduleDetail{}, err
+	}
 	return ScheduleDetail{Schedule: schedule, Automation: automation}, nil
 }
 
@@ -893,15 +938,19 @@ func (s Service) updateScheduleStatus(ctx context.Context, req requestctx.Contex
 // DisableScheduleTx preserves native lifecycle events while the declaration
 // owner atomically records withdrawal in its operation journal.
 func (s Service) DisableScheduleTx(ctx context.Context, tx *sql.Tx, req requestctx.Context, ref string, metadata json.RawMessage) (Schedule, error) {
+	metadata, err := normalizeJSONObject(metadata, "metadata")
+	if err != nil {
+		return Schedule{}, err
+	}
 	return updateScheduleStatusTx(ctx, tx, req, ref, ScheduleStatusDisabled, events.TypeScheduleDisabled, "project declaration withdrawn", metadata)
 }
 
 func updateScheduleStatusTx(ctx context.Context, tx *sql.Tx, req requestctx.Context, ref, status, eventType, reason string, metadata json.RawMessage) (Schedule, error) {
-	schedule, err := scanSchedule(tx.QueryRowContext(ctx, scheduleSelectSQL()+`
-		WHERE schedule_id = $1 OR schedule_key = $1
-		FOR UPDATE
-	`, strings.TrimSpace(ref)))
+	schedule, err := readSchedule(ctx, tx, strings.TrimSpace(ref), true)
 	if err != nil {
+		return Schedule{}, err
+	}
+	if err := validateScheduleMetadata(ctx, tx, schedule, metadata); err != nil {
 		return Schedule{}, err
 	}
 	updated, err := scanSchedule(tx.QueryRowContext(ctx, `
@@ -955,6 +1004,11 @@ func updateScheduleStatusTx(ctx context.Context, tx *sql.Tx, req requestctx.Cont
 			return Schedule{}, err
 		}
 	}
+	if status == ScheduleStatusActive {
+		if err := workers.NotifyQueueTx(ctx, tx, workers.KindAutomationScheduler); err != nil {
+			return Schedule{}, err
+		}
+	}
 	return updated, nil
 }
 
@@ -963,9 +1017,10 @@ func (s Service) getAutomation(ctx context.Context, ref string) (Automation, err
 	if ref == "" {
 		return Automation{}, fmt.Errorf("automation ref is required")
 	}
+	args := []any{ref}
+	predicate := automationBoxPredicate(ctx, &args)
 	return scanAutomation(s.DB.QueryRowContext(ctx, automationSelectSQL()+`
-		WHERE automation_id = $1 OR automation_key = $1
-	`, ref))
+		WHERE (automation_id = $1 OR automation_key = $1) AND `+predicate, args...))
 }
 
 func (s Service) getSchedule(ctx context.Context, ref string) (Schedule, error) {
@@ -973,9 +1028,7 @@ func (s Service) getSchedule(ctx context.Context, ref string) (Schedule, error) 
 	if ref == "" {
 		return Schedule{}, fmt.Errorf("schedule ref is required")
 	}
-	return scanSchedule(s.DB.QueryRowContext(ctx, scheduleSelectSQL()+`
-		WHERE schedule_id = $1 OR schedule_key = $1
-	`, ref))
+	return readSchedule(ctx, s.DB, ref, false)
 }
 
 func (s Service) validateTargetCapability(ctx context.Context, ref string) error {
@@ -1063,6 +1116,10 @@ func resolveScopeID(ctx context.Context, db queryer, ref string) (string, error)
 }
 
 func resolveProjectID(ctx context.Context, db queryer, ref string) (string, error) {
+	return resolveProjectIDIncludingArchive(ctx, db, ref, false)
+}
+
+func resolveProjectIDIncludingArchive(ctx context.Context, db queryer, ref string, includeArchive bool) (string, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return "", fmt.Errorf("project ref is required")
@@ -1072,8 +1129,8 @@ func resolveProjectID(ctx context.Context, db queryer, ref string) (string, erro
 		SELECT project_id
 		FROM projects.projects
 		WHERE (project_id = $1 OR slug = $1)
-		  AND status IN ('active', 'paused', 'blocked')
-	`, ref).Scan(&id)
+		  AND (status IN ('active', 'paused', 'blocked') OR ($2::boolean AND status='archived'))
+	`, ref, includeArchive).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("resolve project %q: %w", ref, err)
 	}

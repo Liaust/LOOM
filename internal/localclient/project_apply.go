@@ -65,6 +65,7 @@ func declarationJSON[T any](c Client, ctx context.Context, method, path, cid str
 	if err != nil {
 		return envelope, err
 	}
+	c.applyBoxContext(req)
 	req.Header.Set(correlation.Header, correlation.Normalize(cid))
 	if input != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -111,6 +112,12 @@ func declarationJSON[T any](c Client, ctx context.Context, method, path, cid str
 
 func validDeclarationResponse(value any) bool {
 	switch v := value.(type) {
+	case pc.ProjectActionResult:
+		return v.ProjectID != "" && v.Resource != "" && v.Action != "" && v.State != ""
+	case pc.ProjectCredentialImportResult:
+		return v.ProjectID != "" && v.Resource != "" && pc.ValidApplicationRuntimeCredentialReference(v.Reference) && v.Revision != ""
+	case pc.ProjectDeploymentResult:
+		return v.ProjectID != "" && v.NodeID != "" && v.Resource != "" && v.State != ""
 	case pc.DeclarationMigrationAssessment:
 		return pc.ValidDeclarationMigrationAssessment(v)
 	case pc.DeclarationPlan:

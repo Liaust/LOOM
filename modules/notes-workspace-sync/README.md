@@ -96,8 +96,18 @@ conflict resolution, key generation and device onboarding are not IPC methods.
 Set `readChunksOnline:false` in the protected settings. The native default uses
 on-demand chunk downloads: a finite sync can finish with metadata present but
 content unavailable to this adapter's local-only exact reader. Eager chunk
-replication is required for the bounded worker; do not enable implicit network
-fetches during exact source validation to compensate for incomplete replication.
+replication is required for the bounded worker. Missing content/chunks remain
+held rather than triggering implicit network fetches during source validation.
+The exact metadata-only exception below does not retrieve missing content.
+
+The local native tree retains only100 revisions. If an exact text revision is
+no longer in that tree, `read.path` may read that one revision's decrypted
+metadata from the already configured CouchDB through the native connection
+owner, with a two-second request deadline and no remote setup or writes. It
+requires the exact path, ID, revision and ancestry; never a newer winner. It
+returns historical metadata only, not content/chunks. Source acceptance still
+requires the independently retained per-intent payload and its exact hash.
+Missing remote history remains held with backoff; it is never manufactured.
 
 Supply configured native CouchDB/E2EE settings through protected runtime storage;
 keep values out of Git, Nix store, logs and command arguments. Native diagnostic
@@ -138,6 +148,7 @@ journal after database replacement, never reuse a cursor blindly.
 | `publish` | `operationId`, relative `path`, exact `baseRevision`, `contentBase64` | Native `id`, created `revision`, unchanged supplied `baseRevision`, payload `sha256`. Calls `storeWithBaseRevision`, even when the supplied base has advanced. |
 | `publish` (initial export) | `operationId`, relative `path`, `create:true`, `contentBase64`; omit `baseRevision` | Uses native `storeIndependentRevision` only if no document history exists. Explicit bootstrap export, not automatic source creation from a client path. |
 | `publish.reference` | Same fields as `publish`, PDF/raster/SVG/Canvas/WAV/CSV/XLSX/DAT/JSON attachment path, binary base64 up to 64 MiB | Same exact-parent/receipt machinery, native binary chunks. Requires encryption/hooks; source export emits a non-writable binding. No incoming binary source mutation. |
+| `publish.reference.file` | Same exact-parent fields, private `reference-spool/reference-*` snapshot, exact `size` and `sha256`, up to 2 GiB | Validates single-link owner-only snapshot and its streamed hash. File-backed Blob uses the pinned upstream V1 bounded binary splitter only for this publication. No source path or content enters IPC/journal JSON; client settings, revision semantics and native encryption are unchanged. |
 | `sync` | none | `{status:"replication",outcome:"completed|blocked|partial|cancelled|failed",reason?:...}` from the native role, with no private error details. |
 | `delete`, `rename` | none | Always `held/client_intent_not_proven`; stock intent is insufficient. |
 

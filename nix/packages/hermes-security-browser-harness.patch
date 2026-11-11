@@ -1,0 +1,30 @@
+--- a/nix/python.nix
++++ b/nix/python.nix
+@@ -96,8 +96,17 @@
+ 
+   pythonPackageOverrides =
+     final: _prev:
+-    if isAarch64Darwin then
+-      {
++    {
++      # Match the security override in uv.lock, including installed metadata.
++      # browser-harness uses Pillow's public image API; retain the 13.x bound.
++      browser-harness = _prev.browser-harness.overrideAttrs (old: {
++        postInstall = (old.postInstall or "") + ''
++          substituteInPlace "$out/${python.sitePackages}/browser_harness-0.1.13.dist-info/METADATA" \
++            --replace-fail 'Requires-Dist: pillow==12.3.0' 'Requires-Dist: pillow>=13.0.0,<14'
++        '';
++      });
++    } // (if isAarch64Darwin then
++      {
+         numpy = mkPrebuiltOverride final pythonPackages.numpy { };
+ 
+         pyarrow = mkPrebuiltOverride final pythonPackages.pyarrow { };
+@@ -143,7 +152,7 @@
+           '';
+         });
+-      };
++      });
+ 
+   pythonSet =
+     (callPackage pyproject-nix.build.packages {

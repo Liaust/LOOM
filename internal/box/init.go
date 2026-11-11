@@ -1,27 +1,56 @@
 package box
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"gopkg.in/yaml.v3"
 
 	"loom.local/loom/internal/ids"
 )
 
 func Init(input InitInput) (InitResult, error) {
+	newBoxID := ids.NewBoxID
+	if input.Resolved.BoxID != "" {
+		selected := input.Resolved.BoxID
+		if input.Resolved.RootRef != "box" && input.Resolved.RootRef != "box:"+selected {
+			return baseInitResult(input, Status{}, Status{}), fmt.Errorf("selected Box root reference disagrees with its identity")
+		}
+		if input.NewBoxID != nil && input.NewBoxID() != selected {
+			return baseInitResult(input, Status{}, Status{}), fmt.Errorf("Box ID factory disagrees with selected Box identity")
+		}
+		newBoxID = func() string { return selected }
+	} else if input.NewBoxID != nil {
+		newBoxID = input.NewBoxID
+	}
+	if input.Resolved.BoxID != "" && input.Resolved.RootRef != "" && input.Resolved.RootRef != "box" {
+		if !input.DryRun {
+			lock, err := lockBoundBoxInit(input.Resolved.RootPath)
+			if err != nil {
+				return baseInitResult(input, Status{}, Status{}), err
+			}
+			defer lock.Close()
+		}
+	}
+	if input.Resolved.BoxID != "" {
+		info, err := os.Lstat(ContractPath(input.Resolved.RootPath))
+		if err != nil && !os.IsNotExist(err) {
+			return baseInitResult(input, Status{}, Status{}), err
+		}
+		if err == nil && !info.Mode().IsRegular() {
+			return baseInitResult(input, Status{}, Status{}), fmt.Errorf("selected Box descriptor must be a regular file without symlinks")
+		}
+	}
 	now := time.Now().UTC()
 	if input.Now != nil {
 		now = input.Now().UTC()
 	}
-	newBoxID := ids.NewBoxID
-	if input.NewBoxID != nil {
-		newBoxID = input.NewBoxID
-	}
-
 	before := Inspect(input.Resolved)
 	contract, err := initContract(input.Resolved, before, now, newBoxID)
 	if err != nil {
@@ -36,7 +65,19 @@ func Init(input InitInput) (InitResult, error) {
 	}
 
 	result := baseInitResult(input, before, before)
+	if input.RetireLane {
+		if area, ok := contract.Areas[AreaLane]; ok && area.Enabled {
+			area.Enabled = false
+			contract.Areas[AreaLane] = area
+			contract.Metadata.UpdatedAt = now.Format(time.RFC3339)
+		}
+	}
 	dirOps, fileOps := plannedInitOperations(contract)
+	if before.Contract != nil && reflect.DeepEqual(*before.Contract, contract) {
+		// Equivalent descriptors retain authored formatting/comments. Only a real
+		// contract upgrade needs a rewrite and before-image.
+		fileOps[0].Update = false
+	}
 	if err := checkInitConflicts(input.Resolved.RootPath, dirOps, fileOps, &result); err != nil {
 		return result, err
 	}
@@ -80,6 +121,93 @@ func Init(input InitInput) (InitResult, error) {
 	result.StatusAfter = Inspect(input.Resolved)
 	normalizeInitResultIdentity(&result)
 	return result, nil
+}
+
+// Never unlink this inode: closing the file releases the lock for the next
+// source operator. The lock belongs to the already ignored internal tmp tree.
+func lockBoundBoxInit(root string) (*os.File, error) {
+	if !filepath.IsAbs(root) || filepath.Clean(root) != root || root == "/" {
+		return nil, fmt.Errorf("bound Box init requires an exact absolute root")
+	}
+	directory, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range append(strings.Split(strings.TrimPrefix(root, "/"), "/"), metadataDir, "tmp") {
+		next, openErr := openBoxInitDirectory(directory, name)
+		unix.Close(directory)
+		if openErr != nil {
+			return nil, fmt.Errorf("open bound Box init directory without symlinks: %w", openErr)
+		}
+		directory = next
+	}
+	defer unix.Close(directory)
+	const name = "box-init.lock"
+	flags := unix.O_RDWR | unix.O_NOFOLLOW | unix.O_CLOEXEC | unix.O_NONBLOCK
+	fd, err := unix.Openat(directory, name, flags|unix.O_CREAT|unix.O_EXCL, 0660)
+	created := err == nil
+	if errors.Is(err, unix.EEXIST) {
+		fd, err = unix.Openat(directory, name, flags, 0)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open bound Box init lock: %w", err)
+	}
+	path := filepath.Join(root, metadataDir, "tmp", name)
+	file := os.NewFile(uintptr(fd), path)
+	refuse := func(err error) (*os.File, error) {
+		file.Close()
+		return nil, err
+	}
+	var held unix.Stat_t
+	if err := unix.Fstat(fd, &held); err != nil || held.Mode&unix.S_IFMT != unix.S_IFREG || held.Nlink != 1 || held.Size != 0 {
+		return refuse(fmt.Errorf("bound Box init lock must be an empty single-link regular file"))
+	}
+	if created {
+		if err := unix.Fchmod(fd, 0660); err != nil {
+			return refuse(err)
+		}
+	}
+	for {
+		err = unix.Flock(fd, unix.LOCK_EX)
+		if !errors.Is(err, unix.EINTR) {
+			break
+		}
+	}
+	if err != nil {
+		return refuse(fmt.Errorf("lock bound Box initialization: %w", err))
+	}
+	opened, err := file.Stat()
+	if err != nil {
+		return refuse(err)
+	}
+	named, err := os.Lstat(path)
+	canonical, resolveErr := filepath.EvalSymlinks(path)
+	if err != nil || resolveErr != nil || canonical != path || !os.SameFile(opened, named) {
+		return refuse(fmt.Errorf("bound Box init lock path changed"))
+	}
+	return file, nil
+}
+
+func openBoxInitDirectory(parent int, name string) (int, error) {
+	flags := unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+	fd, err := unix.Openat(parent, name, flags, 0)
+	if !errors.Is(err, unix.ENOENT) {
+		return fd, err
+	}
+	err = unix.Mkdirat(parent, name, 02770)
+	created := err == nil
+	if err != nil && !errors.Is(err, unix.EEXIST) {
+		return -1, err
+	}
+	fd, err = unix.Openat(parent, name, flags, 0)
+	if err == nil && created {
+		// Explicitly retain group access despite a restrictive caller umask.
+		if err = unix.Fchmod(fd, 02770); err != nil {
+			unix.Close(fd)
+			return -1, err
+		}
+	}
+	return fd, err
 }
 
 type initDirOperation struct {
@@ -133,6 +261,14 @@ func applyInitResultIdentity(result *InitResult, status Status) bool {
 }
 
 func initContract(resolved Resolved, before Status, now time.Time, newBoxID func() string) (Contract, error) {
+	if resolved.BoxID != "" {
+		if before.State == "invalid" {
+			return Contract{}, fmt.Errorf("selected Box status is invalid; refusing identity repair")
+		}
+		if before.Contract != nil && before.Contract.BoxID != resolved.BoxID {
+			return Contract{}, fmt.Errorf("existing Box descriptor identity disagrees with selected Box identity")
+		}
+	}
 	if before.ContractState == "valid" && before.Contract != nil {
 		return upgradeExistingContract(cloneContract(*before.Contract), resolved, before, now), nil
 	}
@@ -213,7 +349,7 @@ func upgradeExistingContract(contract Contract, resolved Resolved, before Status
 		contract.Policies = map[string]string{}
 		changed = true
 	}
-	if strings.TrimSpace(contract.Policies[AreaDocuments]) == "" {
+	if !hasAreaWatchSource(contract, AreaDocuments) {
 		contract.Policies[AreaDocuments] = ".loom/policies/documents.watch.yaml"
 		changed = true
 	}
@@ -264,6 +400,9 @@ func statusHasExistingDirectory(items []PathStatus, key string) bool {
 func plannedInitOperations(contract Contract) ([]initDirOperation, []initFileOperation) {
 	dirs := []initDirOperation{{Key: "root", Path: contract.RootPath}}
 	for _, expected := range ExpectedDirectories(contract) {
+		if !expected.Enabled {
+			continue
+		}
 		dirs = append(dirs, initDirOperation{Key: expected.Key, Path: expected.Path})
 	}
 
@@ -278,7 +417,7 @@ func plannedInitOperations(contract Contract) ([]initDirOperation, []initFileOpe
 		relPath := template.RelPath
 		if template.Area != "" {
 			area, ok := contract.Areas[template.Area]
-			if !ok {
+			if !ok || !area.Enabled {
 				continue
 			}
 			if strings.HasSuffix(template.RelPath, ".yaml") {

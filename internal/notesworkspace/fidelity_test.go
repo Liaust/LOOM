@@ -86,10 +86,22 @@ func TestReplacementPreservesAccessMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var originalIdentity unix.Stat_t
+	if err := unix.Fstat(fd, &originalIdentity); err != nil {
+		t.Fatal(err)
+	}
 	receive(t, s, "metadata", readBase(t, s, "note.md"), "B")
 	op := apply(t, s, "metadata", Accepted)
 	contents(t, name, "B")
 	contents(t, filepath.Join(r.root, op.Journal, "displaced"), "A")
+	var retainedIdentity unix.Stat_t
+	if err := unix.Stat(filepath.Join(r.root, op.Journal, "displaced"), &retainedIdentity); err != nil || retainedIdentity.Dev != originalIdentity.Dev || retainedIdentity.Ino != originalIdentity.Ino {
+		t.Fatalf("original inode not retained: %+v %v", retainedIdentity, err)
+	}
+	retained, err := metadataAt(fd)
+	if err != nil || !reflect.DeepEqual(wanted, retained) {
+		t.Fatalf("retained inode metadata changed: %+v %v", retained, err)
+	}
 	replacement, err := os.Open(name)
 	if err != nil {
 		t.Fatal(err)

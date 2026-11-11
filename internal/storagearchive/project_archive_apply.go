@@ -144,20 +144,26 @@ func (s ProjectRuntimeService) applyProjectPhysicalArchive(ctx context.Context, 
 		return result, fmt.Errorf("project archive workspace operation exists without prior mutation-blocked project state")
 	}
 	if !hasState {
-		if plan.Registration.Registration != nil && plan.Registration.Registration.ContractSchemaVersion == projectcontracts.ProjectSchemaV05 && !plan.InspectRegisteredServices {
+		if plan.Registration.Registration != nil && projectcontracts.IsDeclarationSchemaVersion(plan.Registration.Registration.ContractSchemaVersion) && !plan.InspectRegisteredServices {
 			return result, fmt.Errorf("project archive plan predates registered-service inspection; review a fresh plan")
 		}
 		if err := ValidateProjectPhysicalArchivePlan(plan, s.WorkspaceRoots); err != nil {
 			return result, err
 		}
-		if err := validateCurrentProjectArchiveSnapshots(plan, current, repository, nil); err != nil {
+		if err := validateCurrentProjectArchiveSnapshots(plan, s.WorkspaceRoots, current, repository, nil); err != nil {
 			return result, err
+		}
+		// The validated plan owns the source path. Reconstructing it from the
+		// slug loses an accepted project-location successor.
+		inventory, err := inventoryRetainedSchema(ctx, s.WorkspaceRoots, plan.Workspace.Source.Path, plan.Workspace.Inventory.SchemaVersion)
+		if err != nil || !reflect.DeepEqual(inventory, plan.Workspace.Inventory) {
+			return result, fmt.Errorf("project source changed since the reviewed archive plan")
 		}
 	} else {
 		if err := validateProjectPhysicalArchiveStateAgainstPlan(plan, state, existingWorkspace, workspaceExists); err != nil {
 			return result, err
 		}
-		if err := validateCurrentProjectArchiveSnapshots(plan, current, repository, &state); err != nil {
+		if err := validateCurrentProjectArchiveSnapshots(plan, s.WorkspaceRoots, current, repository, &state); err != nil {
 			return result, err
 		}
 	}
@@ -350,7 +356,7 @@ func (s ProjectRuntimeService) applyProjectPhysicalArchive(ctx context.Context, 
 	if err := validateProjectPhysicalArchiveStateAgainstPlan(plan, transition.State, inspection, true); err != nil {
 		return result, err
 	}
-	if err := validateCurrentProjectArchiveSnapshots(plan, current, repository, &transition.State); err != nil {
+	if err := validateCurrentProjectArchiveSnapshots(plan, s.WorkspaceRoots, current, repository, &transition.State); err != nil {
 		return result, err
 	}
 	if err := validateArchivedProjectPhysicalState(plan, current, repository, transition.State); err != nil {
@@ -480,7 +486,7 @@ func validateProjectPhysicalArchiveStateAgainstPlan(plan ProjectPhysicalArchiveP
 	return nil
 }
 
-func validateCurrentProjectArchiveSnapshots(plan ProjectPhysicalArchivePlan, current projects.ProjectRegistrationDetail, repository projects.ProjectRepositoryReadModel, state *projects.ProjectPhysicalArchiveState) error {
+func validateCurrentProjectArchiveSnapshots(plan ProjectPhysicalArchivePlan, roots TrustedWorkspaceRoots, current projects.ProjectRegistrationDetail, repository projects.ProjectRepositoryReadModel, state *projects.ProjectPhysicalArchiveState) error {
 	currentCanonical, err := canonicalProjectRegistrationDetail(current)
 	if err != nil {
 		return err
@@ -488,6 +494,12 @@ func validateCurrentProjectArchiveSnapshots(plan ProjectPhysicalArchivePlan, cur
 	repositoryCanonical, err := canonicalProjectRepositoryState(repository)
 	if err != nil {
 		return err
+	}
+	if err := normalizeLegacyProjectMembership(plan, roots, plan.Registration.Project.Project.Metadata, plan.Registration.Project.Project.UpdatedAt, plan.Repository.Project.UpdatedAt, &currentCanonical.Project.Project.Metadata, &currentCanonical.Project.Project.UpdatedAt, &repositoryCanonical.Project.UpdatedAt); err != nil {
+		if state == nil {
+			return fmt.Errorf("project registration, runtime, or repository state changed since the reviewed archive plan: %w", err)
+		}
+		return fmt.Errorf("project archive recovery snapshot changed outside allowed lifecycle fields: %w", err)
 	}
 	if state == nil {
 		currentCanonical, err = canonicalProjectArchiveRegistration(currentCanonical, plan.StableWatcherReports)
@@ -588,7 +600,12 @@ func normalizeAllowedProjectArchiveRegistrationLifecycle(plan ProjectPhysicalArc
 		row, planned := &actual.WatchedRootRegistrations[index], want.WatchedRootRegistrations[index]
 		if plan.StableWatcherReports {
 			row.LastReportedAt = planned.LastReportedAt
-			if row.ActivationStatus == planned.ActivationStatus {
+			// Ignore observation times only when the rest of the row is unchanged.
+			// Re-archiving a restored project can disable an already-disabled root
+			// with new audit evidence; its write time must still validate below.
+			observation := *row
+			observation.UpdatedAt = planned.UpdatedAt
+			if reflect.DeepEqual(observation, planned) {
 				row.UpdatedAt = planned.UpdatedAt
 			}
 		}
@@ -841,7 +858,7 @@ func validateProjectRuntimeFullyDeactivated(plan ProjectPhysicalArchivePlan, det
 					}
 				}
 			}
-			if !found && (!plan.InspectRegisteredServices || detail.Registration == nil || detail.Registration.ContractSchemaVersion != projectcontracts.ProjectSchemaV05) {
+			if !found && (!plan.InspectRegisteredServices || detail.Registration == nil || !projectcontracts.IsDeclarationSchemaVersion(detail.Registration.ContractSchemaVersion)) {
 				return fmt.Errorf("project archive services facet disappeared during deactivation")
 			}
 		default:

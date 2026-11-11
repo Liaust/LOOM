@@ -17,7 +17,7 @@ func ResolveServiceRegistrationContract(analysis Analysis, key string) (ServiceF
 	if analysis.Loaded == nil || !analysis.Report.OK {
 		return ServiceFacetItem{}, fmt.Errorf("project contract is not valid")
 	}
-	if analysis.Loaded.Contract.SchemaVersion != ProjectSchemaV05 {
+	if !IsDeclarationSchemaVersion(analysis.Loaded.Contract.SchemaVersion) {
 		for _, item := range analysis.Plan.Services {
 			if item.Key == key {
 				return item, nil

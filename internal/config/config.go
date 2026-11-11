@@ -116,6 +116,7 @@ type Config struct {
 	MainDocuments                string
 	NotesProjection              string
 	BoxPath                      string
+	BoxesFile                    string
 	BoxProfile                   string
 	MainURL                      string
 	DBURL                        string
@@ -143,6 +144,7 @@ type Config struct {
 	WorkspaceArchiveEnabled       bool
 	WorkspaceArchiveManifestKeyID string
 
+	NotesSearchBackend          string
 	EmbeddingsEnabled           bool
 	EmbeddingRuntime            string
 	EmbeddingModel              string
@@ -181,6 +183,7 @@ type Overrides struct {
 	MainDocuments               string
 	NotesProjection             string
 	BoxPath                     string
+	BoxesFile                   string
 	BoxProfile                  string
 	MainURL                     string
 	DBURL                       string
@@ -208,6 +211,7 @@ type Overrides struct {
 	WorkspaceArchiveEnabled       string
 	WorkspaceArchiveManifestKeyID string
 
+	NotesSearchBackend          string
 	EmbeddingsEnabled           string
 	EmbeddingRuntime            string
 	EmbeddingModel              string
@@ -254,6 +258,7 @@ func Load(overrides Overrides) (Config, error) {
 
 		ImportsBackupPolicy: DefaultImportsBackupPolicy,
 
+		NotesSearchBackend:          "native",
 		EmbeddingsEnabled:           DefaultEmbeddingsEnabled,
 		EmbeddingRuntime:            DefaultEmbeddingRuntime,
 		EmbeddingModel:              DefaultEmbeddingModel,
@@ -296,6 +301,9 @@ func Load(overrides Overrides) (Config, error) {
 }
 
 func (c Config) Validate() error {
+	if c.BoxesFile != "" && (!filepath.IsAbs(c.BoxesFile) || filepath.Clean(c.BoxesFile) != c.BoxesFile || strings.ContainsAny(c.BoxesFile, "\x00\r\n")) {
+		return fmt.Errorf("LOOM_BOXES_FILE must be a canonical absolute configuration path")
+	}
 	if _, err := c.HermesScheduleSource(); err != nil {
 		return err
 	}
@@ -381,6 +389,9 @@ func (c Config) Validate() error {
 	}
 	if err := validateEmbeddingConfig(c); err != nil {
 		return err
+	}
+	if c.NotesSearchBackend != "" && c.NotesSearchBackend != "native" && c.NotesSearchBackend != "pg_search" {
+		return fmt.Errorf("invalid LOOM_NOTES_SEARCH_BACKEND: expected native or pg_search")
 	}
 	if err := validateVisionConfig(c); err != nil {
 		return err
@@ -483,6 +494,7 @@ func (c Config) SafeFields() map[string]string {
 		"box_notes":                   c.BoxNotesRoot(),
 		"notes_projection":            c.NotesProjectionRoot(),
 		"box_path":                    c.BoxPath,
+		"boxes_file":                  c.BoxesFile,
 		"box_profile":                 c.BoxProfile,
 		"main_url":                    safeDiagnosticURL(c.MainURL),
 		"socket_path":                 c.SocketPath,
@@ -512,6 +524,7 @@ func (c Config) SafeFields() map[string]string {
 		"restore_provenance_database":             c.RestoreProvenanceDatabase,
 		"restore_provenance_owner":                c.RestoreProvenanceOwner,
 
+		"notes_search_backend":           c.NotesSearchBackend,
 		"embeddings_enabled":             fmt.Sprintf("%t", c.EmbeddingsEnabled),
 		"embedding_runtime":              c.EmbeddingRuntime,
 		"embedding_model":                c.EmbeddingModel,
@@ -693,6 +706,7 @@ func applyEnv(cfg *Config) error {
 		"LOOM_NOTES_PROJECTION_ROOT":       os.Getenv("LOOM_NOTES_PROJECTION_ROOT"),
 		"LOOM_NOTES_WORKSPACE_CONFIG":      os.Getenv("LOOM_NOTES_WORKSPACE_CONFIG"),
 		"LOOM_BOX_PATH":                    os.Getenv("LOOM_BOX_PATH"),
+		"LOOM_BOXES_FILE":                  os.Getenv("LOOM_BOXES_FILE"),
 		"LOOM_BOX_PROFILE":                 os.Getenv("LOOM_BOX_PROFILE"),
 		"LOOM_MAIN_URL":                    os.Getenv("LOOM_MAIN_URL"),
 		"LOOM_DB_URL":                      os.Getenv("LOOM_DB_URL"),
@@ -737,6 +751,7 @@ func applyEnv(cfg *Config) error {
 		"LOOM_WORKSPACE_ARCHIVE_ENABLED":         os.Getenv("LOOM_WORKSPACE_ARCHIVE_ENABLED"),
 		"LOOM_WORKSPACE_ARCHIVE_MANIFEST_KEY_ID": os.Getenv("LOOM_WORKSPACE_ARCHIVE_MANIFEST_KEY_ID"),
 
+		"LOOM_NOTES_SEARCH_BACKEND":           os.Getenv("LOOM_NOTES_SEARCH_BACKEND"),
 		"LOOM_EMBEDDINGS_ENABLED":             os.Getenv("LOOM_EMBEDDINGS_ENABLED"),
 		"LOOM_EMBEDDING_RUNTIME":              os.Getenv("LOOM_EMBEDDING_RUNTIME"),
 		"LOOM_EMBEDDING_MODEL":                os.Getenv("LOOM_EMBEDDING_MODEL"),
@@ -776,6 +791,7 @@ func applyOverrides(cfg *Config, overrides Overrides) error {
 		"LOOM_MAIN_DOCUMENTS_ROOT":         overrides.MainDocuments,
 		"LOOM_NOTES_PROJECTION_ROOT":       overrides.NotesProjection,
 		"LOOM_BOX_PATH":                    overrides.BoxPath,
+		"LOOM_BOXES_FILE":                  overrides.BoxesFile,
 		"LOOM_BOX_PROFILE":                 overrides.BoxProfile,
 		"LOOM_MAIN_URL":                    overrides.MainURL,
 		"LOOM_DB_URL":                      overrides.DBURL,
@@ -807,6 +823,7 @@ func applyOverrides(cfg *Config, overrides Overrides) error {
 		"LOOM_WORKSPACE_ARCHIVE_ENABLED":         overrides.WorkspaceArchiveEnabled,
 		"LOOM_WORKSPACE_ARCHIVE_MANIFEST_KEY_ID": overrides.WorkspaceArchiveManifestKeyID,
 
+		"LOOM_NOTES_SEARCH_BACKEND":           overrides.NotesSearchBackend,
 		"LOOM_EMBEDDINGS_ENABLED":             overrides.EmbeddingsEnabled,
 		"LOOM_EMBEDDING_RUNTIME":              overrides.EmbeddingRuntime,
 		"LOOM_EMBEDDING_MODEL":                overrides.EmbeddingModel,
@@ -887,6 +904,8 @@ func applyMap(cfg *Config, values map[string]string) error {
 			cfg.NotesWorkspaceConfig = value
 		case "LOOM_BOX_PATH":
 			cfg.BoxPath = value
+		case "LOOM_BOXES_FILE":
+			cfg.BoxesFile = value
 		case "LOOM_BOX_PROFILE":
 			cfg.BoxProfile = strings.ToLower(value)
 		case "LOOM_MAIN_URL":
@@ -984,6 +1003,8 @@ func applyMap(cfg *Config, values map[string]string) error {
 			cfg.WorkspaceArchiveEnabled = parsed
 		case "LOOM_WORKSPACE_ARCHIVE_MANIFEST_KEY_ID":
 			cfg.WorkspaceArchiveManifestKeyID = value
+		case "LOOM_NOTES_SEARCH_BACKEND":
+			cfg.NotesSearchBackend = value
 		case "LOOM_EMBEDDINGS_ENABLED":
 			parsed, err := strconv.ParseBool(value)
 			if err != nil {

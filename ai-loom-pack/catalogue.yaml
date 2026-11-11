@@ -23,25 +23,25 @@ invariants:
   - id: external-not-runtime
     rule: Native harness deployment or use of a skill never creates a LOOM actor, access session, work context, or authorization grant.
   - id: project-local-baseline
-    rule: Project agents enter through the standard root AGENTS.md and read project-specific guidance only under .loom/agents/.
+    rule: Project agents follow root AGENTS.md, project-wide .project context and .loom declarations; preserve relevant legacy guidance without making it a compulsory preamble.
   - id: source-before-view
     rule: Agents edit canonical sources and never mutate generated loom-storage views.
   - id: authority-is-external
     rule: Skills provide instructions and never grant execution authority.
-  - id: orca-owns-lifecycle
-    rule: Orca owns interactive repositories, worktrees, terminals, and task lifecycle; LOOM owns worker/service policy and Hermes supplies its harness sessions.
+  - id: native-harness-owns-lifecycle
+    rule: Each worktree has one native lifecycle owner. Codex owns its sessions and worktrees; Hermes owns its agent sessions and routines. ORCA is retired. LOOM owns worker/service policy.
   - id: proton-owns-values
-    rule: Proton Pass owns credential values; the current project contract stores logical env/file bindings, while direct pass:// bindings remain deferred.
+    rule: Credential values stay in approved stores or protected bootstrap settings. Project contracts store references, including supported pass:// bindings, never secret values.
   - id: no-secret-retention
     rule: Secrets never enter Git, .loom files, LOOM Notes, Basecamp, handoffs, logs, or agent memory.
   - id: provenance-is-sole-semantic-ledger
     rule: Archivist workspace files hold instructions and bounded evidence only; qualified semantic state remains in LOOM Provenance.
   - id: morathustra-single-soul
-    rule: Hermes is Morathustra's harness; .hermes/SOUL.md is the sole personality source and project workers never inherit it.
+    rule: The retained Morathustra/Hermes template uses its historical .hermes/SOUL.md; its existence does not activate that retired Main runtime or pass its identity to workers.
   - id: mina-single-soul
-    rule: MINA uses one .hermes/SOUL.md per profile; her personality never grants authority or passes to project workers. Explicit template selection does not activate a runtime or named account.
+    rule: Current MINA uses full native Hermes on Main and workspace root SOUL.md; the native profile references that source. Her personality never grants authority or passes to project workers. Template selection does not activate a runtime or named account.
   - id: hermes-skills-have-separate-owners
-    rule: Hermes native and created skills stay in .hermes/skills; MINA maintains them without a per-write approval queue. Legacy profile defaults remain unchanged. skills/installed is LOOM-managed and read-only, exposed through skills.external_dirs.
+    rule: Native Hermes-created skills live in .hermes/skills; workspace .agents/skills and skills/installed remain separately owned external sources. Preserve live skills and memory; never duplicate names, template-sync learned state or treat tool availability as authority.
   - id: conversation-is-not-semantic-truth
     rule: Hermes supplies conversational continuity; LOOM Provenance remains the qualified semantic ledger and sources remain authoritative.
   - id: archivist-is-manual-only
@@ -53,13 +53,15 @@ skills:
     visibility: shared_core
     intended_roles: [project-agent, morathustra, mina, loom-developer]
     positive_triggers:
-      - Find and exact-load source wording, qualified decisions, or semantic repository context.
+      - Discover unknown source locations, cross-collection material, or indexed PDF/image extraction.
+      - Retrieve relevant qualified decisions, history, or semantic repository context.
       - Distinguish Notes sources, Objects custody, and Provenance lifecycle state.
     negative_triggers:
+      - Find or read a known file, code symbol, or literal text with ordinary filesystem tools.
       - Research how a LOOM command is documented.
       - Register or reconcile claims, or run an Archivist worker.
     safety_class: inspect
-    references: [references/exact-citations.md]
+    references: [references/exact-citations.md, references/selective-enrichment.md]
     overlaps: [search-loom-docs, use-loom-provenance]
     evaluation: {scenarios: 0, status: not-run}
     history:
@@ -73,6 +75,7 @@ skills:
       - Find the authoritative LOOM documentation for a command or workflow.
       - Determine whether described LOOM behavior is current, deferred, or historical.
     negative_triggers:
+      - Read a known file or run a known supported command.
       - Perform a project lifecycle mutation.
       - Diagnose a live multi-node incident.
     safety_class: inspect
@@ -82,7 +85,7 @@ skills:
     history:
       - {version: 0.1.0, status: candidate, change: Initial complete candidate authored for cold-context evaluation.}
   - name: manage-loom-projects
-    version: 0.1.0
+    version: 0.2.0
     status: candidate
     visibility: shared_core
     intended_roles: [project-agent, morathustra, mina, loom-developer]
@@ -91,13 +94,14 @@ skills:
       - Manage project contracts and facets within one project lifecycle.
     negative_triggers:
       - Operate Box storage outside a project.
-      - Create or manage an Orca worktree or task session.
+      - Create or manage a native coding-harness worktree or task session.
     safety_class: safe-run
-    references: [references/project-commands.md]
+    references: [references/project-commands.md, references/project-lifecycle.md, references/managed-applications.md, references/managed-application-recipes.md]
     overlaps: [search-loom-docs, orchestrate-loom-work]
     evaluation: {scenarios: 0, status: not-run}
     history:
       - {version: 0.1.0, status: candidate, change: Initial complete candidate authored for cold-context evaluation.}
+      - {version: 0.2.0, status: candidate, change: Native Codex lifecycle ownership and current Main agent scheduling; retained Hermes guidance is historical.}
   - name: operate-loom-storage
     version: 0.1.0
     status: candidate
@@ -150,7 +154,7 @@ skills:
     history:
       - {version: 0.1.0, status: candidate, change: Initial complete candidate authored for cold-context evaluation.}
   - name: orchestrate-loom-work
-    version: 0.2.0
+    version: 0.3.0
     status: candidate
     visibility: morathustra_operations
     intended_roles: [morathustra, mina]
@@ -158,13 +162,14 @@ skills:
       - Inventory cross-project work, map dependencies, route tasks, and prepare narrow handoffs.
       - Decide whether work belongs with a project agent or the LOOM repository developer.
     negative_triggers:
-      - Own routine feature implementation from the broad named-agent workspace.
-      - Create an Orca task or worktree using a competing LOOM registry.
+      - Perform an ordinary edit in a known project without a coordination need.
+      - Replace the running harness's native chat or worktree lifecycle with a LOOM registry.
     safety_class: plan
     references: [references/routing.md]
     overlaps: [manage-loom-projects, investigate-loom-incidents]
     evaluation: {scenarios: 0, status: not-run}
     history:
+      - {version: 0.3.0, status: candidate, change: Identity-neutral current-task coordination and native Codex/optional ORCA ownership; remove obsolete harness and forced-delegation rules.}
       - {version: 0.2.0, status: candidate, change: Route Hermes conversational context and single-SOUL boundaries without passing private identity to project workers.}
       - {version: 0.1.0, status: candidate, change: Initial complete candidate authored for cold-context evaluation.}
   - name: use-proton-pass
@@ -185,7 +190,7 @@ skills:
     history:
       - {version: 0.1.0, status: candidate, change: Initial complete candidate authored for cold-context evaluation.}
   - name: use-loom-provenance
-    version: 0.2.0
+    version: 0.3.0
     status: candidate
     visibility: shared_provenance
     intended_roles: [project-agent, morathustra, mina, archivist, loom-runtime-agent, loom-developer]
@@ -202,3 +207,4 @@ skills:
     history:
       - {version: 0.1.0, status: candidate, change: Initial manual-only Archivist retrieval and reconciliation guidance.}
       - {version: 0.2.0, status: candidate, change: Shared Main retrieval and pending capture; worker controls stay in Archivist protocols.}
+      - {version: 0.3.0, status: candidate, change: Normal candidate registration CLI and effective review reads with selective source-backed capture and explicit Main-ledger routing.}

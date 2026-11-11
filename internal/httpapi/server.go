@@ -25,6 +25,7 @@ import (
 	"loom.local/loom/internal/backupcontracts"
 	"loom.local/loom/internal/bootstrap"
 	"loom.local/loom/internal/box"
+	"loom.local/loom/internal/boxregistry"
 	"loom.local/loom/internal/capabilities"
 	"loom.local/loom/internal/cloudstorage"
 	"loom.local/loom/internal/communication"
@@ -45,6 +46,7 @@ import (
 	"loom.local/loom/internal/minidashboard"
 	"loom.local/loom/internal/modules"
 	"loom.local/loom/internal/nodes"
+	"loom.local/loom/internal/notesworkspacesync"
 	"loom.local/loom/internal/objects"
 	"loom.local/loom/internal/policy"
 	"loom.local/loom/internal/projectactivation"
@@ -73,6 +75,7 @@ import (
 	loomsync "loom.local/loom/internal/sync"
 	mainwatchedroots "loom.local/loom/internal/watchedroots"
 	"loom.local/loom/internal/workers"
+	"loom.local/loom/internal/workspacefiles"
 )
 
 type idempotencyService interface {
@@ -82,6 +85,8 @@ type idempotencyService interface {
 }
 
 type Services struct {
+	NotesRecovery                   func(context.Context) (notesworkspacesync.EnrollmentInventory, error)
+	NotesRecoveryPrepare            func(context.Context) (notesworkspacesync.EnrollmentInventory, error)
 	DB                              *sql.DB
 	Health                          health.Service
 	Status                          loomstatus.Service
@@ -89,6 +94,13 @@ type Services struct {
 	Box                             box.Service
 	Dropzone                        dropzone.Service
 	FileTransfer                    filetransfer.Service
+	Files                           *workspacefiles.Service
+	Boxes                           *boxregistry.Catalog
+	RetainedRelocations             *storagearchive.RetainedRelocationService
+	WorkspacePaths                  *storagearchive.WorkspacePathService
+	BoxWorkspacePaths               map[string]*storagearchive.WorkspacePathService
+	BoxWorkspaceArchives            map[string]WorkspaceArchiveLifecycleService
+	BoxProjectArchives              map[string]storagearchive.ProjectRuntimeService
 	Idempotency                     idempotencyService
 	Identity                        identity.Service
 	Nodes                           nodes.Service
@@ -116,6 +128,7 @@ type Services struct {
 	MiniDashboard                   interface {
 		Snapshot(context.Context) (minidashboard.DomainSnapshot, error)
 	}
+	WorkspaceHost             func(context.Context) (minidashboard.HostSnapshot, minidashboard.Metric, error)
 	Artifacts                 artifacts.Service
 	Automation                automation.Service
 	HermesSchedules           *hermesschedules.Observer
@@ -134,6 +147,7 @@ type Services struct {
 	ProvenanceAuthorizer      ProvenanceAuthorizer
 	ProvenanceRequestResolver ProvenanceRequestResolver
 	EmbeddingRuntime          knowledge.EmbeddingRuntime
+	NotesFileSourceReader     knowledge.FileSourceReader
 	RuntimeConfig             loomconfig.Config
 	AllowCloudConfigOverride  bool
 
@@ -145,6 +159,7 @@ type Server struct {
 	services                  Services
 	logger                    *slog.Logger
 	projectRegistrationStatus func(context.Context, string) (projects.ProjectRegistrationDetail, error)
+	projectArchiveInspection  func(context.Context, string) (storagearchive.ProjectArchiveInspectResult, error)
 	// Private fixture seam; never configured by HTTP input or runtime flags.
 	cloudRestoreCleanupConfig func() (cloudstorage.Config, error)
 }
@@ -188,12 +203,46 @@ func NewServer(services Services, logger *slog.Logger) Server {
 	if services.Projects.DB != nil {
 		server.projectRegistrationStatus = services.Projects.GetProjectRegistrationStatus
 	}
+	if services.ProjectArchive.Projects != nil {
+		server.projectArchiveInspection = services.ProjectArchive.InspectProjectArchive
+	}
 	return server
 }
 
 func (s Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/health", s.handleHealth)
+	mux.HandleFunc("/v1/files/roots", s.handleFileRoots)
+	mux.HandleFunc("/v1/boxes", s.handleBoxes)
+	mux.HandleFunc("/v1/boxes/membership/inventory", s.handleBoxMembershipInventory)
+	mux.HandleFunc("/v1/boxes/membership/projects", s.handleProjectBoxMembership)
+	mux.HandleFunc("/v1/boxes/membership/sources", s.handleSourceBoxMembership)
+	mux.HandleFunc("/v1/files/application-data", s.handleApplicationFiles)
+	mux.HandleFunc("/v1/files/archive-members", s.handleArchiveMembers)
+	mux.HandleFunc("/v1/files/archive-content", s.handleArchiveMemberContent)
+	mux.HandleFunc("/v1/files/entries", s.handleFileEntries)
+	mux.HandleFunc("/v1/files/search", s.handleFileSearch)
+	mux.HandleFunc("/v1/schedules/hermes/workspace", s.handleHermesWorkspace)
+	mux.HandleFunc("/v1/files/stat", s.handleFileStat)
+	mux.HandleFunc("/v1/files/explain", s.handleFileExplain)
+	mux.HandleFunc("/v1/files/content", s.handleFileContent)
+	mux.HandleFunc("/v1/files/annotations", s.handleFileAnnotations)
+	mux.HandleFunc("/v1/files/create", s.handleFileCreate)
+	mux.HandleFunc("/v1/files/uploads", s.handleFileUploads)
+	mux.HandleFunc("/v1/files/note", s.handleFileNote)
+	mux.HandleFunc("/v1/files/actions", s.handleFileActions)
+	mux.HandleFunc("/v1/files/tree-move", s.handleFileTreeMove)
+	mux.HandleFunc("/v1/files/operations", s.handleFileOperations)
+	mux.HandleFunc("/v1/files/retained-move", s.handleRetainedMove)
+	mux.HandleFunc("/v1/files/workspace-path", s.handleWorkspacePath)
+	mux.HandleFunc("/v1/files/snapshot", s.handleFileSnapshot)
+	mux.HandleFunc("/v1/files/watch", s.handleFileWatch)
+	mux.HandleFunc("/v1/files/links", s.handleFileLinks)
+	mux.HandleFunc("/v1/files/history", s.handleFileHistory)
+	mux.HandleFunc("/v1/system/host", s.handleWorkspaceHost)
+	for _, route := range []string{"/v1/projects/overview", "/v1/jobs/overview", "/v1/schedules/overview", "/v1/system/runtime", "/v1/system/protection"} {
+		mux.HandleFunc(route, s.handleWorkspaceOverview)
+	}
 	mux.HandleFunc("/v1/status", s.handleStatus)
 	mux.HandleFunc("/v1/mini-dashboard/status", s.handleMiniDashboardStatus)
 	mux.HandleFunc("/v1/bootstrap/status", s.handleBootstrapStatus)
@@ -226,9 +275,12 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/events", s.handleEvents)
 	mux.HandleFunc("/v1/events/", s.handleEvent)
 	mux.HandleFunc("/v1/project-declaration-plans", s.handleProjectDeclarationPlans)
+	mux.HandleFunc("/v1/project-deploy", s.handleProjectDeploy)
+	mux.HandleFunc("/v1/project-credential-import", s.handleProjectCredentialImport)
+	mux.HandleFunc("/v1/project-run-action", s.handleProjectAction)
 	mux.HandleFunc("/v1/project-declaration-operations", s.handleProjectDeclarationApply)
 	mux.HandleFunc("/v1/project-declaration-operations/", s.handleProjectDeclarationOperation)
-	mux.HandleFunc("/v1/project-scaffolds", s.handleProjectScaffolds)
+	mux.HandleFunc("/v1/project-scaffolds", s.handleProjectScaffoldsInBox)
 	mux.HandleFunc("/v1/project-facet-additions", s.handleProjectFacetAdditions)
 	mux.HandleFunc("/v1/project-layout-migrations", s.handleProjectLayoutMigrations)
 	mux.HandleFunc("/v1/project-exports", s.handleProjectExports)
@@ -236,7 +288,7 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/project-contract-registrations", s.handleProjectContractRegistrations)
 	mux.HandleFunc("/v1/project-contract-registrations/from-backend", s.handleProjectContractRegistrationsFromBackend)
 	mux.HandleFunc("/v1/project-contract-registrations/", s.handleProjectContractRegistration)
-	mux.HandleFunc("/v1/projects", s.handleProjects)
+	mux.HandleFunc("/v1/projects", s.handleProjectsInBox)
 	mux.HandleFunc("/v1/projects/", s.handleProject)
 	mux.HandleFunc("/v1/knowledge/notes/overview", s.handleKnowledgeNotesOverview)
 	mux.HandleFunc("/v1/knowledge/notes/roots", s.handleKnowledgeNotesRoots)
@@ -246,7 +298,12 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/knowledge/notes/objects/", s.handleKnowledgeNotesObject)
 	mux.HandleFunc("/v1/knowledge/notes/passages/", s.handleKnowledgeNotesPassage)
 	mux.HandleFunc("/v1/knowledge/notes/conflicts", s.handleNotesConflicts)
+	mux.HandleFunc("/v1/knowledge/notes/moves", s.handleNotesSourceMoves)
 	mux.HandleFunc("/v1/knowledge/notes/search", s.handleKnowledgeNotesSearch)
+	mux.HandleFunc("/v1/knowledge/notes/files/search", s.handleKnowledgeFilesSearch)
+	mux.HandleFunc("/v1/knowledge/notes/files/read", s.handleKnowledgeFileRead)
+	mux.HandleFunc("/v1/knowledge/notes/files/reconcile", s.handleKnowledgeFilesReconcile)
+	mux.HandleFunc("/v1/knowledge/notes/files/retained", s.handleKnowledgeFilesRetained)
 	mux.HandleFunc("/v1/knowledge/notes/embeddings/status", s.handleKnowledgeNotesEmbeddingsStatus)
 	mux.HandleFunc("/v1/knowledge/notes/embeddings/enable", s.handleKnowledgeNotesEmbeddingsEnable)
 	mux.HandleFunc("/v1/knowledge/notes/embeddings/disable", s.handleKnowledgeNotesEmbeddingsDisable)
@@ -270,6 +327,7 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/provenance/repos/", s.handleProvenanceRepository)
 	mux.HandleFunc("/v1/provenance/projects/", s.handleProvenanceProjectProjection)
 	mux.HandleFunc("/v1/provenance/candidates", s.handleProvenanceCandidates)
+	mux.HandleFunc("/v1/provenance/review", s.handleProvenanceReview)
 	mux.HandleFunc("/v1/provenance/candidates/", s.handleProvenanceCandidate)
 	mux.HandleFunc("/v1/provenance/records", s.handleProvenanceRecords)
 	mux.HandleFunc("/v1/provenance/records/", s.handleProvenanceRecord)
@@ -381,6 +439,7 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/maintenance/backup/run", s.handleMaintenanceBackupRun)
 	mux.HandleFunc("/v1/maintenance/backup/verify", s.handleMaintenanceBackupVerify)
 	mux.HandleFunc("/v1/backup/coverage", s.handleBackupCoverage)
+	mux.HandleFunc("/v1/backup/notes-inventory", s.handleNotesRecoveryInventory)
 	mux.HandleFunc("/v1/backup/contracts", s.handleBackupContracts)
 	mux.HandleFunc("/v1/backup/contracts/", s.handleBackupContract)
 	mux.HandleFunc("/v1/maintenance/object-store/status", s.handleMaintenanceObjectStoreStatus)
@@ -441,7 +500,7 @@ func (s Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/watched-roots/backups/status", s.handleWatchedRootBackupStatus)
 	mux.HandleFunc("/v1/watched-roots/backups/batches", s.handleWatchedRootBackupBatches)
 	mux.HandleFunc("/v1/watched-roots/backups/items", s.handleWatchedRootBackupItems)
-	return mux
+	return s.withTCPBoundary(s.withBoxContext(mux))
 }
 
 func (s Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -1238,7 +1297,14 @@ func (s Server) handleNodeAgentWatchedRootBackupBatch(w http.ResponseWriter, r *
 	}
 	result, err := s.services.WatchedRoots.RecordBackupBatch(ctx, input)
 	if err != nil {
-		s.writeError(w, correlationID, http.StatusBadRequest, "watched_roots.backup_batch_failed", "watched_roots", input.RootKey, "Could not record watched-root backup batch.", err)
+		status, code := http.StatusInternalServerError, "watched_roots.backup_batch_failed"
+		if errors.Is(err, mainwatchedroots.ErrInvalid) {
+			status, code = http.StatusBadRequest, "watched_roots.backup_batch_invalid"
+		}
+		if errors.Is(err, mainwatchedroots.ErrBackupBindingMismatch) {
+			status, code = http.StatusBadRequest, "watched_roots.backup_binding_mismatch"
+		}
+		s.writeError(w, correlationID, status, code, "watched_roots", input.RootKey, "Could not record watched-root backup batch.", err)
 		return
 	}
 	response.WriteJSON(w, http.StatusCreated, response.Success(correlationID, result))
@@ -1462,7 +1528,7 @@ func (s Server) handleProjectScaffolds(w http.ResponseWriter, r *http.Request) {
 	result, err := projectcontracts.ScaffoldProject(normalized)
 	if err != nil {
 		if result.SourceState == "source_created" {
-			s.writeProjectCreatePending(w, r, result, "project.scaffold_failed", "Project source was retained, but creation did not finish.")
+			s.writeProjectCreatePending(w, r, result, "project.scaffold_failed", "Project source was retained, but creation did not finish.", err)
 			return
 		}
 		s.writeError(w, correlationID, http.StatusBadRequest, "project.scaffold_failed", "projects", normalized.Name, "Could not scaffold project.", err)
@@ -1621,6 +1687,14 @@ func (s Server) handleProjectExports(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeError(w, correlationID, http.StatusBadRequest, "project.export_mode_invalid", "projects", string(input.Mode), "Project export mode is invalid.", err)
 		return
+	}
+	if s.services.StorageCatalog.DB != nil {
+		release, err := storagecatalog.AcquireWorkspaceCustodyReader(ctx, s.services.StorageCatalog.DB)
+		if err != nil {
+			s.writeError(w, correlationID, http.StatusConflict, "project.export_custody_busy", "projects", input.ProjectRef, "Retained custody is changing; inspect the current operation before exporting.", err)
+			return
+		}
+		defer release()
 	}
 	root, err := s.resolveBackendProjectExportRoot(ctx, input.ProjectRef, input.ProjectRoot)
 	if err != nil {
@@ -1800,6 +1874,22 @@ func (s Server) resolveBackendProjectRoot(ctx context.Context, projectRef, proje
 }
 
 func (s Server) resolveBackendProjectExportRoot(ctx context.Context, projectRef, projectRoot string) (string, error) {
+	if ref := strings.TrimSpace(projectRef); ref != "" && s.projectRegistrationStatus != nil {
+		detail, err := s.projectRegistrationStatus(ctx, ref)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return "", fmt.Errorf("could not inspect project export identity: %w", err)
+		}
+		if err == nil && detail.Project.Project.Status == "archived" {
+			if s.projectArchiveInspection == nil {
+				return "", fmt.Errorf("current archive location owner unavailable")
+			}
+			inspection, err := s.projectArchiveInspection(ctx, ref)
+			if err != nil {
+				return "", err
+			}
+			return s.archivedProjectExportRoot(ctx, detail, inspection, projectRoot)
+		}
+	}
 	root, err := s.resolveBackendProjectRootCandidate(ctx, projectRef, projectRoot)
 	if err != nil {
 		return "", err
@@ -2323,6 +2413,11 @@ func (s Server) handleProjectArchive(w http.ResponseWriter, r *http.Request, pro
 		s.writeError(w, correlationID, http.StatusBadRequest, "request.invalid_json", "projects", "body", "Request body is not valid project archive JSON.", err)
 		return
 	}
+	archiveOwner, err := s.lifecycleProjectRuntime(ctx)
+	if err != nil {
+		s.writeLifecycleBoxError(w, correlationID, err)
+		return
+	}
 	req, err := requestctx.ResolveBootstrap(ctx, s.services.DB, correlationID)
 	if err != nil {
 		s.writeError(w, correlationID, http.StatusInternalServerError, "request_context.unavailable", "runtime", "bootstrap", "Could not resolve request context.", err)
@@ -2337,7 +2432,7 @@ func (s Server) handleProjectArchive(w http.ResponseWriter, r *http.Request, pro
 	if !proceed {
 		return
 	}
-	result, err := s.services.ProjectArchive.ArchiveProject(ctx, req, projectRef, input)
+	result, err := archiveOwner.ArchiveProject(ctx, req, projectRef, input)
 	if err != nil {
 		idemErr := loomerrors.Wrap("project.archive_failed", "projects", projectRef, "Could not archive project.", err)
 		s.failIdempotency(ctx, idemRecord, idemErr.Code, response.FailureWithIdempotency(correlationID, idemRecord.Key, idemErr))
@@ -2363,7 +2458,12 @@ func (s Server) handleProjectArchiveInspect(w http.ResponseWriter, r *http.Reque
 		s.writeError(w, correlationID, http.StatusMethodNotAllowed, "method.not_allowed", "projects", r.URL.Path, "Method is not allowed.", nil)
 		return
 	}
-	result, err := s.services.ProjectArchive.InspectProjectArchive(ctx, projectRef)
+	archiveOwner, err := s.lifecycleProjectRuntime(ctx)
+	if err != nil {
+		s.writeLifecycleBoxError(w, correlationID, err)
+		return
+	}
+	result, err := archiveOwner.InspectProjectArchive(ctx, projectRef)
 	if err != nil {
 		s.writeError(w, correlationID, http.StatusBadRequest, "project.archive_inspect_failed", "projects", projectRef, "Could not inspect project archive.", err)
 		return
@@ -2389,7 +2489,12 @@ func (s Server) handleProjectArchiveRestore(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	input.DryRun = true
-	result, err := s.services.ProjectArchive.PlanProjectArchiveRestore(ctx, projectRef, input)
+	archiveOwner, err := s.lifecycleProjectRuntime(ctx)
+	if err != nil {
+		s.writeLifecycleBoxError(w, correlationID, err)
+		return
+	}
+	result, err := archiveOwner.PlanProjectArchiveRestore(ctx, projectRef, input)
 	if err != nil {
 		s.writeError(w, correlationID, http.StatusBadRequest, "project.archive_restore_failed", "projects", projectRef, "Could not plan project archive restore.", err)
 		return
@@ -2415,7 +2520,12 @@ func (s Server) handleProjectArchiveRuntimeMigration(w http.ResponseWriter, r *h
 		return
 	}
 	input.DryRun = true
-	result, err := s.services.ProjectArchive.PlanProjectRuntimeMigration(ctx, projectRef, input)
+	archiveOwner, err := s.lifecycleProjectRuntime(ctx)
+	if err != nil {
+		s.writeLifecycleBoxError(w, correlationID, err)
+		return
+	}
+	result, err := archiveOwner.PlanProjectRuntimeMigration(ctx, projectRef, input)
 	if err != nil {
 		s.writeError(w, correlationID, http.StatusBadRequest, "project.runtime_migration_failed", "projects", projectRef, "Could not plan project runtime migration.", err)
 		return
@@ -2501,6 +2611,22 @@ func (s Server) handleProjectSyncStatus(w http.ResponseWriter, r *http.Request, 
 	if err != nil {
 		s.writeError(w, correlationID, http.StatusBadRequest, "project.sync_status_failed", "projects", projectRef, "Could not read project sync status.", err)
 		return
+	}
+	status.NotesAdmissionState = "not_enrolled"
+	if s.services.DB != nil && len(status.WatchedRoots) > 0 {
+		status.NotesAdmissionState = "unavailable"
+		status.NotesAdmission, err = s.knowledgeService().ProjectAdmissionStatus(ctx, status.WatchedRoots[0].ProjectID)
+		if err == nil {
+			status.NotesAdmissionState = "not_enrolled"
+			if len(status.NotesAdmission) > 0 {
+				status.NotesAdmissionState = "ready"
+			}
+			for _, root := range status.NotesAdmission {
+				if root.State == "pending" || root.State == "waiting_for_owner" {
+					status.NotesAdmissionState = "pending"
+				}
+			}
+		}
 	}
 	response.WriteJSON(w, http.StatusOK, response.Success(correlationID, status))
 }
@@ -3437,6 +3563,10 @@ func (s Server) handleArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ref := pathRef(r.URL.Path, "/v1/artifacts/")
+	if strings.HasSuffix(ref, "/content") {
+		s.handleArtifactContent(w, r, strings.TrimSuffix(ref, "/content"))
+		return
+	}
 	if ref == "" {
 		s.writeError(w, correlationID, http.StatusNotFound, "artifact.ref_required", "artifacts", "artifact", "Artifact reference is required.", nil)
 		return
@@ -6551,7 +6681,7 @@ func (s Server) beginIdempotencyWithRecovery(w http.ResponseWriter, r *http.Requ
 		NodeID:    req.OriginNodeID,
 		Key:       key,
 		Operation: operation,
-		Request:   input,
+		Request:   s.boxIdempotencyInput(ctx, input),
 	})
 	if err != nil {
 		s.writeErrorWithIdempotency(w, correlationID, key, http.StatusInternalServerError, "idempotency.begin_failed", "interface", key, "Could not begin idempotent request.", err)
@@ -6909,6 +7039,7 @@ func ServeUnix(ctx context.Context, socketPath string, handler http.Handler, log
 	server := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
+		ConnContext:       unixFileTransportContext,
 	}
 
 	errCh := make(chan error, 1)
@@ -6948,8 +7079,10 @@ func ServeTCP(ctx context.Context, listenAddr string, handler http.Handler, logg
 	}
 
 	server := &http.Server{
-		Handler:           handler,
+		Handler:           markTCPTransport(handler),
 		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 * 1024,
 	}
 
 	errCh := make(chan error, 1)

@@ -1,0 +1,40 @@
+diff --git a/pm/install.py b/pm/install.py
+--- a/pm/install.py
++++ b/pm/install.py
+@@ -768,7 +768,7 @@
+ def _publish_nix_selection(change, selection: dict, extras) -> None:
+     """Nix owns Python; only a dependency-free selection may publish here."""
+     from pm.plugin_declarations import read_python_declaration, unsupported_requirements
+-    from pm.publication import validate_manifest
++    from pm.publication import StagedPlugin, validate_manifest
+     from pm.workspace import enabled_plugin_dirs
+ 
+     remedy = "Declare Python dependencies in the Nix package and rebuild through its owning manager, then retry."
+@@ -776,8 +776,15 @@
+     if extras:
+         raise InstallError("nix-plugin-selection", "Nix owns the Python environment; cannot add extras", remedy)
+-    selected = enabled_plugin_dirs(proposed_home=change.home, enabled=selection["enabled"],
+-                                   disabled=selection["disabled"])
+-    selected.extend(Path(directory) for directory in selection.get("extra_dirs", ()))
++    if isinstance(change, StagedPlugin):
++        # Validate the proposed code, not the old installed declaration. Include
++        # sibling profiles; publication retains native digest/journal guards.
++        selected = [source for source in enabled_plugin_dirs(installing=change.target)
++                    if source.resolve() != change.target.resolve()]
++        selected.append(change.staged)
++    else:
++        selected = enabled_plugin_dirs(proposed_home=change.home, enabled=selection["enabled"],
++                                       disabled=selection["disabled"])
++        selected.extend(Path(directory) for directory in selection.get("extra_dirs", ()))
+     for source in dict.fromkeys(selected):
+         validate_manifest(source)
+         declaration = read_python_declaration(source)
+@@ -870,7 +877,7 @@
+         with _venv_install_lock(patient=explicit or repair):
+             recover_publication(paths.repo_root())
+             change = _publication(plugins)
+-            if isinstance(change, PluginSelection) and _nix_external_install():
++            if isinstance(change, (PluginSelection, StagedPlugin)) and _nix_external_install():
+                 _publish_nix_selection(change, plugins.data, extras)
+             elif isinstance(change, StagedPlugin) and not change.active:
+                 _publish_inactive(change)

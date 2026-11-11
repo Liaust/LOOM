@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -48,6 +49,7 @@ func (s Store) ListKnowledgeObjects(ctx context.Context, filter KnowledgeObjectF
 	}
 	clauses := []string{visibleNotesCustodyObjectSQL("knowledge_objects", true), notesLifecycleSelectionSQL("knowledge_objects", lifecycle), visibleNotesKnowledgeRelativePathSQL("relative_path")}
 	args := []any{}
+	clauses = append(clauses, notesSelectedObjectSQL(ctx, "knowledge_objects", &args))
 	if filter.SourceCategory != "" {
 		args = append(args, filter.SourceCategory)
 		clauses = append(clauses, fmt.Sprintf("EXISTS (SELECT 1 FROM knowledge.notes_source_roots category_root WHERE category_root.notes_source_root_id = knowledge_objects.notes_source_root_id AND (%s) = $%d)", sourceCategorySQL("category_root.root_kind"), len(args)))
@@ -106,40 +108,55 @@ func (s Store) GetKnowledgeObject(ctx context.Context, ref string) (KnowledgeObj
 	if ref == "" {
 		return KnowledgeObject{}, fmt.Errorf("%w: knowledge object ref is required", ErrInvalid)
 	}
-	row := s.db.QueryRowContext(ctx, `SELECT `+knowledgeObjectColumns()+`
-		FROM knowledge.knowledge_objects
-		WHERE (knowledge_object_id = $1
-		   OR storage_entry_id = $1
-		   OR relative_path = $1)
-		 AND `+visibleNotesKnowledgeObjectSQL("knowledge_objects")+`
-		ORDER BY
-			CASE
-				WHEN knowledge_object_id = $1 THEN 0
-				WHEN storage_entry_id = $1 THEN 1
-				ELSE 2
-			END,
-			updated_at DESC
-		LIMIT 1`, ref)
-	return scanKnowledgeObject(row)
+	return s.getKnowledgeObjectByRef(ctx, ref, SourceLifecycleFilterActive, false)
 }
 
-func (s Store) UpsertKnowledgeObject(ctx context.Context, object KnowledgeObject) (KnowledgeObject, error) {
-	if s.db == nil {
-		return KnowledgeObject{}, fmt.Errorf("knowledge store is not configured")
-	}
-	if err := ValidateKnowledgeObject(object); err != nil {
-		return KnowledgeObject{}, err
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
+// Pipeline claims already carry an immutable ID; do not rediscover it as a
+// storage/path reference or replan its source predicates on each execution.
+func (s Store) getPipelineKnowledgeObject(ctx context.Context, id string) (KnowledgeObject, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return KnowledgeObject{}, err
 	}
 	defer tx.Rollback()
-	if err := storagecatalog.LockWorkspaceCustodyReaderTx(ctx, tx); err != nil {
+	if err = preparePipelineSingletonTx(ctx, tx); err != nil {
 		return KnowledgeObject{}, err
 	}
-	if err := requireNotesCustodyWriteTx(ctx, tx, object); err != nil {
+	object, err := scanKnowledgeObject(tx.QueryRowContext(ctx, `SELECT `+knowledgeObjectColumns()+`
+	 FROM knowledge.knowledge_objects o WHERE o.knowledge_object_id=$1 AND o.deleted_at IS NULL
+	 AND `+visibleNotesKnowledgeObjectSQL("o"), id))
+	if err != nil {
 		return KnowledgeObject{}, err
+	}
+	if err := bindObjectBoxMembership(ctx, tx, &object); err != nil {
+		return KnowledgeObject{}, err
+	}
+	return object, tx.Commit()
+}
+
+func (s Store) UpsertKnowledgeObject(ctx context.Context, object KnowledgeObject) (KnowledgeObject, error) {
+	out, _, err := s.upsertKnowledgeObject(ctx, object, true)
+	return out, err
+}
+
+// changed includes canonical binding repair, not just source content changes.
+func (s Store) upsertKnowledgeObject(ctx context.Context, object KnowledgeObject, auditMetadata ...bool) (out KnowledgeObject, changed bool, err error) {
+	if s.db == nil {
+		return KnowledgeObject{}, false, fmt.Errorf("knowledge store is not configured")
+	}
+	if err := ValidateKnowledgeObject(object); err != nil {
+		return KnowledgeObject{}, false, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return KnowledgeObject{}, false, err
+	}
+	defer tx.Rollback()
+	if err := storagecatalog.LockWorkspaceCustodyReaderTx(ctx, tx); err != nil {
+		return KnowledgeObject{}, false, err
+	}
+	if err := requireNotesCustodyWriteTx(ctx, tx, object); err != nil {
+		return KnowledgeObject{}, false, err
 	}
 	// Catalog and synced observations arrive on independent admission pages.
 	// Recheck ownership at the write boundary, not only among this batch's
@@ -148,10 +165,10 @@ func (s Store) UpsertKnowledgeObject(ctx context.Context, object KnowledgeObject
 	if object.StorageEntryID != nil {
 		owned, err := notesSourceHasSyncedOwner(ctx, tx, object)
 		if err != nil {
-			return KnowledgeObject{}, err
+			return KnowledgeObject{}, false, err
 		}
 		if owned {
-			return KnowledgeObject{}, ErrNotesCustodyPaused
+			return KnowledgeObject{}, false, ErrNotesCustodyPaused
 		}
 	}
 
@@ -165,10 +182,10 @@ func (s Store) UpsertKnowledgeObject(ctx context.Context, object KnowledgeObject
 		LIMIT 1
 	`, object.NotesSourceRootID, object.RelativePath).Scan(&existingID)
 	if err != nil && err != sql.ErrNoRows {
-		return KnowledgeObject{}, err
+		return KnowledgeObject{}, false, err
 	}
-	var out KnowledgeObject
 	var contentChanged bool
+	projectionChanged := true
 	if existingID == "" {
 		object = observeSourceRefresh(nil, object, time.Now().UTC())
 		out, err = insertKnowledgeObjectTx(ctx, tx, object)
@@ -179,32 +196,105 @@ func (s Store) UpsertKnowledgeObject(ctx context.Context, object KnowledgeObject
 			WHERE knowledge_object_id = $1
 			FOR UPDATE`, existingID))
 		if scanErr != nil {
-			return KnowledgeObject{}, scanErr
+			return KnowledgeObject{}, false, scanErr
 		}
 		if err := requireNotesCustodyWriteTx(ctx, tx, existing); err != nil {
-			return KnowledgeObject{}, err
+			return KnowledgeObject{}, false, err
 		}
 		object.KnowledgeObjectID = existingID
 		object = preserveKnowledgeObjectProcessing(existing, object)
 		contentChanged = knowledgeObjectContentChanged(existing, object)
+		projectionChanged = knowledgeProjectionObjectChanged(existing, object)
 		object = observeSourceRefresh(&existing, object, time.Now().UTC())
-		out, err = updateKnowledgeObjectTx(ctx, tx, object)
+		if knowledgeObjectSourceEquivalent(existing, object) {
+			// A replay is not a new source observation. Keep last_seen_at and the
+			// object tuple intact, but retain repair of a missing canonical link.
+			var repair bool
+			err = tx.QueryRowContext(ctx, `SELECT EXISTS (
+			 SELECT 1 FROM knowledge.knowledge_objects ko
+			 JOIN files.file_metadata f ON f.source_node_id=ko.source_node_id
+			 AND f.object_id=ko.metadata->'synced_object'->>'object_id'
+			 WHERE ko.knowledge_object_id=$1
+			 AND ko.canonical_file_id IS DISTINCT FROM f.object_id)`, existingID).Scan(&repair)
+			if err != nil {
+				return KnowledgeObject{}, false, err
+			}
+			if !repair {
+				// Explicit repair and sparse inventories still verify derived search
+				// rows; ordinary exact source replay need not audit lexical terms.
+				if len(auditMetadata) > 0 && auditMetadata[0] {
+					if err = replaceKnowledgeMetadataSearchDocumentForObjectTx(ctx, tx, existing); err != nil {
+						return KnowledgeObject{}, false, err
+					}
+				}
+				if err = tx.Commit(); err != nil {
+					return KnowledgeObject{}, false, err
+				}
+				return existing, false, nil
+			}
+			out = existing
+			projectionChanged = true
+		} else {
+			// last_seen_at tracks the latest changed source observation, never
+			// read time alone, and an older replay cannot move it backwards.
+			if object.LastSeenAt.Before(existing.LastSeenAt) {
+				object.LastSeenAt = existing.LastSeenAt
+			}
+			object.UpdatedAt = time.Now().UTC()
+			out, err = updateKnowledgeObjectTx(ctx, tx, object)
+		}
 	}
 	if err != nil {
-		return KnowledgeObject{}, err
+		return KnowledgeObject{}, false, err
 	}
+	finishCanonical := admissionPhase(ctx, "canonical_file_link")
+	if err = linkCanonicalFileTx(ctx, tx, out.KnowledgeObjectID); err != nil {
+		return KnowledgeObject{}, false, finishCanonical(err)
+	}
+	finishMetadata := admissionPhase(ctx, "metadata_search_ensure")
 	if err = replaceKnowledgeMetadataSearchDocumentForObjectTx(ctx, tx, out); err != nil {
-		return KnowledgeObject{}, err
+		return KnowledgeObject{}, false, finishMetadata(err)
 	}
 	if contentChanged {
 		if err = markEmbeddingObjectChangedTx(ctx, tx, out.KnowledgeObjectID, time.Now().UTC()); err != nil {
-			return KnowledgeObject{}, err
+			return KnowledgeObject{}, false, err
+		}
+	}
+	if projectionChanged {
+		if err = MarkProjectionDirtyTx(ctx, tx, ProjectionDirtyInput{ObjectIDs: []string{out.KnowledgeObjectID}}); err != nil {
+			return KnowledgeObject{}, false, err
 		}
 	}
 	if err = tx.Commit(); err != nil {
-		return KnowledgeObject{}, err
+		return KnowledgeObject{}, false, err
 	}
-	return out, nil
+	return out, true, nil
+}
+
+// Compare the effective persisted input after processing and refresh-clock
+// preservation. IDs, read timestamps and serving/publication fields are not
+// source changes. PostgreSQL timestamps have microsecond precision.
+func knowledgeObjectSourceEquivalent(existing, next KnowledgeObject) bool {
+	sameTime := func(a, b time.Time) bool {
+		return a.UTC().Truncate(time.Microsecond).Equal(b.UTC().Truncate(time.Microsecond))
+	}
+	sameOptionalTime := func(a, b *time.Time) bool {
+		return (a == nil && b == nil) || (a != nil && b != nil && sameTime(*a, *b))
+	}
+	return existing.NotesSourceRootID == next.NotesSourceRootID && existing.RelativePath == next.RelativePath &&
+		reflect.DeepEqual(existing.StorageEntryID, next.StorageEntryID) &&
+		reflect.DeepEqual(existing.SourceNodeID, next.SourceNodeID) && existing.SourceNodeKey == next.SourceNodeKey &&
+		reflect.DeepEqual(existing.ProjectID, next.ProjectID) && existing.SourcePath == next.SourcePath &&
+		existing.Title == next.Title && existing.FileClass == next.FileClass && existing.MimeType == next.MimeType &&
+		reflect.DeepEqual(existing.SizeBytes, next.SizeBytes) && existing.SourceHash == next.SourceHash &&
+		existing.SourceRevision == next.SourceRevision && existing.ProcessingState == next.ProcessingState &&
+		existing.PipelineKey == next.PipelineKey && existing.PipelineVersion == next.PipelineVersion &&
+		sameOptionalTime(existing.SourceCreatedAt, next.SourceCreatedAt) &&
+		sameOptionalTime(existing.SourceModifiedAt, next.SourceModifiedAt) && sameTime(existing.RecencyAt, next.RecencyAt) &&
+		existing.RecencyBasis == next.RecencyBasis && projectionMetadataEqual(existing.AbsoluteTimeMetadata, next.AbsoluteTimeMetadata) &&
+		sameOptionalTime(existing.LastProcessedAt, next.LastProcessedAt) &&
+		existing.LastErrorCode == next.LastErrorCode && existing.LastErrorMessage == next.LastErrorMessage &&
+		projectionMetadataEqual(existing.Metadata, next.Metadata) && sameOptionalTime(existing.DeletedAt, next.DeletedAt)
 }
 
 func knowledgeObjectContentChanged(existing, next KnowledgeObject) bool {
@@ -257,6 +347,18 @@ func (s Store) listSyncedNotesPage(ctx context.Context, sourceRootID string, aft
 }
 
 func (s Store) listSyncedNotesPageFiltered(ctx context.Context, sourceRootID string, after [3]string, limit int, changedOnly bool) ([]SyncedObjectEntry, error) {
+	return s.listSyncedNotesPageOrdered(ctx, sourceRootID, after, limit, changedOnly, false)
+}
+
+func (s Store) listRecentSyncedNotesPage(ctx context.Context, limit int) ([]SyncedObjectEntry, error) {
+	return s.listSyncedNotesPageOrdered(ctx, "", [3]string{}, limit, true, true)
+}
+
+func (s Store) listSyncedNotesPageOrdered(ctx context.Context, sourceRootID string, after [3]string, limit int, changedOnly, recent bool) ([]SyncedObjectEntry, error) {
+	return s.listSyncedNotesVersions(ctx, sourceRootID, after, limit, changedOnly, recent, nil)
+}
+
+func (s Store) listSyncedNotesVersions(ctx context.Context, sourceRootID string, after [3]string, limit int, changedOnly, recent bool, versions []string) ([]SyncedObjectEntry, error) {
 	if s.db == nil {
 		return nil, fmt.Errorf("knowledge store is not configured")
 	}
@@ -290,6 +392,23 @@ func (s Store) listSyncedNotesPageFiltered(ctx context.Context, sourceRootID str
 		)`,
 	}
 	args := []any{}
+	currentFilter := ""
+	scopeFilter := ""
+	if versions != nil {
+		args = append(args, versions)
+		// Restrict work before ranking, but still let a newer ineligible source
+		// mask a requested older version of the same scoped path.
+		currentFilter = `WHERE ov.object_version_id=ANY($1::text[]) AND NOT EXISTS (
+		 SELECT 1 FROM objects.object_scope_links newer_link
+		 JOIN files.file_metadata newer_file ON newer_file.object_id=newer_link.object_id
+		 JOIN objects.objects newer_object ON newer_object.object_id=newer_file.object_id
+		 JOIN objects.object_versions newer_version ON newer_version.object_version_id=newer_file.latest_version_id
+		  AND newer_version.object_id=newer_file.object_id
+		 WHERE newer_link.scope_id=osl.scope_id AND newer_link.relevance_status='active'
+		 AND COALESCE(newer_version.source_node_id,newer_file.source_node_id) IS NOT DISTINCT FROM COALESCE(ov.source_node_id,f.source_node_id)
+		 AND COALESCE(newer_version.source_path,newer_file.source_path,newer_object.metadata->>'source_path','')=COALESCE(ov.source_path,f.source_path,o.metadata->>'source_path','')
+		 AND (newer_version.created_at,newer_version.object_version_id)>(ov.created_at,ov.object_version_id))`
+	}
 	if changedOnly {
 		clauses = append(clauses, `NOT EXISTS (
 		 SELECT 1 FROM admitted_synced admitted
@@ -301,8 +420,9 @@ func (s Store) listSyncedNotesPageFiltered(ctx context.Context, sourceRootID str
 	if strings.TrimSpace(sourceRootID) != "" {
 		args = append(args, strings.TrimSpace(sourceRootID))
 		clauses = append(clauses, fmt.Sprintf("nsr.notes_source_root_id = $%d", len(args)))
+		scopeFilter = fmt.Sprintf(" AND nsr.notes_source_root_id=$%d", len(args))
 	}
-	if limit > 0 {
+	if limit > 0 && !recent {
 		n := len(args)
 		args = append(args, after[0], after[1], after[2])
 		clauses = append(clauses, fmt.Sprintf("(nsr.notes_source_root_id, ov.object_version_id, sr.replica_id) > ($%d::text, $%d::text, $%d::text)", n+1, n+2, n+3))
@@ -312,12 +432,16 @@ func (s Store) listSyncedNotesPageFiltered(ctx context.Context, sourceRootID str
 	query := `WITH `
 	if changedOnly {
 		// Read admitted identities once, not every row in a root per replica.
+		// Optional declarations may be absent on roots but JSON null on objects.
 		query += `admitted_synced AS MATERIALIZED (
-		 SELECT notes_source_root_id,
-		 metadata->'synced_object'->>'object_version_id' AS object_version_id,
-		 metadata->'synced_object'->>'replica_id' AS replica_id
+		 SELECT ko.notes_source_root_id,
+		 ko.metadata->'synced_object'->>'object_version_id' AS object_version_id,
+		 ko.metadata->'synced_object'->>'replica_id' AS replica_id
 		 FROM knowledge.knowledge_objects ko
-		 WHERE deleted_at IS NULL AND metadata->'synced_object' IS NOT NULL
+		 JOIN knowledge.notes_source_roots admitted_root USING(notes_source_root_id)
+		 WHERE ko.deleted_at IS NULL AND ko.metadata->'synced_object' IS NOT NULL
+		 AND COALESCE(ko.metadata#>'{source_root,knowledge_source}','null'::jsonb) IS NOT DISTINCT FROM
+		     COALESCE(admitted_root.metadata#>'{registration_metadata,knowledge_source}','null'::jsonb)
 		 AND EXISTS (SELECT 1 FROM knowledge.pipeline_runs pr
 		  WHERE pr.knowledge_object_id=ko.knowledge_object_id
 		  AND pr.source_revision=ko.source_revision AND pr.source_hash=ko.source_hash)
@@ -329,6 +453,7 @@ func (s Store) listSyncedNotesPageFiltered(ctx context.Context, sourceRootID str
 			JOIN scopes.scopes ss ON ` + notesSyncedScopeSQL("nsr", "ss") + `
 			WHERE nsr.status = 'active'
 			AND nsr.root_kind IN ('box_notes','box_topics','box_library','project_notes','project_material')
+			` + scopeFilter + `
 		), current_sources AS MATERIALIZED (
 			SELECT DISTINCT ON (
 				osl.scope_id, COALESCE(ov.source_node_id, f.source_node_id),
@@ -341,6 +466,7 @@ func (s Store) listSyncedNotesPageFiltered(ctx context.Context, sourceRootID str
 			JOIN files.file_metadata f ON f.object_id = o.object_id
 			JOIN objects.object_versions ov ON ov.object_version_id = f.latest_version_id
 			AND ov.object_id = o.object_id
+			` + currentFilter + `
 			ORDER BY osl.scope_id, COALESCE(ov.source_node_id, f.source_node_id),
 			COALESCE(ov.source_path, f.source_path, o.metadata->>'source_path', ''),
 			ov.created_at DESC, ov.object_version_id DESC
@@ -393,7 +519,11 @@ func (s Store) listSyncedNotesPageFiltered(ctx context.Context, sourceRootID str
 		  ON b.blob_id = ov.blob_id
 		WHERE ` + strings.Join(clauses, " AND ")
 	if limit > 0 {
-		query += " ORDER BY nsr.notes_source_root_id, ov.object_version_id, sr.replica_id"
+		if recent {
+			query += " ORDER BY ov.created_at DESC, ov.object_version_id DESC, nsr.notes_source_root_id, sr.replica_id"
+		} else {
+			query += " ORDER BY nsr.notes_source_root_id, ov.object_version_id, sr.replica_id"
+		}
 		args = append(args, limit)
 		query += fmt.Sprintf(" LIMIT $%d::integer", len(args))
 	} else {

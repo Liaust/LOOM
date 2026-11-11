@@ -352,16 +352,8 @@ func ProjectCandidateRegistrationReceipt(receipt CandidateRegistrationBatchRecei
 }
 
 func (api *FoundationAPI) RegisterCandidates(ctx context.Context, replayKey string, request CandidateRegistrationRequest) (CandidateRegistrationBatchReceipt, error) {
-	batch := CandidateRegistrationBatch{ReplayKey: strings.TrimSpace(replayKey), Candidates: request.Candidates}
-	for index := range batch.Candidates {
-		if batch.Candidates[index].SchemaVersion == "" {
-			batch.Candidates[index].SchemaVersion = SchemaVersion
-		}
-		if strings.TrimSpace(batch.Candidates[index].Visibility) == "" {
-			batch.Candidates[index].Visibility = "private"
-		}
-	}
-	if _, _, _, _, err := validateRegistrationBatch(batch); err != nil {
+	batch := foundationRegistrationBatch(replayKey, request)
+	if err := ValidateCandidateRegistrationRequest(replayKey, request); err != nil {
 		return CandidateRegistrationBatchReceipt{}, &FoundationValidationError{Err: err}
 	}
 	receipt, err := api.service.RegisterCandidateBatch(ctx, batch)
@@ -401,6 +393,39 @@ func (api *FoundationAPI) ApplyManualOperations(ctx context.Context, request Man
 		return ManualOperationBatchReceipt{}, err
 	}
 	return ManualOperationBatchReceipt{}, &FoundationConflictError{Err: err}
+}
+
+// ValidateCandidateRegistrationRequest shares the backend's pre-delivery checks;
+// it does not resolve sources or change producer evidence.
+func ValidateCandidateRegistrationRequest(replayKey string, request CandidateRegistrationRequest) error {
+	if len(strings.TrimSpace(replayKey)) > 256 {
+		return errors.New("registration idempotency key exceeds 256 bytes")
+	}
+	_, _, _, _, err := validateRegistrationBatch(foundationRegistrationBatch(replayKey, request))
+	return err
+}
+
+func ValidateManualOperationsRequest(request ManualOperationsRequest) error {
+	operations, err := decodeLifecycleOperations(request.Operations)
+	if err != nil {
+		return err
+	}
+	_, _, err = prepareOperationBatch(ManualOperationBatch{Scope: request.Scope, Producer: request.Producer,
+		ProcessingRunID: request.ProcessingRunID, PackID: request.PackID, Operations: operations})
+	return err
+}
+
+func foundationRegistrationBatch(replayKey string, request CandidateRegistrationRequest) CandidateRegistrationBatch {
+	batch := CandidateRegistrationBatch{ReplayKey: strings.TrimSpace(replayKey), Candidates: append([]CandidateRegistration(nil), request.Candidates...)}
+	for index := range batch.Candidates {
+		if batch.Candidates[index].SchemaVersion == "" {
+			batch.Candidates[index].SchemaVersion = SchemaVersion
+		}
+		if strings.TrimSpace(batch.Candidates[index].Visibility) == "" {
+			batch.Candidates[index].Visibility = "private"
+		}
+	}
+	return batch
 }
 
 func ValidateFoundationPageRequest(request PageRequest) error {

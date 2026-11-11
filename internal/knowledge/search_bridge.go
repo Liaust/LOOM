@@ -11,6 +11,8 @@ import (
 	"time"
 	"unicode"
 
+	"loom.local/loom/internal/boxregistry"
+
 	"loom.local/loom/internal/ids"
 	"loom.local/loom/internal/projects"
 	lexical "loom.local/loom/internal/search"
@@ -26,6 +28,9 @@ const (
 )
 
 type NotesSearchInput struct {
+	boxSelection           *boxregistry.ResolvedSelection
+	fileView               bool
+	discoveryLimit         int
 	RequireCurrent         bool                  `json:"require_current,omitempty"`
 	SourceLifecycle        SourceLifecycleFilter `json:"source_lifecycle,omitempty"`
 	queryEmbedding         *notesQueryEmbedding
@@ -34,9 +39,15 @@ type NotesSearchInput struct {
 	semanticBatch          map[notesLexicalVariant][]NotesSearchResult
 	visibleObjectIDsJSON   string
 	indexed                *notesIndexedSearch
+	indexedAdmission       *notesIndexedAdmission
 	indexedBudget          int
 	indexedExactScope      *bool
+	preparedQuery          string
+	nativeTerms            []notesQueryTerm
+	nativeFiltered         bool
+	indexedUnfiltered      map[notesLexicalVariant]bool
 	candidateObjectIDsJSON string
+	indexedNoCustody       bool
 	SourceCategory         string   `json:"source_category,omitempty"`
 	Query                  string   `json:"query"`
 	Mode                   string   `json:"mode,omitempty"`
@@ -56,6 +67,7 @@ type NotesSearchInput struct {
 }
 
 type NotesSearchResultSet struct {
+	Coverage                          *NotesSearchCoverage        `json:"coverage,omitempty"`
 	CandidateRetrievalTruncated       bool                        `json:"candidate_retrieval_truncated,omitempty"`
 	RefreshingMatchesOmitted          int                         `json:"refreshing_matches_omitted"`
 	RefreshingMatchesOmittedTruncated bool                        `json:"refreshing_matches_omitted_truncated"`
@@ -72,49 +84,82 @@ type NotesSearchResultSet struct {
 	Results                           []NotesSearchResult         `json:"results"`
 }
 
+// These are observations of returned hits, never inferred corpus totals. Files
+// preserved outside enrollment and bodies/vectors absent from a bounded query
+// cannot be counted by a search result page.
+type NotesSearchCoverage struct {
+	Scope                   string `json:"scope"`
+	CountsScope             string `json:"counts_scope"`
+	CorpusCountsKnown       bool   `json:"corpus_counts_known"`
+	BodyResults             int    `json:"body_results"`
+	ReferenceOnlyResults    int    `json:"reference_only_results"`
+	CompatibleVectorMatches int    `json:"compatible_vector_matches"`
+}
+
+func notesSearchReturnedCoverage(results []NotesSearchResult) *NotesSearchCoverage {
+	coverage := &NotesSearchCoverage{Scope: "enrolled_readable_sources", CountsScope: "returned_results"}
+	for _, result := range results {
+		if result.SourceKind == KnowledgeMetadataSearchSourceKind || result.MetadataOnly || result.TextSource == TextSourceMetadataText {
+			coverage.ReferenceOnlyResults++
+		} else {
+			coverage.BodyResults++
+		}
+		if result.SemanticRank > 0 {
+			coverage.CompatibleVectorMatches++
+		}
+	}
+	return coverage
+}
+
 type NotesSearchResult struct {
-	Freshness NotesSearchFreshness `json:"freshness"`
+	filePath    string
+	FileID      string               `json:"file_id,omitempty"`
+	ProjectName string               `json:"project_name,omitempty"`
+	Freshness   NotesSearchFreshness `json:"freshness"`
 	SourceContext
 	NotesCustodyContext
-	PassageFollowup          *NotesPassageInput  `json:"passage_followup,omitempty"`
-	SearchDocumentID         string              `json:"search_document_id"`
-	SourceKind               string              `json:"source_kind,omitempty"`
-	KnowledgeObjectID        string              `json:"knowledge_object_id"`
-	KnowledgeObjectVersionID string              `json:"knowledge_object_version_id,omitempty"`
-	KnowledgeChunkID         string              `json:"knowledge_chunk_id"`
-	NotesSourceRootID        string              `json:"notes_source_root_id"`
-	RootKind                 string              `json:"root_kind"`
-	SourceNodeKey            string              `json:"source_node_key,omitempty"`
-	ProjectID                string              `json:"project_id,omitempty"`
-	RelativePath             string              `json:"relative_path"`
-	SourcePath               string              `json:"source_path,omitempty"`
-	Title                    string              `json:"title,omitempty"`
-	FileClass                string              `json:"file_class"`
-	TextSource               string              `json:"text_source,omitempty"`
-	ExtractionStatus         string              `json:"extraction_status,omitempty"`
-	MetadataOnly             bool                `json:"metadata_only,omitempty"`
-	ChunkIndex               int                 `json:"chunk_index"`
-	StructuralPath           string              `json:"structural_path,omitempty"`
-	Snippet                  string              `json:"snippet,omitempty"`
-	RankScore                float64             `json:"rank_score"`
-	BM25Score                float64             `json:"bm25_score,omitempty"`
-	FTSScore                 float64             `json:"fts_score,omitempty"`
-	BoostScore               float64             `json:"boost_score,omitempty"`
-	LexicalRank              int                 `json:"lexical_rank,omitempty"`
-	SemanticRank             int                 `json:"semantic_rank,omitempty"`
-	SemanticDistance         float64             `json:"semantic_distance,omitempty"`
-	SemanticScore            float64             `json:"semantic_score,omitempty"`
-	FinalScore               float64             `json:"final_score,omitempty"`
-	MatchReasons             []string            `json:"match_reasons,omitempty"`
-	SourceCreatedAt          *time.Time          `json:"source_created_at,omitempty"`
-	SourceModifiedAt         *time.Time          `json:"source_modified_at,omitempty"`
-	RecencyAt                time.Time           `json:"recency_at"`
-	RecencyBasis             string              `json:"recency_basis"`
-	RecencyScore             float64             `json:"recency_score"`
-	RecencyRank              int                 `json:"recency_rank"`
-	ObservedAt               time.Time           `json:"observed_at"`
-	IndexedAt                time.Time           `json:"indexed_at"`
-	Citation                 NotesSearchCitation `json:"citation"`
+	PassageFollowup          *NotesPassageInput `json:"passage_followup,omitempty"`
+	SearchDocumentID         string             `json:"search_document_id"`
+	SourceKind               string             `json:"source_kind,omitempty"`
+	KnowledgeObjectID        string             `json:"knowledge_object_id"`
+	KnowledgeObjectVersionID string             `json:"knowledge_object_version_id,omitempty"`
+	KnowledgeChunkID         string             `json:"knowledge_chunk_id"`
+	NotesSourceRootID        string             `json:"notes_source_root_id"`
+	RootKind                 string             `json:"root_kind"`
+	SourceNodeKey            string             `json:"source_node_key,omitempty"`
+	ProjectID                string             `json:"project_id,omitempty"`
+	RelativePath             string             `json:"relative_path"`
+	SourcePath               string             `json:"source_path,omitempty"`
+	Title                    string             `json:"title,omitempty"`
+	FileClass                string             `json:"file_class"`
+	TextSource               string             `json:"text_source,omitempty"`
+	ExtractionStatus         string             `json:"extraction_status,omitempty"`
+	MetadataOnly             bool               `json:"metadata_only,omitempty"`
+	ChunkIndex               int                `json:"chunk_index"`
+	StructuralPath           string             `json:"structural_path,omitempty"`
+	Snippet                  string             `json:"snippet,omitempty"`
+	RankScore                float64            `json:"rank_score"`
+	BM25Score                float64            `json:"bm25_score,omitempty"`
+	FTSScore                 float64            `json:"fts_score,omitempty"`
+	LexicalMethod            string             `json:"lexical_method,omitempty"`
+	lexicalFallback          bool
+	BoostScore               float64               `json:"boost_score,omitempty"`
+	LexicalRank              int                   `json:"lexical_rank,omitempty"`
+	SemanticRank             int                   `json:"semantic_rank,omitempty"`
+	SemanticDistance         float64               `json:"semantic_distance,omitempty"`
+	SemanticScore            float64               `json:"semantic_score,omitempty"`
+	SemanticCoverage         notesSemanticCoverage `json:"semantic_coverage,omitempty"`
+	FinalScore               float64               `json:"final_score,omitempty"`
+	MatchReasons             []string              `json:"match_reasons,omitempty"`
+	SourceCreatedAt          *time.Time            `json:"source_created_at,omitempty"`
+	SourceModifiedAt         *time.Time            `json:"source_modified_at,omitempty"`
+	RecencyAt                time.Time             `json:"recency_at"`
+	RecencyBasis             string                `json:"recency_basis"`
+	RecencyScore             float64               `json:"recency_score"`
+	RecencyRank              int                   `json:"recency_rank"`
+	ObservedAt               time.Time             `json:"observed_at"`
+	IndexedAt                time.Time             `json:"indexed_at"`
+	Citation                 NotesSearchCitation   `json:"citation"`
 }
 
 type NotesSearchCitation struct {
@@ -315,7 +360,7 @@ func notesSearchDisplayQuery(input NotesSearchInput) string {
 			parts = append(parts, `"`+phrase+`"`)
 		}
 	}
-	return strings.TrimSpace(strings.Join(parts, " "))
+	return strings.Join(parts, " ")
 }
 
 func (s *Service) SearchNotes(ctx context.Context, input NotesSearchInput) (NotesSearchResultSet, error) {
@@ -384,6 +429,7 @@ func (s *Service) searchLexicalNotes(ctx context.Context, input NotesSearchInput
 		}
 		rank++
 		result.LexicalRank = rank
+		annotateIndexedNotesLexicalResult(input, &result)
 		result.Citation = notesSearchCitation(result)
 		results = append(results, result)
 	}
@@ -394,13 +440,13 @@ func (s *Service) searchLexicalNotes(ctx context.Context, input NotesSearchInput
 }
 
 func (s *Service) resolveNotesSearchInput(ctx context.Context, input NotesSearchInput) (NotesSearchInput, error) {
+	input.boxSelection = notesBoxSelection(ctx)
 	var lifecycleErr error
 	input.SourceLifecycle, lifecycleErr = NormalizeSourceLifecycleFilter(input.SourceLifecycle)
 	if lifecycleErr != nil {
 		return NotesSearchInput{}, lifecycleErr
 	}
-	input.Query = strings.TrimSpace(input.Query)
-	if input.Query == "" {
+	if strings.TrimSpace(input.Query) == "" {
 		return NotesSearchInput{}, fmt.Errorf("%w: notes search query is required", ErrInvalid)
 	}
 	input.Mode = normalizeNotesSearchMode(input.Mode)
@@ -797,11 +843,36 @@ func buildNotesSearchVariantsQuery(input NotesSearchInput, variants []notesLexic
 // This is a statement-local result, never a cached permission or freshness grant.
 func notesSearchObjectsSQL(input NotesSearchInput, args *[]any) string {
 	visibility := visibleNotesCustodyObjectSQL("ko", true)
+	prefix, objects := "", "knowledge.knowledge_objects"
+	if input.candidateObjectIDsJSON != "" && input.visibleObjectIDsJSON == "" {
+		*args = append(*args, input.candidateObjectIDsJSON)
+		prefix = fmt.Sprintf(`WITH requested_objects AS MATERIALIZED (
+ SELECT ko.* FROM (SELECT DISTINCT jsonb_array_elements_text($%d::jsonb) AS id) requested
+ JOIN knowledge.knowledge_objects ko ON ko.knowledge_object_id=requested.id),
+ selected_roots AS MATERIALIZED (
+ SELECT r.* FROM knowledge.notes_source_roots r
+ WHERE r.notes_source_root_id IN (SELECT notes_source_root_id FROM requested_objects)),
+ authorized_roots AS MATERIALIZED (
+ SELECT r.*,`, len(*args)) + notesStatementRootAuthoritySQL("r") + ` AS statement_authority,
+ projects.declaration_watch_read_sources(r.project_id,r.node_id,r.backend_root_key) AS statement_read_sources,
+ (SELECT jsonb_build_object('schema_version',accepted.contract_schema_version,'source',expected.value#>'{metadata,knowledge_source}')
+ FROM projects.project_watched_root_registrations writer
+ JOIN projects.project_contract_registrations accepted USING(project_contract_registration_id)
+ LEFT JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(accepted.registration_plan_json->'watched_roots')='array'
+ THEN accepted.registration_plan_json->'watched_roots' ELSE '[]'::jsonb END) expected
+ ON expected.value->>'backend_root_key'=r.backend_root_key
+ WHERE writer.project_watched_root_registration_id=r.project_watched_root_registration_id LIMIT 1) AS statement_declaration
+ FROM selected_roots r) `
+		objects, visibility = "requested_objects", notesStatementVisibleObjectSQL("ko")
+		if input.indexedNoCustody {
+			visibility = notesStatementUnmovedObjectSQL("ko")
+		}
+	}
 	if input.visibleObjectIDsJSON != "" {
 		*args = append(*args, input.visibleObjectIDsJSON)
 		visibility = fmt.Sprintf("ko.knowledge_object_id IN (SELECT jsonb_array_elements_text($%d::jsonb))", len(*args))
 	}
-	query := `SELECT ko.knowledge_object_id, ko.notes_source_root_id, ko.source_node_key,
+	query := prefix + `SELECT ko.knowledge_object_id, ko.notes_source_root_id, ko.source_node_key,
 	 ko.project_id, ko.relative_path, ko.source_path, ko.title, ko.file_class,
 	 ko.recency_at, ko.recency_basis, ko.last_seen_at, ko.lexical_version_id,
 	 ko.semantic_version_id, ko.semantic_runtime_key, ko.semantic_model_key, ko.semantic_dimensions,
@@ -810,11 +881,13 @@ func notesSearchObjectsSQL(input NotesSearchInput, args *[]any) string {
 	  WHERE custody.knowledge_object_id=ko.knowledge_object_id) AS search_lifecycle,
 	 ` + notesLatestSourceSQL("ko", "source_revision") + ` AS latest_source_revision,
 	 ` + notesLatestSourceSQL("ko", "source_hash") + ` AS latest_source_hash
-	 FROM knowledge.knowledge_objects ko
+	 FROM ` + objects + ` ko
 	 JOIN knowledge.notes_source_roots root ON root.notes_source_root_id=ko.notes_source_root_id
 	 WHERE ` + visibility + `
+	 AND ` + notesObservedSourcePresentSQL("ko") + `
 	 AND ` + notesLifecycleSelectionSQL("ko", input.SourceLifecycle) + `
 	 AND ` + visibleNotesKnowledgeRelativePathSQL("ko.relative_path")
+	query += " AND " + notesSelectedRootSQL(input.boxSelection, "root", args)
 	add := func(condition, value string) {
 		if value != "" {
 			*args = append(*args, value)
@@ -826,7 +899,7 @@ func notesSearchObjectsSQL(input NotesSearchInput, args *[]any) string {
 	add("ko.source_node_key =", strings.TrimSpace(input.SourceNodeKey))
 	add("ko.notes_source_root_id =", strings.TrimSpace(input.NotesSourceRootID))
 	add("ko.file_class =", strings.TrimSpace(input.FileClass))
-	if input.candidateObjectIDsJSON != "" {
+	if input.candidateObjectIDsJSON != "" && input.visibleObjectIDsJSON != "" {
 		*args = append(*args, input.candidateObjectIDsJSON)
 		query += fmt.Sprintf(" AND ko.knowledge_object_id IN (SELECT jsonb_array_elements_text($%d::jsonb))", len(*args))
 	}
@@ -837,7 +910,7 @@ func notesSearchObjectsSQL(input NotesSearchInput, args *[]any) string {
 }
 
 func notesSearchTerms(input NotesSearchInput) []string {
-	text := strings.Join(append([]string{input.Query, strings.Join(input.Phrases, " "), strings.Join(input.Tags, " ")}, input.Path), " ")
+	text := strings.Join([]string{input.Query, strings.Join(input.Phrases, " "), strings.Join(input.Tags, " ")}, " ")
 	// Identifier components must not become unrelated words such as the A in NOT_A_SECRET.
 	terms := strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_'
@@ -993,6 +1066,10 @@ func notesSearchMatchReasons(flags notesSearchMatchFlags) []string {
 }
 
 func groupNotesSearchResults(results []NotesSearchResult, limit int) []NotesSearchResult {
+	return groupNotesSearchResultsByFile(results, limit, false)
+}
+
+func groupNotesSearchResultsByFile(results []NotesSearchResult, limit int, fileView bool) []NotesSearchResult {
 	if limit <= 0 || limit > 50 {
 		limit = 10
 	}
@@ -1000,6 +1077,9 @@ func groupNotesSearchResults(results []NotesSearchResult, limit int) []NotesSear
 	seen := map[string]bool{}
 	for _, result := range results {
 		key := result.KnowledgeObjectID
+		if fileView && result.FileID != "" {
+			key = result.FileID
+		}
 		if key == "" {
 			key = result.SearchDocumentID
 		}
@@ -1030,11 +1110,13 @@ func (s Store) ResolveSourceRootRef(ctx context.Context, ref string) (SourceRoot
 	if ref == "" {
 		return SourceRoot{}, fmt.Errorf("%w: source root ref is required", ErrInvalid)
 	}
-	row := s.db.QueryRowContext(ctx, `SELECT `+sourceRootColumns()+`
+	args := []any{ref}
+	selection := notesSelectedRootSQL(notesBoxSelection(ctx), "notes_source_roots", &args)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+sourceRootColumns()+`
 		FROM knowledge.notes_source_roots
-		WHERE notes_source_root_id = $1
+		WHERE (notes_source_root_id = $1
 		   OR backend_root_key = $1
-		   OR source_path = $1
+		   OR source_path = $1) AND `+selection+`
 		ORDER BY
 			CASE
 				WHEN notes_source_root_id = $1 THEN 0
@@ -1042,8 +1124,28 @@ func (s Store) ResolveSourceRootRef(ctx context.Context, ref string) (SourceRoot
 				ELSE 2
 			END,
 			updated_at DESC
-		LIMIT 1`, ref)
-	return scanSourceRoot(row)
+		LIMIT 2`, args...)
+	if err != nil {
+		return SourceRoot{}, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return SourceRoot{}, err
+		}
+		return SourceRoot{}, sql.ErrNoRows
+	}
+	root, err := scanSourceRoot(rows)
+	if err != nil {
+		return SourceRoot{}, err
+	}
+	if notesBoxSelection(ctx) != nil && root.NotesSourceRootID != ref && rows.Next() {
+		return SourceRoot{}, fmt.Errorf("%w: source root alias is ambiguous in selected Boxes; use its exact ID", ErrInvalid)
+	}
+	if err := rows.Err(); err != nil {
+		return SourceRoot{}, err
+	}
+	return root, nil
 }
 
 func (s *Service) replaceKnowledgeSearchDocumentsTx(ctx context.Context, tx *sql.Tx, object KnowledgeObject, version KnowledgeObjectVersion, chunks []KnowledgeChunk) ([]KnowledgeChunk, int, error) {
@@ -1089,7 +1191,8 @@ func insertKnowledgeSearchDocumentTx(ctx context.Context, tx *sql.Tx, object Kno
 			source_updated_at, source_created_at, source_modified_at, recency_at,
 			recency_basis, indexed_at, index_version, metadata
 		)
-		VALUES ($1,$2,$3,$4,null,null,null,$5,null,
+		VALUES ($1,$2,$3,$4,(SELECT canonical_file_id FROM knowledge.knowledge_objects WHERE knowledge_object_id=$17),null,null,$5,
+	        (SELECT home_scope_id FROM objects.objects WHERE object_id=(SELECT canonical_file_id FROM knowledge.knowledge_objects WHERE knowledge_object_id=$17)),
 		        nullif($6::text, ''), nullif($7::text, ''), $8::text, $9::text,
 		        setweight(to_tsvector('simple', COALESCE($6::text, '')), 'A') ||
 		        setweight(to_tsvector('simple', COALESCE($7::text, '')), 'B') ||
@@ -1098,6 +1201,8 @@ func insertKnowledgeSearchDocumentTx(ctx context.Context, tx *sql.Tx, object Kno
 		        $13, $14, now(), $15, $16)
 		ON CONFLICT (source_kind, source_id, index_version)
 		DO UPDATE SET
+			object_id = EXCLUDED.object_id,
+			scope_id = EXCLUDED.scope_id,
 			source_version_id = EXCLUDED.source_version_id,
 			source_node_id = EXCLUDED.source_node_id,
 			title = EXCLUDED.title,
@@ -1133,6 +1238,7 @@ func insertKnowledgeSearchDocumentTx(ctx context.Context, tx *sql.Tx, object Kno
 		version.RecencyBasis,
 		KnowledgeSearchIndexKey,
 		metadata,
+		object.KnowledgeObjectID,
 	).Scan(&searchDocumentID)
 	if err != nil {
 		return "", err
@@ -1169,7 +1275,7 @@ func upsertKnowledgeMetadataSearchDocumentTx(ctx context.Context, tx *sql.Tx, ob
 	bodyHash := textHashURI(body)
 	metadata := knowledgeMetadataSearchDocumentMetadata(object)
 	err := tx.QueryRowContext(ctx, `
-		INSERT INTO search.search_documents (
+		INSERT INTO search.search_documents AS stored (
 			search_document_id, source_kind, source_id, source_version_id,
 			object_id, object_version_id, document_chunk_id, source_node_id,
 			scope_id, title, summary, body, body_hash, tsv,
@@ -1177,7 +1283,8 @@ func upsertKnowledgeMetadataSearchDocumentTx(ctx context.Context, tx *sql.Tx, ob
 			source_updated_at, source_created_at, source_modified_at, recency_at,
 			recency_basis, indexed_at, index_version, metadata
 		)
-		VALUES ($1,$2,$3,nullif($4::text, ''),null,null,null,$5,null,
+		VALUES ($1,$2,$3,nullif($4::text, ''),(SELECT canonical_file_id FROM knowledge.knowledge_objects WHERE knowledge_object_id=$3),null,null,$5,
+	        (SELECT home_scope_id FROM objects.objects WHERE object_id=(SELECT canonical_file_id FROM knowledge.knowledge_objects WHERE knowledge_object_id=$3)),
 		        nullif($6::text, ''), nullif($7::text, ''), $8::text, $9::text,
 		        setweight(to_tsvector('simple', COALESCE($6::text, '')), 'A') ||
 		        setweight(to_tsvector('simple', COALESCE($7::text, '')), 'B') ||
@@ -1186,6 +1293,10 @@ func upsertKnowledgeMetadataSearchDocumentTx(ctx context.Context, tx *sql.Tx, ob
 		        $13, $14, now(), $15, $16)
 		ON CONFLICT (source_kind, source_id, index_version)
 		DO UPDATE SET
+			object_id = EXCLUDED.object_id,
+			object_version_id = EXCLUDED.object_version_id,
+			document_chunk_id = EXCLUDED.document_chunk_id,
+			scope_id = EXCLUDED.scope_id,
 			source_version_id = EXCLUDED.source_version_id,
 			source_node_id = EXCLUDED.source_node_id,
 			title = EXCLUDED.title,
@@ -1204,6 +1315,19 @@ func upsertKnowledgeMetadataSearchDocumentTx(ctx context.Context, tx *sql.Tx, ob
 			recency_basis = EXCLUDED.recency_basis,
 			indexed_at = now(),
 			metadata = EXCLUDED.metadata
+		WHERE (stored.object_id, stored.object_version_id, stored.document_chunk_id,
+			stored.scope_id, stored.source_version_id, stored.source_node_id,
+			stored.title, stored.summary, stored.body, stored.body_hash, stored.tsv,
+			stored.language_config, stored.data_classification, stored.trust_level,
+			stored.freshness_state, stored.source_updated_at, stored.source_created_at,
+			stored.source_modified_at, stored.recency_at, stored.recency_basis, stored.metadata)
+		IS DISTINCT FROM
+			(EXCLUDED.object_id, EXCLUDED.object_version_id, EXCLUDED.document_chunk_id,
+			EXCLUDED.scope_id, EXCLUDED.source_version_id, EXCLUDED.source_node_id,
+			EXCLUDED.title, EXCLUDED.summary, EXCLUDED.body, EXCLUDED.body_hash, EXCLUDED.tsv,
+			EXCLUDED.language_config, EXCLUDED.data_classification, EXCLUDED.trust_level,
+			EXCLUDED.freshness_state, EXCLUDED.source_updated_at, EXCLUDED.source_created_at,
+			EXCLUDED.source_modified_at, EXCLUDED.recency_at, EXCLUDED.recency_basis, EXCLUDED.metadata)
 		RETURNING search_document_id
 	`, searchDocumentID,
 		KnowledgeMetadataSearchSourceKind,
@@ -1222,10 +1346,17 @@ func upsertKnowledgeMetadataSearchDocumentTx(ctx context.Context, tx *sql.Tx, ob
 		KnowledgeSearchIndexKey,
 		metadata,
 	).Scan(&searchDocumentID)
+	if err == sql.ErrNoRows {
+		// A no-op conflict retains its row lock until commit but returns no row.
+		// Resolve that existing identity before checking derived materialization.
+		err = tx.QueryRowContext(ctx, `SELECT search_document_id FROM search.search_documents
+			WHERE source_kind=$1 AND source_id=$2 AND index_version=$3`,
+			KnowledgeMetadataSearchSourceKind, object.KnowledgeObjectID, KnowledgeSearchIndexKey).Scan(&searchDocumentID)
+	}
 	if err != nil {
 		return "", err
 	}
-	_, err = lexical.UpsertLexicalDocumentTx(ctx, tx, knowledgeMetadataLexicalDocumentInput(searchDocumentID, object))
+	_, _, err = lexical.EnsureLexicalDocumentTx(ctx, tx, knowledgeMetadataLexicalDocumentInput(searchDocumentID, object))
 	if err != nil {
 		return "", err
 	}
@@ -1437,6 +1568,13 @@ func appendSearchableMetadataText(prefix string, value any, lines *[]string, dep
 func shouldIndexKnowledgeObjectMetadata(object KnowledgeObject) bool {
 	if object.DeletedAt != nil || object.ProcessingState == ProcessingStateDeleted {
 		return false
+	}
+	_, search, err := knowledgeSourcePolicyAndSearch(object)
+	if err != nil || search == "none" {
+		return false
+	}
+	if search == "metadata" {
+		return true
 	}
 	if object.ProcessingState == ProcessingStateMetadataOnly && extractionStatusIndexesMetadataOnly(objectExtractionStatus(object.Metadata)) {
 		return true

@@ -129,6 +129,7 @@ type projectRepositorySurfacePage struct {
 }
 
 type projectRepositorySurfaceListItem struct {
+	Archive                  *projectstate.ArchivedSourceContext      `json:"archive,omitempty"`
 	RepositoryID             string                                   `json:"repository_id"`
 	RepositoryOwnerProjectID string                                   `json:"repository_owner_project_id"`
 	Key                      string                                   `json:"key"`
@@ -441,6 +442,7 @@ func projectRepositorySurfaceItem(member projectstate.RepositoryProjection) proj
 		}
 	}
 	return projectRepositorySurfaceListItem{
+		Archive:                  member.Archive,
 		RepositoryID:             member.RepositoryID,
 		RepositoryOwnerProjectID: member.RepositoryOwnerProjectID,
 		Key:                      member.Key,

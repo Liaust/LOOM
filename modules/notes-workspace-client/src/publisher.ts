@@ -63,6 +63,8 @@ export class Publisher {
     }
     private runnable(op: Operation | undefined) {
         if (!op || !unfinished(op) || ["held", "conflict", "uploaded"].includes(op.state)) return false;
+        const scope = this.client.journal.state.scopes?.[op.intent.workspace + "/" + op.intent.collection];
+        if (scope && (!scope.writable || scope.generation !== op.intent.generation)) return false;
         const pred = op.intent.predecessor ? this.get(op.intent.predecessor) : undefined;
         if (op.intent.predecessor && (!pred?.publication || ["held", "conflict"].includes(pred.state))) return false;
         const seen = new Set<string>();
@@ -485,6 +487,7 @@ export class Publisher {
             for (const o of s.operations)
                 if (o.state === "applied" && !needed.has(o.intent.id)) o.payload = "";
         }, s => !s.operations.some(o => o.state === "applied" && o.payload !== ""));
+        await this.client.resumeTransfers();
         this.client.io.changed();
     }
 }

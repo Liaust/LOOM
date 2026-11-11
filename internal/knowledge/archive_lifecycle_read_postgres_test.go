@@ -1,7 +1,9 @@
 package knowledge
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -66,8 +68,16 @@ func TestNotesArchiveReadCurrentEvidencePostgres(t *testing.T) {
 	}
 	assertNotesCustodyReadable(t, f.s, object.KnowledgeObjectID, true)
 	f.archive(t)
+	_, pending := f.s.resolveFileReadTarget(t.Context(), object.KnowledgeObjectID)
+	var admission *FileAdmissionError
+	if !errors.As(pending, &admission) || admission.Reason != "custody_projection_pending" {
+		t.Fatalf("fresh completed lifecycle was reported absent: %v", pending)
+	}
 	if _, err := f.p.ProjectOperation(t.Context(), f.plan.OperationID); err != nil {
 		t.Fatal(err)
+	}
+	if err := f.s.classifyPendingFileCustody(t.Context(), object.KnowledgeObjectID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("receipted lifecycle retained pending status: %v", err)
 	}
 	assertNotesCustodyReadable(t, f.s, object.KnowledgeObjectID, true)
 	var raw []byte
@@ -100,4 +110,24 @@ func TestNotesArchiveReadCurrentEvidencePostgres(t *testing.T) {
 		"old_pointer": `UPDATE knowledge.notes_current_custody c SET workspace_lifecycle_event_id=t.workspace_lifecycle_event_id FROM knowledge.notes_custody_transitions t WHERE c.knowledge_object_id=$1 AND t.knowledge_object_id=c.knowledge_object_id AND t.previous_event_id IS NULL`,
 	})
 	f.assertCustody(t, "active", 4)
+}
+
+func TestNotesPendingCustodyPrivateRefusalPostgres(t *testing.T) {
+	f := notesArchiveTestFixture(t)
+	f.archive(t)
+	var object KnowledgeObject
+	for _, item := range f.objects {
+		if item.RelativePath == "topic-one/source.md" {
+			object = item
+		}
+	}
+	if _, err := f.s.store.db.Exec(`UPDATE knowledge.knowledge_objects SET metadata=jsonb_set(metadata,'{private_no_index}','true') WHERE knowledge_object_id=$1`, object.KnowledgeObjectID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.s.classifyPendingFileCustody(t.Context(), object.KnowledgeObjectID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("private reference disclosed lifecycle status: %v", err)
+	}
+	if err := f.s.classifyPendingFileCustody(t.Context(), "unknown-managed-id"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("unknown reference got a lifecycle diagnostic: %v", err)
+	}
 }

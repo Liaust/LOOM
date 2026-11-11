@@ -183,3 +183,24 @@ func (r fakeCommandRunner) called(key string) bool {
 	}
 	return false
 }
+
+func TestPDFNativeExtractionSkipsImageInventoryAndPreservesText(t *testing.T) {
+	object := testKnowledgeObjectForExtraction(storagecatalog.FileClassPDF, "native.pdf")
+	object.SourcePath = "/tmp/native.pdf"
+	runner := fakeCommandRunner{outputs: map[string][]byte{
+		"pdfinfo -rawdates /tmp/native.pdf":              []byte("Pages: 2\nEncrypted: no\n"),
+		"pdftotext -layout -enc UTF-8 /tmp/native.pdf -": []byte("native text on first page\fsecond page text\f"),
+	}}
+	extractor := newPDFExtractor(&runner)
+	extractor.nativeOnly = true
+	result, err := extractor.Extract(ExtractionInput{Object: object})
+	if err != nil || result.ExtractorVersion != ExtractorVersionPDFNative || len(result.TextSections) != 2 {
+		t.Fatalf("%+v %v", result, err)
+	}
+	if runner.called("pdfimages -list /tmp/native.pdf") {
+		t.Fatal("inventoried images without a consumer")
+	}
+	if result.TextSections[1].Text != "second page text" {
+		t.Fatal("lost native PDF text")
+	}
+}

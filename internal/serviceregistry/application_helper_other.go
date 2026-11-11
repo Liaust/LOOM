@@ -22,6 +22,15 @@ func (ApplicationHelperClient) PlanProvision(context.Context, ApplicationProvisi
 func (ApplicationHelperClient) Provision(context.Context, ApplicationProvisionPlan) (ApplicationProvisionPlan, error) {
 	return ApplicationProvisionPlan{}, applicationError("helper.linux_required")
 }
+func (ApplicationHelperClient) ImportCredential(context.Context, ApplicationCredentialImport) (ApplicationCredentialImportReceipt, error) {
+	return ApplicationCredentialImportReceipt{}, applicationError("helper.linux_required")
+}
+func (ApplicationHelperClient) RunAction(context.Context, ApplicationActionRequest) (ApplicationActionReceipt, error) {
+	return ApplicationActionReceipt{}, applicationError("helper.linux_required")
+}
+func (ApplicationHelperClient) InspectAction(context.Context, ApplicationActionRequest) (ApplicationActionReceipt, error) {
+	return ApplicationActionReceipt{}, applicationError("helper.linux_required")
+}
 func ServeApplicationHelper(string, bool) error { return applicationError("helper.linux_required") }
 
 func (ApplicationHelperClient) Archive(context.Context, ApplicationArchiveControl) (ManagerResult, error) {

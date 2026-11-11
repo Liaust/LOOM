@@ -36,7 +36,7 @@ func defaultTemplateFiles() []templateFile {
 		{Key: "lane_readme", RelPath: DefaultLaneDirName + "/README.md", Mode: defaultFileMode, Render: laneReadme, Required: false, Area: AreaLane},
 		{Key: "launchpad_readme", RelPath: "Launchpad/README.md", Mode: defaultFileMode, Render: launchpadReadme, Required: false, Area: AreaLaunchpad},
 		{Key: "dropzone_readme", RelPath: "Dropzone/README.md", Mode: defaultFileMode, Render: dropzoneReadme, Required: false, Area: AreaDropzone},
-		{Key: "notes_policy", RelPath: ".loom/policies/notes.watch.yaml", Mode: defaultFileMode, Render: notesPolicy, Required: true},
+		{Key: "notes_policy", RelPath: ".loom/policies/notes.watch.yaml", Mode: defaultFileMode, Render: notesPolicy, Required: true, Area: AreaNotes},
 		{Key: "documents_policy", RelPath: ".loom/policies/documents.watch.yaml", Mode: defaultFileMode, Render: documentsPolicy, Required: true, Area: AreaDocuments},
 		{Key: "lane_policy", RelPath: ".loom/policies/lane.transfer.yaml", Mode: defaultFileMode, Render: lanePolicy, Required: true, Area: AreaLane},
 		{Key: "launchpad_policy", RelPath: ".loom/policies/launchpad.watch.yaml", Mode: defaultFileMode, Render: launchpadPolicy, Required: true, Area: AreaLaunchpad},
@@ -66,6 +66,11 @@ func rootReadme(contract Contract) string {
 }
 
 func metadataReadme(contract Contract) string {
+	if contract.SchemaVersion == FolderPolicySchemaVersion {
+		return "# .loom\n\n" +
+			"`box.yaml` owns Box areas and their inline watch settings. Explicit `policies` paths remain supported for existing watch and transfer policies.\n\n" +
+			"Runtime state belongs to the node and lives outside the visible Box. Normal user work belongs in the visible Box folders.\n"
+	}
 	return "# .loom\n\n" +
 		"This hidden folder stores durable LOOM Box contracts and generated policy files. Runtime state belongs to the node and lives outside the visible Box.\n\n" +
 		"- `box.yaml`: machine-readable Box contract.\n" +
@@ -94,8 +99,23 @@ backup and indexing pipelines according to the Box policy. Edit source notes
 here; do not mutate derived metadata, search projections, or generated storage
 views.
 
-Use ` + "`search-loom-docs`" + ` to verify exact commands. Treat bulk or destructive
-changes as sensitive and require explicit user scope.
+Find and read known source with scoped filesystem tools; Notes search is for
+discovery or indexed extraction, not a prerequisite for file access. Use known
+commands and local ` + "`--help`" + `; consult relevant skill/docs detail when needed.
+Treat bulk or destructive changes as sensitive and require explicit user scope.
+
+When creating a durable knowledge note, add a supported primary ` + "`type`" + `, useful
+` + "`subject/`" + ` tags and links to existing relevant people/concepts/sources. Follow
+` + "`Navigation/Organisation.md`" + ` when present; use ` + "`people`" + ` for confirmed profiles
+and ` + "`related`" + ` for other useful relationships. Preserve existing tags/domain
+properties. Project research stays in its project, not copied into this source.
+No compulsory global search, invented links, generated-index rewrite or
+existing-vault tagging sweep on each task. Code/scratch/imported originals are
+not authored knowledge notes; backlog curation is a separate assignment.
+Links/tags do not equal current authority. Prefer owning-project context, note
+role and substantive chronology, not metadata/import mtimes. A later developed
+view can supersede an early exploration only with contextual evidence; preserve
+historical links, original dates and uncertainty without declaring newer facts true.
 `
 }
 
@@ -112,8 +132,11 @@ This directory is canonical broad user storage. Backup, metadata, and indexing
 behavior varies by file type and Box policy. Edit source files here and treat
 generated ` + "`loom-storage`" + ` exports as read-only views.
 
-Use ` + "`search-loom-docs`" + ` to verify exact commands. Preview destructive or bulk
-operations and require explicit user scope before applying them.
+Find and read known source with scoped filesystem tools; Notes search is for
+discovery or indexed extraction, not a prerequisite for file access. Use known
+commands and local ` + "`--help`" + `; consult relevant skill/docs detail when needed.
+Preview destructive or bulk operations and require explicit user scope before
+applying them.
 `
 }
 
@@ -168,51 +191,11 @@ func dropzoneReadme(contract Contract) string {
 }
 
 func notesPolicy(contract Contract) string {
-	return `schema_version: loom.box.watch_policy.v0.6
-area: notes
-path: Notes
-enabled: true
-mode: watched_root
-semantics: knowledge_index
-catalog:
-  enabled: true
-object:
-  enabled: true
-text:
-  enabled: true
-index:
-  enabled: true
-sync:
-  enabled: true
-backup:
-  enabled: true
-delete_semantics: local_source_authoritative
-notes: Markdown/text enters LOOM search/database; attachments are backed up and cataloged without text indexing by default.
-`
+	return renderWatchPolicy(defaultWatchPolicy(AreaNotes))
 }
 
 func documentsPolicy(contract Contract) string {
-	return `schema_version: loom.box.watch_policy.v0.6
-area: documents
-path: Documents
-enabled: true
-mode: watched_root
-semantics: broad_backup
-catalog:
-  enabled: true
-object:
-  enabled: false
-text:
-  enabled: false
-index:
-  enabled: false
-sync:
-  enabled: false
-backup:
-  enabled: true
-delete_semantics: local_source_authoritative
-notes: Documents is broad local storage backed up by main; metadata/catalog visibility is separate from text indexing.
-`
+	return renderWatchPolicy(defaultWatchPolicy(AreaDocuments))
 }
 
 func lanePolicy(contract Contract) string {

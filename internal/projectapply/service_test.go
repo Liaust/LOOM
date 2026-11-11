@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -12,6 +13,137 @@ import (
 	pc "loom.local/loom/internal/projectcontracts"
 	"loom.local/loom/internal/projects"
 )
+
+type currentStatusOwner struct {
+	inertOwner
+	readiness pc.DeclarationReadiness
+	err       error
+	reads     int
+}
+
+func (o *currentStatusOwner) ResourceStatus(context.Context, pc.DeclarationAction, json.RawMessage) (pc.DeclarationReadiness, error) {
+	o.reads++
+	return o.readiness, o.err
+}
+
+func TestDeclarationCurrentResourceStatusWebDAV(t *testing.T) {
+	p := testPrincipal()
+	x := testResolution(p, 1)
+	x.Plan.PlanID = "current-declaration"
+	x.Plan.Basis.Bindings = map[pc.ResourceKey]pc.DeclarationBinding{
+		"source": {Kind: pc.DeclarationRepository, RepositoryID: "repository"},
+		"files":  {Kind: pc.DeclarationKnowledge},
+		"webdav": {Kind: pc.DeclarationApplication},
+	}
+	registration := projects.DeclarationRegistrationPayload{ProjectRoot: x.Plan.Basis.Target.ProjectRoot, Project: projects.ProjectContractProjectInput{ID: x.Plan.Basis.Target.ProjectID}, Repositories: []projects.ProjectRepositoryValidatedMember{{Key: "source", Path: "src"}}}
+	x.Payloads[x.Plan.Basis.Actions[0].ID], _ = json.Marshal(registration)
+	a := pc.DeclarationAction{ID: "apply_application:webdav", Kind: pc.DeclarationApplyApplication, Resource: "webdav", Owner: pc.DeclarationOwnerApplication, InputHash: "desired-application-input"}
+	x.Plan.Basis.Actions = append(x.Plan.Basis.Actions, a)
+	r := readiness(a.InputHash)
+	r.Applied = pc.DeclarationFact{State: pc.DeclarationSatisfied, Revision: "installation-revision", EvidenceRef: "installation"}
+	r.Healthy = pc.DeclarationFact{State: pc.DeclarationSatisfied, Revision: "generation-revision", EvidenceRef: "installation"}
+	r.Protected = pc.DeclarationFact{State: pc.DeclarationSatisfied, Revision: "old-backup-manifest", EvidenceRef: "backup-operation"}
+	r.Endpoint = &pc.ApplicationEndpointStatus{URL: "https://webdav.example.test", DNS: "satisfied", TLS: "satisfied", Routing: "satisfied"}
+	owner := &currentStatusOwner{readiness: r}
+	s := NewService(nil, nil, nil, map[pc.DeclarationOwner]Owner{pc.DeclarationOwnerApplication: owner})
+	status := s.resourceStatus(t.Context(), x)
+	if owner.reads != 1 || !reflect.DeepEqual(status.Resources["webdav"].Readiness, r) {
+		t.Fatalf("owner evidence lost: %+v reads=%d", status, owner.reads)
+	}
+	if status.Resources["source"].Path != x.Plan.Basis.Target.ProjectRoot+"/src" || status.ObservedAt == "" {
+		t.Fatalf("navigation/read time missing: %+v", status)
+	}
+	for _, fact := range []*pc.DeclarationFact{&status.Readiness.Applied, &status.Readiness.Healthy, &status.Readiness.Protected} {
+		if fact.State != pc.DeclarationUnknown {
+			t.Fatalf("invented global guarantee: %+v", status.Readiness)
+		}
+	}
+	owner.err = fail(pc.DeclarationTargetUnavailable, "backup_inspection_unavailable")
+	status = s.resourceStatus(t.Context(), x)
+	if !reflect.DeepEqual(status.Resources["webdav"].Readiness, r) || len(status.Resources["webdav"].Errors) != 1 || status.Resources["webdav"].Errors[0].Resource != "webdav" {
+		t.Fatalf("partial observation discarded: %+v", status.Resources["webdav"])
+	}
+	for _, invalid := range []string{"../outside", "/outside", "src/../other", ""} {
+		registration.Repositories[0].Path = invalid
+		x.Payloads[x.Plan.Basis.Actions[0].ID], _ = json.Marshal(registration)
+		if got := s.resourceStatus(t.Context(), x).Resources["source"].Path; got != "" {
+			t.Fatalf("unsafe navigation %q: %q", invalid, got)
+		}
+	}
+}
+
+func TestDeclarationCurrentStatusWorkState(t *testing.T) {
+	x := testResolution(testPrincipal(), 1)
+	s := NewService(nil, nil, nil, nil)
+	baseline := s.resourceStatus(t.Context(), x)
+	for _, state := range []string{"", "working", "passive", "archived", "passive\ncommand"} {
+		payload := projects.DeclarationRegistrationPayload{ProjectRoot: x.Plan.Basis.Target.ProjectRoot, Project: projects.ProjectContractProjectInput{ID: x.Plan.Basis.Target.ProjectID, Status: "active", WorkState: state}}
+		x.Payloads[x.Plan.Basis.Actions[0].ID], _ = json.Marshal(payload)
+		status := s.resourceStatus(t.Context(), x)
+		want := ""
+		if pc.ValidProjectWorkState(state) {
+			want = state
+		}
+		if status.WorkState != want || status.Readiness != baseline.Readiness || status.Lifecycle != baseline.Lifecycle {
+			t.Fatalf("classification changed readiness/lifecycle: %+v", status)
+		}
+		for _, mismatch := range []string{"identity", "root"} {
+			changed := payload
+			if mismatch == "identity" {
+				changed.Project.ID = ids.NewProjectID()
+			} else {
+				changed.ProjectRoot += "/other"
+			}
+			x.Payloads[x.Plan.Basis.Actions[0].ID], _ = json.Marshal(changed)
+			if got := s.resourceStatus(t.Context(), x).WorkState; got != "" {
+				t.Fatalf("mismatched project classification: %s", got)
+			}
+		}
+	}
+}
+
+func TestDeclarationResourceAggregationRequiresCompleteCompatibleEvidence(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		state     pc.DeclarationFactState
+		revision  string
+		withError bool
+		want      pc.DeclarationFactState
+	}{
+		{"compatible", pc.DeclarationSatisfied, "current", false, pc.DeclarationSatisfied},
+		{"stale", pc.DeclarationSatisfied, "historical", false, pc.DeclarationUnknown},
+		{"unqualified", pc.DeclarationSatisfied, "", false, pc.DeclarationUnknown},
+		{"unknown", pc.DeclarationUnknown, "current", false, pc.DeclarationUnknown},
+		{"pending", pc.DeclarationPending, "current", false, pc.DeclarationPending},
+		{"blocked", pc.DeclarationFailed, "current", false, pc.DeclarationFailed},
+		{"unavailable", pc.DeclarationSatisfied, "current", true, pc.DeclarationUnknown},
+		{"not_applicable", pc.DeclarationNotApplicable, "", false, pc.DeclarationSatisfied},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := pc.DeclarationStatus{Revision: "current", Resources: map[pc.ResourceKey]pc.DeclarationResourceStatus{
+				"first":  {Readiness: pc.DeclarationReadiness{Protected: pc.DeclarationFact{State: pc.DeclarationSatisfied, Revision: "current"}}},
+				"second": {Readiness: pc.DeclarationReadiness{Protected: pc.DeclarationFact{State: tt.state, Revision: tt.revision}}},
+			}}
+			if tt.withError {
+				r := s.Resources["second"]
+				r.Errors = []pc.DeclarationError{{Code: pc.DeclarationTargetUnavailable}}
+				s.Resources["second"] = r
+			}
+			if got := aggregateResourceFact(s, 5); got.State != tt.want || got.Revision != "current" || got.EvidenceRef != "" {
+				t.Fatalf("aggregate: %+v want %s", got, tt.want)
+			}
+		})
+	}
+	for _, resources := range []map[pc.ResourceKey]pc.DeclarationResourceStatus{nil, {"only": {Readiness: pc.DeclarationReadiness{Protected: pc.DeclarationFact{State: pc.DeclarationNotApplicable}}}}} {
+		want := pc.DeclarationUnknown
+		if len(resources) > 0 {
+			want = pc.DeclarationNotApplicable
+		}
+		if got := aggregateResourceFact(pc.DeclarationStatus{Revision: "current", Resources: resources}, 5); got.State != want {
+			t.Fatalf("empty/not-applicable: %+v", got)
+		}
+	}
+}
 
 func testPrincipal() Principal {
 	return Principal{ActorID: ids.NewActorID(), OriginNodeID: ids.NewNodeID()}
@@ -54,6 +186,49 @@ type allowAuth struct{}
 func (allowAuth) Read(context.Context, Principal, pc.DeclarationTarget) error { return nil }
 func (allowAuth) Execute(context.Context, Principal, pc.DeclarationPlanBasis, pc.DeclarationAction, []string) error {
 	return nil
+}
+
+type archivedStatusResolver struct {
+	Resolver
+	target pc.DeclarationTarget
+	calls  int
+}
+
+func (r *archivedStatusResolver) ArchivedTarget(context.Context, Principal, pc.DeclarationPlanRequest) (*pc.DeclarationTarget, error) {
+	r.calls++
+	return &r.target, nil
+}
+
+type archivedReadAuth struct {
+	allowAuth
+	deny bool
+}
+
+func (a archivedReadAuth) Read(context.Context, Principal, pc.DeclarationTarget) error {
+	if a.deny {
+		return fail(pc.DeclarationUnauthorized, "current_project_read_access_required")
+	}
+	return nil
+}
+
+func TestDeclarationArchivedStatusIsReadOnlyAndAuthorized(t *testing.T) {
+	p := testPrincipal()
+	r := &archivedStatusResolver{target: pc.DeclarationTarget{ProjectID: ids.NewProjectID(), OwnerNodeID: p.OriginNodeID}}
+	request := pc.DeclarationPlanRequest{SchemaVersion: pc.DeclarationRequestSchemaV05, ProjectRef: r.target.ProjectID}
+	s := NewService(nil, r, archivedReadAuth{}, nil)
+	status, err := s.Status(t.Context(), p, request)
+	if err != nil || status.Lifecycle != "archived" || status.Revision != "" || status.Target.ProjectRoot != "" || status.Operation != nil || len(status.Resources) != 0 || status.Readiness.Healthy.State != pc.DeclarationNotApplicable || status.Readiness.Protected.State != pc.DeclarationUnknown {
+		t.Fatalf("invented live readiness or location: %+v %v", status, err)
+	}
+	s.auth = archivedReadAuth{deny: true}
+	_, err = s.Status(t.Context(), p, request)
+	requireCode(t, err, pc.DeclarationUnauthorized)
+	before := r.calls
+	_, err = s.Status(t.Context(), Principal{}, request)
+	requireCode(t, err, pc.DeclarationUnauthorized)
+	if r.calls != before {
+		t.Fatal("invalid principal reached registry")
+	}
 }
 
 type inertOwner struct{}

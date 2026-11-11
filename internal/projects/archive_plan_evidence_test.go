@@ -16,7 +16,7 @@ func projectEvidenceFixture(t *testing.T, projectID, operationID string, req req
 	e := projects.ProjectPlanEvidence{ProjectID: projectID, OperationID: operationID, OperationKind: "archive", Request: req, PlanDigest: "sha256:" + strings.Repeat("a", 64)}
 	// This store validates persistence bindings; the adapter validates full plans.
 	e.Payload, _ = json.Marshal(map[string]any{"schema_version": "storage.project_physical_archive_plan.v1", "request": req, "plan_digest": e.PlanDigest,
-		"workspace": map[string]string{"operation_id": operationID, "operation_kind": "archive", "object_id": projectID}, "private_inode": uint64(9007199254740993)})
+		"workspace": map[string]string{"schema_version": "storage.workspace_archive_plan.v1", "operation_id": operationID, "operation_kind": "archive", "object_id": projectID}, "private_inode": uint64(9007199254740993)})
 	e.PayloadSHA256 = projects.ProjectPlanPayloadDigest(e.Payload)
 	return e
 }
@@ -59,5 +59,26 @@ func TestProjectPlanEvidenceBindingsAndPrivacy(t *testing.T) {
 	}
 	if err := projects.NewService(nil).SaveProjectPlanEvidence(context.Background(), e); !errors.Is(err, projects.ErrProjectPlanEvidenceUnavailable) {
 		t.Fatalf("nil database: %v", err)
+	}
+}
+
+func TestProjectPlanEvidenceAcceptsExactVersionFamilies(t *testing.T) {
+	req := requestctx.Context{ActorID: "actor_fixture", OriginNodeID: "node_fixture", ScopeID: "scope_fixture", CorrelationID: "corr_fixture"}
+	for _, version := range []string{"v1", "v2", "v3"} {
+		e := projectEvidenceFixture(t, "project_fixture", "workspace_archive_operation_01ARZ3NDEKTSV4RRFFQ69G5FAV", req)
+		var body map[string]json.RawMessage
+		if err := json.Unmarshal(e.Payload, &body); err != nil {
+			t.Fatal(err)
+		}
+		body["schema_version"], _ = json.Marshal("storage.project_physical_archive_plan." + version)
+		var workspace map[string]json.RawMessage
+		json.Unmarshal(body["workspace"], &workspace)
+		workspace["schema_version"], _ = json.Marshal("storage.workspace_archive_plan." + version)
+		body["workspace"], _ = json.Marshal(workspace)
+		e.Payload, _ = json.Marshal(body)
+		e.PayloadSHA256 = projects.ProjectPlanPayloadDigest(e.Payload)
+		if err := projects.ValidateProjectPlanEvidence(e); err != nil {
+			t.Fatalf("%s: %v", version, err)
+		}
 	}
 }

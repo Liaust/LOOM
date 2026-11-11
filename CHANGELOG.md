@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased - Workspace Source Refresh
+
+- Adds the standalone Electron desktop source and matching filesystem/Notes
+  owners: direct editing, durable offline work, Main-first file operations,
+  on-demand attachments, project focus, structured editors and knowledge views.
+- Includes Box-aware context, active/passive/archived projects, native Hermes
+  profiles/schedules, current search/worker/recovery improvements and migrations
+  through00115. Existing SQL migrations and public Git ancestry are preserved.
+- Makes public examples operator-configured rather than selecting maintainer
+  accounts or private update channels. Refreshes the public architecture and
+  installation explanation; legacy Obsidian/ORCA material remains historical.
+- This is a source candidate, not a new published version, signed desktop
+  distribution, mobile client or universal recovery/installation guarantee.
+
 ## 0.9.0 - Public Beta
 
 The first usable-system source baseline, following the September developer

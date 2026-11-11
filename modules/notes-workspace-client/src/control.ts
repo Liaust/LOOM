@@ -20,6 +20,8 @@ export async function nativeMetadataChange(
 // Ordinary native note payloads go through native splitting/encryption. No
 // source path/base/intent is added as a plaintext custom PouchDB field.
 export class ControlTransport {
+    private missing=new Map<string,{first:number;attempt?:number}>();
+    private recovering=new Set<string>();
     constructor(private db: DatabaseFileAccess,
         private ready: (path: string, revision: string) => Promise<boolean> = async () => true) {}
     async put(record: Control): Promise<string> {
@@ -58,7 +60,21 @@ export class ControlTransport {
         return rev;
     }
     async get(path: string, revision: string): Promise<Control> {
-        if (!await this.ready(path, revision)) throw new Error("control_pending_chunks");
+        const key=JSON.stringify([path,revision]);
+        if (!await this.ready(path, revision)) {
+            const now=Date.now(),pending=this.missing.get(key)??{first:now};
+            this.missing.set(key,pending);
+            // Give normal replication a chance first. A genuinely stranded
+            // control can then use native authenticated on-demand chunk repair.
+            if(now-pending.first>=10000&&(pending.attempt===undefined||now-pending.attempt>=60000)&&
+                !this.recovering.has(key)&&this.recovering.size<2) {
+                pending.attempt=now;this.recovering.add(key);
+                void this.db.fetchEntry(path as FilePathWithPrefix,revision,false,true,false)
+                    .catch(()=>false).finally(()=>this.recovering.delete(key));
+            }
+            throw new Error("control_pending_chunks");
+        }
+        this.missing.delete(key);
         if ((await this.db.getConflictedRevs(path as FilePathWithPrefix)).length)
             throw new Error("control_collision");
         const entry = await this.db.fetchEntry(path as FilePathWithPrefix, revision, false, true, true);

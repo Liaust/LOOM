@@ -47,7 +47,7 @@ func (r ApplicationRuntime) Publish(ctx context.Context, peerUID uint32, p Appli
 }
 
 func (r ApplicationRuntime) publishLocked(ctx context.Context, policy ApplicationHostPolicy, grant ApplicationGrant, p ApplicationPublication) error {
-	if grant.RepositoryID != p.Descriptor.RepositoryID || grant.PolicyRevision != p.PolicyRevision || grant.LocationRevision != p.LocationRevision || policy.Platform != p.Descriptor.Artifact.Platform || !applicationRevisionPattern.MatchString(p.Revision) {
+	if grant.ProducerIdentity() != p.Descriptor.ProducerIdentity() || grant.PolicyRevision != p.PolicyRevision || grant.LocationRevision != p.LocationRevision || policy.Platform != p.Descriptor.Artifact.Platform || !applicationRevisionPattern.MatchString(p.Revision) {
 		return applicationError("publication.scope_denied")
 	}
 	p.GrantDigest = applicationSHA(grant)
@@ -140,6 +140,14 @@ func (r ApplicationRuntime) ArchiveControl(ctx context.Context, peerUID uint32, 
 	}
 	defer release()
 	policy, e = r.policy()
+	if q.Operation != OperationStatus {
+		if active, err := r.applicationActionActive(*owner); err != nil || active {
+			if err != nil {
+				return out, err
+			}
+			return out, applicationError("action.active")
+		}
+	}
 	if e != nil {
 		return out, e
 	}

@@ -316,6 +316,50 @@ func TestCloudSnapshotStatusLiveEndpointSkipsInventoryWhenCloudDisabled(t *testi
 	}
 }
 
+func TestCloudSnapshotStatusPreservesProducerWhenInventoryBlocked(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "borg")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\necho 'private canary lock failure' >&2\nexit 2\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := writeBorgCloudConfig(t, binary)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg cloudstorage.Config
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	rclone := filepath.Join(dir, "rclone")
+	if err := os.WriteFile(rclone, []byte("#!/bin/sh\nprintf '[]'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cfg.RcloneBinary = rclone
+	raw, _ = json.Marshal(cfg)
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(Services{RuntimeConfig: config.Config{NodeID: "main", NodeKind: "main"}, AllowCloudConfigOverride: true}, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler()
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/cloud/snapshot/status/live", strings.NewReader(`{"config_path":"`+path+`"}`)))
+	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), "private canary") {
+		t.Fatal("inventory failure erased or leaked status", w.Code, w.Body.String())
+	}
+	var envelope response.Envelope[struct {
+		InventoryStatus    string                            `json:"inventory_status"`
+		InventoryErrorCode string                            `json:"inventory_error_code"`
+		Producer           maintenance.CloudProtectionStatus `json:"producer"`
+		Snapshots          *cloudstorage.SnapshotListResult  `json:"snapshots"`
+	}]
+	if err := json.Unmarshal(w.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if !envelope.OK || envelope.Data.InventoryStatus != "unavailable" || envelope.Data.InventoryErrorCode != "cloud.snapshot_list_failed" || envelope.Data.Snapshots != nil || envelope.Data.Producer.WorkerState != "unavailable" {
+		t.Fatal("invented inventory or missing producer evidence", w.Body.String())
+	}
+}
+
 func TestCloudSnapshotRunEndpointRejectsUnsafeShapesBeforeWorkerExecution(t *testing.T) {
 	server := NewServer(Services{}, slog.Default()).Handler()
 	for _, test := range []struct {

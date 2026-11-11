@@ -18,8 +18,9 @@ type sqlQuery interface {
 // SQLStore requires the feature-local migration to be numbered/installed by the
 // integrator. No schema creation or alternative database is performed here.
 type SQLStore struct {
-	DB    *sql.DB
-	query sqlQuery
+	DB              *sql.DB
+	ExclusiveSource bool
+	query           sqlQuery
 }
 
 func (s SQLStore) q() sqlQuery {
@@ -37,23 +38,56 @@ func (s SQLStore) WithLock(ctx context.Context, key string, fn func(Store) error
 		return err
 	}
 	defer conn.Close()
-	if _, err = conn.ExecContext(ctx, `SELECT pg_advisory_lock(hashtextextended($1,0))`, "notesworkspace:"+key); err != nil {
-		// Cancellation can obscure whether PostgreSQL acquired a session lock.
-		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
-		return err
+	filesystemLock := `SELECT pg_advisory_lock_shared(hashtextextended($1,0))`
+	filesystemUnlock := `SELECT pg_advisory_unlock_shared(hashtextextended($1,0))`
+	if s.ExclusiveSource {
+		filesystemLock = `SELECT pg_advisory_lock(hashtextextended($1,0))`
+		filesystemUnlock = `SELECT pg_advisory_unlock(hashtextextended($1,0))`
 	}
+	locks := []struct{ key, acquire, release string }{
+		{"notesworkspace:filesystem", filesystemLock, filesystemUnlock},
+		{"notesworkspace:" + key, `SELECT pg_advisory_lock(hashtextextended($1,0))`, `SELECT pg_advisory_unlock(hashtextextended($1,0))`},
+	}
+	held, discarded := 0, false
 	defer func() {
+		if discarded {
+			return
+		}
 		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if _, err := conn.ExecContext(cleanup, `SELECT pg_advisory_unlock(hashtextextended($1,0))`, "notesworkspace:"+key); err != nil {
-			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
-			result = errors.Join(result, err)
+		for i := held - 1; i >= 0; i-- {
+			var unlocked bool
+			err := conn.QueryRowContext(cleanup, locks[i].release, locks[i].key).Scan(&unlocked)
+			if err == nil && !unlocked {
+				err = fmt.Errorf("notes workspace lock not held: %s", locks[i].key)
+			}
+			if err != nil {
+				_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+				result = errors.Join(result, err)
+				return
+			}
 		}
 	}()
-	return fn(SQLStore{DB: s.DB, query: conn})
+	for _, lock := range locks {
+		if _, err := conn.ExecContext(ctx, lock.acquire, lock.key); err != nil {
+			// Cancellation can obscure which session locks PostgreSQL acquired.
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+			discarded = true
+			return err
+		}
+		held++
+	}
+	return fn(SQLStore{DB: s.DB, ExclusiveSource: s.ExclusiveSource, query: conn})
 }
 func (s SQLStore) Bind(ctx context.Context, f File) (File, error) {
 	raw, err := json.Marshal(f)
+	if err != nil {
+		return File{}, err
+	}
+	_, err = s.q().ExecContext(ctx, `INSERT INTO notes_workspace.source_scopes(scope_id,kind,source_path,node_key,created_at)
+ SELECT notes_source_root_id,'notes',source_path,COALESCE(node_key,''),created_at FROM knowledge.notes_source_roots
+ WHERE notes_source_root_id=$1 AND NOT EXISTS(SELECT 1 FROM notes_workspace.source_scopes WHERE scope_id=$1)
+ ON CONFLICT(scope_id) DO NOTHING`, f.CollectionID)
 	if err != nil {
 		return File{}, err
 	}
@@ -76,20 +110,33 @@ func (s SQLStore) File(ctx context.Context, id string) (f File, err error) {
 	return
 }
 func (s SQLStore) SaveBase(ctx context.Context, b Base) error {
+	// Streamed references already have no inline bytes. Direct PDF reads still
+	// need storage-level sharing so enrollment changes cannot reintroduce copies.
+	var shared bool
+	if len(b.Content) > 0 {
+		var relative string
+		if err := s.q().QueryRowContext(ctx, `SELECT record->>'relative_path' FROM notes_workspace.files WHERE file_id=$1`, b.FileID).Scan(&relative); err != nil {
+			return err
+		}
+		shared = isPDF(relative)
+	}
+	var payload any
+	if shared {
+		if err := ensureReferencePayload(ctx, s.q(), b.Hash, b.Content); err != nil {
+			return err
+		}
+		payload = b.Hash
+		b.Content = nil
+	}
 	raw, err := json.Marshal(b)
 	if err != nil {
 		return err
 	}
-	_, err = s.q().ExecContext(ctx, `INSERT INTO notes_workspace.bases(base_id,file_id,record) VALUES($1,$2,$3) ON CONFLICT(base_id) DO NOTHING`, b.ID, b.FileID, raw)
+	_, err = s.q().ExecContext(ctx, `INSERT INTO notes_workspace.bases(base_id,file_id,record,reference_payload_hash) VALUES($1,$2,$3,$4) ON CONFLICT(base_id) DO NOTHING`, b.ID, b.FileID, raw, payload)
 	return err
 }
 func (s SQLStore) Base(ctx context.Context, id string) (b Base, err error) {
-	var raw []byte
-	err = s.q().QueryRowContext(ctx, `SELECT record FROM notes_workspace.bases WHERE base_id=$1`, id).Scan(&raw)
-	if err == nil {
-		err = json.Unmarshal(raw, &b)
-	}
-	return
+	return readSQLBase(ctx, s.q(), id)
 }
 func (s SQLStore) Receive(ctx context.Context, op Operation) (Operation, error) {
 	raw, err := json.Marshal(op)
@@ -142,7 +189,7 @@ func (s SQLStore) PendingOperationIDs(ctx context.Context, after string, limit i
 // RetainedOperationIDs includes final receipts: late open-inode writes can occur
 // after acknowledgement. Run separate repeated sweeps; do not prune on acceptance.
 func (s SQLStore) RetainedOperationIDs(ctx context.Context, after string, limit int) (DiscoveryPage, error) {
-	return s.discover(ctx, after, limit, "COALESCE(record->>'journal','') <> ''")
+	return s.discover(ctx, after, limit, "COALESCE(record->>'journal','') <> '' AND COALESCE(record#>>'{file,entry_kind}','') <> 'directory'")
 }
 func (s SQLStore) discover(ctx context.Context, after string, limit int, predicate string) (DiscoveryPage, error) {
 	if s.DB == nil {
@@ -216,13 +263,67 @@ func (s SQLStore) FileAt(ctx context.Context, collection, key string) (f File, e
 }
 
 // Reservations are prepared journal entries, not another queue. Callers hold the
-// collection lock when checking/reserving so reads cannot bind a half-moved path.
+// filesystem and collection locks; aliases must see the same physical reservation.
 func (s SQLStore) PathBusy(ctx context.Context, collection, key, except string) (bool, error) {
 	var busy bool
-	err := s.q().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notes_workspace.operations o JOIN notes_workspace.files f USING(file_id)
+	scope, err := s.scopeLocation(ctx, collection)
+	if err != nil {
+		return false, err
+	}
+	physical, resolved := scopePathKey(scope.Path, key)
+	err = s.q().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM notes_workspace.operations o JOIN notes_workspace.files f USING(file_id)
  WHERE f.collection_id=$1 AND o.operation_id<>$3 AND o.state IN ('pending','held') AND COALESCE(o.record->>'path_stage','')<>''
- AND (o.record->'file'->>'path_key'=$2 OR o.record->>'destination_key'=$2))`, collection, key, except).Scan(&busy)
-	return busy, err
+ AND (o.record->'file'->>'path_key'=$2 OR o.record->>'destination_key'=$2)) OR EXISTS(
+ SELECT 1 FROM notes_workspace.tree_moves t
+ CROSS JOIN LATERAL (SELECT t.record->>'source_key' AS source,t.record->>'destination_key' AS destination) m
+ WHERE t.state IN ('prepared','held') AND t.move_id<>$3
+ AND ($4=m.source OR left($4,length(m.source)+1)=m.source||'/' OR left(m.source,length($4)+1)=$4||'/'
+ OR $4=m.destination OR left($4,length(m.destination)+1)=m.destination||'/' OR left(m.destination,length($4)+1)=$4||'/')) OR EXISTS(
+ SELECT 1 FROM storage.retained_relocations r WHERE r.state='prepared' AND r.relocation_id<>$3 AND r.plan_json->>'schema'='storage.workspace_path_plan.v1'
+ AND ($4=r.source_prefix OR left($4,length(r.source_prefix)+1)=r.source_prefix||'/' OR left(r.source_prefix,length($4)+1)=$4||'/'
+ OR $4=r.destination_prefix OR left($4,length(r.destination_prefix)+1)=r.destination_prefix||'/' OR left(r.destination_prefix,length($4)+1)=$4||'/'))`, collection, key, except, physical).Scan(&busy)
+	if err != nil || busy {
+		return busy, err
+	}
+	if !resolved {
+		return false, ErrMembership
+	}
+	query, ok := s.q().(interface {
+		QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	})
+	if !ok {
+		return false, ErrMembership
+	}
+	// Read prepared path metadata only, not retained proposal/base payloads.
+	rows, err := query.QueryContext(ctx, `SELECT
+ CASE WHEN s.kind='notes' OR s.scope_id IS NULL THEN COALESCE(NULLIF(r.source_path,''),s.source_path,'') ELSE s.source_path END,
+ CASE WHEN s.kind='notes' OR s.scope_id IS NULL THEN COALESCE(r.node_key,s.node_key,'') ELSE s.node_key END,
+ COALESCE(NULLIF(o.record#>>'{file,path_key}',''),f.path_key),
+ COALESCE(NULLIF(o.record->>'destination_key',''),o.record#>>'{request,destination_path}','')
+ FROM notes_workspace.operations o JOIN notes_workspace.files f USING(file_id)
+ LEFT JOIN notes_workspace.source_scopes s ON s.scope_id=f.collection_id
+ LEFT JOIN knowledge.notes_source_roots r ON r.notes_source_root_id=f.collection_id AND (s.kind='notes' OR s.scope_id IS NULL)
+ WHERE o.operation_id<>$1 AND o.state IN ('pending','held') AND COALESCE(o.record->>'path_stage','')<>''`, except)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var root, node, source, destination string
+		if err := rows.Scan(&root, &node, &source, &destination); err != nil {
+			return false, err
+		}
+		if scope.NodeKey != "" && node != "" && scope.NodeKey != node {
+			continue
+		}
+		for _, relative := range []string{source, destination} {
+			reserved, known := scopePathKey(root, relative)
+			if known && (within(physical, reserved) || within(reserved, physical)) {
+				return true, nil
+			}
+		}
+	}
+	return false, rows.Err()
 }
 
 // CommitPath atomically advances binding/history/base/receipt after physical

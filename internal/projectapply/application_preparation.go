@@ -101,7 +101,7 @@ func (r *LocalResolver) prepareApplication(ctx context.Context, target pc.Declar
 
 func validateApplicationPreparation(p applicationPayload) error {
 	x, q := p.Preparation, p.Request
-	if x == nil || q.Manifest == nil || sr.ValidatePreparedApplication(x.Descriptor, *q.Manifest) != nil || x.Grant.Validate() != nil || x.Grant.Request.Owner != q.Owner || x.Grant.Request.RepositoryID != x.Descriptor.RepositoryID || x.Grant.Request.LocationRevision != q.LocationRevision || x.Grant.PolicyRevision != q.PolicyRevision || q.DescriptorDigest != sr.ApplicationDescriptorDigest(x.Descriptor) || q.ExpectedRevision != sr.ApplicationPreparedRevision(x.Grant, x.Descriptor) || len(q.CredentialRevisions) != len(x.Grant.Request.CredentialSources) || len(q.Data) != len(x.Grant.Request.Data) {
+	if x == nil || q.Manifest == nil || sr.ValidatePreparedApplication(x.Descriptor, *q.Manifest) != nil || x.Grant.Validate() != nil || x.Grant.Request.Owner != q.Owner || x.Grant.Request.ProducerIdentity() != x.Descriptor.ProducerIdentity() || x.Grant.Request.LocationRevision != q.LocationRevision || x.Grant.PolicyRevision != q.PolicyRevision || q.DescriptorDigest != sr.ApplicationDescriptorDigest(x.Descriptor) || q.ExpectedRevision != sr.ApplicationPreparedRevision(x.Grant, x.Descriptor) || len(q.CredentialRevisions) != len(x.Grant.Request.CredentialSources) || len(q.Data) != len(x.Grant.Request.Data) {
 		return fail(pc.DeclarationInvalid, "application_preparation_invalid")
 	}
 	for key, data := range q.Data {

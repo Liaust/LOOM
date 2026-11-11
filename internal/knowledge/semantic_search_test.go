@@ -2,12 +2,14 @@ package knowledge
 
 import (
 	"encoding/json"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"loom.local/loom/internal/ids"
+	lexical "loom.local/loom/internal/search"
 	"loom.local/loom/internal/storagecatalog"
 )
 
@@ -196,5 +198,60 @@ func TestNotesSearchModeNormalizationAndCandidateLimit(t *testing.T) {
 	}
 	if got := notesSearchCandidateLimit(80); got != 80 {
 		t.Fatalf("clamped candidate limit = %d, want 80", got)
+	}
+}
+
+func TestFuseNotesCoverageNormalizesOnlyUnavailableBodyRelevance(t *testing.T) {
+	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	results := []NotesSearchResult{}
+	for i, tc := range []struct {
+		id       string
+		coverage notesSemanticCoverage
+		metadata bool
+	}{
+		{"unembedded", notesSemanticCoverageUnavailable, false},
+		{"represented-outside-top-k", notesSemanticCoverageAvailable, false},
+		{"unknown", notesSemanticCoverageUnknown, false},
+		{"incidental-overlap", notesSemanticCoverageAvailable, false},
+		{"metadata", notesSemanticCoverageUnavailable, true},
+	} {
+		results = append(results, NotesSearchResult{SearchDocumentID: tc.id, KnowledgeObjectID: tc.id,
+			SourceKind: KnowledgeSearchSourceKind, RankScore: float64(10 - i), RecencyAt: now,
+			SemanticCoverage: tc.coverage, MetadataOnly: tc.metadata})
+	}
+	semantic := []NotesSearchResult{
+		{SearchDocumentID: "incidental-overlap", KnowledgeObjectID: "incidental-overlap", SemanticScore: 0.9, SemanticDistance: 0.1, RecencyAt: now},
+		{SearchDocumentID: "semantic-only", KnowledgeObjectID: "semantic-only", SemanticScore: 0.8, SemanticDistance: 0.2, RecencyAt: now},
+	}
+	got := fuseNotesSearchResults(results, semantic, NotesSearchInput{Limit: 10}, now)
+	if len(got) != 6 || got[0].SearchDocumentID != "unembedded" {
+		t.Fatalf("unrepresented relevant body still penalized: %+v", got)
+	}
+	for _, result := range got {
+		want := lexical.DefaultRecencyRankWeight / (lexical.DefaultReciprocalRankFusionK + float64(result.RecencyRank))
+		if result.LexicalRank > 0 {
+			weight := lexical.DefaultRelevanceRankWeight
+			if result.SearchDocumentID == "unembedded" {
+				weight *= 2
+				if result.SemanticRank != 0 || result.SemanticScore != 0 || result.SemanticDistance != 0 {
+					t.Fatal("coverage normalization fabricated semantic evidence")
+				}
+			}
+			want += weight / (lexical.DefaultReciprocalRankFusionK + float64(result.LexicalRank))
+		}
+		if result.SemanticRank > 0 {
+			want += lexical.DefaultRelevanceRankWeight / (lexical.DefaultReciprocalRankFusionK + float64(result.SemanticRank))
+		}
+		if math.Abs(result.FinalScore-want) > 1e-12 {
+			t.Fatalf("wrong relevance/recency normalization for %+v, want %f", result, want)
+		}
+	}
+	// A whole-request semantic failure uses lexical reranking, not this policy.
+	fallback := rerankNotesSearchResults(results, NotesSearchInput{Limit: 10}, now, NotesSearchModeLexical)
+	for _, result := range fallback {
+		want := lexical.DefaultRelevanceRankWeight/(lexical.DefaultReciprocalRankFusionK+float64(result.LexicalRank)) + lexical.DefaultRecencyRankWeight/(lexical.DefaultReciprocalRankFusionK+float64(result.RecencyRank))
+		if math.Abs(result.FinalScore-want) > 1e-12 {
+			t.Fatal("whole-request lexical fallback acquired a coverage bonus")
+		}
 	}
 }

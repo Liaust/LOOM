@@ -2,10 +2,23 @@ package projects
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"loom.local/loom/internal/ids"
 )
+
+// ProjectWorkState reads only the registered project classification. Empty
+// means unspecified, not an inferred lifecycle or a persisted working default.
+func ProjectWorkState(metadata json.RawMessage) string {
+	var fields struct {
+		WorkState string `json:"work_state"`
+	}
+	if json.Unmarshal(metadata, &fields) == nil && (fields.WorkState == "working" || fields.WorkState == "passive") {
+		return fields.WorkState
+	}
+	return ""
+}
 
 // Stable keyset enumeration over registered sources only, including archived
 // identities so their lifecycle can be reflected without reopening payloads.
@@ -13,10 +26,12 @@ func (s Service) ListProjectContextSources(ctx context.Context, owner, after str
 	if owner == "" || limit < 1 || limit > 20 || (after != "" && ids.Validate(ids.ProjectPrefix, after) != nil) {
 		return nil, fmt.Errorf("invalid project context page")
 	}
+	args := []any{owner, after, limit}
+	selection := projectBoxSelectionSQL(ctx, "p", &args)
 	rows, err := s.DB.QueryContext(ctx, `SELECT p.project_id
 		FROM projects.projects p JOIN projects.project_repository_sources s ON s.project_id=p.project_id
 		WHERE s.source_snapshot_json->'location'->>'owner_node'=$1 AND p.project_id>$2
-		ORDER BY p.project_id LIMIT $3`, owner, after, limit)
+		AND `+selection+` ORDER BY p.project_id LIMIT $3`, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -375,14 +375,17 @@ func ProjectWatchedRootKey(projectSlug, localRootKey string) string {
 }
 
 type watchPolicyBuilder struct {
-	sourceOnly bool
-	loaded     LoadedProject
-	contract   ProjectContract
-	add        func(Diagnostic)
-	roots      map[string]*watchRootAccumulator
+	sourceOnly  bool
+	independent bool
+	loaded      LoadedProject
+	contract    ProjectContract
+	add         func(Diagnostic)
+	roots       map[string]*watchRootAccumulator
 }
 
 type watchRootAccumulator struct {
+	selections          *watchedroots.ConsumerSelections
+	files               *filepolicy.FolderPolicy
 	key                 string
 	safeRoot            string
 	path                string
@@ -409,7 +412,7 @@ type watchRootAccumulator struct {
 }
 
 func newWatchPolicyBuilder(loaded LoadedProject, contract ProjectContract, add func(Diagnostic)) *watchPolicyBuilder {
-	return &watchPolicyBuilder{loaded: loaded, contract: contract, add: add, roots: map[string]*watchRootAccumulator{}}
+	return &watchPolicyBuilder{loaded: loaded, contract: contract, independent: contract.SchemaVersion == ProjectSchemaV06, add: add, roots: map[string]*watchRootAccumulator{}}
 }
 
 func (builder *watchPolicyBuilder) addNotes(item NotesFacetItem) {
@@ -606,6 +609,21 @@ func (builder *watchPolicyBuilder) addBackupPolicySource(policy ProjectBackupPol
 }
 
 func (builder *watchPolicyBuilder) merge(root watchRootAccumulator, file, field string) {
+	if builder.independent && root.selections == nil {
+		root.selections = &watchedroots.ConsumerSelections{}
+		selection := func() *watchedroots.PathSelection {
+			return &watchedroots.PathSelection{Include: normalizePolicyPatterns(firstNonEmptyStrings(root.include, []string{"**/*"})), Exclude: normalizePolicyPatterns(root.exclude)}
+		}
+		if root.syncMode != "" && root.syncMode != watchedroots.SyncModeNone {
+			root.selections.Sync = selection()
+		}
+		if root.indexMode != "" && root.indexMode != watchedroots.IndexModeNone {
+			root.selections.Index = selection()
+		}
+		if root.backupMode != "" && root.backupMode != watchedroots.BackupModeNone {
+			root.selections.Backup = selection()
+		}
+	}
 	root.key = filesystemconnector.NormalizeRootKey(root.key)
 	root.safeRoot = filesystemconnector.NormalizeRootKey(root.safeRoot)
 	if root.safeRoot == "" {
@@ -631,7 +649,7 @@ func (builder *watchPolicyBuilder) merge(root watchRootAccumulator, file, field 
 		})
 		return
 	}
-	if !compatiblePatternSet(existing.include, root.include) || !compatiblePatternSet(existing.exclude, root.exclude) {
+	if !builder.independent && (!compatiblePatternSet(existing.include, root.include) || !compatiblePatternSet(existing.exclude, root.exclude)) {
 		builder.add(Diagnostic{
 			Severity: SeverityError,
 			Code:     "watched_root.pattern_conflict",
@@ -640,6 +658,13 @@ func (builder *watchPolicyBuilder) merge(root watchRootAccumulator, file, field 
 			Field:    field,
 		})
 		return
+	}
+	if builder.independent {
+		if err := mergeConsumerSelections(existing.selections, root.selections); err != nil {
+			builder.add(Diagnostic{Severity: SeverityError, Code: "watched_root.consumer_conflict", Message: err.Error(), File: file, Field: field})
+			return
+		}
+		existing.include, existing.exclude = observationEnvelope(existing.selections)
 	}
 	if len(existing.include) == 0 {
 		existing.include = append([]string{}, root.include...)
@@ -729,9 +754,16 @@ func (builder *watchPolicyBuilder) items() []ProjectWatchedRootItem {
 			},
 			DeletePolicy: watchedroots.DeletePolicy{Mode: firstNonEmptyString(root.deleteMode, watchedroots.DeleteModeLocalStateOnly)},
 		}
-		// Knowledge folders need bounded polling even without filesystem events.
+		if builder.independent {
+			config.SchemaVersion = watchedroots.IndependentConfigSchemaVersion
+			config.ConsumerSelections = root.selections
+			config.Files = root.files
+			config.Include, config.Exclude = observationEnvelope(root.selections)
+		}
+		// Generated knowledge roots wake on events, retaining sparse reconciliation.
 		if root.metadata["knowledge_source"] != nil {
-			config.Scan.FullRescanInterval = "1m"
+			config.Watch = watchedroots.WatchConfig{Enabled: true, Backend: watchedroots.WatchBackendAuto, DebounceWindow: "2s"}
+			config.Scan.FullRescanInterval = "6h"
 			if config.SyncPolicy.MaxFileBytes == 0 {
 				config.SyncPolicy.MaxFileBytes = loomsync.MaxStreamObjectUploadBytes
 			}

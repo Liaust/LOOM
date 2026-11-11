@@ -225,6 +225,9 @@ func (s Service) SetWorkerPolicy(ctx context.Context, req requestctx.Context, wo
 	if _, err := idempotency.StoreRecoveryEvidenceTx(ctx, tx, recoveryInput); err != nil {
 		return SetWorkerPolicyResult{}, err
 	}
+	if err := NotifyQueueTx(ctx, tx, instance.WorkerKind); err != nil {
+		return SetWorkerPolicyResult{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return SetWorkerPolicyResult{}, err
 	}

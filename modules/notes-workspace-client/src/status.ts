@@ -1,4 +1,4 @@
-import type { Operation, State } from "./journal";
+import { unfinished, type Operation, type State } from "./journal";
 
 export type StatusRuntime = { starting?: boolean; failure?: string; checkpointFailure?: string };
 export type StatusSummary = Readonly<{
@@ -18,10 +18,15 @@ export type StatusSummary = Readonly<{
     reflectionHolds: number;
     captureHolds: number;
     otherHolds: number;
+    scanObservations: number;
+    excludedObservations: number;
+    managedObservations: number;
+    historicalObservations: number;
+    localObservations: number;
     failure?: string;
     checkpointFailure?: string;
 }>;
-export type StatusPageOptions = { offset?: number; limit?: number; kind?: "operations" | "holds" };
+export type StatusPageOptions = { offset?: number; limit?: number; kind?: "operations" | "holds" | "observations" };
 export type StatusPage<T> = { items: T[]; total: number; offset: number; omitted: number; nextOffset?: number };
 export type StatusGroupKind = "blocked" | "publication" | "acceptance" | "unknown-dependency" | "hold";
 export type StatusHoldKind = "reflection" | "capture" | "other";
@@ -64,12 +69,14 @@ type Group = {
     holdKind?: StatusHoldKind;
     dependency?: Wait;
 };
-const active = (op: Operation) => op.state !== "applied" && !op.resolvedBy;
+const active = unfinished;
 const blocked = (op: Operation) => op.state === "held" || op.state === "conflict";
 const key = (kind: string, id: string) => JSON.stringify([kind, id]);
 const compact = (text: string) => text.length > 160 ? text.slice(0, 157) + "..." : text;
 const captureReasons = new Set(["missing_writable_binding", "outside_collection", "rename_target_collision",
     "payload_limit", "reference_only", "directory_base_unavailable"]);
+const observation = (reason: string) => /^(device_excluded|observed_absence)\//.test(reason)||
+    ["untracked_scan", "scanner_absence_is_not_delete", "withdrawn_collection_retained", "configuration_retained_history", "source_managed_structure"].includes(reason);
 function holdKind(reason: string): StatusHoldKind {
     if (/^(event_|capture_|predecessor_capture_)/.test(reason) || captureReasons.has(reason)) return "capture";
     if (/^(reflection_|layout_|directory_reflection_)/.test(reason) ||
@@ -96,6 +103,9 @@ function renderGroup(group: Group): StatusGroup {
 // UI events (including checkpoint-only changes) need not walk retained history.
 export class NotesStatus {
     private indexedOperations?: State["operations"];
+    private indexedScopes?: State["scopes"];
+    private configuration = new Map<string, string>();
+    private blocked(op: Operation) { return blocked(op) || this.configuration.has(op.intent.id); }
     private indexedHolds?: State["holds"];
     private byId = new Map<string, Operation>();
     private waits = new Map<string, Wait[]>();
@@ -105,22 +115,36 @@ export class NotesStatus {
     private groupsById = new Map<string, Group>();
     private counts = { operations: 0, unfinished: 0, pendingPublication: 0, pendingAcceptance: 0,
         blocked: 0, blockedRoots: 0, waiting: 0, unknownDependencies: 0, accepted: 0, resolved: 0 };
-    private holdCounts = { holds: 0, reflectionHolds: 0, captureHolds: 0, otherHolds: 0 };
+    private holdCounts = { holds: 0, reflectionHolds: 0, captureHolds: 0, otherHolds: 0, scanObservations: 0,
+        excludedObservations: 0, managedObservations: 0, historicalObservations: 0, localObservations: 0 };
     private cachedSummary?: StatusSummary;
 
     private index(state?: State) {
         let changed = false;
-        if (this.indexedOperations !== state?.operations) {
+        if (this.indexedOperations !== state?.operations || this.indexedScopes !== state?.scopes) {
+            this.configuration = new Map((state?.operations ?? []).filter(active).flatMap(op => {
+                const scope = state?.scopes?.[op.intent.workspace + "/" + op.intent.collection];
+                return scope && (scope.generation !== op.intent.generation || !scope.writable) ?
+                    [[op.intent.id, scope.writable ? "configuration_changed" : "source_read_only"]] : [];
+            }));
             this.indexOperations(state?.operations ?? []);
             this.indexedOperations = state?.operations;
+            this.indexedScopes = state?.scopes;
             changed = true;
         }
         if (this.indexedHolds !== state?.holds) {
-            this.holdCounts = { holds: 0, reflectionHolds: 0, captureHolds: 0, otherHolds: 0 };
+            this.holdCounts = { holds: 0, reflectionHolds: 0, captureHolds: 0, otherHolds: 0, scanObservations: 0,
+                excludedObservations: 0, managedObservations: 0, historicalObservations: 0, localObservations: 0 };
             this.holdGroups = Object.entries(state?.holds ?? {}).map(([path, reason]) => {
                 const kind = holdKind(reason);
                 this.holdCounts.holds++;
-                if (kind === "reflection") this.holdCounts.reflectionHolds++;
+                if (observation(reason)) {
+                    this.holdCounts.scanObservations++;
+                    if (reason.startsWith("device_excluded/")) this.holdCounts.excludedObservations++;
+                    else if (reason === "source_managed_structure") this.holdCounts.managedObservations++;
+                    else if (reason === "untracked_scan") this.holdCounts.localObservations++;
+                    else this.holdCounts.historicalObservations++;
+                } else if (kind === "reflection") this.holdCounts.reflectionHolds++;
                 else if (kind === "capture") this.holdCounts.captureHolds++;
                 else this.holdCounts.otherHolds++;
                 // A missing operation, an old path or a matching accepted record
@@ -145,7 +169,7 @@ export class NotesStatus {
         const pending: Operation[] = [];
         for (const op of operations) {
             this.byId.set(op.intent.id, op);
-            if (op.resolvedBy) this.counts.resolved++;
+            if (op.resolvedBy || op.sourceSatisfiedBy) this.counts.resolved++;
             else if (op.state === "applied") this.counts.accepted++;
             else { pending.push(op); this.counts.unfinished++; }
         }
@@ -218,8 +242,8 @@ export class NotesStatus {
                 }
                 seen.set(id, chain.length);
                 chain.push(id);
-                if (blocked(op)) {
-                    group = make(key("operation", id), "blocked", op.intent.path, op.reason ?? op.state, op);
+                if (this.blocked(op)) {
+                    group = make(key("operation", id), "blocked", op.intent.path, this.configuration.get(id) ?? op.reason ?? op.state, op);
                     break;
                 }
                 const waits = this.waits.get(id) ?? [];
@@ -245,7 +269,7 @@ export class NotesStatus {
         for (const op of pending) {
             const group = owner(op);
             group.members.push(op);
-            if (blocked(op)) this.counts.blocked++;
+            if (this.blocked(op)) this.counts.blocked++;
             else if (this.waits.get(op.intent.id)!.length) {
                 this.counts.waiting++;
                 group.waiting++;
@@ -267,8 +291,10 @@ export class NotesStatus {
         if (previous && previous.phase === phase && previous.failure === runtime.failure &&
             previous.checkpointFailure === runtime.checkpointFailure) return previous;
         const c = this.counts, h = this.holdCounts;
+        const checks = h.holds - h.scanObservations;
         const text = phase === "starting" ? "LOOM starting" : phase === "held" ? "LOOM held: " + compact(runtime.failure!) :
-            `LOOM: ${c.pendingPublication} to publish; ${c.pendingAcceptance} awaiting source; ${c.blocked} blocked; ${c.waiting} waiting; ${h.holds} holds`;
+            !c.unfinished && !checks ? "LOOM: Up to date" :
+            `LOOM: ${c.pendingPublication} to send; ${c.pendingAcceptance} awaiting Main; ${c.blocked} need review; ${c.waiting} dependent; ${checks} path checks`;
         this.cachedSummary = Object.freeze({ phase, text: text + (runtime.checkpointFailure ? "; recovery export failed" : ""),
             ...c, ...h, ...(runtime.failure ? { failure: runtime.failure } : {}),
             ...(runtime.checkpointFailure ? { checkpointFailure: runtime.checkpointFailure } : {}) });
@@ -278,7 +304,9 @@ export class NotesStatus {
         const summary = this.summary(state, runtime);
         // Safety holds precede ordinary pending work, even in a large backlog.
         const selected = options.kind === "operations" ? this.groups.filter(group => group.kind !== "hold") :
-            options.kind === "holds" ? this.holdGroups : this.groups;
+            options.kind === "holds" ? this.holdGroups.filter(g=>!observation(g.reason)) :
+            options.kind === "observations" ? this.holdGroups.filter(g=>observation(g.reason)) :
+            this.groups.filter(g => g.kind !== "hold" || !observation(g.reason));
         const groups = page(selected, options, renderGroup);
         return { summary, groups };
     }
@@ -287,10 +315,10 @@ export class NotesStatus {
         const group = this.groupsById.get(id);
         if (!group) return;
         return { group: renderGroup(group), operations: page(group.members, options, (op): StatusOperation => {
-            const stage = blocked(op) ? "blocked" : this.waits.get(op.intent.id)?.length ? "waiting" :
+            const stage = this.blocked(op) ? "blocked" : this.waits.get(op.intent.id)?.length ? "waiting" :
                 op.state === "uploaded" ? "acceptance" : "publication";
             return { id: op.intent.id, path: compact(op.intent.path), ...(op.intent.target ? { target: compact(op.intent.target) } : {}),
-                operation: op.intent.operation, state: op.state, stage, reason: compact(op.reason ?? this.waits.get(op.intent.id)?.[0]?.reason ?? ""),
+                operation: op.intent.operation, state: op.state, stage, reason: compact(this.configuration.get(op.intent.id) ?? op.reason ?? this.waits.get(op.intent.id)?.[0]?.reason ?? ""),
                 predecessor: op.intent.predecessor, dependencies: op.intent.dependencies?.length ?? 0 };
         }), ...(group.holdKind ? { hold: { path: group.path, reason: group.reason, kind: group.holdKind } } : {}),
         ...(group.dependency ? { dependency: { ...group.dependency } } : {}) };

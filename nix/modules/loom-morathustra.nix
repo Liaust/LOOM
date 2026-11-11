@@ -14,10 +14,10 @@ let
   externalTools = [ self.packages.${pkgs.stdenv.hostPlatform.system}.basecamp-cli pkgs.gh ];
   accountTools = pkgs.callPackage ../packages/morathustra-external-tools.nix {
     agentIdentity = identity;
-    basecampAccountID = if cfg.externalAccountBinding == null then 0 else cfg.externalAccountBinding.basecampAccountID;
+    basecampAccountID = cfg.externalAccountBinding.basecampAccountID;
     basecamp-cli = self.packages.${pkgs.stdenv.hostPlatform.system}.basecamp-cli;
   };
-  enabledAccountTools = lib.optionals cfg.externalAccountsEnabled accountTools;
+  enabledAccountTools = lib.optionals (cfg.externalAccountsEnabled && cfg.externalAccountBinding != null) accountTools;
   browser = self.packages.${pkgs.stdenv.hostPlatform.system}.agent-browser;
   browserTools = lib.optionals cfg.browserEnabled [ browser browser.chromium ];
   selectedMacBridge = profile: self.packages.${pkgs.stdenv.hostPlatform.system}.mac-computer-use-bridge.overrideAttrs (_: {
@@ -357,6 +357,7 @@ let
 
 in
 {
+  imports = [ ./loom-mina-tools.nix ];
   options.loom.morathustra = runtimeOptions "morathustra";
   options.loom.mina = runtimeOptions "mina" // {
     selected = lib.mkEnableOption "MINA identity even while its gateway and recovery producer are disabled";
@@ -393,8 +394,8 @@ in
           message = "Morathustra Mac computer use requires its sole selected enabled runtime.";
         }
         {
-          assertion = !config.loom.mina.macComputerUseEnabled || (minaSelected && config.loom.mina.enable);
-          message = "MINA Mac computer use requires its sole selected enabled runtime.";
+          assertion = !config.loom.mina.macComputerUseEnabled || minaSelected;
+          message = "MINA Mac computer use requires explicit MINA selection.";
         }
         {
           assertion = !minaSelected || !(config.loom.morathustra.enable || config.loom.morathustra.recoveryEnabled || config.loom.morathustra.recoveryPublicKey != "");
@@ -427,8 +428,8 @@ in
     (lib.mkIf (cfg.enable || cfg.recoveryEnabled) {
       assertions = [
         {
-          assertion = config.loom.orca.enable;
-          message = "${label} requires the existing LOOM ORCA agents account.";
+          assertion = config.loom.agents.enable;
+          message = "${label} requires the shared LOOM agents account.";
         }
         {
           assertion = config.users.users.agents.group == "agents";
@@ -617,9 +618,9 @@ in
 
     (lib.mkIf cfg.enable {
 
-      users.users.agents.packages = externalTools ++ enabledAccountTools ++ browserTools ++ macTools;
+      users.users.agents.packages = lib.optionals (!minaSelected) (externalTools ++ enabledAccountTools ++ browserTools ++ macTools);
 
-      environment.etc = lib.optionalAttrs (cfg.externalAccountsEnabled && cfg.externalAccountBinding != null) {
+      environment.etc = lib.optionalAttrs (!minaSelected && cfg.externalAccountsEnabled && cfg.externalAccountBinding != null) {
         "loom-${identity}-accounts.json" = {
           mode = "symlink";
           text = builtins.toJSON {

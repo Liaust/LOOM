@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	bolt "go.etcd.io/bbolt"
+
 	"loom.local/loom/internal/communication"
 	"loom.local/loom/internal/filesystemconnector"
 	"loom.local/loom/internal/response"
@@ -29,8 +31,11 @@ type Store struct {
 	DataDir    string
 
 	// A value-scoped token is passed only through one held sync transaction.
-	syncLocked bool
-	syncBatch  *queueBatch
+	syncLocked   bool
+	backupLocked bool
+	syncBatch    *queueBatch
+	queueDB      *bolt.DB
+	recordView   map[string]map[string]bool
 }
 
 type LocalQueueCounts struct {
@@ -114,6 +119,9 @@ func (s Store) LoadConfig() (Config, error) {
 		return Config{}, err
 	}
 	config = normalizeConfig(config)
+	if err := validateNodeBoxCatalogConfig(config); err != nil {
+		return Config{}, err
+	}
 	if err := validateOptionalAbsolutePath("box_root_path", config.BoxRootPath); err != nil {
 		return Config{}, err
 	}
@@ -128,6 +136,9 @@ func (s Store) LoadConfig() (Config, error) {
 
 func (s Store) SaveConfig(config Config) error {
 	config = normalizeConfig(config)
+	if err := validateNodeBoxCatalogConfig(config); err != nil {
+		return err
+	}
 	if err := validateOptionalAbsolutePath("box_root_path", config.BoxRootPath); err != nil {
 		return err
 	}

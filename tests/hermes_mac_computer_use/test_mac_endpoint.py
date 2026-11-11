@@ -48,8 +48,13 @@ def fixture(mode, root, args):
         return
     if mode != '--driver' or args != ['mcp', '--socket', str(root / 'synthetic.sock')]:
         raise RuntimeError('Forbidden fixture process selector')
+    implicit_active, expiry_seen = True, False
     for line in sys.stdin:
         request = json.loads(line)
+        if 'method' not in request:
+            with (root / 'peer-responses.jsonl').open('a') as out:
+                out.write(json.dumps(request) + '\n')
+            continue
         method, params = request['method'], request.get('params', {})
         if 'id' not in request:
             continue
@@ -72,6 +77,24 @@ def fixture(mode, root, args):
                 assert set(params.get('arguments', {})) <= {'pid', 'on_screen_only'}
             with (root / 'calls.jsonl').open('a') as out:
                 out.write(json.dumps(params) + '\n')
+            if conf.get('implicit_lifecycle'):
+                if conf.get('expire_implicit') and not expiry_seen:
+                    implicit_active, expiry_seen = False, True
+                label = params.get('arguments', {}).get('session')
+                if name in {'start_session', 'end_session'}:
+                    if not label:
+                        implicit_active = name == 'start_session' and not conf.get('never_revive')
+                    result = {'content': [], 'structuredContent': {'session': label or 'implicit',
+                        'active': name == 'start_session'}}
+                    print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)
+                    continue
+                if not label and not implicit_active:
+                    result = {'isError': True, 'content': [{'type': 'text',
+                        'text': f"session 'mcp-fixture' has ended; tool call '{name}' was rejected. Call start_session with this id to revive it."}]}
+                    if conf.get('typed_ended'):
+                        result['structuredContent'] = {'code': 'session_ended'}
+                    print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)
+                    continue
             if conf.get('turnover_during') == name:
                 observed = json.loads((root / 'observed.json').read_text())
                 observed['runtime_pid'] += 1
@@ -85,6 +108,12 @@ def fixture(mode, root, args):
             if conf.get('malformed') == name:
                 print('{broken SYNTHETIC_SECRET_SENTINEL', flush=True)
                 continue
+            if conf.get('notification_before') == name:
+                for _ in range(conf.get('notification_count', 1)):
+                    print(json.dumps({'jsonrpc': '2.0', 'method': 'notifications/message',
+                        'params': {'level': 'info', 'data': 'SYNTHETIC_SECRET_SENTINEL'}}), flush=True)
+            if conf.get('peer_ping_before') == name:
+                print(json.dumps({'jsonrpc': '2.0', 'method': 'ping', 'id': 'peer-ping', 'params': {}}), flush=True)
             if conf.get('oversize') == name:
                 print('x' * (bridge.MAX_FRAME + 2), flush=True)
                 continue
@@ -112,7 +141,8 @@ def fixture(mode, root, args):
                 print('SYNTHETIC_SECRET_SENTINEL' * 2000, file=sys.stderr, flush=True)
         else:
             raise RuntimeError('Forbidden driver method')
-        print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)
+        response_id = 'wrong-reply-id' if conf.get('wrong_id') and conf['wrong_id'] == params.get('name') else request['id']
+        print(json.dumps({'jsonrpc': '2.0', 'id': response_id, 'result': result}), flush=True)
 
 
 if __name__ == '__main__' and sys.argv[1:2] and sys.argv[1].startswith('--'):
@@ -269,8 +299,146 @@ class EndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['result']['structuredContent']['delivery'], 'observed')
         await self.capture(p)
         captures = [c for c in self.h.calls() if c['name'] == 'get_window_state']
-        self.assertTrue(captures[0]['arguments']['session'].startswith('loom-'))
-        self.assertNotEqual(captures[0]['arguments']['session'], 'caller-label-not-authority')
+        self.assertNotIn('session', captures[0]['arguments'])
+
+    async def test_expired_implicit_read_revives_once_and_invalidates_capture(self):
+        self.h.set(implicit_lifecycle=True, stateless_window_listing=True)
+        p, _ = await self.ready()
+        before = await self.capture(p)
+        self.h.set(implicit_lifecycle=True, stateless_window_listing=True, expire_implicit=True)
+        listed = await self.call(p, 'tools/call', {'name': 'list_windows', 'arguments': {}})
+        self.assertFalse(listed['result'].get('isError', False), listed)
+        self.assertNotEqual(before['result']['structuredContent']['generation'],
+                            listed['result']['structuredContent']['generation'])
+        self.assertEqual([c['arguments'] for c in self.h.calls() if c['name'] == 'start_session'], [{}, {}])
+        self.assertEqual(len([c for c in self.h.calls() if c['name'] == 'list_windows']), 2)
+        stale = await self.call(p, 'tools/call', self.click_args())
+        self.assertEqual(stale['result']['structuredContent']['code'], 'mac_target_stale')
+        self.assertFalse(any(c['name'] == 'click' for c in self.h.calls()))
+        await self.capture(p)
+        self.assertFalse((await self.call(p, 'tools/call', self.click_args()))['result']['isError'])
+
+    async def test_ended_input_is_not_replayed_or_revived_until_a_read(self):
+        self.h.set(implicit_lifecycle=True)
+        p, _ = await self.ready()
+        await self.capture(p)
+        self.h.set(implicit_lifecycle=True, expire_implicit=True, typed_ended=True)
+        failed = await self.call(p, 'tools/call', self.click_args())
+        self.assertEqual(failed['result']['structuredContent']['code'], 'mac_target_stale')
+        self.assertEqual(failed['result']['structuredContent']['delivery'], 'not_sent')
+        self.assertEqual(len([c for c in self.h.calls() if c['name'] == 'click']), 1)
+        self.assertEqual(len([c for c in self.h.calls() if c['name'] == 'start_session']), 1)
+        await self.call(p, 'tools/call', self.click_args())
+        self.assertEqual(len([c for c in self.h.calls() if c['name'] == 'click']), 1)
+        await self.capture(p)
+        self.assertFalse((await self.call(p, 'tools/call', self.click_args()))['result']['isError'])
+
+    async def test_explicit_end_and_start_use_same_implicit_lease(self):
+        self.h.set(implicit_lifecycle=True, stateless_window_listing=True)
+        p, _ = await self.ready()
+        await self.capture(p)
+        ended = await self.call(p, 'tools/call', {'name': 'end_session', 'arguments': {'session': 'another-label'}})
+        started = await self.call(p, 'tools/call', {'name': 'start_session', 'arguments': {'session': 'another-label'}})
+        self.assertEqual(ended['result']['structuredContent']['session'], 'implicit')
+        self.assertEqual(started['result']['structuredContent']['session'], 'implicit')
+        self.assertEqual([c['arguments'] for c in self.h.calls() if c['name'] in {'start_session', 'end_session'}], [{}, {}, {}])
+        listed = await self.call(p, 'tools/call', {'name': 'list_windows', 'arguments': {}})
+        self.assertFalse(listed['result'].get('isError', False), listed)
+
+    async def test_failed_session_revival_does_not_loop(self):
+        self.h.set(implicit_lifecycle=True)
+        p, _ = await self.ready()
+        await self.capture(p)
+        self.h.set(implicit_lifecycle=True, expire_implicit=True, never_revive=True)
+        result = await self.call(p, 'tools/call', {'name': 'list_windows', 'arguments': {}})
+        self.assertTrue(result['result']['isError'])
+        self.assertEqual(len([c for c in self.h.calls() if c['name'] == 'list_windows']), 2)
+        self.assertEqual(len([c for c in self.h.calls() if c['name'] == 'start_session']), 2)
+
+    async def test_valid_notification_does_not_poison_later_reads(self):
+        self.h.set(notification_before='list_windows')
+        p, _ = await self.ready()
+        for _ in range(2):
+            result = await self.call(p, 'tools/call', {'name': 'list_windows', 'arguments': {}})
+            self.assertFalse(result['result'].get('isError', False), result)
+            self.assertNotIn('SYNTHETIC_SECRET_SENTINEL', json.dumps(result))
+        self.assertEqual(len([c for c in self.h.calls() if c['name'] == 'list_windows']), 2)
+
+    async def test_peer_ping_is_answered_without_dispatching_a_tool(self):
+        self.h.set(peer_ping_before='list_windows')
+        p, _ = await self.ready()
+        for _ in range(2):
+            result = await self.call(p, 'tools/call', {'name': 'list_windows', 'arguments': {}})
+            self.assertFalse(result['result'].get('isError', False), result)
+        responses = [json.loads(line) for line in (self.h.root / 'peer-responses.jsonl').read_text().splitlines()]
+        self.assertTrue(responses)
+        self.assertTrue(all(r == {'jsonrpc': '2.0', 'id': 'peer-ping', 'result': {}} for r in responses))
+        self.assertFalse(any(c['name'] in bridge.INPUTS for c in self.h.calls()))
+
+    async def test_notification_flood_is_bounded_and_next_read_recovers(self):
+        self.h.set(notification_before='list_windows', notification_count=bridge.MAX_PEER_MESSAGES + 1)
+        p, _ = await self.ready()
+        failed = await self.call(p, 'tools/call', {'name': 'list_windows', 'arguments': {}})
+        self.assertEqual(failed['result']['structuredContent']['code'], 'mac_output_limit')
+        self.assertNotIn('SYNTHETIC_SECRET_SENTINEL', json.dumps(failed))
+        self.h.set()
+        fresh = await self.call(p, 'tools/call', {'name': 'list_windows', 'arguments': {}})
+        self.assertFalse(fresh['result'].get('isError', False), fresh)
+
+    async def test_bad_reply_discards_channel_then_read_rehandshakes(self):
+        p, _ = await self.ready()
+        self.h.set(wrong_id='list_windows')
+        bad = await self.call(p, 'tools/call', {'name': 'list_windows', 'arguments': {}})
+        self.assertEqual(bad['result']['structuredContent']['code'], 'mac_protocol_error')
+        self.h.set()
+        fresh = await self.call(p, 'tools/call', {'name': 'list_windows', 'arguments': {}})
+        self.assertFalse(fresh['result'].get('isError', False), fresh)
+        self.assertNotEqual(bad['result']['structuredContent']['generation'], fresh['result']['structuredContent']['generation'])
+        self.assertEqual(len([c for c in self.h.calls() if c['name'] == 'list_windows']), 2)
+
+    async def test_lost_owned_ssh_channel_reconnects_on_next_read(self):
+        p, _ = await self.ready()
+        await self.capture(p)
+        endpoint_pid = [json.loads(line)['pid'] for line in (self.h.root / 'pids.jsonl').read_text().splitlines()
+                        if json.loads(line)['mode'] == '--endpoint'][-1]
+        os.kill(endpoint_pid, signal.SIGTERM)
+        await asyncio.sleep(0.05)
+        first = await self.call(p, 'tools/call', {'name': 'list_windows', 'arguments': {}})
+        if first['result'].get('isError'):
+            self.assertEqual(first['result']['structuredContent']['code'], 'mac_connection_lost')
+        fresh = await self.call(p, 'tools/call', {'name': 'list_windows', 'arguments': {}})
+        self.assertFalse(fresh['result'].get('isError', False), fresh)
+        held = await self.call(p, 'tools/call', self.click_args())
+        self.assertEqual(held['result']['structuredContent']['code'], 'mac_target_stale')
+        self.assertFalse(any(c['name'] == 'click' for c in self.h.calls()))
+        await self.capture(p)
+        self.assertFalse((await self.call(p, 'tools/call', self.click_args()))['result']['isError'])
+
+    async def test_reconnect_handshake_is_not_misreported_as_input_delivery(self):
+        p, _ = await self.ready()
+        await self.capture(p)
+        endpoint_pid = [json.loads(line)['pid'] for line in (self.h.root / 'pids.jsonl').read_text().splitlines()
+                        if json.loads(line)['mode'] == '--endpoint'][-1]
+        os.kill(endpoint_pid, signal.SIGTERM)
+        await asyncio.sleep(0.05)
+        held = await self.call(p, 'tools/call', self.click_args())
+        self.assertIn(held['result']['structuredContent']['code'], {'mac_target_stale', 'mac_action_outcome_unknown'})
+        self.assertFalse(any(c['name'] == 'click' for c in self.h.calls()))
+        await self.capture(p)
+        self.assertFalse((await self.call(p, 'tools/call', self.click_args()))['result']['isError'])
+
+    async def test_bad_input_reply_is_unknown_and_requires_fresh_capture(self):
+        p, _ = await self.ready()
+        await self.capture(p)
+        self.h.set(wrong_id='click')
+        bad = await self.call(p, 'tools/call', self.click_args())
+        self.assertEqual(bad['result']['structuredContent']['delivery'], 'unknown')
+        self.h.set()
+        held = await self.call(p, 'tools/call', self.click_args())
+        self.assertEqual(held['result']['structuredContent']['code'], 'mac_target_stale')
+        self.assertEqual(len([c for c in self.h.calls() if c['name'] == 'click']), 1)
+        await self.capture(p)
+        self.assertFalse((await self.call(p, 'tools/call', self.click_args()))['result']['isError'])
 
     def restart_driver(self):
         observed = json.loads(self.h.observed.read_text())
@@ -291,7 +459,7 @@ class EndpointTests(unittest.IsolatedAsyncioTestCase):
     async def test_restart_same_connection_invalidates_targets_and_renegotiates(self):
         p, init = await self.ready()
         await self.capture(p)
-        starts = [c['arguments']['session'] for c in self.h.calls() if c['name'] == 'start_session']
+        starts = [c for c in self.h.calls() if c['name'] == 'start_session']
         self.restart_driver()
         refused = await self.call(p, 'tools/call', self.click_args())
         self.assertEqual(refused['result']['structuredContent']['code'], 'mac_target_stale')
@@ -299,7 +467,7 @@ class EndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(c['name'] == 'click' for c in self.h.calls()))
         fresh = await self.capture(p)
         self.assertNotEqual(fresh['result']['structuredContent']['generation'], init['result']['_meta']['loom']['generation'])
-        self.assertNotEqual([c['arguments']['session'] for c in self.h.calls() if c['name'] == 'start_session'][-1], starts[0])
+        self.assertEqual(len([c for c in self.h.calls() if c['name'] == 'start_session']), len(starts) + 1)
         good = await self.call(p, 'tools/call', self.click_args())
         self.assertEqual(good['result']['structuredContent']['delivery'], 'confirmed')
 
@@ -473,7 +641,7 @@ class EndpointTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(option, vector)
         starts = [c for c in self.h.calls() if c['name'] == 'start_session']
         self.assertEqual(len(starts), 1)
-        self.assertTrue(starts[0]['arguments']['session'].startswith('loom-'))
+        self.assertEqual(starts[0]['arguments'], {})
         second = await self.call(p, 'tools/call', self.click_args())
         self.assertFalse(second['result']['isError'])
         self.assertEqual(len([c for c in self.h.calls() if c['name'] == 'click']), 2)

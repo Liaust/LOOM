@@ -14,6 +14,12 @@ let
   retiredMainBoxIntakeNames = [ "Dropzone" "loom-lane" "LOOM Lane" ];
   systemdPath = path: ''"${path}"'';
   shellArg = lib.escapeShellArg;
+  extraBoxRoots = lib.mapAttrsToList (_: box: box.rootPath) cfg.boxes;
+  extraBoxDirectories = [ "Projects" "Documents" "Notes" "Topics" "Library" ".loom" ];
+  extraBoxACL = lib.concatStringsSep "," (
+    [ "u:${cfg.user}:rwx" "d:u:${cfg.user}:rwx" "m::rwx" "d:m::rwx" ]
+    ++ lib.optionals (lib.attrByPath [ "loom" "agents" "enable" ] false config) [ "u:agents:rwx" "d:u:agents:rwx" ]
+  );
 in
 {
   options.loom.storage = {
@@ -47,6 +53,14 @@ in
       {
         assertion = lib.all (name: !(lib.elem name retiredMainBoxIntakeNames)) managedMainBoxDirectories;
         message = "LOOM Main Box tmpfiles must not recreate retired Dropzone or Main Lane paths.";
+      }
+      {
+        assertion = lib.all (key: builtins.match "[a-z][a-z0-9_-]{0,62}" key != null) (builtins.attrNames cfg.boxes);
+        message = "LOOM Box keys must be stable lowercase filesystem-safe identifiers.";
+      }
+      {
+        assertion = builtins.length extraBoxRoots == builtins.length (lib.unique extraBoxRoots);
+        message = "LOOM additional Boxes must have distinct source roots.";
       }
     ];
 
@@ -87,7 +101,9 @@ in
       "d ${cfg.dataDir}/indexes 0750 ${cfg.user} ${cfg.group} - -"
       "d ${cfg.dataDir}/packages 0750 ${cfg.user} ${cfg.group} - -"
       "d ${cfg.dataDir}/state 0750 ${cfg.user} ${cfg.group} - -"
+      "d ${cfg.dataDir}/boxes 0750 ${cfg.user} ${cfg.group} - -"
       "d ${cfg.dataDir}/temp 0750 ${cfg.user} ${cfg.group} - -"
+      "f ${cfg.dataDir}/update.activation.lock 0660 ${cfg.user} ${cfg.group} - -"
       "d ${cfg.dataDir}/update 0770 ${cfg.user} ${cfg.group} - -"
       "d ${cfg.dataDir}/update/history 0770 ${cfg.user} ${cfg.group} - -"
       "d ${cfg.dataDir}/update/pending 0770 ${cfg.user} ${cfg.group} - -"
@@ -108,17 +124,62 @@ in
       "d ${cloudCfg.borgSecurityDir} 0700 ${cfg.user} ${cfg.group} - -"
     ]
       ++ lib.optionals (cfg.manageBoxPaths && cfg.boxPath != null) [
-      "a+ ${systemdPath boxParent} - - - - u:${cfg.user}:--x,m::r-x"
+      "a+ ${systemdPath boxParent} - - - - u:${cfg.user}:r-x,m::r-x"
       "d ${systemdPath cfg.boxPath} 0755 ${boxOwner} ${boxRootGroup} - -"
       "d ${systemdPath "${cfg.boxPath}/Projects"} 2770 ${boxOwner} ${boxServiceGroup} - -"
       "d ${systemdPath "${cfg.boxPath}/Documents"} 2770 ${boxOwner} ${boxServiceGroup} - -"
       "d ${systemdPath "${cfg.boxPath}/Notes"} 2770 ${boxOwner} ${boxServiceGroup} - -"
       "d ${systemdPath "${cfg.boxPath}/.loom"} 0770 ${boxOwner} ${boxServiceGroup} - -"
-    ];
+    ] ++ lib.concatMap (root:
+      [
+        "d ${systemdPath (builtins.dirOf root)} 2770 ${boxOwner} ${boxServiceGroup} - -"
+        "d ${systemdPath root} 2770 ${boxOwner} ${boxServiceGroup} - -"
+      ] ++ map (area: "d ${systemdPath "${root}/${area}"} 2770 ${boxOwner} ${boxServiceGroup} - -") extraBoxDirectories
+      ++ map (path: "a+ ${systemdPath path} - - - - ${extraBoxACL}") ([root] ++ map (area: "${root}/${area}") extraBoxDirectories)
+    ) extraBoxRoots;
+
+    system.activationScripts.loomAdditionalBoxAccess = lib.stringAfter [ "users" "loomBoxParentAcl" ] ''
+      ${lib.optionalString (extraBoxRoots != [ ]) ''
+        storage=${shellArg cfg.storageRoot}
+        if [ ! -d "$storage" ] || [ "$(${pkgs.coreutils}/bin/readlink -e "$storage")" != "$storage" ]; then
+          echo "LOOM additional Box archives require canonical existing storage" >&2
+          exit 1
+        fi
+        for path in ${lib.escapeShellArgs ([ "${cfg.storageRoot}/Boxes" ] ++ lib.mapAttrsToList (key: _: "${cfg.storageRoot}/Boxes/${key}") cfg.boxes)}; do
+          if [ -L "$path" ] || { [ -e "$path" ] && [ ! -d "$path" ]; }; then
+            echo "LOOM additional Box archive path is not a real directory" >&2
+            exit 1
+          fi
+        done
+        # tmpfiles refuses the existing loomadmin -> loom parent ownership
+        # transition. Provision only these exact managed directories here.
+        ${pkgs.coreutils}/bin/install -d -o ${shellArg cfg.user} -g ${shellArg cfg.group} -m 2750 ${shellArg "${cfg.storageRoot}/Boxes"}
+        ${lib.concatMapStringsSep "\n" (key: ''
+          path=${shellArg "${cfg.storageRoot}/Boxes/${key}"}
+          if [ ! -d "$path" ]; then
+            ${pkgs.coreutils}/bin/install -d -o ${shellArg cfg.user} -g ${shellArg cfg.group} -m 2770 "$path"
+          elif [ "$(${pkgs.coreutils}/bin/stat -c '%U:%G' -- "$path")" != ${shellArg "${cfg.user}:${cfg.group}"} ]; then
+            echo "LOOM additional Box archive root owner is invalid" >&2
+            exit 1
+          fi
+        '') (builtins.attrNames cfg.boxes)}
+      ''}
+      ${lib.concatMapStringsSep "\n" (root: ''
+        for path in ${lib.escapeShellArgs ([root] ++ map (area: "${root}/${area}") extraBoxDirectories)}; do
+          if [ -L "$path" ]; then
+            echo "LOOM additional Box paths must not be symlinks" >&2
+            exit 1
+          fi
+          if [ -d "$path" ]; then
+            ${pkgs.acl}/bin/setfacl -m ${shellArg extraBoxACL} "$path"
+          fi
+        done
+      '') extraBoxRoots}
+    '';
 
     system.activationScripts.loomBoxParentAcl = lib.mkIf (cfg.manageBoxPaths && cfg.boxPath != null) ''
       if [ -d ${shellArg boxParent} ]; then
-        ${pkgs.acl}/bin/setfacl -m u:${cfg.user}:--x,g:${cfg.group}:--x,m::r-x ${shellArg boxParent}
+        ${pkgs.acl}/bin/setfacl -m u:${cfg.user}:r-x,g:${cfg.group}:--x,m::r-x ${shellArg boxParent}
       fi
     '';
 

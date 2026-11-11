@@ -1,5 +1,13 @@
 # Retrieval Routing Reference
 
+## Known Sources And References
+
+Use scoped `rg --files`, `rg`, directory listings and direct reads for known
+files, filenames, code symbols or literal text on the owning machine. Ordinary
+source lookup needs no search skill, docs lookup, indexing wait or health
+preflight. Get known file/record references directly; search discovers missing
+context rather than re-resolving an exact identity.
+
 ## Technical Objects
 
 Use `loom object list` and `loom object inspect <object-ref>` for object
@@ -8,15 +16,23 @@ extraction failures. Do not reinterpret an object failure as a semantic claim.
 
 ## Notes Source Material
 
-Use `loom notes search <query>` when the question asks what a source says,
-where wording appears, or which note contains material. Registered Notes,
+Use `loom notes search <query>` for unknown locations, conceptual questions,
+material across collections or published PDF/image extraction. Registered Notes,
 Topics drafts, Library sources and explicitly declared project docs/research
 share this engine. Documents and Imports are not implicitly Notes sources.
 Use `--category topics`, `--category library` or `--category projects` when the
 question supplies that context, and preserve project/owner filters.
 
-Object metadata and search snippets are not an exact quotation. For a selected
-passage, bind the knowledge object ID, version ID, chunk ID and source hash:
+Read the chosen current source directly, or use
+`loom notes read <file-id-or-exact-path>` for a managed reference. Native text
+does not wait for indexing; PDF/image reads use available current extraction
+without starting heavy processing. A missing search result does not prove file
+absence. Object metadata and search snippets are not an exact quotation.
+
+### Historical Citations
+
+Only for an existing historical citation or recovery question, preserve the
+knowledge object ID, version ID, chunk ID and source hash:
 
 ```text
 loom notes passage get <chunk-id> --object <object-id> --version <version-id> --source-hash sha256:<digest>
@@ -43,13 +59,21 @@ for the separate reviewed candidate/record boundary.
 
 Use `loom provenance search <query>` for accepted records and unresolved cases.
 Pending candidates require `--include-pending` or the explicit
-`pending_candidates` collection and remain separate. Follow compact IDs with:
+`pending_candidates` collection and remain separate. When the preview lacks
+meaning or qualifications needed for the task, get the selected exact ID:
 
 ```text
 loom provenance record get <record-id>
 loom provenance candidate get <candidate-id>
 loom provenance case get <case-id>
 ```
+
+Routine get avoids duplicated payload/history while preserving relevant meaning,
+scope, posture and completeness. Add `--sources` for stored source receipts;
+add `--details --json` for full lifecycle input or diagnostic fields. A bounded
+view's missing/truncated evidence is not an empty complete set. Read the actual
+source when verification of its present contents is needed. Lifecycle mutation
+still requires the exact current state/evidence specified by its operation.
 
 ## Project And Repository Navigation
 
@@ -81,6 +105,10 @@ describes a repository by aliases, purpose, topics, role, or active focus. Load
 the selected semantic card with `loom provenance repo get <repository-id>`.
 Return to `loom project` only when the card exposes a technical navigation gap.
 
-At every step, search one engine first, exact-get second, and expand
-sequentially. Report collection, posture, currentness, truncation, and the
-reason for any expansion.
+Search when discovery is needed; use another surface for an actual missing
+piece, not to satisfy a fixed call order. Independent retrievals may run in
+parallel; engine scores are not interchangeable and separate reads need not
+share a snapshot. Report relevant collection, posture, currentness and truncation;
+this is not a mandatory result tuple for an ordinary native file read. Operational
+state and managed mutations still use their supported surfaces, not database
+queries or generated-view edits.

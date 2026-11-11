@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"loom.local/loom/internal/notesworkspace"
@@ -20,13 +21,38 @@ type Scope struct {
 	// Operator-selected exact predecessor. It authorizes export rebinding only,
 	// never incoming writes under a withdrawn generation.
 	PreviousGeneration string `json:"previous_generation,omitempty"`
+	ReadOnly           bool   `json:"read_only,omitempty"`
 }
 type Service struct {
+	ReferenceSpool string
 	Replica, Epoch string
-	Scopes         []Scope
-	Store          Store
-	Source         Source
-	Native         Native
+	// Current canonical source admission is required for retained export adoption.
+	AdoptExisting         bool
+	LayoutPublication     bool
+	Scopes                []Scope
+	UnavailableScopes     []Scope
+	Store                 Store
+	Source                Source
+	Native                Native
+	Now                   func() time.Time
+	RetryRevision         string
+	MoveRetryAt           time.Time
+	LayoutRetryAt         time.Time
+	LayoutHoldReasons     map[string]int
+	LayoutInspected       int
+	ReferenceStagedBytes  int64
+	ReferenceMetadataHeld int
+	ReferenceReadBytes    int64
+	ReferenceReadAttempts int
+	ReferenceReadMS       int64
+	LayoutMetadataProbes  int
+	LayoutPressure        string
+	LayoutAttempts        []LayoutAttemptDetail
+	layoutBudget          *referenceBudget
+	layoutDependencies    *layoutDependencyCache
+	ArchiveRetryAt        time.Time
+	MappingIndexPending   bool
+	SourceMovesQueued     bool
 }
 type BindingRecord struct {
 	Binding                    Binding
@@ -36,6 +62,7 @@ type FileMapping struct {
 	Scope                                    Scope
 	ClientFileID, SourceFileID, CreateBaseID string
 	Latest                                   *Binding
+	SuccessorOf                              string `json:"SuccessorOf,omitempty"`
 }
 type Join struct {
 	IntentRaw, PublicationRaw  string
@@ -48,6 +75,9 @@ type Join struct {
 	// ResolutionID links a reviewed attempt without changing the original Ack.
 	ResolutionID   string `json:"ResolutionID,omitempty"`
 	OperatorReview string `json:"OperatorReview,omitempty"`
+	RetryAfterMS   int64  `json:"RetryAfterMS,omitempty"`
+	RetryContext   string `json:"RetryContext,omitempty"`
+	RetryAttempts  int    `json:"RetryAttempts,omitempty"`
 }
 type Observation struct {
 	Evidence Evidence
@@ -55,7 +85,11 @@ type Observation struct {
 }
 type Progress struct {
 	Imported, Processed int
+	Incoming            int
+	ReferencePaths      []string
+	Applied             int
 	NextSequence        json.RawMessage
+	MoreWork            bool
 	NextOperation       string
 	Held                int
 }
@@ -130,7 +164,12 @@ func (s *Service) Step(ctx context.Context, limit int) (progress Progress, err e
 		if page.Status != "available" || !json.Valid(page.Next) || len(page.Changes) > limit {
 			return ErrHeld
 		}
+		progress.MoreWork = len(page.Changes) == limit
+		if page.HasMore != nil {
+			progress.MoreWork = *page.HasMore
+		}
 		fresh := make([]string, 0, limit)
+		referencePaths := map[string]bool{}
 		for _, change := range page.Changes {
 			if len(change.Leaves) > 64 {
 				return ErrHeld
@@ -139,6 +178,10 @@ func (s *Service) Step(ctx context.Context, limit int) (progress Progress, err e
 				id := key(leaf.ID, leaf.Revision)
 				if leaf.Kind == "system" {
 					continue
+				}
+				if referencePath(leaf.Path) && !referencePaths[leaf.Path] {
+					referencePaths[leaf.Path] = true
+					progress.ReferencePaths = append(progress.ReferencePaths, leaf.Path)
 				}
 				leaf.Content = nil // observations retain references, never a second payload queue
 				observation := Observation{Evidence: leaf, Reason: "missing_client_intent"}
@@ -185,6 +228,9 @@ func (s *Service) Step(ctx context.Context, limit int) (progress Progress, err e
 				}
 				if reason == "consumed" {
 					progress.Imported++
+					if strings.Contains(ob.Evidence.Path, "/intent/") || strings.Contains(ob.Evidence.Path, "/publication/") {
+						progress.Incoming++
+					}
 				}
 			}
 		}
@@ -193,11 +239,24 @@ func (s *Service) Step(ctx context.Context, limit int) (progress Progress, err e
 		} else {
 			cursor.Retry = ids[len(ids)-1]
 		}
-		ops, e := r.ListPending(ctx, "operation", cursor.Operation, limit)
+		now := time.Now()
+		if s.Now != nil {
+			now = s.Now()
+		}
+		retryContext := s.retryContext()
+		var ops []string
+		if ready, ok := r.(interface {
+			ListReadyOperations(context.Context, string, int, string, int64) ([]string, error)
+		}); ok {
+			ops, e = ready.ListReadyOperations(ctx, cursor.Operation, limit, retryContext, now.UnixMilli())
+		} else {
+			ops, e = r.ListPending(ctx, "operation", cursor.Operation, limit)
+		}
 		if e != nil {
 			return e
 		}
 		visiting, done := map[string]bool{}, map[string]bool{}
+		progress.MoreWork = progress.MoreWork || len(ops) == limit
 		budget := 128
 		var visit func(string) error
 		visit = func(id string) error {
@@ -213,18 +272,36 @@ func (s *Service) Step(ctx context.Context, limit int) (progress Progress, err e
 			if e != nil {
 				return e
 			}
+			if j.RetryContext == retryContext && j.RetryAfterMS > now.UnixMilli() && !predecessorApplied(ctx, r, j) {
+				return nil
+			}
 			if i, e := parseIntent([]byte(j.IntentRaw)); e == nil && i.Predecessor != "" && j.Ack == nil {
 				if e := visit(i.Predecessor); e != nil {
 					return e
 				}
 			}
+			oldReason := j.Reason
+			wasApplied := j.Status == "applied" && j.AckPublished
 			if e = s.process(ctx, r, id, &j); e != nil {
 				return e
+			}
+			if j.Status == "held" && !j.AckPublished {
+				if j.Reason != oldReason || j.RetryContext != retryContext {
+					j.RetryAttempts = 0
+				}
+				j.RetryAttempts++
+				delay := operationRetryDelay(j.Reason, j.RetryAttempts)
+				j.RetryAfterMS, j.RetryContext = now.Add(delay).UnixMilli(), retryContext
+			} else {
+				j.RetryAfterMS, j.RetryContext, j.RetryAttempts = 0, "", 0
 			}
 			if e = r.Put(ctx, "operation", id, j); e != nil {
 				return e
 			}
 			progress.Processed++
+			if !wasApplied && j.Status == "applied" && j.AckPublished {
+				progress.Applied++
+			}
 			if j.Status == "held" {
 				progress.Held++
 			}
@@ -250,9 +327,42 @@ func (s *Service) Step(ctx context.Context, limit int) (progress Progress, err e
 	})
 	return
 }
+func (s *Service) retryContext() string {
+	raw, _ := json.Marshal(struct {
+		Scopes   []Scope
+		Revision string
+	}{s.Scopes, s.RetryRevision})
+	return digest(raw)
+}
+
+func operationRetryDelay(reason string, attempts int) time.Duration {
+	switch reason {
+	case "source_admission_unavailable", "directory_source_unavailable", "source_create_unavailable",
+		"directory_create_unavailable", "source_operation_unavailable", "directory_operation_unavailable",
+		"operator_publication_pending", "directory_publication_pending", "ack_publication_pending":
+		return min(30*time.Second*time.Duration(1<<min(max(attempts-1, 0), 4)), 5*time.Minute)
+	default:
+		// New control evidence and accepted predecessors bypass this deadline.
+		// An unchanged missing binding/revision is not a transport retry.
+		return 6 * time.Hour
+	}
+}
+
+func predecessorApplied(ctx context.Context, r Records, j Join) bool {
+	if j.Reason != "predecessor_not_applied" && j.Reason != "waiting_for_predecessor" {
+		return false
+	}
+	i, err := parseIntent([]byte(j.IntentRaw))
+	if err != nil || i.Predecessor == "" {
+		return false
+	}
+	p, err := load[Join](ctx, r, "operation", i.Predecessor)
+	return err == nil && p.Status == "applied"
+}
+
 func (s *Service) importControl(ctx context.Context, r Records, leaf Evidence) (string, error) {
 	// Payloads are independently verified when paired with an explicit intent.
-	if strings.HasPrefix(leaf.Path, Prefix+"payload/") {
+	if strings.HasPrefix(leaf.Path, Prefix+"payload/") && !strings.HasPrefix(leaf.Path, StructurePrefix) && !strings.HasPrefix(leaf.Path, LayoutPrefix) {
 		return "consumed", nil
 	}
 	var exact Evidence
@@ -280,6 +390,15 @@ func (s *Service) importControl(ctx context.Context, r Records, leaf Evidence) (
 			return "control_invalid", nil
 		}
 		intentID = i.ID
+		if i.EntryKind == "directory" {
+			for _, path := range []string{i.Path, i.Target} {
+				if path != "" {
+					if err := r.Put(ctx, "cursor", "directory_reservation_"+key(i.Workspace, i.Collection, path), i.ID); err != nil {
+						return "", err
+					}
+				}
+			}
+		}
 	case "publication":
 		p, e := parsePublication(exact.Content)
 		if e != nil {
@@ -287,7 +406,7 @@ func (s *Service) importControl(ctx context.Context, r Records, leaf Evidence) (
 		}
 		intentID = p.IntentID
 	// Inbound bindings/acks are never authoritative for the server mapping.
-	case "binding", "ack":
+	case "binding", "ack", "scope", "layout":
 		return "consumed", nil
 	default:
 		return "control_invalid", nil
@@ -307,6 +426,9 @@ func (s *Service) importControl(ctx context.Context, r Records, leaf Evidence) (
 		j.IntentRaw = string(exact.Content)
 	} else {
 		j.PublicationRaw = string(exact.Content)
+	}
+	if old != string(exact.Content) {
+		j.RetryAfterMS, j.RetryContext, j.RetryAttempts = 0, "", 0
 	}
 	if e = r.Put(ctx, "operation", intentID, j); e != nil {
 		return "", e
@@ -341,10 +463,54 @@ func (s *Service) process(ctx context.Context, r Records, id string, j *Join) er
 		holdJoin(j, "publication_pair_mismatch")
 		return nil
 	}
-	scope, ok := s.scope(i)
+	retired, retirementErr := load[Layout](ctx, r, "export", sourceMoveRetirement(Binding{
+		Workspace: i.Workspace, Collection: i.Collection, FileID: i.FileID, Path: i.Path}))
+	if retirementErr != nil && !missing(retirementErr) {
+		return retirementErr
+	}
+	if retirementErr == nil && retired.SourceMove && (i.Base == nil || i.Base.SourceSequence <= retired.Previous.SourceSequence) {
+		j.Ack = &Ack{Header: Header{1, "ack", "ack_" + key(s.Replica, i.ID)}, IntentID: i.ID,
+			IntentDigest: p.IntentDigest, PublicationID: p.ID, Status: "held", Reason: "source_relocated"}
+		j.Status, j.Reason = "held", "source_relocated"
+		return s.publishAck(ctx, j)
+	}
+	scope, ok := s.intentScope(ctx, r, i)
 	if !ok {
-		holdJoin(j, "scope_unavailable")
+		for _, unavailable := range s.UnavailableScopes {
+			if unavailable.Workspace == i.Workspace && unavailable.Collection == i.Collection {
+				holdJoin(j, "source_admission_unavailable")
+				return nil
+			}
+		}
+		reason := "collection_withdrawn"
+		for _, current := range s.Scopes {
+			if current.Workspace == i.Workspace && current.Collection == i.Collection {
+				reason = "configuration_changed"
+				break
+			}
+		}
+		// This is a durable refusal of this exact old request, not authority
+		// to rebase it. A current binding/review must produce a new intent.
+		ackID := "ack_" + key(s.Replica, i.ID)
+		if i.EntryKind == "directory" {
+			ackID = "dir_" + ackID
+		} else if strings.HasPrefix(i.ID, "canvas_") {
+			ackID = "canvas_" + ackID
+		}
+		j.Ack = &Ack{Header: Header{1, "ack", ackID}, IntentID: i.ID,
+			IntentDigest: p.IntentDigest, PublicationID: p.ID, Status: "held", Reason: reason}
+		j.Status = "held"
+		if e := r.Put(ctx, "operation", id, *j); e != nil {
+			return e
+		}
+		return s.publishAck(ctx, j)
+	}
+	if scope.ReadOnly {
+		holdJoin(j, "archive_reference_read_only")
 		return nil
+	}
+	if i.EntryKind == "directory" {
+		return s.processDirectory(ctx, r, id, j, i, p, scope)
 	}
 	relative, ok := scope.relative(i.Path)
 	if !ok {
@@ -368,14 +534,18 @@ func (s *Service) process(ctx context.Context, r Records, id string, j *Join) er
 		if e != nil {
 			return e
 		}
+		if previous.Status != "applied" {
+			holdJoin(j, "predecessor_not_applied")
+			return nil
+		}
 		pi, e := parseIntent([]byte(previous.IntentRaw))
 		pp, pe := parsePublication([]byte(previous.PublicationRaw))
 		expectedPath := pi.Path
 		if pi.Operation == "rename" {
 			expectedPath = pi.Target
 		}
-		if e != nil || pe != nil || mapKey(pi) != mapKey(i) || pi.Operation == "delete" || !sameBase(i.Base, pi.Base) || expectedPath != i.Path || previous.Status != "applied" {
-			holdJoin(j, "predecessor_not_applied")
+		if e != nil || pe != nil || mapKey(pi) != mapKey(i) || pi.Operation == "delete" || !sameBase(i.Base, pi.Base) || expectedPath != i.Path {
+			holdJoin(j, "predecessor_mismatch")
 			return nil
 		}
 		j.SourceFileID = previous.SourceFileID
@@ -467,13 +637,13 @@ func (s *Service) process(ctx context.Context, r Records, id string, j *Join) er
 				return nil
 			}
 			mapping = FileMapping{Scope: scope, ClientFileID: i.FileID, SourceFileID: read.File.ID, CreateBaseID: read.Base.ID}
-			if e = s.saveMapping(ctx, r, i, mapping); e != nil {
-				if errors.Is(e, ErrHeld) {
-					holdJoin(j, "source_identity_collision")
-					return nil
-				}
-				return e
+		}
+		if e = s.saveMapping(ctx, r, i, mapping); e != nil {
+			if errors.Is(e, ErrHeld) {
+				holdJoin(j, "source_identity_collision")
+				return nil
 			}
+			return e
 		}
 		j.SourceFileID = mapping.SourceFileID
 		j.SourceBaseID = mapping.CreateBaseID
@@ -486,7 +656,7 @@ func (s *Service) process(ctx context.Context, r Records, id string, j *Join) er
 	if e != nil {
 		return e
 	}
-	if mapping.Scope != scope || mapping.SourceFileID != j.SourceFileID {
+	if !layoutScopeAllowed(ctx, r, mapping.Scope, scope) || mapping.SourceFileID != j.SourceFileID {
 		holdJoin(j, "file_mapping_mismatch")
 		return nil
 	}
@@ -542,6 +712,9 @@ func (s *Service) process(ctx context.Context, r Records, id string, j *Join) er
 		return nil
 	}
 	ack := Ack{Header: Header{1, "ack", "ack_" + key(s.Replica, i.ID)}, IntentID: i.ID, IntentDigest: p.IntentDigest, PublicationID: p.ID, Status: "conflict", Reason: "source_conflict"}
+	if strings.HasPrefix(i.ID, "canvas_") {
+		ack.ID = "canvas_" + ack.ID
+	}
 	j.Status = "conflict"
 	j.ResultBaseID = outcome.ResultBaseID
 	j.ResultFile = outcome.ResultFile
@@ -563,6 +736,13 @@ func (s *Service) process(ctx context.Context, r Records, id string, j *Join) er
 				target = i.Target
 			}
 			binding := Binding{Header: Header{1, "binding", "binding_" + key(s.Replica, i.ID)}, Workspace: i.Workspace, Collection: i.Collection, Generation: i.Generation, FileID: i.FileID, CollectionRoot: scope.Root, Path: target, SourceBase: "base_" + key(s.Replica, result.ID), NativeRevision: findRevision(p, target, "content"), SHA256: i.SHA256, Writable: true}
+			if strings.HasPrefix(i.ID, "canvas_") {
+				binding.ID = "canvas_" + binding.ID
+			}
+			binding.ID, e = layoutBindingID(ctx, r, scope, binding.ID)
+			if e != nil {
+				return e
+			}
 			binding.SourceSequence = 1
 			if mapping.Latest != nil {
 				binding.SourceSequence = mapping.Latest.SourceSequence + 1
@@ -578,7 +758,11 @@ func (s *Service) process(ctx context.Context, r Records, id string, j *Join) er
 				return e
 			}
 			mapping.Latest = &binding
+			mapping.Scope = scope
 			if e = r.Put(ctx, "file", mapKey(i), mapping); e != nil {
+				return e
+			}
+			if e = indexMapping(ctx, r, mapping); e != nil {
 				return e
 			}
 			ack.Binding = &binding
@@ -605,12 +789,19 @@ func (s *Service) saveMapping(ctx context.Context, r Records, i Intent, m FileMa
 		return e
 	}
 	if e == nil && old != i.FileID {
-		return ErrHeld
+		if err := s.reserveSourceSuccessor(ctx, r, i, m, old); err != nil {
+			return err
+		}
+		m.SuccessorOf = old
+	}
+	// Keep a replayable mapping before handing the current reverse pointer over.
+	if e = r.Put(ctx, "file", mapKey(i), m); e != nil {
+		return e
 	}
 	if e = r.Put(ctx, "source_file", reverse, i.FileID); e != nil {
 		return e
 	}
-	return r.Put(ctx, "file", mapKey(i), m)
+	return indexMapping(ctx, r, m)
 }
 func (s *Service) publishAck(ctx context.Context, j *Join) error {
 	if j.AckPublished {

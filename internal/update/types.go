@@ -206,21 +206,23 @@ type ReleaseManifest struct {
 }
 
 type UpdateManifest struct {
-	SchemaVersion string             `json:"schema_version" yaml:"schema_version"`
-	UpdateID      string             `json:"update_id" yaml:"update_id"`
-	Status        string             `json:"status" yaml:"status"`
-	PlanHash      string             `json:"plan_hash,omitempty" yaml:"plan_hash,omitempty"`
-	StartedAt     time.Time          `json:"started_at,omitempty" yaml:"started_at,omitempty"`
-	FinishedAt    *time.Time         `json:"finished_at,omitempty" yaml:"finished_at,omitempty"`
-	Active        ReleaseState       `json:"active" yaml:"active"`
-	Target        ReleaseState       `json:"target" yaml:"target"`
-	Migrations    MigrationPlan      `json:"migrations" yaml:"migrations"`
-	BackupRef     string             `json:"backup_ref,omitempty" yaml:"backup_ref,omitempty"`
-	BackupPath    string             `json:"backup_path,omitempty" yaml:"backup_path,omitempty"`
-	Rollback      RollbackPlan       `json:"rollback" yaml:"rollback"`
-	Diagnostics   []UpdateDiagnostic `json:"diagnostics,omitempty" yaml:"diagnostics,omitempty"`
-	Metadata      map[string]any     `json:"metadata,omitempty" yaml:"metadata,omitempty"`
-	Maintenance   *MaintenanceWindow `json:"maintenance_window,omitempty" yaml:"maintenance_window,omitempty"`
+	SchemaVersion   string             `json:"schema_version" yaml:"schema_version"`
+	UpdateID        string             `json:"update_id" yaml:"update_id"`
+	Status          string             `json:"status" yaml:"status"`
+	PlanHash        string             `json:"plan_hash,omitempty" yaml:"plan_hash,omitempty"`
+	StartedAt       time.Time          `json:"started_at,omitempty" yaml:"started_at,omitempty"`
+	FinishedAt      *time.Time         `json:"finished_at,omitempty" yaml:"finished_at,omitempty"`
+	Active          ReleaseState       `json:"active" yaml:"active"`
+	Target          ReleaseState       `json:"target" yaml:"target"`
+	Migrations      MigrationPlan      `json:"migrations" yaml:"migrations"`
+	BackupRef       string             `json:"backup_ref,omitempty" yaml:"backup_ref,omitempty"`
+	BackupPath      string             `json:"backup_path,omitempty" yaml:"backup_path,omitempty"`
+	Rollback        RollbackPlan       `json:"rollback" yaml:"rollback"`
+	Diagnostics     []UpdateDiagnostic `json:"diagnostics,omitempty" yaml:"diagnostics,omitempty"`
+	Metadata        map[string]any     `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	Maintenance     *MaintenanceWindow `json:"maintenance_window,omitempty" yaml:"maintenance_window,omitempty"`
+	ReadinessTarget *ReadinessTarget   `json:"readiness_target,omitempty" yaml:"readiness_target,omitempty"`
+	Readiness       *ReadinessEvidence `json:"readiness,omitempty" yaml:"readiness,omitempty"`
 }
 
 type RollbackPlanSummary struct {
@@ -233,13 +235,14 @@ type RollbackPlanSummary struct {
 }
 
 type UpdateStatus struct {
-	CheckedAt          time.Time          `json:"checked_at"`
-	StateDir           string             `json:"state_dir"`
-	ActiveManifestPath string             `json:"active_manifest_path"`
-	ActiveExists       bool               `json:"active_exists"`
-	Active             *UpdateManifest    `json:"active,omitempty"`
-	History            []UpdateManifest   `json:"history"`
-	Diagnostics        []UpdateDiagnostic `json:"diagnostics,omitempty"`
+	CheckedAt          time.Time                `json:"checked_at"`
+	StateDir           string                   `json:"state_dir"`
+	ActiveManifestPath string                   `json:"active_manifest_path"`
+	ActiveExists       bool                     `json:"active_exists"`
+	Active             *UpdateManifest          `json:"active,omitempty"`
+	History            []UpdateManifest         `json:"history"`
+	Diagnostics        []UpdateDiagnostic       `json:"diagnostics,omitempty"`
+	Reconciliations    []ReconciliationEvidence `json:"reconciliations,omitempty"`
 }
 
 type RuntimeIdentity struct {

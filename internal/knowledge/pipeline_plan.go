@@ -35,18 +35,28 @@ type CompiledPipelinePlan struct {
 }
 
 func CompilePipelinePlan(object KnowledgeObject, policy PipelinePolicy) (CompiledPipelinePlan, error) {
+	return compilePipelinePlan(object, policy, false)
+}
+
+func compilePipelinePlan(object KnowledgeObject, policy PipelinePolicy, selectiveEnrichment bool) (CompiledPipelinePlan, error) {
 	definition := PipelineDefinitionForObject(object)
 	if err := ValidatePipelineDefinition(definition); err != nil {
 		return CompiledPipelinePlan{}, err
 	}
 	plan := CompiledPipelinePlan{SchemaVersion: "knowledge.pipeline_plan.v1", DefinitionKey: definition.Key, DefinitionVersion: definition.Version, FileFamily: definition.FileFamily}
-	source, err := knowledgeSourcePolicy(object)
+	if definition.FileFamily == "pdf" || definition.FileFamily == "image" {
+		plan.SchemaVersion = "knowledge.pipeline_plan.v2"
+	}
+	source, search, err := knowledgeSourcePolicyAndSearch(object)
 	if err != nil {
 		return CompiledPipelinePlan{}, err
 	}
 	if source != nil {
 		policy = effectiveSourcePipelinePolicy(policy, source)
-		plan.SourcePolicy, plan.EffectivePolicy = source, &policy
+		plan.SourcePolicy = source
+	}
+	if source != nil || plan.SchemaVersion == "knowledge.pipeline_plan.v2" {
+		plan.EffectivePolicy = &policy
 	}
 	for index, stage := range definition.Stages {
 		compiled := CompiledPipelineStage{
@@ -93,6 +103,21 @@ func CompilePipelinePlan(object KnowledgeObject, policy PipelinePolicy) (Compile
 	if len(plan.Stages) == 0 || plan.Stages[0].StageKey != FilePipelineStageMetadata {
 		return CompiledPipelinePlan{}, fmt.Errorf("%w: compiled pipeline must begin with metadata", ErrInvalid)
 	}
+	selectUsefulPipelineStages(&plan)
+	if !selectiveEnrichment && (search == "metadata" || search == "none") {
+		for i := range plan.Stages {
+			stage := &plan.Stages[i]
+			switch stage.StageKey {
+			case FilePipelineStageMetadata, FilePipelineStageFinalize:
+				continue
+			case FilePipelineStageLexicalIndex:
+				if search == "metadata" {
+					continue
+				}
+			}
+			stage.Selected, stage.SkipReason = false, "disabled_by_source_search"
+		}
+	}
 	return plan, nil
 }
 
@@ -105,4 +130,45 @@ func (plan CompiledPipelinePlan) Snapshot() (json.RawMessage, error) {
 		return nil, err
 	}
 	return payload, nil
+}
+
+// Preserve explicit policy skips in the saved plan, but admit only stages with
+// a consumer. Called again after a version-specific enrichment selects stages.
+func selectUsefulPipelineStages(plan *CompiledPipelinePlan) {
+	selected := func(key string) bool {
+		for _, stage := range plan.Stages {
+			if stage.StageKey == key {
+				return stage.Selected
+			}
+		}
+		return false
+	}
+	body := plan.FileFamily != "image" || selected(FilePipelineStageImageOCR) || selected(FilePipelineStageImageDescription)
+	for i := range plan.Stages {
+		stage := &plan.Stages[i]
+		useful := true
+		switch stage.StageKey {
+		case FilePipelineStagePDFPageAnalysis:
+			useful = selected(FilePipelineStagePDFOCR)
+		case FilePipelineStageConsolidateText, FilePipelineStageChunk:
+			useful = body
+		case FilePipelineStageEmbedding:
+			if !body && stage.Selected {
+				stage.Selected, stage.SkipReason = false, "no_body_producer"
+			}
+			continue
+		default:
+			continue
+		}
+		stage.Selected = useful
+		stage.SkipReason = ""
+		if !useful {
+			stage.SkipReason = "no_selected_consumer"
+		}
+	}
+}
+
+func effectiveCheapPipelinePlan(raw json.RawMessage) bool {
+	var plan CompiledPipelinePlan
+	return json.Unmarshal(raw, &plan) == nil && plan.SchemaVersion == "knowledge.pipeline_plan.v2"
 }

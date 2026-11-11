@@ -17,6 +17,9 @@ func TestProjectCreateConflictAndReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if loaded.Declaration.SchemaVersion != ProjectSchemaV06 || loaded.Declaration.Resources["files"].Knowledge.Path != "." {
+		t.Fatal("constructor does not use real project hierarchy")
+	}
 	// Ordinary user payload survives a constructor replay.
 	payload := filepath.Join(result.ProjectRoot, "notes", "user.md")
 	if err := os.WriteFile(payload, []byte("owned"), 0600); err != nil {

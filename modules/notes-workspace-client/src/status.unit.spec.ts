@@ -20,6 +20,39 @@ function chain(size: number): Operation[] {
 }
 
 describe("compact actionable Notes status", () => {
+    it("keeps retained observations out of warning categories and the normal status", () => {
+        const s = state([operation("accepted", "applied")], {
+            excluded: "device_excluded/reflection_chunks_pending", archive: "source_managed_structure",
+            old: "observed_absence/missing_writable_binding", retired: "configuration_retained_history", local: "untracked_scan",
+        });
+        const original = structuredClone(s), view = new NotesStatus();
+        expect(view.summary(s)).toMatchObject({ text: "LOOM: Up to date", unfinished: 0, holds: 5,
+            scanObservations: 5, captureHolds: 0, reflectionHolds: 0, otherHolds: 0,
+            excludedObservations: 1, managedObservations: 1, historicalObservations: 2, localObservations: 1 });
+        expect(view.overview(s).groups.total).toBe(0);
+        expect(view.overview(s, { kind: "holds" }).groups.total).toBe(0);
+        expect(view.overview(s, { kind: "observations" }).groups.total).toBe(5);
+        expect(s).toEqual(original);
+    });
+    it("never hides real checks or a blocked operation alongside excluded history", () => {
+        const s = state([operation("blocked", "held"), operation("child", "queued", { predecessor: "blocked" })], {
+            expected: "device_excluded/reference_only", capture: "missing_writable_binding",
+            incoming: "reflection_preserves_local_edit", unknown: "unknown_legacy_reason",
+        });
+        const view = new NotesStatus();
+        expect(view.summary(s)).toMatchObject({ unfinished: 2, blocked: 1, waiting: 1,
+            holds: 4, scanObservations: 1, captureHolds: 1, reflectionHolds: 1, otherHolds: 1 });
+        expect(view.summary(s).text).toContain("1 dependent; 3 path checks");
+        expect(view.overview(s, { kind: "holds" }).groups.total).toBe(3);
+        expect(view.overview(s, { kind: "operations" }).groups.total).toBe(1);
+    });
+    it("reports an uploaded old-generation edit as configuration review, including scope-only updates",()=>{
+        const s=state([published(operation("old","uploaded"))]),view=new NotesStatus();
+        expect(view.summary(s)).toMatchObject({pendingAcceptance:1,blocked:0});
+        s.scopes={"w/c":{version:1,kind:"scope",id:"newscope",workspace:"w",collection:"c",generation:"new",collectionRoot:"Notes",writable:true,sourceSequence:2}};
+        expect(view.summary(s)).toMatchObject({pendingAcceptance:0,blocked:1});
+        expect(view.overview(s).groups.items[0]).toMatchObject({kind:"blocked",reason:"configuration_changed"});
+    });
     it("keeps recovered-root acceptance separate from ordinary publication and pages holds independently", () => {
         const root = { ...published(operation("root", "uploaded", { operation: "create" })), nativeRecovery: true };
         const child = operation("child", "queued", { predecessor: "root" });

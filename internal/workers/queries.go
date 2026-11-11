@@ -136,6 +136,10 @@ func (s Service) ListDueWorkers(ctx context.Context, now time.Time, limit int) (
 }
 
 func (s Service) listDueWorkers(ctx context.Context, now time.Time, limit int, lane string) ([]WorkerInstance, error) {
+	return s.listDueWorkersExcluding(ctx, now, limit, lane, nil)
+}
+
+func (s Service) listDueWorkersExcluding(ctx context.Context, now time.Time, limit int, lane string, excluded []string) ([]WorkerInstance, error) {
 	if s.DB == nil {
 		return nil, fmt.Errorf("%w: database is required", ErrInvalid)
 	}
@@ -146,9 +150,8 @@ func (s Service) listDueWorkers(ctx context.Context, now time.Time, limit int, l
 		  AND enabled = true
 		  AND paused = false
 		  AND current_run_id IS NULL
-		  AND ($10 = '' OR ($10 = 'jobs' AND worker_kind = 'job_runner')
-		    OR ($10 = 'notes' AND worker_kind = 'notes_workspace_sync')
-		    OR ($10 = 'background' AND worker_kind NOT IN ('job_runner','notes_workspace_sync')))
+		  AND worker_instance_id <> ALL($11::text[])
+		  AND ($10 = '' OR $10 = `+workerLaneSQL()+`)
 		  AND (
 		      (tick_policy_json->>'mode' = $6 AND (next_run_after IS NULL OR next_run_after <= $8))
 		      OR
@@ -156,7 +159,7 @@ func (s Service) listDueWorkers(ctx context.Context, now time.Time, limit int, l
 		  )
 		ORDER BY COALESCE(next_run_after, '-infinity'::timestamptz), worker_key ASC
 		LIMIT $9
-	`, LocalityMainOwned, LifecycleRegistered, LifecycleActive, LifecycleDegraded, LifecycleFailed, TickModeInterval, TickModeDailyLocal, now.UTC(), limit, lane)
+	`, LocalityMainOwned, LifecycleRegistered, LifecycleActive, LifecycleDegraded, LifecycleFailed, TickModeInterval, TickModeDailyLocal, now.UTC(), limit, lane, textArrayLiteral(excluded))
 	if err != nil {
 		return nil, err
 	}
@@ -171,6 +174,73 @@ func (s Service) listDueWorkers(ctx context.Context, now time.Time, limit int, l
 		out = append(out, instance)
 	}
 	return out, rows.Err()
+}
+
+func (s Service) nextSupervisorDeadline(ctx context.Context, lane string, now time.Time, safety time.Duration, probes map[string]time.Time) (time.Time, error) {
+	next := now.Add(safety)
+	active := map[string]bool{}
+	rows, err := s.DB.QueryContext(ctx, `SELECT worker_instance_id,tick_policy_json,next_run_after
+		FROM workers.worker_instances WHERE locality=$1 AND enabled AND NOT paused
+		AND lifecycle_status IN ('registered','active','degraded','failed') AND current_run_id IS NULL
+		AND ($2='' OR $2=`+workerLaneSQL()+`)`, LocalityMainOwned, lane)
+	if err != nil {
+		return next, err
+	}
+	for rows.Next() {
+		var id string
+		var raw []byte
+		var after sql.NullTime
+		if err = rows.Scan(&id, &raw, &after); err != nil {
+			rows.Close()
+			return next, err
+		}
+		active[id] = true
+		policy, err := ParseTickPolicy(raw)
+		if err != nil || policy.Mode == TickModeManual || (policy.Mode == TickModeDailyLocal && !after.Valid) {
+			continue
+		}
+		due := now.Add(10 * time.Millisecond)
+		if after.Valid && after.Time.After(now) {
+			due = after.Time
+		}
+		if probe, ok := probes[id]; ok && probe.After(due) {
+			due = probe
+		}
+		if due.Before(next) {
+			next = due
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return next, err
+	}
+	for id := range probes {
+		if !active[id] {
+			delete(probes, id)
+		}
+	}
+	if lane == "control" || lane == "" {
+		var expiry sql.NullTime
+		err = s.DB.QueryRowContext(ctx, `SELECT min(at) FROM (
+		SELECT expires_at AS at FROM workers.worker_leases WHERE lease_status='active'
+		UNION ALL SELECT run.deadline_at AS at FROM workers.worker_runs run
+		JOIN workers.worker_instances instance ON instance.current_run_id=run.worker_run_id
+		WHERE run.run_status='running') deadlines`).Scan(&expiry)
+		if err != nil {
+			return next, err
+		}
+		if expiry.Valid {
+			at := expiry.Time
+			if !at.After(now) {
+				at = now.Add(time.Second)
+			}
+			if at.Before(next) {
+				next = at
+			}
+		}
+	}
+	return next, nil
 }
 
 func (s Service) advanceDailyScheduleAfterFailedAttempt(ctx context.Context, selected WorkerInstance, policy TickPolicy, now time.Time) (bool, error) {

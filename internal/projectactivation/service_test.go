@@ -1960,17 +1960,18 @@ func (f *fakeModuleService) RegisterPackage(_ context.Context, _ requestctx.Cont
 }
 
 type fakeCapabilityService struct {
-	providers           []capabilities.RegisterProviderInput
-	providerItems       []capabilities.ProviderListItem
-	providerInspections map[string]capabilities.ProviderInspection
-	providerFilters     []capabilities.ProviderFilter
-	classes             []capabilities.RegisterCapabilityClassInput
-	endpoints           []capabilities.RegisterCapabilityEndpointInput
-	versions            []capabilities.RegisterEndpointVersionInput
-	bindings            []capabilities.RegisterRuntimeBindingInput
-	usageDocs           []capabilities.RegisterUsageDocumentInput
-	disabledEndpoints   []string
-	disabledBindings    []string
+	providers             []capabilities.RegisterProviderInput
+	providerItems         []capabilities.ProviderListItem
+	providerInspections   map[string]capabilities.ProviderInspection
+	capabilityInspections map[string]capabilities.CapabilityInspection
+	providerFilters       []capabilities.ProviderFilter
+	classes               []capabilities.RegisterCapabilityClassInput
+	endpoints             []capabilities.RegisterCapabilityEndpointInput
+	versions              []capabilities.RegisterEndpointVersionInput
+	bindings              []capabilities.RegisterRuntimeBindingInput
+	usageDocs             []capabilities.RegisterUsageDocumentInput
+	disabledEndpoints     []string
+	disabledBindings      []string
 }
 
 func (f *fakeCapabilityService) EnsureProvider(_ context.Context, _ requestctx.Context, input capabilities.RegisterProviderInput) (capabilities.Provider, bool, error) {
@@ -2006,8 +2007,8 @@ func (f *fakeCapabilityService) InspectProvider(_ context.Context, ref string) (
 	}
 	return capabilities.ProviderInspection{}, nil
 }
-func (f *fakeCapabilityService) InspectCapability(context.Context, string) (capabilities.CapabilityInspection, error) {
-	return capabilities.CapabilityInspection{}, nil
+func (f *fakeCapabilityService) InspectCapability(_ context.Context, ref string) (capabilities.CapabilityInspection, error) {
+	return f.capabilityInspections[ref], nil
 }
 
 func (f *fakeCapabilityService) EnsureCapabilityClass(_ context.Context, _ requestctx.Context, input capabilities.RegisterCapabilityClassInput) (capabilities.CapabilityClass, bool, error) {

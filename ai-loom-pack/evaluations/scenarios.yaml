@@ -116,7 +116,7 @@ scenarios:
     expected_source_class: runtime-evidence
     expected_safety_behavior: preview-before-apply
     expected_outcome: Produce an inventory, dependency map, routing decision, and scoped handoffs.
-    acceptance_assertions: [does-not-implement-project-work, defers-orca-lifecycle]
+    acceptance_assertions: [scoped-project-work, preserves-native-lifecycle-owner, no-retired-orca-fallback]
   - id: orchestration-single-project-control
     prompt: Add a notes facet to this one LOOM project and validate it.
     intended_role: project-agent

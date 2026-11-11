@@ -15,6 +15,42 @@ import (
 
 const mapperProjectID = "project_01ARZ3NDEKTSV4RRFFQ69G5FAV"
 
+func TestWorkspaceSelectionEmptyListsRegistration(t *testing.T) {
+	for _, workspace := range []string{"{include: ['**/*.md'], exclude: []}", "{include: [], exclude: []}", "{}"} {
+		root := t.TempDir()
+		writeMapperFixture(t, filepath.Join(root, "notes/current.md"), "Current note")
+		writeMapperFixture(t, filepath.Join(root, ".loom/project.yaml"), "kind: loom.project\nschema_version: project.contract.v0.5\nproject: {id: "+mapperProjectID+", slug: workspace-example, name: Workspace example, owner_node: main}\nresources:\n  reading:\n    kind: knowledge\n    knowledge: {path: notes, category: notes, include: ['**/*.md'], exclude: ['historical/**'], workspace: "+workspace+"}\n")
+		a := requireMapperAnalysis(t, root)
+		if _, err := BuildInput(a, "workspace.test"); err != nil {
+			t.Fatalf("workspace %s: %v", workspace, err)
+		}
+		encoded, _ := json.Marshal(a)
+		var decoded projectcontracts.Analysis
+		if err := json.Unmarshal(encoded, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		decoded.Loaded.Raw = append([]byte(nil), a.Loaded.Raw...)
+		if _, err := BuildInput(decoded, "workspace.test"); err != nil {
+			t.Fatalf("round-trip workspace %s: %v", workspace, err)
+		}
+	}
+}
+
+func TestAgentInstructionsRegistrationSource(t *testing.T) {
+	root := t.TempDir()
+	writeMapperFixture(t, filepath.Join(root, ".loom/project.yaml"), "kind: loom.project\nschema_version: project.contract.v0.5\nproject: {id: "+mapperProjectID+", slug: agent-example, name: Agent example, owner_node: main}\nresources:\n  researcher:\n    kind: agent\n    agent: {instructions_ref: agent.md, model: 'gemma3:4b', provider: ollama}\n")
+	writeMapperFixture(t, filepath.Join(root, "agent.md"), "Research this project only.\n")
+	a := requireMapperAnalysis(t, root)
+	if _, err := BuildInput(a, "agent.test"); err != nil {
+		t.Fatal(err)
+	}
+	a.Plan.Declaration.Sources = a.Plan.Declaration.Sources[:1]
+	a.Report.Declaration.Sources = a.Plan.Declaration.Sources
+	if _, err := BuildInput(a, "agent.test"); err == nil {
+		t.Fatal("instructions source disappeared")
+	}
+}
+
 func TestManagedApplicationDescriptorRegistrationSource(t *testing.T) {
 	for _, scenario := range []struct {
 		name    string
@@ -284,6 +320,55 @@ func TestDeclarationRegistrationRejectsMismatchedDisplayIdentity(t *testing.T) {
 	a.Plan.Project.Name = "Other name"
 	if _, err := BuildInput(a, "declaration.test"); err == nil {
 		t.Fatal("declaration identity differs from registered name")
+	}
+}
+
+func TestProjectWorkStateRegistrationEvidence(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, ".loom/project.yaml")
+	writeMapperFixture(t, filepath.Join(root, "material/note.md"), "# Owned note\n")
+	for _, state := range []string{"", "passive", "working"} {
+		source := "kind: loom.project\nschema_version: project.contract.v0.5\nproject: {id: " + mapperProjectID + ", slug: work-state, name: Work state, owner_node: main, status: active"
+		if state != "" {
+			source += ", work_state: " + state
+		}
+		source += "}\nresources:\n  notes: {kind: knowledge, knowledge: {path: material, category: notes}}\n"
+		writeMapperFixture(t, file, source)
+		a := requireMapperAnalysis(t, root)
+		var roundTrip projectcontracts.Analysis
+		raw, err := json.Marshal(a)
+		if err != nil || json.Unmarshal(raw, &roundTrip) != nil {
+			t.Fatal("analysis round trip", err)
+		}
+		// Loaded.Raw is intentionally private wire evidence, not an input inferred
+		// from mutable disk. Preserve it across the report/plan JSON round trip.
+		roundTrip.Loaded = a.Loaded
+		writeMapperFixture(t, file, "changed after analysis")
+		input, err := BuildInput(roundTrip, "work-state.test")
+		if err != nil || input.Project.WorkState != state {
+			t.Fatalf("mapped classification=%q err=%v", input.Project.WorkState, err)
+		}
+		for _, target := range []string{"report", "plan", "both", "loaded"} {
+			changed := roundTrip
+			switch target {
+			case "report":
+				changed.Report.Project.WorkState = "substitution"
+			case "plan":
+				changed.Plan.Project.WorkState = "substitution"
+			case "both":
+				changed.Report.Project.WorkState, changed.Plan.Project.WorkState = "passive", "passive"
+				if state == "passive" {
+					changed.Report.Project.WorkState, changed.Plan.Project.WorkState = "working", "working"
+				}
+			case "loaded":
+				copy := *changed.Loaded
+				copy.Contract.Project.WorkState = "substitution"
+				changed.Loaded = &copy
+			}
+			if _, err := BuildInput(changed, "work-state.test"); err == nil {
+				t.Fatal("substituted work state accepted", target)
+			}
+		}
 	}
 }
 

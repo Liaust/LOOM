@@ -89,7 +89,11 @@ func (o WatchOwner) Apply(ctx context.Context, call ActionCall) (Observation, er
 	if err != nil {
 		return Observation{}, err
 	}
-	if !same(localPrerequisitesFor(call.Principal, x, call.Expected.Bindings), call.Expected) {
+	current, err := o.Resolver.currentPrerequisitesFor(ctx, call.Principal, x, call.Expected)
+	if err != nil {
+		return Observation{}, err
+	}
+	if !same(current, call.Expected) {
 		return Observation{}, fail(pc.DeclarationPlanStale, "watch_prerequisite_changed")
 	}
 	group, err := projectwatch.BuildDeclarationWatchGroup(x.Analysis, x.Target.OwnerNodeID, x.Input.Project.OwnerNode, domain.Payload.Group.Contributors)

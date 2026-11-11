@@ -1,43 +1,59 @@
 # MINA Tooling
 
+Use known routes directly. The single quick routing table is in
+`protocols/DEVICE-AND-TOOL-ROUTING.md`; consult it only when the surface is unclear.
+Main Chromium, an exact shared page and the Mac desktop are distinct targets.
+
+## Core Work Surfaces
+
+These are peers with different authority, not optional integrations beneath LOOM.
+Use the relevant surface without a compulsory sequence or calls to all three.
+
+| Surface | Responsibility and route |
+|---|---|
+| LOOM | Files, project registration, knowledge and technical execution/state; use the owning source or supported `loom` surface. Git and original artifacts remain source authority. |
+| Basecamp | Canonical commitments, task/Kanban state, progress, blockers and the operator's input; `loom-mina-basecamp` under `protocols/BASECAMP.md`. Ordinary work maintains relevant tasks without waiting for an explicit Basecamp request. |
+| Provenance | Shared source-backed decisions, preferences, rationale and qualified project context; Main's `loom provenance`, `use-loom-provenance` and `protocols/PROVENANCE-AND-MEMORY.md`. Retrieve when prior meaning matters and selectively capture new durable meaning during work. |
+
+Human appointments, calendar events and deadlines belong in Basecamp. Hermes
+owns agentic routine timing; LOOM owns system/service/backup and capability
+schedules. A calendar entry is not an executable automation, and a successful
+run is not automatically a completed Basecamp commitment.
+
+## Supporting Runtime And Access Owners
+
 | Need | Supported owner/surface |
 |---|---|
 | Projects and repositories | LOOM project registry and owning repository contracts |
-| Technical file identity/version or extraction state | LOOM Objects |
-| Source wording | LOOM Notes |
-| Qualified decisions, constraints, relationships and unresolved cases | LOOM Provenance |
 | Jobs, workers and permissioned actions | LOOM capability and worker surfaces |
-| Interactive folder/worktree/task/terminal lifecycle | Installed release-matched ORCA tools |
-| Model execution and conversation retrieval | Pinned Hermes runtime and session-search tools |
-| Conversational continuity | Hermes memory, without a per-write approval queue |
-| Native/created skills | Hermes `skill_manage`, with `category="created"` for new skills |
-| Reviewed LOOM skill distribution | Repository source and operator-owned `skills/installed` deployment |
+| Persistent conversations, memory, native child tasks and agentic routines | Full native Hermes on Main; Desktop and Hermex are clients; see HERMES-RUNTIME.md |
+| Native Codex model, thread and managed-worktree lifecycle | Native Codex controls, exact resume and supported thread reads; opening another client does not transfer ownership |
+| Desktop interaction | Native Hermes computer_use on Main; existing loom-mac MCP for the Mac; native Codex tools in Codex. ORCA is retired. |
+| Conversational continuity | Current thread plus source-attributed relevant history; LOOM Provenance is a separate ledger |
+| Native/created skills | Active harness's skill tools; Hermes profile skills or Codex `.agents/skills`, without duplicate external copies |
+| Reviewed LOOM skill distribution | Repository source and supported account/admin native skill roots |
 | Credential values | Approved external store and protected runtime injection |
-| Named Basecamp task interface | `loom-mina-basecamp` with the literal profile under `protocols/BASECAMP.md` |
 | Named GitHub actor and portable workspace versioning | `loom-mina-gh` under `protocols/GITHUB.md`; separate Git transport gate |
-| Approved Box project work, from TUI or gateway | Main terminal and project-local tools; both reach the same approved Box files |
-| Web research independent of the operator's desktop | Native browser tools on Main Chromium |
-| Exact shared ORCA browser page | ORCA browser tools for that page's owning host |
-| Mac desktop, Safari/Chrome windows and native apps | Native Hermes `computer_use` through the installed Mac connector |
-| Authorized shell work on another node | Its separately configured SSH route, not the desktop connector's restricted key |
+| Approved Box project work, from native Desktop or direct CLI | Main terminal and project-local tools; both reach the same approved Box files |
 
-Discover an available tool and inspect its help/schema before use. Use
-release-matched LOOM documentation through `loom docs search` and local help;
-do not invent capability names, arguments or installation commands. Follow
-`protocols/LOOM-ROUTING.md` for the first retrieval surface.
+Prefer `rg --files`, `rg`, directory listings and direct reads for known source.
+This needs no search skill, indexing wait or health preflight. Use search for
+discovery or relevant history; get exact record references directly. Use known
+commands and inspect local help only for an unfamiliar operation or actual
+mismatch; consult relevant skill/docs detail when needed. Do not invent
+capability names, arguments or installation commands. Consult
+`protocols/LOOM-ROUTING.md` when the retrieval surface is unclear.
 
-Hermes' `skills.external_dirs` exposes the installed set. Pinned Hermes has no
-`skills.create_dir` setting. Use the native `created` category within
-`.hermes/skills`, not another root. Read
+Native Codex discovers supported account/admin and workspace skill roots. Read
 `protocols/SKILL-CREATION-AND-PROMOTION.md` before creating or maintaining a skill.
-Do not patch Hermes, redirect its store through symlinks, or treat instructions
-as sandbox or credential enforcement. Same-user read-only modes are not a
-security sandbox; runtime OS/service custody must independently protect
-installed skills in both gateway and TUI.
+Do not duplicate installed bodies into the workspace or shadow a shared skill.
+Same-user read-only modes are not a security sandbox; OS/service custody must
+independently protect installed skills. Mac offline is a tool outcome, not a
+reason to block an unrelated thread or substitute another device.
 
-Choose the device and browser surface through
-`protocols/DEVICE-AND-TOOL-ROUTING.md`; selected native Mac desktop work follows
-`protocols/MAC-COMPUTER-USE.md`. Those source protocols do not activate a connector.
+For selected native Mac desktop work, load `protocols/MAC-COMPUTER-USE.md` for
+fresh targeting and uncertain delivery, then reuse the unchanged protocol.
+No protocol read activates a connector or proves current availability.
 
 ## Managed Account Entry Points
 
@@ -54,8 +70,7 @@ identity. Follow `OPERATING-POLICY.md` for the task's action scope.
 For Basecamp, use `loom-mina-basecamp` with literal `--profile mina` before the
 command. For GitHub, use `loom-mina-gh <command>`. The `--profile mina` pair belongs only to
 Basecamp; GitHub CLI has no such flag. Follow the corresponding protocol's
-identity preflight against the operator binding documented in release-matched
-ORCA Main Operations. Put the command first (after Basecamp's literal profile
+identity preflight against the current protected operator binding. Put the command first (after Basecamp's literal profile
 pair), then its options. The wrappers select only the pinned
 native CLI and protected auth HOME/config/cache inside the child. Ordinary `gh`
 and `basecamp` retain their normal behavior for other coding agents. Never set
@@ -66,40 +81,27 @@ custody and environment selection, not a new permission model. Installed skills
 and successful API authentication add no action authority or Git transport proof.
 Missing/unsafe auth metadata, conflicting selectors and operator-only lifecycle
 commands fail closed; hand off the refusal without credential values. Native
-refresh may write only the approved existing external auth root in the gateway;
+refresh may write only the approved existing external auth root;
 no auth store is provisioned by package installation.
 
 ## Nix And Writable State
 
-Nix owns package versions and dependencies, service definitions, immutable
+Nix owns package versions for system tools and dependencies, service definitions, immutable
 store paths and system security. Do not edit the package store, bypass managed
 mode, or repair a blocked harness change with pip, npm, system package installation,
-sudo or a second Hermes profile. A dependency or service change belongs in the
+sudo or a second agent account. A dependency or service change belongs in the
 owning repository and the reviewed operator deployment flow.
 This does not prohibit installing project-local dependencies into the project's
 own virtualenv or node_modules as part of an approved development task.
 
-Managed `hermes config set` can refuse a change and still return exit zero.
-Read the refusal and re-read effective state through supported config surfaces
-before claiming success; an exit code alone is insufficient. Read only the
-relevant non-secret setting, never dump a complete credential-bearing profile.
-The Nix baseline is a provisioning template, not an automatic overwrite
-mechanism for every live config edit. Live reconciliation is operator-owned
-and must preserve unrelated values and concurrent user changes. Skill selection
-and curator settings are dynamically read; a gateway restart is not needed
-merely to reload them. Preserve active sessions. The pinned gateway bypasses
-the curator's configured idle threshold at its hourly tick; read the skill
-protocol before making an idle-safety claim.
-
-Runtime profile state is not all immutable. Native skill and memory tools,
-sessions, theme files and bounded task state remain available under their own
-permissions and approval rules. A managed config refusal does not prohibit
-that work. The accepted native settings are `skills.write_approval=false`,
-`memory.write_approval=false` and `skills.guard_agent_created=false`. Use native
-tools and verify their result; a saved write is different from a pending proposal.
-Existing pending changes remain individually reviewable through the native
-pending/diff/approve/reject flow. External installation scanning and managed
-installed-skill custody remain in force.
+Codex's native installer owns its releases; the boot service owns the resident
+process. Updates require a quiet maintenance window, not an unattended restart.
+CLI and resident server versions may differ until that handover. Preserve active
+threads and prior binaries. Do not kill other sessions or edit the Nix store.
+Runtime threads, created skills and task state remain writable. Ordinary Main
+Codex has read/write/network access under the existing agents OS boundaries;
+neither its settings profile nor the SOUL grants sudo or credential authority.
+Inspect only relevant non-secret settings, not complete auth-bearing configs.
 
 For a required managed change that is blocked, send a short handoff with the
 intent, exact non-secret failure, current and desired setting, and source
@@ -107,6 +109,7 @@ owner. Continue unrelated work. Do not infer sudo or credential authority from
 the blocker or from an available terminal.
 
 Never open a runtime database directly or query its tables. Retrieve sessions
-through supported Hermes tools and semantic state through LOOM. Recovery must
+through the owning harness's native Hermes or Codex tools and semantic state
+through LOOM Provenance. Recovery must
 use a supported consistent snapshot workflow after its separate acceptance;
 copying mutable profile files is not a verified backup.

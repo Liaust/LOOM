@@ -88,8 +88,45 @@ func newUpdateCommand(opts *options) *cobra.Command {
 	cmd.AddCommand(newUpdateMaintenanceCommand(opts))
 	cmd.AddCommand(newUpdateManifestCommand(opts))
 	cmd.AddCommand(newUpdateHistoryCommand(opts))
+	cmd.AddCommand(newUpdateReconcileCommand(opts))
 	cmd.AddCommand(newUpdateWorkspaceCommand(opts))
 	cmd.AddCommand(newUpdateReleaseCommand(opts))
+	return cmd
+}
+
+func newUpdateReconcileCommand(opts *options) *cobra.Command {
+	flags := updateFlags{}
+	cmd := &cobra.Command{
+		Use:   "reconcile",
+		Short: "Observe an existing update and append readiness evidence",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if _, err := resolveOutputMode(opts); err != nil {
+				return renderError(cmd, opts, correlation.Normalize(opts.correlationID), err)
+			}
+			cfg, err := config.Load(config.Overrides{ConfigFile: opts.configFile})
+			if err != nil {
+				return renderError(cmd, opts, correlation.Normalize(opts.correlationID), err)
+			}
+			ctx, cancel := context.WithTimeout(cmd.Context(), 3*time.Minute)
+			defer cancel()
+			result, err := update.Reconcile(ctx, update.ReconcileInput{StateDir: firstNonEmptyString(flags.stateDir, update.DefaultStateDir(cfg.DataDir)), ManifestPath: flags.manifestPath})
+			if err != nil {
+				return renderError(cmd, opts, correlation.Normalize(opts.correlationID), err)
+			}
+			if opts.jsonOutput {
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(result)
+			}
+			if opts.plainOutput {
+				fmt.Fprintln(cmd.OutOrStdout(), result.Status)
+			} else {
+				update.RenderReconcileResult(cmd.OutOrStdout(), result)
+			}
+			return nil
+		},
+	}
+	addUpdateStateFlags(cmd, &flags)
+	cmd.Flags().StringVar(&flags.manifestPath, "manifest", "", "existing update receipt to observe (defaults to active receipt)")
 	return cmd
 }
 

@@ -118,6 +118,9 @@ func (s Store) applyMetadataAcknowledgements(outbox []LocalSyncOutboxItem, resul
 			(metadataString(result.Metadata, "local_outbox_id") != "" && metadataString(result.Metadata, "local_outbox_id") != local.LocalOutboxID) {
 			return fmt.Errorf("metadata acknowledgement identity mismatch")
 		}
+		if metadataString(local.PayloadJSON, "schema_version") == loomsync.FileObservationSchema {
+			continue // Validated by the file observation owner, without a blob binding.
+		}
 		var p loomsync.MetadataObservation
 		if err := json.Unmarshal(local.PayloadJSON, &p); err != nil {
 			return fmt.Errorf("invalid queued metadata observation")
@@ -135,8 +138,7 @@ func (s Store) applyMetadataAcknowledgements(outbox []LocalSyncOutboxItem, resul
 		if !ok || root == "" || relative == "" {
 			return fmt.Errorf("invalid queued metadata path")
 		}
-		ws := watchedroots.NewStore(s.DataDir)
-		current, err := ws.LoadPathState(root, relative)
+		current, err := s.loadQueuePathState(root, relative)
 		if watchedroots.IsNotExist(err) {
 			continue
 		}
@@ -151,8 +153,8 @@ func (s Store) applyMetadataAcknowledgements(outbox []LocalSyncOutboxItem, resul
 		mtime := p.SourceMtime.UTC()
 		current.LastSyncedModifiedAt = &mtime
 		current.LastSyncedMetadataSequence = item.LocalSequence
-		// Persist before terminalizing the outbox: a crash retries the same item.
-		if err := ws.SavePathState(current); err != nil {
+		// The redo page installs this state before retiring the acknowledgement journal.
+		if err := s.saveQueuePathState(current); err != nil {
 			return err
 		}
 	}

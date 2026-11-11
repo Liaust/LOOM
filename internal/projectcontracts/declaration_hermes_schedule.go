@@ -9,20 +9,28 @@ import (
 )
 
 type HermesScheduleDeclaration struct {
-	Profile      string   `json:"profile" yaml:"profile"`
-	Prompt       string   `json:"prompt" yaml:"prompt"`
-	Skills       []string `json:"skills,omitempty" yaml:"skills,omitempty"`
-	Cron         string   `json:"cron,omitempty" yaml:"cron,omitempty"`
-	EveryMinutes int      `json:"every_minutes,omitempty" yaml:"every_minutes,omitempty"`
-	At           string   `json:"at,omitempty" yaml:"at,omitempty"`
-	Status       string   `json:"status,omitempty" yaml:"status,omitempty"`
+	Target       string                            `json:"target,omitempty" yaml:"target,omitempty"`
+	Codex        *hermesschedules.CodexProjectSpec `json:"codex,omitempty" yaml:"codex,omitempty"`
+	Profile      string                            `json:"profile" yaml:"profile"`
+	Prompt       string                            `json:"prompt" yaml:"prompt"`
+	Skills       []string                          `json:"skills,omitempty" yaml:"skills,omitempty"`
+	Cron         string                            `json:"cron,omitempty" yaml:"cron,omitempty"`
+	EveryMinutes int                               `json:"every_minutes,omitempty" yaml:"every_minutes,omitempty"`
+	At           string                            `json:"at,omitempty" yaml:"at,omitempty"`
+	Status       string                            `json:"status,omitempty" yaml:"status,omitempty"`
 }
 
 func HermesScheduleInput(s HermesScheduleDeclaration, root string) (hermesschedules.ProjectSpec, error) {
 	fail := func() (hermesschedules.ProjectSpec, error) {
-		return hermesschedules.ProjectSpec{}, fmt.Errorf("explicit mina profile, prompt, safe skills, one native timing expression and active/paused status required")
+		return hermesschedules.ProjectSpec{}, fmt.Errorf("explicit profile (mina or declared agent key), prompt, safe skills, one native timing expression and active/paused status required")
 	}
-	if s.Profile != "mina" || strings.TrimSpace(s.Prompt) == "" || len(s.Prompt) > 32768 || strings.ContainsRune(s.Prompt, 0) || !filepath.IsAbs(root) || filepath.Clean(root) != root {
+	if !scheduleKeyPattern.MatchString(s.Profile) || strings.TrimSpace(s.Prompt) == "" || len(s.Prompt) > 32768 || strings.ContainsRune(s.Prompt, 0) || !filepath.IsAbs(root) || filepath.Clean(root) != root {
+		return fail()
+	}
+	if (s.Target != "" && s.Target != "agent" && s.Target != "codex") || (s.Target == "codex") != (s.Codex != nil) {
+		return fail()
+	}
+	if s.Codex != nil && (!hermesschedules.ValidCodexProjectSpec(*s.Codex) || len(s.Skills) != 0) {
 		return fail()
 	}
 	n := 0
@@ -70,5 +78,5 @@ func HermesScheduleInput(s HermesScheduleDeclaration, root string) (hermesschedu
 		seen[skill] = true
 		skills = append(skills, skill)
 	}
-	return hermesschedules.ProjectSpec{Schedule: timing, Prompt: strings.TrimSpace(s.Prompt), Skills: skills, Status: status, Workdir: root}, nil
+	return hermesschedules.ProjectSpec{Schedule: timing, Prompt: strings.TrimSpace(s.Prompt), Skills: skills, Status: status, Workdir: root, Codex: s.Codex}, nil
 }

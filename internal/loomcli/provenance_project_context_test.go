@@ -4,12 +4,34 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	pc "loom.local/loom/internal/projectcontracts"
 	"loom.local/loom/internal/projectstate"
 	"loom.local/loom/internal/provenance"
 	"loom.local/loom/internal/response"
 )
+
+func TestProvenanceProjectContextCLIArchivedMissingState(t *testing.T) {
+	projectID := "project_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+	observed := time.Date(2026, 10, 3, 6, 0, 0, 0, time.UTC)
+	socket, closeServer := startStorageCommandServer(t, func(w http.ResponseWriter, r *http.Request) {
+		response.WriteJSON(w, http.StatusOK, response.Success("snapshot", provenance.ProjectProjectionSnapshot{
+			ProjectID: projectID, SnapshotID: provenance.SemanticID("11111111-1111-4111-8111-111111111111"), SourceRevision: 4, ProjectionRevision: 7, ObservedAt: observed,
+			Context: provenance.ProjectContextProjection{ProjectID: projectID, Lifecycle: "archived", Development: &projectstate.ProjectDevelopmentState{Posture: projectstate.ProjectDevelopmentPartial, MissingDocuments: []string{".project/STATE.md"}, Archive: &projectstate.ArchivedSourceContext{OperationID: "archive_fixture", ArchivedAt: observed, ManifestDigest: "sha256:fixture"}}},
+		}))
+	})
+	defer closeServer()
+	out, stderr, err := executeRootCommand("--socket", socket, "provenance", "project", "get", projectID)
+	if err != nil {
+		t.Fatalf("get: %v %s %s", err, out, stderr)
+	}
+	for _, wanted := range []string{"Historical archive: archive_fixture", "source revision: 4", "2026-10-03T06:00:00Z", "Missing retained documents: .project/STATE.md", "does not establish current runtime health", "not accepted semantic decisions"} {
+		if !strings.Contains(out, wanted) {
+			t.Fatalf("missing %q: %s", wanted, out)
+		}
+	}
+}
 
 func TestProvenanceProjectContextCLIExactGet(t *testing.T) {
 	projectID := "project_01ARZ3NDEKTSV4RRFFQ69G5FAV"

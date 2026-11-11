@@ -23,6 +23,7 @@ CONNECT = 5.0
 HANDSHAKE = 10.0
 ACTION = 30.0
 TEARDOWN = 5.0
+MAX_PEER_MESSAGES = 64
 ENDPOINT = '/usr/local/libexec/loom-mac-endpoint'
 # Set only by the immutable installed launcher, never an inherited environment.
 PINNED_BINDING_SHA256 = None
@@ -228,16 +229,44 @@ class Peer:
                 await self.process.stdin.drain()
                 if 'id' not in request:
                     return None
+                peer_messages, peer_bytes = 0, 0
                 while True:
                     line = await self.process.stdout.readline()
                     if not line:
                         raise Fault('mac_connection_lost')
                     result = decode(line)
+                    if 'method' in result:
+                        peer_messages += 1
+                        peer_bytes += len(line)
+                        if peer_messages > MAX_PEER_MESSAGES or peer_bytes > MAX_FRAME:
+                            raise Fault('mac_output_limit')
+                        if 'result' in result or 'error' in result:
+                            raise Fault('mac_protocol_error')
+                        if 'id' not in result:
+                            if not result['method'].startswith('notifications/'):
+                                raise Fault('mac_protocol_error')
+                            continue
+                        # No peer request can dispatch work on this host. MCP
+                        # ping is harmless; unsupported requests get a refusal.
+                        reply = {'jsonrpc': '2.0', 'id': result['id']}
+                        if result['method'] == 'ping':
+                            reply['result'] = {}
+                        else:
+                            reply['error'] = {'code': -32601, 'message': 'Unsupported peer request'}
+                        self.process.stdin.write(encode(reply))
+                        await self.process.stdin.drain()
+                        continue
                     if result.get('id') != request['id'] or ('result' in result) == ('error' in result):
                         raise Fault('mac_protocol_error')
                     return result
         except (ValueError, asyncio.LimitOverrunError):
+            await self.close()
             raise Fault('mac_output_limit') from None
+        except (Exception, asyncio.CancelledError):
+            # A late reply after cancellation or an invalid frame must never be
+            # consumed as the next request's response. Keep sent for delivery.
+            await self.close()
+            raise
 
     async def close(self):
         if self.process:
@@ -273,7 +302,17 @@ class Bridge:
         self.ready = False
         self.uncertain = False
         self.observed = False
-        self.deadline = time.monotonic() + HANDSHAKE
+        self.initialize_request = None
+
+    def initialized(self, result):
+        if 'error' in result:
+            code = result['error'].get('data', {}).get('code', 'mac_driver_unavailable')
+            raise Fault(code if code in MESSAGES else 'mac_driver_unavailable')
+        attestation = result['result'].get('_meta', {}).get('loom', {})
+        if runtime_identity(attestation.get('binding')) != runtime_identity(self.binding['runtime']) or attestation.get('target_node') != 'macbook' or re.fullmatch('[0-9a-f]{32}', str(attestation.get('generation'))) is None:
+            raise Fault('mac_host_identity_mismatch')
+        self.generation = attestation['generation']
+        self.ready = True
 
     async def handle(self, request):
         method = request.get('method')
@@ -288,26 +327,35 @@ class Bridge:
             raise Fault('mac_policy_refused')
         if mutating and (self.uncertain or not self.observed):
             raise Fault('mac_target_stale')
+        dispatching_action = False
         try:
-            if self.peer.process is None:
-                await self.peer.start(ssh_vector(self.binding, pinned_public=self.pinned_public))
             outgoing = dict(request)
             if method == 'initialize':
                 runtime_identity(self.binding['runtime'])
                 outgoing['params'] = dict(params, _meta={'loom_binding': self.binding['runtime']})
-            deadline = self.deadline if not self.ready else time.monotonic() + ACTION
+            deadline = time.monotonic() + (HANDSHAKE if method == 'initialize' else ACTION)
+            if self.peer.process is None or self.peer.process.returncode is not None:
+                await self.peer.close()
+                self.peer = Peer()
+                self.ready, self.observed = False, False
+                await self.peer.start(ssh_vector(self.binding, pinned_public=self.pinned_public))
+                if method != 'initialize':
+                    if self.initialize_request is None:
+                        raise Fault('mac_driver_unavailable')
+                    handshake = min(deadline, time.monotonic() + HANDSHAKE)
+                    self.initialized(await self.peer.exchange(self.initialize_request, handshake))
+                    await self.peer.exchange({'jsonrpc': '2.0', 'method': 'notifications/initialized'}, handshake)
+                    await self.peer.exchange({'jsonrpc': '2.0', 'id': 'loom-tools-' + uuid.uuid4().hex,
+                        'method': 'tools/list'}, handshake)
+                    if mutating:
+                        raise Fault('mac_target_stale')
+            dispatching_action = mutating
             result = await self.peer.exchange(outgoing, deadline)
             if result is None:
                 return None
             if method == 'initialize':
-                if 'error' in result:
-                    code = result['error'].get('data', {}).get('code', 'mac_driver_unavailable')
-                    raise Fault(code if code in MESSAGES else 'mac_driver_unavailable')
-                attestation = result['result'].get('_meta', {}).get('loom', {})
-                if runtime_identity(attestation.get('binding')) != runtime_identity(self.binding['runtime']) or attestation.get('target_node') != 'macbook' or re.fullmatch('[0-9a-f]{32}', str(attestation.get('generation'))) is None:
-                    raise Fault('mac_host_identity_mismatch')
-                self.generation = attestation['generation']
-                self.ready = True
+                self.initialized(result)
+                self.initialize_request = outgoing
             if method == 'tools/call':
                 value = result.get('result', {})
                 current = value.get('structuredContent', {}).get('generation')
@@ -327,7 +375,7 @@ class Bridge:
                     self.uncertain = False
             return result
         except (Exception, asyncio.CancelledError) as exc:
-            sent = mutating and self.peer.sent
+            sent = dispatching_action and self.peer.sent
             self.observed = False
             if sent:
                 self.uncertain = True

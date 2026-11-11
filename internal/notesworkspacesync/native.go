@@ -27,6 +27,12 @@ type JSONLClient struct {
 	poisoned bool
 }
 
+func (c *JSONLClient) Poisoned() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.poisoned
+}
+
 func (c *JSONLClient) Call(ctx context.Context, request map[string]any, out any) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -60,8 +66,9 @@ func (c *JSONLClient) Call(ctx context.Context, request map[string]any, out any)
 	// Keep all I/O in the same operation. Cancellation does not permit reusing
 	// this stream while its old read or write may still be completing.
 	type response struct {
-		raw []byte
-		err error
+		raw        []byte
+		err        error
+		requestErr error
 	}
 	done := make(chan response, 1)
 	go func() {
@@ -100,7 +107,9 @@ func (c *JSONLClient) Call(ctx context.Context, request map[string]any, out any)
 			return
 		}
 		if status.Status == "error" {
-			done <- response{err: errors.New("native request failed")}
+			// A matched, fully consumed operation refusal leaves reply framing
+			// intact. Only transport/framing failures require a new stream.
+			done <- response{requestErr: errors.New("native request failed")}
 			return
 		}
 		// Decode into private data first; cancellation never mutates a caller's out.
@@ -111,6 +120,9 @@ func (c *JSONLClient) Call(ctx context.Context, request map[string]any, out any)
 		if reply.err != nil {
 			c.poisoned = true
 			return reply.err
+		}
+		if reply.requestErr != nil {
+			return reply.requestErr
 		}
 		return json.Unmarshal(reply.raw, out)
 	case <-ctx.Done():
@@ -137,11 +149,14 @@ type Evidence struct {
 	BranchDeleted          bool     `json:"branchDeleted"`
 	Status                 string   `json:"status"`
 	Reason                 string   `json:"reason"`
+	Detail                 string   `json:"detail,omitempty"`
+	Phase                  string   `json:"phase,omitempty"`
 	SHA256                 string   `json:"sha256"`
 	Content                []byte   `json:"contentBase64"`
 }
 type NativeChanges struct {
 	Status  string          `json:"status"`
+	HasMore *bool           `json:"hasMore,omitempty"`
 	Next    json.RawMessage `json:"nextSequence"`
 	Changes []struct {
 		ID     string     `json:"id"`

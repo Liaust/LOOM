@@ -3,9 +3,11 @@ package loomcli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
@@ -14,9 +16,12 @@ import (
 	"github.com/spf13/cobra"
 
 	"loom.local/loom/internal/box"
+	"loom.local/loom/internal/boxregistry"
 	"loom.local/loom/internal/correlation"
 	loomerrors "loom.local/loom/internal/errors"
+	"loom.local/loom/internal/ids"
 	"loom.local/loom/internal/projects"
+	"loom.local/loom/internal/response"
 )
 
 func newBoxCommand(opts *options) *cobra.Command {
@@ -28,6 +33,9 @@ func newBoxCommand(opts *options) *cobra.Command {
 	cmd.AddCommand(newBoxRepairCommand(opts))
 	cmd.AddCommand(newBoxStatusCommand(opts))
 	cmd.AddCommand(newBoxPathCommand(opts))
+	cmd.AddCommand(newBoxContextCommand(opts))
+	cmd.AddCommand(newBoxListCommand(opts))
+	cmd.AddCommand(newBoxMembershipCommand(opts))
 	cmd.AddCommand(newBoxWatchPlanCommand(opts))
 	cmd.AddCommand(newBoxWatchApplyCommand(opts))
 	cmd.AddCommand(newBoxWatchStatusCommand(opts))
@@ -36,6 +44,7 @@ func newBoxCommand(opts *options) *cobra.Command {
 }
 
 type boxCommandFlags struct {
+	initialize     bool
 	path           string
 	profile        string
 	dryRun         bool
@@ -44,7 +53,7 @@ type boxCommandFlags struct {
 }
 
 func newBoxInitCommand(opts *options) *cobra.Command {
-	flags := boxCommandFlags{}
+	flags := boxCommandFlags{initialize: true}
 	cmd := &cobra.Command{
 		Use:   "init",
 		Short: "Create the local LOOM Box folder template",
@@ -53,7 +62,11 @@ func newBoxInitCommand(opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			result, err := box.Init(box.InitInput{Resolved: resolved, DryRun: flags.dryRun})
+			input := box.InitInput{Resolved: resolved, DryRun: flags.dryRun}
+			if resolved.BoxID != "" {
+				input.NewBoxID = func() string { return resolved.BoxID }
+			}
+			result, err := box.Init(input)
 			result = boxInitResultForCurrentSurface(result)
 			if opts.jsonOutput {
 				encodeErr := encodeCurrentBoxJSON(cmd.OutOrStdout(), result)
@@ -73,6 +86,7 @@ func newBoxInitCommand(opts *options) *cobra.Command {
 
 func newBoxRepairCommand(opts *options) *cobra.Command {
 	flags := boxCommandFlags{}
+	var retireLane bool
 	cmd := &cobra.Command{
 		Use:   "repair",
 		Short: "Repair or complete the local LOOM Box folder template",
@@ -81,7 +95,11 @@ func newBoxRepairCommand(opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			result, err := box.Init(box.InitInput{Resolved: resolved, DryRun: flags.dryRun})
+			input := box.InitInput{Resolved: resolved, DryRun: flags.dryRun, RetireLane: retireLane}
+			if resolved.BoxID != "" {
+				input.NewBoxID = func() string { return resolved.BoxID }
+			}
+			result, err := box.Init(input)
 			result = boxInitResultForCurrentSurface(result)
 			if opts.jsonOutput {
 				encodeErr := encodeCurrentBoxJSON(cmd.OutOrStdout(), result)
@@ -96,6 +114,7 @@ func newBoxRepairCommand(opts *options) *cobra.Command {
 	}
 	addBoxFlags(cmd, &flags)
 	cmd.Flags().BoolVar(&flags.dryRun, "dry-run", false, "show planned Box repairs without writing")
+	cmd.Flags().BoolVar(&retireLane, "retire-lane", false, "disable legacy Lane without deleting its files or transfer history")
 	return cmd
 }
 
@@ -229,7 +248,11 @@ func newBoxPathCommand(opts *options) *cobra.Command {
 			}
 			result := box.PathResultFromResolved(resolved)
 			if opts.jsonOutput {
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(result)
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(struct {
+					box.PathResult
+					BoxID   string `json:"box_id,omitempty"`
+					RootRef string `json:"root_ref,omitempty"`
+				}{result, resolved.BoxID, resolved.RootRef})
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), result.RootPath)
 			return nil
@@ -237,6 +260,118 @@ func newBoxPathCommand(opts *options) *cobra.Command {
 	}
 	addBoxFlags(cmd, &flags)
 	return cmd
+}
+
+type boxContextResult struct {
+	BoxID           string `json:"box_id"`
+	BoxKey          string `json:"box_key"`
+	Label           string `json:"label"`
+	Node            string `json:"node"`
+	RootPath        string `json:"root_path"`
+	RootRef         string `json:"root_ref"`
+	Source          string `json:"source"`
+	SelectionOrigin string `json:"selection_origin"`
+	PolicyPath      string `json:"policy_path"`
+	PolicyRevision  string `json:"policy_revision"`
+	PolicyStatus    string `json:"policy_status"`
+}
+
+func newBoxContextCommand(opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:   "context",
+		Short: "Resolve the local Box identity and agent policy without contacting services",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if _, err := resolveOutputMode(opts); err != nil {
+				return err
+			}
+			result, err := resolveBoxContextForCLI(opts)
+			if err != nil {
+				return err
+			}
+			if opts.jsonOutput {
+				envelope := response.Success(correlation.Normalize(opts.correlationID), result)
+				envelope.Meta.Source, envelope.Meta.Freshness = "local-cli", "local"
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(envelope)
+			}
+			if opts.plainOutput {
+				fmt.Fprintln(cmd.OutOrStdout(), result.RootPath)
+				return nil
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Box: %s (%s)\nRoot: %s\nSelection: %s\nPolicy: %s (%s)\n",
+				result.BoxKey, result.BoxID, result.RootPath, result.SelectionOrigin, result.PolicyPath, result.PolicyStatus)
+			if result.PolicyRevision != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "Policy revision: %s\n", result.PolicyRevision)
+			}
+			return nil
+		},
+	}
+}
+
+func resolveBoxContextForCLI(opts *options) (boxContextResult, error) {
+	if opts != nil && opts.allBoxes {
+		return boxContextResult{}, fmt.Errorf("%w: Box context requires one Box; --all-boxes is not supported", boxregistry.ErrSelection)
+	}
+	cfg, err := resolveCLIConfig(opts)
+	if err != nil {
+		return boxContextResult{}, err
+	}
+	ref, origin, err := resolveCLIBoxSelection(cfg, opts)
+	if err != nil {
+		return boxContextResult{}, err
+	}
+	catalog, err := cfg.BoxCatalog()
+	if err != nil {
+		return boxContextResult{}, err
+	}
+	binding, err := catalog.Get(ref)
+	if err != nil {
+		return boxContextResult{}, err
+	}
+	source := "catalog"
+	if cfg.BoxesFile == "" {
+		source = "legacy"
+	}
+	result := boxContextResult{
+		BoxID: binding.ID, BoxKey: binding.Key, Label: binding.Label, Node: binding.Node,
+		RootPath: binding.RootPath, RootRef: binding.RootRef, Source: source, SelectionOrigin: origin,
+		PolicyPath: filepath.Join(binding.RootPath, ".loom", "agents", "WORKFLOW.md"), PolicyStatus: "missing",
+	}
+	info, err := os.Stat(result.PolicyPath)
+	if os.IsNotExist(err) {
+		return result, nil
+	}
+	if err != nil {
+		return boxContextResult{}, fmt.Errorf("read Box policy metadata: %w", err)
+	}
+	const policyLimit = 1 << 20
+	if !info.Mode().IsRegular() || info.Size() > policyLimit {
+		return boxContextResult{}, fmt.Errorf("Box policy must be a bounded regular file")
+	}
+	canonical, err := filepath.EvalSymlinks(result.PolicyPath)
+	if err != nil || canonical != result.PolicyPath {
+		return boxContextResult{}, fmt.Errorf("Box policy must not redirect outside its derived path")
+	}
+	file, err := os.Open(result.PolicyPath)
+	if err != nil {
+		return boxContextResult{}, fmt.Errorf("open Box policy: %w", err)
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return boxContextResult{}, fmt.Errorf("Box policy changed while opening")
+	}
+	hash := sha256.New()
+	n, err := io.Copy(hash, io.LimitReader(file, policyLimit+1))
+	if err != nil {
+		return boxContextResult{}, fmt.Errorf("read Box policy: %w", err)
+	}
+	if n > policyLimit {
+		return boxContextResult{}, fmt.Errorf("Box policy exceeds size limit")
+	}
+	result.PolicyStatus = "available"
+	result.PolicyRevision = fmt.Sprintf("sha256:%x", hash.Sum(nil))
+	return result, nil
 }
 
 func newBoxWatchPlanCommand(opts *options) *cobra.Command {
@@ -363,11 +498,69 @@ func addBoxFlags(cmd *cobra.Command, flags *boxCommandFlags) {
 }
 
 func resolveBoxForCLI(opts *options, flags boxCommandFlags) (box.Resolved, error) {
+	if opts == nil {
+		opts = &options{}
+	}
+	if opts.allBoxes {
+		return box.Resolved{}, fmt.Errorf("Box filesystem commands require one Box; --all-boxes is not supported")
+	}
 	cfg, err := resolveCLIConfig(opts)
 	if err != nil {
 		return box.Resolved{}, err
 	}
-	return box.Resolve(box.ResolveInput{
+	ref := strings.TrimSpace(os.Getenv("LOOM_BOX_ID"))
+	if opts.boxRef != "" {
+		ref = opts.boxRef
+	}
+	var selected *boxregistry.Box
+	if flags.path == "" || ref != "" {
+		client, clientErr := resolveCLIClient(cfg, opts)
+		if clientErr != nil {
+			return box.Resolved{}, clientErr
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		catalog, catalogErr := client.Boxes(ctx, opts.correlationID)
+		if catalogErr == nil {
+			for _, binding := range catalog.Data.Boxes {
+				if binding.Node != cfg.NodeID {
+					return box.Resolved{}, fmt.Errorf("Box catalog belongs to node %q, not local node %q; run the Box command on its owning node", binding.Node, cfg.NodeID)
+				}
+			}
+		}
+		// Init must see descriptor changes made since daemon startup. A local
+		// configured catalog also permits owning-node initialization offline.
+		if flags.initialize && cfg.BoxesFile != "" {
+			catalog.Data, catalogErr = cfg.BoxCatalog()
+			if catalogErr != nil {
+				return box.Resolved{}, catalogErr
+			}
+		}
+		if catalogErr == nil {
+			binding, selectionErr := catalog.Data.Lookup(ref)
+			if selectionErr != nil {
+				return box.Resolved{}, selectionErr
+			}
+			if binding.Node != cfg.NodeID {
+				return box.Resolved{}, fmt.Errorf("selected Box belongs to node %q, not local node %q", binding.Node, cfg.NodeID)
+			}
+			if !binding.Available {
+				if !flags.initialize || cfg.BoxesFile == "" || (binding.Reason != "root_missing" && binding.Reason != "descriptor_missing") {
+					return box.Resolved{}, fmt.Errorf("%w: %s (%s)", boxregistry.ErrUnavailable, binding.Key, binding.Reason)
+				}
+				binding.ID = ids.NewBoxID()
+				if !binding.Primary {
+					binding.RootRef = "box:" + binding.ID
+					binding.StateRoot = filepath.Join(cfg.DataDir, "boxes", binding.ID)
+				}
+			}
+			selected = &binding
+			cfg.BoxPath, cfg.BoxStateRoot = binding.RootPath, binding.StateRoot
+		} else if ref != "" {
+			return box.Resolved{}, catalogErr
+		}
+	}
+	input := box.ResolveInput{
 		ExplicitPath:     flags.path,
 		ConfiguredPath:   cfg.BoxPath,
 		RuntimeStateRoot: cfg.BoxStateRoot,
@@ -375,7 +568,38 @@ func resolveBoxForCLI(opts *options, flags boxCommandFlags) (box.Resolved, error
 		ConfigProfile:    cfg.BoxProfile,
 		NodeID:           cfg.NodeID,
 		NodeRole:         cfg.NodeRole,
-	})
+	}
+	if selected != nil {
+		input.BoxID, input.RootRef = selected.ID, selected.RootRef
+	}
+	resolved, err := box.Resolve(input)
+	if err != nil {
+		return box.Resolved{}, err
+	}
+	if selected != nil && resolved.RootPath != selected.RootPath {
+		return box.Resolved{}, fmt.Errorf("explicit path disagrees with selected Box root")
+	}
+	return resolved, nil
+}
+
+func newBoxListCommand(opts *options) *cobra.Command {
+	return &cobra.Command{Use: "list", Short: "List the authoritative registered workspace Boxes", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+		cc, err := resolveCommandContext(opts)
+		if err != nil {
+			return err
+		}
+		result, err := cc.Client.Boxes(cmd.Context(), cc.CorrelationID)
+		if err != nil {
+			return err
+		}
+		if opts.jsonOutput {
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(result.Data)
+		}
+		for _, b := range result.Data.Boxes {
+			fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%s\t%s\t%t\n", b.Key, b.Node, b.ID, b.RootPath, b.Available)
+		}
+		return nil
+	}}
 }
 
 func renderBoxStatus(cmd *cobra.Command, status box.Status) {

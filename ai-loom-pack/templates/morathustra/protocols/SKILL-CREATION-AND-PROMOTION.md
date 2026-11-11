@@ -49,7 +49,8 @@ set and its parents remains independently authoritative for gateway and TUI.
 
 ## Conservative Native Curator
 
-The accepted baseline enables the native curator with these settings:
+The following conservative settings are an optional configuration example,
+not a claim about a live profile or authorization to enable maintenance:
 
 - `prune_builtins=false` and `consolidate=false`.
 - `interval_hours=168` and `min_idle_hours=2`.
@@ -83,24 +84,13 @@ keep their existing owners; `prune_builtins=false` preserves all bundled skills.
 
 ## Skill Selection
 
-Disable the following exact 42 unused bundled names with `skills.disabled`,
-not deletion:
-
-- airtable, arxiv, ascii-video, baoyu-infographic, box, claude-code,
-  claude-design, codebase-inspection, codex, competitor-news-monitor,
-  computer-use, design-md, dogfood, email-inbox-triage, gif-search,
-  google-workspace, hermes-agent-skill-authoring, himalaya, humanizer,
-  inspecting-hermes-desktop-dom, llm-wiki, manim-video, maps,
-  node-inspect-debugger, notion, obsidian, opencode, p5js, popular-web-designs,
-  product-price-monitor, python-debugpy, requesting-code-review, sdlc-review,
-  simplify-code, songsee, songwriting-and-ai-music, spike, systematic-debugging,
-  teams-meeting-pipeline, test-driven-development, xurl, youtube-content.
-
-Nineteen visible skills remained after unwanted skills were removed from
-selection: twelve native skills plus seven LOOM-installed skills. That count
-is a historical observation, not a curated or fixed catalogue or a ceiling.
+Inspect the actual installed catalogue and the operator's selected skills.
+Change selection with `skills.disabled` only when authorized, not deletion.
+This template supplies no private inventory or live count. ORCA's legacy skills
+are retired, not an availability fallback; do not disable native Hermes tools
+merely because a retired client once exposed similarly named skills.
 Do not infer a new-skill approval requirement from it; the native write-approval
-and installed/created ownership rules above still apply. Keep the four
-platform-hidden Apple skills untouched. Changing selection does not transfer
+and installed/created ownership rules above still apply. Keep platform-hidden
+skills untouched. Changing selection does not transfer
 ownership. Follow `TOOLING.md` for managed Nix settings; the baseline is a
 provisioning template, not permission to overwrite live profile configuration.

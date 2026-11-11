@@ -14,6 +14,8 @@ import (
 // Recover receipts, never replay calls. An expired invocation lease alone does
 // not prove that its owner stopped: wait for a terminal worker or linked job.
 func (s Service) recoverExpiredInvocations(ctx context.Context, req requestctx.Context, input DispatcherRunInput) error {
+	args := []any{input.Now, input.InvocationRef, input.BatchSize}
+	predicate := invocationBoxPredicateFor(ctx, "i", &args)
 	rows, err := s.DB.QueryContext(ctx, `SELECT invocation_id FROM automation.invocations i
 		WHERE status IN ('leased','calling') AND lease_expires_at <= $1
 		AND ($2 = '' OR invocation_id = $2)
@@ -23,7 +25,7 @@ func (s Service) recoverExpiredInvocations(ctx context.Context, req requestctx.C
 			AND (j.job_id=i.job_id OR EXISTS (SELECT 1 FROM routing.capability_calls c
 				WHERE c.metadata->>'invocation_id'=i.invocation_id
 				AND (c.job_id=j.job_id OR j.metadata #>> '{routing,capability_call_id}'=c.capability_call_id)))))
-		ORDER BY lease_expires_at LIMIT $3`, input.Now, input.InvocationRef, input.BatchSize)
+		AND `+predicate+` ORDER BY lease_expires_at LIMIT $3`, args...)
 	if err != nil {
 		return err
 	}
@@ -55,9 +57,11 @@ func (s Service) recoverExpiredInvocation(ctx context.Context, req requestctx.Co
 		return err
 	}
 	defer tx.Rollback()
+	args := []any{ref, now}
+	predicate := invocationBoxPredicate(ctx, &args)
 	i, err := scanInvocation(tx.QueryRowContext(ctx, invocationSelectSQL()+`
 		WHERE invocation_id=$1 AND status IN ('leased','calling') AND lease_expires_at <= $2
-		FOR UPDATE SKIP LOCKED`, ref, now))
+		AND `+predicate+` FOR UPDATE SKIP LOCKED`, args...))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}

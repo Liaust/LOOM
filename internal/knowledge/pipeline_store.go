@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -30,6 +32,21 @@ func (s *Service) applyExtractionPipeline(ctx context.Context, object KnowledgeO
 			_ = tx.Rollback()
 		}
 	}()
+	current, err := lockCurrentPipelineObjectTx(ctx, tx, object.KnowledgeObjectID)
+	if err != nil {
+		return TextPipelineResult{}, err
+	}
+	if current.SourceHash != object.SourceHash || current.SourceRevision != object.SourceRevision {
+		return TextPipelineResult{}, fmt.Errorf("%w: extraction source is no longer current", ErrConflict)
+	}
+	var admitted bool
+	if err = tx.QueryRowContext(ctx, `SELECT `+visibleNotesKnowledgeObjectSQL("o")+` AND `+notesPublicationCurrentSQL("o", "o")+`
+	 FROM knowledge.knowledge_objects o WHERE knowledge_object_id=$1`, object.KnowledgeObjectID).Scan(&admitted); err != nil {
+		return TextPipelineResult{}, err
+	}
+	if !admitted {
+		return TextPipelineResult{}, fmt.Errorf("%w: extraction source admission changed", ErrConflict)
+	}
 
 	version, err := s.getOrCreateKnowledgeObjectVersionTx(ctx, tx, object, extractionPipelineVersionMetadata(extraction))
 	if err != nil {
@@ -314,117 +331,197 @@ func nextKnowledgeObjectVersionNumberTx(ctx context.Context, tx *sql.Tx, objectI
 	return next, err
 }
 
-func (s *Service) replaceKnowledgeChunksTx(ctx context.Context, tx *sql.Tx, object KnowledgeObject, version KnowledgeObjectVersion, inputs []TextChunkInput) ([]KnowledgeChunk, error) {
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM knowledge.knowledge_chunks
-		WHERE knowledge_object_version_id = $1
-	`, version.KnowledgeObjectVersionID); err != nil {
-		return nil, err
+// These pages share the caller's transaction: a failed later page cannot expose
+// a partial replacement. The byte budget measures bound parameter payload; an
+// oversized existing row is sent alone so batching adds no new input policy.
+const pipelineWriteBatchRows = 256
+const pipelineWriteBatchBytes = 256 * 1024
+
+func pipelineWriteBatchEnd(rows [][]any, start int) int {
+	end, bytes := start, 0
+	for end < len(rows) && end-start < pipelineWriteBatchRows {
+		size := 0
+		for _, value := range rows[end] {
+			size += 4 // PostgreSQL parameter length prefix.
+			switch v := value.(type) {
+			case string:
+				size += len(v)
+			case []byte:
+				size += len(v)
+			case json.RawMessage:
+				size += len(v)
+			case nil:
+			default:
+				size += 8
+			}
+		}
+		if end > start && size > pipelineWriteBatchBytes-bytes {
+			break
+		}
+		bytes += size
+		end++
 	}
+	return end
+}
+
+func pipelineWriteValues(rows [][]any, types []string) (string, []any) {
+	var values strings.Builder
+	args := make([]any, 0, len(rows)*len(types))
+	for i, row := range rows {
+		if i > 0 {
+			values.WriteByte(',')
+		}
+		values.WriteByte('(')
+		for j, value := range row {
+			if j > 0 {
+				values.WriteByte(',')
+			}
+			args = append(args, value)
+			values.WriteByte('$')
+			values.WriteString(strconv.Itoa(len(args)))
+			values.WriteString("::" + types[j])
+		}
+		values.WriteByte(')')
+	}
+	return values.String(), args
+}
+
+func (s *Service) replaceKnowledgeChunksTx(ctx context.Context, tx *sql.Tx, object KnowledgeObject, version KnowledgeObjectVersion, inputs []TextChunkInput) ([]KnowledgeChunk, error) {
 	chunks := make([]KnowledgeChunk, 0, len(inputs))
+	parameters := make([][]any, 0, len(inputs))
+	positions := make(map[string]int, len(inputs))
 	versionID := version.KnowledgeObjectVersionID
 	for _, input := range inputs {
-		startOffset := input.StartOffset
-		endOffset := input.EndOffset
-		tokenEstimate := input.TokenCountEstimate
+		startOffset, endOffset, tokenEstimate := input.StartOffset, input.EndOffset, input.TokenCountEstimate
 		chunk, err := s.PrepareKnowledgeChunk(KnowledgeChunk{
-			KnowledgeObjectID:        object.KnowledgeObjectID,
-			KnowledgeObjectVersionID: &versionID,
-			ChunkIndex:               input.Index,
-			ChunkText:                input.Text,
-			ChunkHash:                input.ChunkHash,
-			StructuralPath:           input.StructuralPath,
-			StartOffset:              &startOffset,
-			EndOffset:                &endOffset,
-			TokenCountEstimate:       &tokenEstimate,
-			ChunkerVersion:           KnowledgeMarkdownTextChunkerVersion,
-			Status:                   ChunkStatusCreated,
-			Metadata:                 chunkMetadata(input),
+			KnowledgeObjectID: object.KnowledgeObjectID, KnowledgeObjectVersionID: &versionID,
+			ChunkIndex: input.Index, ChunkText: input.Text, ChunkHash: input.ChunkHash,
+			StructuralPath: input.StructuralPath, StartOffset: &startOffset, EndOffset: &endOffset,
+			TokenCountEstimate: &tokenEstimate, ChunkerVersion: KnowledgeMarkdownTextChunkerVersion,
+			Status: ChunkStatusCreated, Metadata: chunkMetadata(input),
 		})
 		if err != nil {
 			return nil, err
 		}
-		row := tx.QueryRowContext(ctx, `
-			INSERT INTO knowledge.knowledge_chunks (
-				knowledge_chunk_id, knowledge_object_id, knowledge_object_version_id,
-				chunk_index, chunk_text, chunk_hash, structural_path, start_offset,
-				end_offset, token_count_estimate, chunker_version, status, metadata,
-				created_at, indexed_at
-			)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-			RETURNING `+knowledgeChunkColumns(),
-			chunk.KnowledgeChunkID,
-			chunk.KnowledgeObjectID,
-			nullableString(chunk.KnowledgeObjectVersionID),
-			chunk.ChunkIndex,
-			chunk.ChunkText,
-			chunk.ChunkHash,
-			chunk.StructuralPath,
-			nullableInt(chunk.StartOffset),
-			nullableInt(chunk.EndOffset),
-			nullableInt(chunk.TokenCountEstimate),
-			chunk.ChunkerVersion,
-			chunk.Status,
-			chunk.Metadata,
-			chunk.CreatedAt,
-			nullableTime(chunk.IndexedAt),
-		)
-		chunk, err = scanKnowledgeChunk(row)
+		positions[chunk.KnowledgeChunkID] = len(chunks)
+		chunks = append(chunks, chunk)
+		parameters = append(parameters, []any{
+			chunk.KnowledgeChunkID, chunk.KnowledgeObjectID, nullableString(chunk.KnowledgeObjectVersionID),
+			chunk.ChunkIndex, chunk.ChunkText, chunk.ChunkHash, chunk.StructuralPath,
+			nullableInt(chunk.StartOffset), nullableInt(chunk.EndOffset), nullableInt(chunk.TokenCountEstimate),
+			chunk.ChunkerVersion, chunk.Status, chunk.Metadata, chunk.CreatedAt, nullableTime(chunk.IndexedAt),
+		})
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM knowledge.knowledge_chunks WHERE knowledge_object_version_id=$1`, versionID); err != nil {
+		return nil, err
+	}
+	for start := 0; start < len(parameters); {
+		end := pipelineWriteBatchEnd(parameters, start)
+		values, args := pipelineWriteValues(parameters[start:end], []string{
+			"text", "text", "text", "integer", "text", "text", "text", "integer", "integer", "integer",
+			"text", "text", "jsonb", "timestamptz", "timestamptz",
+		})
+		rows, err := tx.QueryContext(ctx, `INSERT INTO knowledge.knowledge_chunks (
+		 knowledge_chunk_id,knowledge_object_id,knowledge_object_version_id,chunk_index,chunk_text,chunk_hash,
+		 structural_path,start_offset,end_offset,token_count_estimate,chunker_version,status,metadata,created_at,indexed_at)
+		 VALUES `+values+` RETURNING `+knowledgeChunkColumns(), args...)
 		if err != nil {
 			return nil, err
 		}
-		chunks = append(chunks, chunk)
+		for rows.Next() {
+			chunk, err := scanKnowledgeChunk(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			position, ok := positions[chunk.KnowledgeChunkID]
+			if !ok || position < start || position >= end || chunk.ChunkIndex != chunks[position].ChunkIndex {
+				rows.Close()
+				return nil, fmt.Errorf("%w: unexpected inserted chunk identity", ErrConflict)
+			}
+			chunks[position] = chunk
+			delete(positions, chunk.KnowledgeChunkID)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		for _, chunk := range chunks[start:end] {
+			if _, missing := positions[chunk.KnowledgeChunkID]; missing {
+				return nil, fmt.Errorf("%w: missing inserted chunk identity", ErrConflict)
+			}
+		}
+		start = end
 	}
 	return chunks, nil
 }
 
 func (s *Service) replaceObjectLinksTx(ctx context.Context, tx *sql.Tx, object KnowledgeObject, inputs []ExtractedLink) ([]ObjectLink, error) {
-	if _, err := tx.ExecContext(ctx, `
-		DELETE FROM knowledge.object_links
-		WHERE source_knowledge_object_id = $1
-	`, object.KnowledgeObjectID); err != nil {
-		return nil, err
-	}
 	links := make([]ObjectLink, 0, len(inputs))
+	parameters := make([][]any, 0, len(inputs))
+	positions := make(map[string]int, len(inputs))
 	for _, input := range inputs {
 		link, err := s.PrepareObjectLink(ObjectLink{
-			SourceKnowledgeObjectID: object.KnowledgeObjectID,
-			LinkKind:                input.Kind,
-			RawTarget:               input.RawTarget,
-			NormalizedTarget:        input.NormalizedTarget,
-			LinkText:                input.LinkText,
-			Status:                  LinkStatusUnresolved,
-			Metadata:                linkMetadata(input),
+			SourceKnowledgeObjectID: object.KnowledgeObjectID, LinkKind: input.Kind,
+			RawTarget: input.RawTarget, NormalizedTarget: input.NormalizedTarget, LinkText: input.LinkText,
+			Status: LinkStatusUnresolved, Metadata: linkMetadata(input),
 		})
 		if err != nil {
 			return nil, err
 		}
-		row := tx.QueryRowContext(ctx, `
-			INSERT INTO knowledge.object_links (
-				knowledge_object_link_id, source_knowledge_object_id,
-				target_knowledge_object_id, chunk_id, link_kind, raw_target,
-				normalized_target, link_text, status, metadata, created_at, updated_at
-			)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-			RETURNING `+objectLinkColumns(),
-			link.KnowledgeObjectLinkID,
-			link.SourceKnowledgeObjectID,
-			nullableString(link.TargetKnowledgeObjectID),
-			nullableString(link.ChunkID),
-			link.LinkKind,
-			link.RawTarget,
-			link.NormalizedTarget,
-			link.LinkText,
-			link.Status,
-			link.Metadata,
-			link.CreatedAt,
-			link.UpdatedAt,
-		)
-		link, err = scanObjectLink(row)
+		positions[link.KnowledgeObjectLinkID] = len(links)
+		links = append(links, link)
+		parameters = append(parameters, []any{
+			link.KnowledgeObjectLinkID, link.SourceKnowledgeObjectID, nullableString(link.TargetKnowledgeObjectID),
+			nullableString(link.ChunkID), link.LinkKind, link.RawTarget, link.NormalizedTarget, link.LinkText,
+			link.Status, link.Metadata, link.CreatedAt, link.UpdatedAt,
+		})
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM knowledge.object_links WHERE source_knowledge_object_id=$1`, object.KnowledgeObjectID); err != nil {
+		return nil, err
+	}
+	for start := 0; start < len(parameters); {
+		end := pipelineWriteBatchEnd(parameters, start)
+		values, args := pipelineWriteValues(parameters[start:end], []string{
+			"text", "text", "text", "text", "text", "text", "text", "text", "text", "jsonb", "timestamptz", "timestamptz",
+		})
+		rows, err := tx.QueryContext(ctx, `INSERT INTO knowledge.object_links (
+		 knowledge_object_link_id,source_knowledge_object_id,target_knowledge_object_id,chunk_id,link_kind,
+		 raw_target,normalized_target,link_text,status,metadata,created_at,updated_at)
+		 VALUES `+values+` RETURNING `+objectLinkColumns(), args...)
 		if err != nil {
 			return nil, err
 		}
-		links = append(links, link)
+		for rows.Next() {
+			link, err := scanObjectLink(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			position, ok := positions[link.KnowledgeObjectLinkID]
+			if !ok || position < start || position >= end {
+				rows.Close()
+				return nil, fmt.Errorf("%w: unexpected inserted link identity", ErrConflict)
+			}
+			links[position] = link
+			delete(positions, link.KnowledgeObjectLinkID)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		for _, link := range links[start:end] {
+			if _, missing := positions[link.KnowledgeObjectLinkID]; missing {
+				return nil, fmt.Errorf("%w: missing inserted link identity", ErrConflict)
+			}
+		}
+		start = end
 	}
 	return links, nil
 }

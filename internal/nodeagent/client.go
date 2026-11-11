@@ -24,8 +24,16 @@ import (
 )
 
 type Client struct {
-	BaseURL    string
-	HTTPClient *http.Client
+	BaseURL         string
+	HTTPClient      *http.Client
+	credentialToken string
+}
+
+// WithNodeCredential binds transfer requests to the existing enrolled identity.
+// Keep the token out of URLs, serialized client state and diagnostic output.
+func (c Client) WithNodeCredential(token string) Client {
+	c.credentialToken = strings.TrimSpace(token)
+	return c
 }
 
 type RemoteRequestError struct {
@@ -167,6 +175,9 @@ func doJSON[I any, O any](ctx context.Context, client Client, method, path, corr
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
+	if client.credentialToken != "" {
+		request.Header.Set("Authorization", "Bearer "+client.credentialToken)
+	}
 	request.Header.Set(correlation.Header, correlation.Normalize(correlationID))
 	if strings.TrimSpace(idempotencyKey) != "" {
 		request.Header.Set(idempotency.Header, strings.TrimSpace(idempotencyKey))
@@ -210,6 +221,9 @@ func doRaw[O any](ctx context.Context, client Client, method, path, correlationI
 	}
 	request.Header.Set("Content-Type", "application/octet-stream")
 	request.Header.Set("Accept", "application/json")
+	if client.credentialToken != "" {
+		request.Header.Set("Authorization", "Bearer "+client.credentialToken)
+	}
 	request.Header.Set(correlation.Header, correlation.Normalize(correlationID))
 	if strings.TrimSpace(idempotencyKey) != "" {
 		request.Header.Set(idempotency.Header, strings.TrimSpace(idempotencyKey))

@@ -15,6 +15,7 @@ import (
 	"loom.local/loom/internal/backupcontracts"
 	"loom.local/loom/internal/backupstrategy"
 	"loom.local/loom/internal/box"
+	"loom.local/loom/internal/boxregistry"
 	"loom.local/loom/internal/config"
 	"loom.local/loom/internal/hermesprofile"
 	"loom.local/loom/internal/maintenance"
@@ -41,6 +42,11 @@ const (
 )
 
 type Options struct {
+	Boxes           boxregistry.Catalog
+	BoxCatalogError error
+	LoadBoxes       func() (boxregistry.Catalog, error)
+	// CloudRoots must come from authenticated committed archive evidence, not policy.
+	CloudRoots             []CloudRootEvidence
 	ApplicationDataRoot    string
 	HermesRecovery         hermesprofile.Policy
 	HermesPolicyError      error
@@ -53,6 +59,7 @@ type Options struct {
 	MainDocumentsRoot      string
 	StorageRetentionRoot   string
 	StorageArchiveRoot     string
+	StorageRoot            string
 	StorageExportRoot      string
 	MainBoxPath            string
 	BoxNotesRoot           string
@@ -71,15 +78,18 @@ type Options struct {
 }
 
 type Report struct {
-	SchemaVersion      string    `json:"schema_version"`
-	Mode               string    `json:"mode"`
-	Status             string    `json:"status"`
-	GeneratedAt        time.Time `json:"generated_at"`
-	BackupRoot         string    `json:"backup_root,omitempty"`
-	LatestManifestPath string    `json:"latest_manifest_path,omitempty"`
-	Entries            []Entry   `json:"entries"`
-	Summary            Summary   `json:"summary"`
-	CriticalMissing    []string  `json:"critical_missing,omitempty"`
+	ObservedAt         time.Time  `json:"observed_at"`
+	ManifestCapturedAt *time.Time `json:"manifest_captured_at,omitempty"`
+	ManifestClass      string     `json:"manifest_class,omitempty"`
+	SchemaVersion      string     `json:"schema_version"`
+	Mode               string     `json:"mode"`
+	Status             string     `json:"status"`
+	GeneratedAt        time.Time  `json:"generated_at"`
+	BackupRoot         string     `json:"backup_root,omitempty"`
+	LatestManifestPath string     `json:"latest_manifest_path,omitempty"`
+	Entries            []Entry    `json:"entries"`
+	Summary            Summary    `json:"summary"`
+	CriticalMissing    []string   `json:"critical_missing,omitempty"`
 }
 
 type Summary struct {
@@ -114,7 +124,21 @@ func Bounded(report Report) BoundedSummary {
 	}
 }
 
+// Evidence separates this read from dated capture and current-file assurance.
+// Bounded intentionally does not persist these locators or per-entry details.
+type Evidence struct {
+	EvidenceBasis      string     `json:"evidence_basis,omitempty"`
+	EvidenceRef        string     `json:"evidence_ref,omitempty"`
+	EvidenceCapturedAt *time.Time `json:"evidence_captured_at,omitempty"`
+	ObservedAt         time.Time  `json:"observed_at"`
+	RequirementBasis   string     `json:"requirement_basis,omitempty"`
+	CurrentProtection  string     `json:"current_protection"`
+}
+
 type Entry struct {
+	Evidence
+	BoxID      string `json:"box_id,omitempty"`
+	BoxKey     string `json:"box_key,omitempty"`
 	Key        string `json:"key"`
 	Label      string `json:"label"`
 	Category   string `json:"category"`
@@ -138,6 +162,9 @@ type ContractPlan struct {
 }
 
 type BackupContract struct {
+	Evidence
+	BoxID          string `json:"box_id,omitempty"`
+	BoxKey         string `json:"box_key,omitempty"`
 	Key            string `json:"key"`
 	Label          string `json:"label"`
 	Category       string `json:"category"`
@@ -157,6 +184,7 @@ type ContractSummary struct {
 }
 
 func OptionsFromConfig(cfg config.Config) Options {
+	catalog, catalogErr := cfg.BoxCatalog()
 	hermesPolicy, hermesErr := cfg.HermesRecoveryPolicy()
 	dataDir := strings.TrimSpace(cfg.DataDir)
 	if dataDir == "" {
@@ -180,6 +208,7 @@ func OptionsFromConfig(cfg config.Config) Options {
 		mainBox = filepath.Join("/home", "loomadmin", box.DefaultRootDirName)
 	}
 	return Options{
+		Boxes: catalog, BoxCatalogError: catalogErr, LoadBoxes: cfg.BoxCatalog,
 		ApplicationDataRoot: cfg.ApplicationDataBackupRoot,
 		HermesRecovery:      hermesPolicy, HermesPolicyError: hermesErr,
 		DataDir:              dataDir,
@@ -190,6 +219,7 @@ func OptionsFromConfig(cfg config.Config) Options {
 		MainDocumentsRoot:    mainDocuments,
 		StorageRetentionRoot: storageRetention,
 		StorageArchiveRoot:   cfg.ArchiveRoot,
+		StorageRoot:          cfg.StorageRoot,
 		StorageExportRoot:    storageExport,
 		MainBoxPath:          mainBox,
 		BoxNotesRoot:         cfg.BoxNotesRoot(),
@@ -216,6 +246,9 @@ func PlanContractsFromReport(report Report) ContractPlan {
 		Contracts:     make([]BackupContract, 0, len(report.Entries)),
 	}
 	for _, entry := range report.Entries {
+		if entry.ObservedAt.IsZero() {
+			entry.ObservedAt = report.GeneratedAt
+		}
 		contract := contractFromEntry(entry)
 		plan.Contracts = append(plan.Contracts, contract)
 		if contract.ContractStatus == "satisfied" {
@@ -236,11 +269,33 @@ func PlanContractsFromReport(report Report) ContractPlan {
 }
 
 func contractFromEntry(entry Entry) BackupContract {
+	entry = qualifyEvidence(entry, entry.ObservedAt)
 	status := "needs_attention"
-	if entry.Status == StatusCovered || entry.Status == StatusExcludedExplicitly {
+	satisfied := entry.Status == StatusExcludedExplicitly
+	if entry.Status == StatusCovered {
+		switch entry.RequirementBasis {
+		case "policy_declaration":
+			satisfied = entry.Policy != ""
+		case "dated_manifest_declaration":
+			satisfied = entry.EvidenceRef != "" && entry.EvidenceCapturedAt != nil
+		case "recovery_assurance":
+			satisfied = entry.EvidenceRef != "" && entry.EvidenceCapturedAt != nil && (entry.EvidenceBasis == "local_package_validation" || entry.EvidenceBasis == "authenticated_package_validation")
+		case "configured_readiness", "enrollment_readiness":
+			satisfied = entry.EvidenceBasis == "policy_declaration" || entry.EvidenceBasis == "source_inventory" || entry.EvidenceBasis == "source_readability"
+		case "migration_eligibility":
+			satisfied = entry.EvidenceBasis == "digest_bound_migration_report" && entry.EvidenceRef != ""
+		}
+	}
+	if satisfied {
 		status = "satisfied"
 	}
+	action := backupActionForEntry(entry)
+	if entry.Status == StatusCovered && status != "satisfied" {
+		action = "inspect dated capture/recovery evidence; readiness alone does not satisfy assurance"
+	}
 	return BackupContract{
+		Evidence: entry.Evidence,
+		BoxID:    entry.BoxID, BoxKey: entry.BoxKey,
 		Key:            entry.Key,
 		Label:          entry.Label,
 		Category:       entry.Category,
@@ -249,9 +304,52 @@ func contractFromEntry(entry Entry) BackupContract {
 		ContractStatus: status,
 		Critical:       entry.Critical,
 		Path:           entry.Path,
-		Action:         backupActionForEntry(entry),
+		Action:         action,
 		Detail:         firstNonEmpty(entry.Message, entry.Policy),
 	}
+}
+
+func qualifyEvidence(entry Entry, observed time.Time) Entry {
+	entry.ObservedAt = observed.UTC()
+	if entry.CurrentProtection == "" {
+		entry.CurrentProtection = "unknown"
+	}
+	if entry.RequirementBasis == "" {
+		switch entry.Category {
+		case "runtime_config", "runtime_root", "canonical_custody_root", "authoritative_notes_root", "standalone_backup_contract", "recovery_package":
+			entry.RequirementBasis = "recovery_assurance"
+		case "latest_backup":
+			entry.RequirementBasis = "dated_manifest_declaration"
+		case "policy", "excluded_view", "generated_artifact":
+			entry.RequirementBasis = "policy_declaration"
+		default:
+			entry.RequirementBasis = "unknown"
+		}
+	}
+	if entry.EvidenceBasis == "" {
+		switch entry.Category {
+		case "runtime_config", "policy", "excluded_view", "generated_artifact":
+			entry.EvidenceBasis = "policy_declaration"
+		case "runtime_root", "authoritative_notes_root", "standalone_backup_contract", "canonical_custody_root":
+			entry.EvidenceBasis = "source_observation"
+		case "latest_backup":
+			entry.EvidenceBasis = "manifest_declaration"
+			if entry.Policy != "" {
+				entry.EvidenceBasis = "manifest_policy_declaration"
+			}
+		default:
+			entry.EvidenceBasis = "unknown"
+		}
+	}
+	if entry.Status == StatusExcludedExplicitly {
+		entry.RequirementBasis = "policy_declaration"
+		entry.EvidenceBasis = "policy_declaration"
+		entry.CurrentProtection = "not_applicable"
+	}
+	if entry.EvidenceRef == "" && (entry.EvidenceBasis == "source_observation" || entry.EvidenceBasis == "source_inventory" || entry.EvidenceBasis == "source_readability") {
+		entry.EvidenceRef = entry.Path
+	}
+	return entry
 }
 
 func backupRequirementForEntry(entry Entry) string {
@@ -303,6 +401,7 @@ func backupActionForEntry(entry Entry) string {
 
 func Check(ctx context.Context, opts Options) (Report, error) {
 	opts = normalizeOptions(opts)
+	opts.Boxes, opts.BoxCatalogError = opts.ProtectionBoxes()
 	now := time.Now().UTC()
 	if opts.Now != nil {
 		now = opts.Now().UTC()
@@ -312,9 +411,23 @@ func Check(ctx context.Context, opts Options) (Report, error) {
 		Mode:          opts.Mode,
 		Status:        OverallOK,
 		GeneratedAt:   now,
+		ObservedAt:    now,
 		BackupRoot:    opts.BackupRoot,
 	}
 	add := func(entry Entry) {
+		if entry.BoxKey == "" && filepath.IsAbs(entry.Path) {
+			for _, box := range opts.Boxes.Boxes {
+				if box.Primary && (entry.Path == box.RootPath || strings.HasPrefix(entry.Path, box.RootPath+string(filepath.Separator))) {
+					entry.BoxID, entry.BoxKey = box.ID, box.Key
+					break
+				}
+			}
+		}
+		entry = qualifyEvidence(entry, now)
+		if entry.Category == "latest_backup" && entry.EvidenceRef == "" && report.LatestManifestPath != "" {
+			entry.EvidenceRef = report.LatestManifestPath
+			entry.EvidenceCapturedAt = report.ManifestCapturedAt
+		}
 		report.Entries = append(report.Entries, entry)
 	}
 
@@ -323,7 +436,20 @@ func Check(ctx context.Context, opts Options) (Report, error) {
 		if opts.HermesRecovery.Identity == hermesprofile.MinaIdentity {
 			entry.Key, entry.Label = "mina-recovery", "MINA Hermes recovery"
 		}
-		_, err := hermesprofile.CheckDailyCoverage(ctx, opts.HermesRecovery, now)
+		evidence, err := hermesprofile.CheckDailyCoverage(ctx, opts.HermesRecovery, now)
+		entry.EvidenceBasis = "authenticated_package_validation_attempt"
+		if err == nil && len(evidence) > 0 {
+			latest := evidence[0]
+			for _, item := range evidence[1:] {
+				if item.CreatedAt.After(latest.CreatedAt) {
+					latest = item
+				}
+			}
+			entry.EvidenceBasis = "authenticated_package_validation"
+			entry.EvidenceRef = latest.Path
+			captured := latest.CreatedAt.UTC()
+			entry.EvidenceCapturedAt = &captured
+		}
 		if opts.HermesPolicyError != nil {
 			err = opts.HermesPolicyError
 		}
@@ -410,6 +536,9 @@ func Check(ctx context.Context, opts Options) (Report, error) {
 	for _, entry := range standaloneBackupContractEntries(ctx, opts) {
 		add(entry)
 	}
+	for _, entry := range boxCoverageEntries(ctx, opts, now) {
+		add(entry)
+	}
 
 	manifestPath, manifest, found, err := resolveManifest(opts)
 	if err != nil {
@@ -434,6 +563,11 @@ func Check(ctx context.Context, opts Options) (Report, error) {
 		add(resolveProvenanceManifestEntry(ctx, opts, "", maintenance.BackupManifest{}))
 	} else {
 		report.LatestManifestPath = manifestPath
+		report.ManifestClass = "local_main_backup"
+		if captured, err := time.Parse(time.RFC3339Nano, manifest.CreatedAt); err == nil {
+			captured = captured.UTC()
+			report.ManifestCapturedAt = &captured
+		}
 		add(resolveProvenanceManifestEntry(ctx, opts, manifestPath, manifest))
 		add(manifestPathEntry("latest-main-documents", "latest backup includes main-documents", manifest.Paths.MainDocuments, "main-documents", true))
 		add(manifestPathEntry("latest-imports", "latest backup includes Imports custody", manifest.Paths.Imports, "imports", true))
@@ -479,6 +613,7 @@ func migrationEligibilityEntry(report backupstrategy.MigrationEligibilityReport)
 	if report.Schema == backupstrategy.MigrationEligibilitySchema && report.Status == backupstrategy.MigrationEligibilityEligible && report.Digest != "" && !report.CleanupApplyAllowed {
 		entry.Status = StatusCovered
 		entry.Message = fmt.Sprintf("strict restore accepted; %d exact legacy candidate(s), %d expected allocated bytes; cleanup still requires Slice 6 review", len(report.Candidates), report.ExpectedReclaimableBytes)
+		entry.EvidenceBasis, entry.EvidenceRef, entry.RequirementBasis = "digest_bound_migration_report", report.Digest, "migration_eligibility"
 		return entry
 	}
 	entry.Status = StatusRequiresDecision
@@ -488,10 +623,15 @@ func migrationEligibilityEntry(report backupstrategy.MigrationEligibilityReport)
 
 func provenanceManifestEntry(ctx context.Context, manifestPath string, manifest maintenance.BackupManifest, trustedManifestSHA256 string) Entry {
 	entry := Entry{
+		Evidence: Evidence{EvidenceBasis: "local_package_validation_attempt", EvidenceRef: manifestPath},
 		Key:      "latest-provenance-ledger",
 		Label:    "latest backup includes the complete provenance ledger",
 		Category: "latest_backup",
 		Critical: true,
+	}
+	if captured, err := time.Parse(time.RFC3339Nano, manifest.CreatedAt); err == nil {
+		captured = captured.UTC()
+		entry.EvidenceCapturedAt = &captured
 	}
 	if _, err := maintenance.ValidateProvenanceBackupManifest(manifest); err != nil {
 		entry.Status = StatusMissing
@@ -517,6 +657,7 @@ func provenanceManifestEntry(ctx context.Context, manifestPath string, manifest 
 		return entry
 	}
 	entry.Status = StatusCovered
+	entry.EvidenceBasis = "local_package_validation"
 	entry.Exists = true
 	entry.TotalBytes = verification.DumpSizeBytes
 	entry.Policy = "complete_schema_counts_graph_digest_and_authenticated_dump"
@@ -650,6 +791,7 @@ func directoryEntry(ctx context.Context, key, label, path string, critical bool)
 		return entry
 	}
 	entry.Status = StatusCovered
+	entry.EvidenceBasis = "source_inventory"
 	entry.Exists = true
 	entry.FileCount = fileCount
 	entry.TotalBytes = totalBytes
@@ -707,6 +849,7 @@ func custodyDirectoryEntry(ctx context.Context, key, label, pathValue string, cr
 		return entry
 	}
 	entry.Status = StatusCovered
+	entry.EvidenceBasis = "source_readability"
 	entry.Exists = true
 	entry.Policy = "bounded_readability_check"
 	entry.Message = "canonical custody root is readable; full inventory is deferred to backup/verification work"
@@ -851,6 +994,9 @@ func resolveManifest(opts Options) (string, maintenance.BackupManifest, bool, er
 	if strings.TrimSpace(opts.ManifestPath) != "" {
 		manifestPath := filepath.Clean(opts.ManifestPath)
 		manifest, err := maintenance.ReadBackupManifest(manifestPath)
+		if err == nil && !localMainManifest(manifest) {
+			err = fmt.Errorf("manifest is not a local main-backup producer class")
+		}
 		return manifestPath, manifest, err == nil, err
 	}
 	matches, err := filepath.Glob(filepath.Join(opts.BackupRoot, "*", "manifest.json"))
@@ -861,9 +1007,36 @@ func resolveManifest(opts Options) (string, maintenance.BackupManifest, bool, er
 		return "", maintenance.BackupManifest{}, false, nil
 	}
 	sort.Strings(matches)
-	manifestPath := matches[len(matches)-1]
-	manifest, err := maintenance.ReadBackupManifest(manifestPath)
-	return manifestPath, manifest, err == nil, err
+	var selected maintenance.BackupManifest
+	var selectedPath string
+	var selectedAt time.Time
+	var invalid error
+	for _, manifestPath := range matches {
+		manifest, err := maintenance.ReadBackupManifest(manifestPath)
+		if err != nil {
+			invalid = err
+			continue
+		}
+		if !localMainManifest(manifest) {
+			continue
+		}
+		captured, err := time.Parse(time.RFC3339Nano, manifest.CreatedAt)
+		if err != nil {
+			invalid = fmt.Errorf("local main-backup manifest has no valid capture time")
+			continue
+		}
+		if selectedPath == "" || captured.After(selectedAt) {
+			selected, selectedPath, selectedAt = manifest, manifestPath, captured
+		}
+	}
+	if selectedPath != "" {
+		return selectedPath, selected, true, nil
+	}
+	return "", maintenance.BackupManifest{}, false, invalid
+}
+
+func localMainManifest(manifest maintenance.BackupManifest) bool {
+	return manifest.BackupKind == "loom_main_state" || manifest.BackupKind == "loom_main_and_provenance_state"
 }
 
 func manifestPathEntry(key, label, value, expected string, critical bool) Entry {
@@ -914,6 +1087,7 @@ func manifestAuthenticatedPrivateBackupsEvidenceEntry(ctx context.Context, manif
 	expectedPath := maintenance.PrivateBackupsEvidencePath
 	missing := func(pathValue, message string) Entry {
 		return Entry{
+			Evidence: Evidence{EvidenceBasis: "local_package_validation_attempt"},
 			Key:      key,
 			Label:    label,
 			Category: "latest_backup",
@@ -961,7 +1135,7 @@ func manifestAuthenticatedPrivateBackupsEvidenceEntry(ctx context.Context, manif
 	if actualSize != *artifact.SizeBytes || actualSHA256 != strings.ToLower(strings.TrimSpace(artifact.SHA256)) {
 		return missing(declaredPath, "retained legacy evidence bytes do not match the manifest artifact")
 	}
-	return Entry{Key: key, Label: label, Category: "latest_backup", Path: artifact.Path, Status: StatusCovered, Critical: critical}
+	return Entry{Evidence: Evidence{EvidenceBasis: "local_package_validation"}, Key: key, Label: label, Category: "latest_backup", Path: artifact.Path, Status: StatusCovered, Critical: critical}
 }
 
 func hashNoFollowRegular(pathValue string, maxBytes int64) (string, int64, error) {

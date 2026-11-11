@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode"
 
+	"loom.local/loom/internal/boxregistry"
 	"loom.local/loom/internal/events"
 	"loom.local/loom/internal/ids"
 	"loom.local/loom/internal/requestctx"
@@ -98,8 +99,9 @@ type CreateInput struct {
 }
 
 type createProjectTxOptions struct {
-	ProjectID   string
-	EventSource string
+	ProjectID       string
+	EventSource     string
+	AllowUnassigned bool
 }
 
 type CreateResult struct {
@@ -109,7 +111,8 @@ type CreateResult struct {
 }
 
 type Service struct {
-	DB *sql.DB
+	DB    *sql.DB
+	boxes *boxregistry.Catalog
 }
 
 func NewService(db *sql.DB) Service {
@@ -121,7 +124,9 @@ func (s Service) ListProjects(ctx context.Context, limit int) ([]Project, error)
 		limit = 50
 	}
 
-	rows, err := s.DB.QueryContext(ctx, projectSelectSQL()+` ORDER BY p.updated_at DESC, p.slug LIMIT $1`, limit)
+	args := []any{limit}
+	selection := projectBoxSelectionSQL(ctx, "p", &args)
+	rows, err := s.DB.QueryContext(ctx, projectSelectSQL()+` WHERE `+selection+` ORDER BY p.updated_at DESC, p.slug LIMIT $1`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -169,11 +174,13 @@ func (s Service) ResolveProjectRef(ctx context.Context, ref string) (Project, er
 		return Project{}, fmt.Errorf("project ref is required")
 	}
 
+	args := []any{ref}
+	selection := projectBoxSelectionSQL(ctx, "p", &args)
 	row := s.DB.QueryRowContext(ctx, projectSelectSQL()+`
-		WHERE p.project_id = $1
+		WHERE (p.project_id = $1
 		   OR p.slug = $1
 		   OR scope.scope_key = $1
-		   OR scope.slug = $1
+		   OR scope.slug = $1) AND `+selection+`
 		ORDER BY
 			CASE
 				WHEN p.project_id = $1 THEN 0
@@ -182,7 +189,7 @@ func (s Service) ResolveProjectRef(ctx context.Context, ref string) (Project, er
 				ELSE 3
 			END
 		LIMIT 1
-	`, ref)
+	`, args...)
 	return scanProject(row)
 }
 
@@ -329,6 +336,9 @@ func createProjectTx(ctx context.Context, tx *sql.Tx, req requestctx.Context, in
 	}
 	existing, err := getProjectByIDOrSlugTx(ctx, tx, projectID, input.Slug, true)
 	if err == nil {
+		if err := ensureProjectBoxSelection(ctx, existing); err != nil && !(options.AllowUnassigned && HomeBoxID(existing.Metadata) == "") {
+			return CreateResult{}, err
+		}
 		if projectID != "" && existing.ProjectID != projectID {
 			return CreateResult{}, fmt.Errorf("project slug %q belongs to project %s, not %s", input.Slug, existing.ProjectID, projectID)
 		}
@@ -342,6 +352,11 @@ func createProjectTx(ctx context.Context, tx *sql.Tx, req requestctx.Context, in
 	}
 	if err != sql.ErrNoRows {
 		return CreateResult{}, err
+	}
+	if options.EventSource == "project.create" {
+		if selection, ok := boxregistry.FromContext(ctx); ok && !selection.AllBoxes {
+			return CreateResult{}, fmt.Errorf("Box-scoped creation requires validated project registration and physical placement")
+		}
 	}
 
 	homeNodeID := req.OriginNodeID

@@ -105,6 +105,7 @@ type DirectArchiveManifestPrepareInput struct {
 }
 
 type PreparedDirectArchiveManifest struct {
+	ManifestV3                    *DirectArchiveManifestV3
 	Manifest                      DirectArchiveManifest
 	ManifestV2                    *DirectArchiveManifestV2
 	ManifestBytes                 []byte
@@ -406,6 +407,15 @@ func ParseAuthenticatedDirectArchiveManifest(manifestBytes, hashFileBytes []byte
 		return PreparedDirectArchiveManifest{}, err
 	}
 	switch schema {
+	case DirectArchiveManifestSchemaV3:
+		var manifest DirectArchiveManifestV3
+		if err := decodeExactDirectArchiveManifest(manifestBytes, &manifest); err != nil {
+			return PreparedDirectArchiveManifest{}, err
+		}
+		if err := validateDirectArchiveManifestV3(manifest); err != nil {
+			return PreparedDirectArchiveManifest{}, err
+		}
+		return PreparedDirectArchiveManifest{ManifestV3: &manifest, ManifestV2: &manifest.Archive, ManifestBytes: append([]byte(nil), manifestBytes...), ManifestSHA256: manifestSHA, HashFileBytes: append([]byte(nil), hashFileBytes...)}, nil
 	case DirectArchiveManifestSchema:
 		var manifest DirectArchiveManifest
 		if err := decodeExactDirectArchiveManifest(manifestBytes, &manifest); err != nil {
@@ -546,6 +556,11 @@ func verifyExtractedDirectArchiveV2(ctx context.Context, root string, prepared P
 	if err := validateDirectArchiveManifestV2(*manifest); err != nil {
 		return verification, err
 	}
+	if prepared.ManifestV3 != nil {
+		if err := validateDirectArchiveManifestV3(*prepared.ManifestV3); err != nil {
+			return verification, err
+		}
+	}
 	digest := sha256.Sum256(prepared.ManifestBytes)
 	if prepared.ManifestSHA256 != hex.EncodeToString(digest[:]) || string(prepared.HashFileBytes) != prepared.ManifestSHA256+"  "+DirectArchiveManifestFile+"\n" {
 		return verification, fmt.Errorf("%w: extracted v2 archive manifest identity is invalid", ErrDirectArchiveRequestInvalid)
@@ -676,6 +691,16 @@ func verifyExtractedDirectArchiveV2(ctx context.Context, root string, prepared P
 	verification.Checks["user_payload_confinement"] = "succeeded"
 	verification.Checks["bounded_package_entries"] = "succeeded"
 	verification.Checks["operational_package"] = "succeeded"
+	for _, dep := range AdditionalNotesRecoveryPackages(prepared) {
+		v, err := VerifyOperationalPackage(ctx, OperationalPackageVerificationInput{PackageDir: filepath.Join(root, filepath.FromSlash(dep.Package.ArchivePath)), ExpectedPackageID: dep.Package.PackageID, ExpectedManifestSHA256: dep.Package.ManifestSHA256})
+		if err != nil || v.Status != "succeeded" {
+			verification.Errors = append(verification.Errors, "extracted Notes operational dependency failed verification")
+			return verification, nil
+		}
+	}
+	if prepared.ManifestV3 != nil {
+		verification.Checks["notes_operational_dependencies"] = "succeeded"
+	}
 	verification.Status = "succeeded"
 	return verification, nil
 }
@@ -733,6 +758,11 @@ func extractedDirectArchiveV2Contract(prepared PreparedDirectArchiveManifest) (m
 	}
 	if err := add(manifest.ProvenancePackage.ArchivePath, manifest.ProvenancePackage.Entries); err != nil {
 		return nil, nil, nil, err
+	}
+	for _, dep := range AdditionalNotesRecoveryPackages(prepared) {
+		if err := add(dep.Package.ArchivePath, dep.Package.Entries); err != nil {
+			return nil, nil, nil, err
+		}
 	}
 	evidenceTime := DirectArchiveEvidenceModifiedUnixNano(manifest.CreatedAt)
 	manifestDigest := sha256.Sum256(prepared.ManifestBytes)
@@ -907,7 +937,7 @@ func normalizeDirectArchiveRequestWithBoxRoots(request DirectArchiveRequest, all
 		if err != nil {
 			return request, fmt.Errorf("%w: canonical root %q: %v", ErrDirectArchiveRequestInvalid, root.Name, err)
 		}
-		allowEmpty := allowEmptyBoxRoots && (root.Name == "box_topics" || root.Name == "box_library" || root.Name == "application_data")
+		allowEmpty := allowEmptyBoxRoots && DirectArchiveRootAllowsEmpty(root.Name)
 		if err := requireReadableDirectArchiveDirectory(path, allowEmpty); err != nil {
 			return request, fmt.Errorf("%w: canonical root %q: %v", ErrDirectArchiveRequestInvalid, root.Name, err)
 		}
@@ -1023,6 +1053,18 @@ func NormalizeDirectArchiveClass(value string) (string, error) {
 type directArchiveHardlinkKey struct {
 	device uint64
 	inode  uint64
+}
+
+func DirectArchiveRootAllowsEmpty(name string) bool {
+	if IsBoxArchiveRoot(name) {
+		return true
+	}
+	switch name {
+	case "box_topics", "box_library", "application_data", "storage_projects", "storage_library", "storage_records", "storage_location_evidence":
+		return true
+	default:
+		return false
+	}
 }
 
 func inspectDirectArchiveRoot(ctx context.Context, root DirectArchiveRoot, exclusions []string, hardlinks map[directArchiveHardlinkKey]string) (DirectArchiveRootManifest, error) {

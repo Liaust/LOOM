@@ -1,12 +1,13 @@
 # Register A Pending Candidate On Main
 
-The installed `loom provenance` CLI provides retrieval. Registration uses the
-existing `POST /v1/provenance/candidates` local API, not an invented CLI command
-or direct database access. This works independently of `.project/` rollout.
+Use `loom provenance candidate register` for capture. It uses the existing
+authorized `POST /v1/provenance/candidates` local API and its idempotency contract,
+not a second semantic writer or direct database access.
 
 ## Prepare Once
 
-Search relevant accepted records and pending candidates first. Capture one
+Reuse a known exact record or check relevant records/candidates for a duplicate
+when necessary. Capture one
 atomic claim with its scope, source and time. Use `decision`, `preference`,
 `constraint`, `correction`, `outcome` or another accurate record kind. Keep
 agent interpretation distinguishable from the user's actual statement.
@@ -63,21 +64,16 @@ snippet. A verified source still does not make its claim accepted truth.
 
 ## Submit And Verify
 
-On Main, use the current agent account and configured LOOM socket. The standard
-socket is `/run/loom/loomd.sock`; this is not a PostgreSQL endpoint. Keep request
-files in the current task's private scratch area. Never use sudo or switch
-identity to make a refused request succeed.
+On Main, use the current agent account and configured LOOM backend. Keep request
+files in the current task's private scratch area. Never use sudo, switch
+identity or change ledger to make a refused request succeed.
 
 ```sh
-curl --silent --show-error --fail-with-body --max-time 45 \
-  --unix-socket "${LOOM_SOCKET_PATH:-/run/loom/loomd.sock}" \
-  -H 'Content-Type: application/json' \
-  -H 'X-Loom-Idempotency-Key: <one-stable-key-for-this-exact-registration>' \
-  --data-binary @candidate.json \
-  http://loom/v1/provenance/candidates
+loom provenance candidate register --file candidate.json \
+  --idempotency-key <one-stable-key-for-this-exact-registration> --yes --json
 ```
 
-Require HTTP success AND `ok: true`. Inspect
+Require command success AND `ok: true`. Inspect
 `data.receipt.receipts[].candidate_id`, `effective_state`, `replayed` and
 `source_results`. Verify the returned candidate, optionally its stored sources:
 
@@ -85,6 +81,13 @@ Require HTTP success AND `ok: true`. Inspect
 loom --json provenance candidate get <candidate-id> --sources
 loom --json provenance search <distinctive-claim-terms> --include-pending
 ```
+
+The routine get shows meaning and effective lifecycle without repeating the
+submission payload. Use `--details --json` if the task needs that full stored
+representation; registration receipts themselves keep their existing shape.
+Source expansion reads stored evidence, not the live source. Preserve its
+separate incomplete/truncated status rather than treating omitted detail as
+verified or absent.
 
 Keep the returned ID and honest pending/unverified posture in the normal task
 handoff. There is no additional Markdown semantic ledger to maintain. A replay

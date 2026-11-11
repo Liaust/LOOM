@@ -8,6 +8,10 @@
 /.orca/
 /.hermes/
 node_modules/
+__pycache__/
+*.py[cod]
+*.sqlite
+*.sqlite3
 /bin/
 result
 result-*

@@ -65,6 +65,27 @@ func TestRecoveryDailyCoveragePreservesCreationFreshness(t *testing.T) {
 	}
 }
 
+func TestRetainedMinaRecoveryAfterProducerRetirement(t *testing.T) {
+	in, policy := fixture(t)
+	in.Identity, policy.Identity = MinaIdentity, MinaIdentity
+	in.ID = "mina-retained-fixture"
+	evidence, err := Publish(t.Context(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.Enabled = false
+	got, err := Check(t.Context(), policy, in.CreatedAt.Add(60*24*time.Hour))
+	if err != nil || !reflect.DeepEqual(got, []Evidence{evidence}) {
+		t.Fatalf("retained inclusion: %v %v", got, err)
+	}
+	if err := os.Chmod(filepath.Join(evidence.Path, ManifestFile), 0640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Check(t.Context(), policy, in.CreatedAt.Add(60*24*time.Hour)); err == nil {
+		t.Fatal("retirement bypassed authentication")
+	}
+}
+
 func TestRecoveryCheckRealScaffoldReadmeAndExactPackages(t *testing.T) {
 	in, policy := fixture(t)
 	pack, err := agentpack.LoadFromPath("../../ai-loom-pack")

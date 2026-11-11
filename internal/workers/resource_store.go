@@ -3,6 +3,7 @@ package workers
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -124,4 +125,47 @@ func scanResourceLease(scanner scanner) (ResourceLease, error) {
 	lease.KnowledgePipelineRunID, lease.KnowledgePipelineStageRunID = stringPtr(pipelineRunID), stringPtr(stageRunID)
 	lease.ReleasedAt, lease.Metadata = timePtr(released), rawMessage(metadata)
 	return lease, nil
+}
+
+// Sample callers first establish actual queue readiness. Preserve all unrelated
+// policy keys and use this existing row as the durable admission owner.
+func (s Service) AdmitResourceTurn(ctx context.Context, key string, snapshot ResourcePressureSnapshot, maxUnits int, maxTempBytes int64) (ResourceTurnAdmission, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return ResourceTurnAdmission{}, err
+	}
+	defer tx.Rollback()
+	var raw []byte
+	if err = tx.QueryRowContext(ctx, `SELECT policy_json FROM workers.resource_capacities WHERE resource_key=$1 FOR UPDATE`, key).Scan(&raw); err != nil {
+		return ResourceTurnAdmission{}, err
+	}
+	policy, state, err := parseResourcePressurePolicy(raw)
+	if err != nil {
+		return ResourceTurnAdmission{}, err
+	}
+	admission, state := EvaluateResourcePressure(snapshot, policy, state, maxUnits, maxTempBytes)
+	policyJSON, _ := json.Marshal(policy)
+	stateJSON, _ := json.Marshal(state)
+	if _, err = tx.ExecContext(ctx, `UPDATE workers.resource_capacities SET policy_json=policy_json||jsonb_build_object('pressure_policy',$2::jsonb,'pressure_state',$3::jsonb),updated_at=$4 WHERE resource_key=$1`, key, policyJSON, stateJSON, snapshot.SampledAt); err != nil {
+		return ResourceTurnAdmission{}, err
+	}
+	return admission, tx.Commit()
+}
+
+func (s Service) ResourcePressureDeadline(ctx context.Context, key string) (ResourcePressureState, error) {
+	var raw []byte
+	if err := s.DB.QueryRowContext(ctx, `SELECT policy_json FROM workers.resource_capacities WHERE resource_key=$1`, key).Scan(&raw); err != nil {
+		return ResourcePressureState{}, err
+	}
+	_, state, err := parseResourcePressurePolicy(raw)
+	return state, err
+}
+
+// Re-arm the finite optional cooldown only when optional work actually takes a
+// turn; ordinary traffic cannot spend an optional admission opportunity.
+func (s Service) RecordOptionalResourceTurn(ctx context.Context, key string, now time.Time) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE workers.resource_capacities SET
+	 policy_json=jsonb_set(policy_json,'{pressure_state,optional_not_before}',to_jsonb($2::timestamptz+make_interval(secs => COALESCE((policy_json->'pressure_policy'->>'reconsider_seconds')::integer,30)))),updated_at=$2
+	 WHERE resource_key=$1 AND policy_json->'pressure_state'->>'constrained'='true'`, key, now)
+	return err
 }

@@ -3,7 +3,99 @@ package knowledge
 import (
 	"encoding/json"
 	"time"
+
+	"loom.local/loom/internal/workers"
 )
+
+// PipelineProgress is a bounded observation of selected unified trajectories.
+// Neither the queue window nor worker turn counters are corpus totals.
+type PipelineProgress struct {
+	SchemaVersion string                   `json:"schema_version"`
+	ObservedAt    time.Time                `json:"observed_at"`
+	Scope         string                   `json:"scope"`
+	Limit         int                      `json:"limit"`
+	WindowFull    bool                     `json:"window_full"`
+	CurrentKnown  bool                     `json:"current_known"`
+	CountsKnown   bool                     `json:"counts_known"`
+	Unknown       map[string]string        `json:"unknown"`
+	Runs          []PipelineRunProgress    `json:"runs"`
+	Workers       []PipelineWorkerProgress `json:"workers"`
+	PartialErrors []string                 `json:"partial_errors,omitempty"`
+}
+
+type PipelineRunProgress struct {
+	PipelineRunID     string                       `json:"pipeline_run_id"`
+	ObjectID          string                       `json:"object_id"`
+	SelectedVersionID string                       `json:"selected_version_id"`
+	Generation        int64                        `json:"generation"`
+	SourceRevision    string                       `json:"source_revision"`
+	SourceHash        string                       `json:"source_hash"`
+	RunAgeSeconds     float64                      `json:"age_seconds"`
+	Status            string                       `json:"status,omitempty"`
+	CurrentStage      string                       `json:"current_stage,omitempty"`
+	LastChangedAt     time.Time                    `json:"last_changed_at"`
+	LastProgressAt    *time.Time                   `json:"last_progress_at,omitempty"`
+	Source            *PipelineSourceStatus        `json:"source,omitempty"`
+	Reason            string                       `json:"reason,omitempty"`
+	NextEligibleAt    *time.Time                   `json:"next_eligible_at,omitempty"`
+	Publication       *PipelineProgressPublication `json:"publication,omitempty"`
+	Stages            []PipelineStageProgress      `json:"stages"`
+}
+
+// Eligibility describes the current source fence, not a lease or a promise
+// that the worker will claim the stage now. Unavailable evidence stays unknown.
+type PipelineSourceStatus struct {
+	ObservedAt          time.Time `json:"observed_at"`
+	ClaimSourceEligible *bool     `json:"claim_source_eligible"`
+	Readable            *bool     `json:"readable"`
+	Reason              string    `json:"reason"`
+	RelativePath        string    `json:"relative_path,omitempty"`
+}
+
+type PipelineProgressPublication struct {
+	CatalogCurrent      bool       `json:"catalog_current"`
+	RefreshPending      bool       `json:"refresh_pending"`
+	LexicalVersionID    string     `json:"lexical_version_id,omitempty"`
+	SemanticVersionID   string     `json:"semantic_version_id,omitempty"`
+	LexicalCurrent      bool       `json:"lexical_current"`
+	SemanticCurrent     bool       `json:"semantic_current"`
+	BodyCurrent         bool       `json:"body_current"`
+	LexicalPublishedAt  *time.Time `json:"lexical_published_at,omitempty"`
+	SemanticPublishedAt *time.Time `json:"semantic_published_at,omitempty"`
+}
+
+type PipelineStageProgress struct {
+	StageKey       string                         `json:"stage_key"`
+	Status         string                         `json:"status"`
+	Attempts       int                            `json:"attempts"`
+	Selected       *bool                          `json:"selected"`
+	SkipReason     string                         `json:"skip_reason,omitempty"`
+	CompletedUnits int                            `json:"completed_units"`
+	TotalUnits     *int                           `json:"total_units"`
+	ReusedUnits    *int                           `json:"reused_units"`
+	Unknown        map[string]string              `json:"unknown,omitempty"`
+	NextAttemptAt  *time.Time                     `json:"next_attempt_at,omitempty"`
+	Admission      *workers.ResourceTurnAdmission `json:"admission,omitempty"`
+}
+
+// These are the existing owner's last committed run and pressure observation,
+// with receipt identity/time. They do not assert current headroom or throughput.
+type PipelineWorkerProgress struct {
+	CurrentRunID           string                   `json:"current_run_id,omitempty"`
+	CounterScope           string                   `json:"counter_scope"`
+	Turns                  []HeavyExecutorRunResult `json:"turns,omitempty"`
+	MoreWork               *bool                    `json:"more_work"`
+	AdmissionTimedOut      *bool                    `json:"admission_timed_out"`
+	AdmissionWarning       *AdmissionPhaseWarning   `json:"admission_warning,omitempty"`
+	WorkerKey              string                   `json:"worker_key"`
+	RunID                  string                   `json:"run_id,omitempty"`
+	Status                 string                   `json:"status,omitempty"`
+	StartedAt              *time.Time               `json:"started_at,omitempty"`
+	FinishedAt             *time.Time               `json:"finished_at,omitempty"`
+	NextRunAfter           *time.Time               `json:"next_run_after,omitempty"`
+	Counters               map[string]int64         `json:"counters,omitempty"`
+	RecentIntervalsSeconds []float64                `json:"recent_intervals_seconds,omitempty"`
+}
 
 const (
 	PipelineExecutionCoordinator = "coordinator"

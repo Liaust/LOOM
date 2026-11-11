@@ -1,6 +1,7 @@
 package update
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"loom.local/loom/internal/backupstrategy"
 	"loom.local/loom/internal/maintenance"
 )
 
@@ -40,6 +42,17 @@ func NewOperationalPackageBackupVerifier(expectedBackupRef, expectedManifestSHA2
 }
 
 func Apply(ctx context.Context, input ApplyInput) (ApplyResult, error) {
+	if input.Yes && !input.DryRun && (input.AllowNonProduction || isProductionMain(input.Runtime)) {
+		spec, _, err := normalizeSpec(input.Spec)
+		if err != nil {
+			return ApplyResult{}, err
+		}
+		lease, err := acquireActivationLease(spec.StateDir)
+		if err != nil {
+			return refuseApply(ApplyResult{}, err.Error())
+		}
+		defer lease.Close()
+	}
 	now := currentTime(input.Now)
 	plan, err := Plan(ctx, PlannerInput{Spec: input.Spec, Now: input.Now})
 	if err != nil {
@@ -77,6 +90,13 @@ func Apply(ctx context.Context, input ApplyInput) (ApplyResult, error) {
 		backupPath := strings.TrimSpace(input.BackupPath)
 		if backupPath == "" {
 			return refuseApply(result, "update apply requires --backup-path for a locally verified backup")
+		}
+		if strings.HasPrefix(filepath.Base(backupPath), "operational-") {
+			lease, err := backupstrategy.LockOperationalPackages(filepath.Dir(backupPath), false)
+			if err != nil {
+				return refuseApply(result, "operational backup retention lease unavailable: "+err.Error())
+			}
+			defer lease.Close()
 		}
 		production := !input.AllowNonProduction && isProductionMain(input.Runtime)
 		backupRef := strings.TrimSpace(input.BackupRef)
@@ -157,6 +177,18 @@ func Apply(ctx context.Context, input ApplyInput) (ApplyResult, error) {
 	if err := writeAllUpdateManifests(paths, manifest, false); err != nil {
 		return result, err
 	}
+	runner := firstRunner(input.Runner)
+	if !input.SkipHealthCheck {
+		target, err := resolveReadinessTarget(ctx, runner, plan.Target, plan.Nix.TargetFlakeOutput, plan.Migrations.TargetLatestVersion)
+		if err != nil {
+			return failApply(result, paths, manifest, "target_identity", err)
+		}
+		manifest.ReadinessTarget = &target
+		result.Manifest = manifest
+		if err := writeAllUpdateManifests(paths, manifest, false); err != nil {
+			return result, err
+		}
+	}
 
 	maintenanceCoordinator := input.Maintenance
 	if maintenanceCoordinator == nil {
@@ -182,7 +214,6 @@ func Apply(ctx context.Context, input ApplyInput) (ApplyResult, error) {
 	}
 	result.Changed = append(result.Changed, UpdateChange{Step: "switch_release", Status: "changed", Path: plan.Spec.ActivePath})
 
-	runner := firstRunner(input.Runner)
 	if !input.SkipRebuild {
 		if _, err := runner(ctx, "sudo", "nixos-rebuild", "switch", "--flake", flakeArgument(plan.Target.Path, plan.Nix.TargetFlakeOutput), "--show-trace"); err != nil {
 			return failApply(result, paths, manifest, "nixos_rebuild", err)
@@ -192,9 +223,11 @@ func Apply(ctx context.Context, input ApplyInput) (ApplyResult, error) {
 		result.Changed = append(result.Changed, UpdateChange{Step: "nixos_rebuild", Status: "skipped", Message: "Skipped by operator flag."})
 	}
 	if !input.SkipHealthCheck {
-		if err := runHealthCheck(ctx, runner); err != nil {
+		evidence, err := runTargetReadiness(ctx, runner, *manifest.ReadinessTarget)
+		if err != nil {
 			return failApply(result, paths, manifest, "health_check", err)
 		}
+		manifest.Readiness = &evidence
 		result.Changed = append(result.Changed, UpdateChange{Step: "health_check", Status: "succeeded"})
 	} else {
 		result.Changed = append(result.Changed, UpdateChange{Step: "health_check", Status: "skipped", Message: "Skipped by operator flag."})
@@ -484,9 +517,13 @@ func defaultCommandRunner(ctx context.Context, name string, args ...string) ([]b
 	if name == "sudo" && strings.TrimSpace(os.Getenv("LOOM_SUDO_PASSWORD_STDIN")) == "1" {
 		cmd.Stdin = os.Stdin
 	}
-	output, err := cmd.CombinedOutput()
+	// Successful command data must not include diagnostics (for example Nix
+	// fetch warnings before an evaluated store path, or stderr before JSON).
+	var diagnostics bytes.Buffer
+	cmd.Stderr = &diagnostics
+	output, err := cmd.Output()
 	if err != nil {
-		return output, fmt.Errorf("%s %s failed: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+		return output, fmt.Errorf("%s %s failed: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(output)+diagnostics.String()))
 	}
 	return output, nil
 }

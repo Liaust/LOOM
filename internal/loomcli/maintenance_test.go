@@ -10,9 +10,41 @@ import (
 	"testing"
 	"time"
 
+	"loom.local/loom/internal/backupstrategy"
 	"loom.local/loom/internal/maintenance"
 	"loom.local/loom/internal/response"
 )
+
+func TestBackupStatusSeparatesSuccessfulRunFromRetainedFailure(t *testing.T) {
+	var out bytes.Buffer
+	cmd := NewRootCommand()
+	cmd.SetOut(&out)
+	renderMaintenanceBackupStatus(cmd, maintenance.BackupStatus{
+		Status: "critical", EarlierFailure: true,
+		LatestRun:    &maintenance.BackupRunObservation{OperationID: "current", Status: "succeeded", VerificationStatus: "succeeded"},
+		LatestFailed: &maintenance.BackupOperation{Operation: maintenance.Operation{MaintenanceOperationID: "old"}},
+		OpenFindings: maintenance.FindingSummary{Open: 3, Critical: 3},
+	})
+	for _, want := range []string{"Backup: critical", "Latest completed run: current status=succeeded", "not cloud protection", "Earlier failure (retained, not resolved)", "unresolved findings remain separate"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing %q: %s", want, out.String())
+		}
+	}
+}
+
+func TestBackupStatusUsesDatedRedactedRecoveryInventory(t *testing.T) {
+	var out bytes.Buffer
+	cmd := NewRootCommand()
+	cmd.SetOut(&out)
+	renderMaintenanceBackupStatus(cmd, maintenance.BackupStatus{Status: "ok", RecoveryInventoryState: "stale", RecoveryInventory: &backupstrategy.RecoveryInventorySummary{
+		ObservedAt: time.Date(2026, 10, 19, 2, 0, 0, 0, time.UTC), NotesAvailable: true, NotesCaptures: 3, NotesProtected: 1, NotesHeld: 2,
+	}})
+	for _, want := range []string{"stale observed=2026-10-19T02:00:00Z", "not fresh protection or deletion authority", "entries=3 saved-cloud-evidence=1 held=2"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing %q: %s", want, out.String())
+		}
+	}
+}
 
 func TestMaintenanceRetentionApplyRequiresYesBeforeDaemon(t *testing.T) {
 	cmd := NewRootCommand()

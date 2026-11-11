@@ -80,7 +80,8 @@
     service.enable = true;
     restoreAuthority.enable = true;
     nodeAgent.enable = true;
-    orca.enable = true;
+    agents.enable = true;
+    orca.enable = false;
     smb = {
       enable = true;
       boxShareName = "loom-main-box";

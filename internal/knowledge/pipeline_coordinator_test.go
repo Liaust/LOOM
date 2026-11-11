@@ -1,11 +1,51 @@
 package knowledge
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	"loom.local/loom/internal/storagecatalog"
 )
+
+func TestReferenceOnlyPDFExtractionRetainsOversizeMetadata(t *testing.T) {
+	object := KnowledgeObject{FileClass: storagecatalog.FileClassPDF, RelativePath: "book.pdf"}
+	for _, tc := range []struct {
+		name     string
+		policy   PipelinePolicy
+		explicit bool
+		status   string
+		want     bool
+	}{
+		{"automatic reference", PipelinePolicy{}, false, ExtractionStatusTooLarge, true},
+		{"selected OCR", PipelinePolicy{PDFOCREnabled: true}, false, ExtractionStatusTooLarge, false},
+		{"selected embeddings", PipelinePolicy{EmbeddingsEnabled: true}, false, ExtractionStatusTooLarge, false},
+		{"explicit enrichment", PipelinePolicy{}, true, ExtractionStatusTooLarge, false},
+		{"password", PipelinePolicy{}, false, ExtractionStatusPasswordRequired, false},
+		{"missing source", PipelinePolicy{}, false, ExtractionStatusSourceUnavailable, false},
+		{"failed extraction", PipelinePolicy{}, false, ExtractionStatusFailed, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan, err := CompilePipelinePlan(object, tc.policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.explicit {
+				plan.Enrichment = &PipelineEnrichment{}
+			}
+			snapshot, err := json.Marshal(plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := referenceOnlyPDFExtraction(snapshot, tc.status); got != tc.want {
+				t.Fatalf("reference-only completion = %t, want %t", got, tc.want)
+			}
+		})
+	}
+	if referenceOnlyPDFExtraction(nil, ExtractionStatusTooLarge) {
+		t.Fatal("missing plan admitted reference-only completion")
+	}
+}
 
 func TestConsolidatedArtifactTextOrdersLocatorsAndOmitsMetadata(t *testing.T) {
 	second, first, metadata := "second", "first", "title"

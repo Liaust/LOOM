@@ -1,0 +1,557 @@
+diff --git a/desktop/plugin.js b/desktop/plugin.js
+--- a/desktop/plugin.js
++++ b/desktop/plugin.js
+@@ -42,6 +42,8 @@
+ let wakeClient = null
+ let trainingRecorder = null
+ let callStarting = false
++let activeCall = null
++let micTestStop = null
+ let pluginDisposed = false
+ let wakeView = { phase: 'off', error: '', enabled: false, phrase: 'mina' }
+ 
+@@ -96,6 +98,7 @@
+ }
+ 
+ async function captureWakePcm(request, frameLength, onError, micId = '', { feed = true } = {}) {
++  if (callStarting || bus.live || micTestStop) throw new Error('Finish the call or microphone test before capturing wake audio.')
+   const audio = { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+   if (micId) audio.deviceId = { exact: micId }
+   const stream = await navigator.mediaDevices.getUserMedia({ audio, video: false })
+@@ -206,6 +209,8 @@
+   }
+   async enable(persist = true) {
+     if (!this.route) throw new Error('Select MINA on Main before enabling wake.')
++    if (callStarting || bus.live || micTestStop) throw new Error('Finish the call or microphone test before enabling wake.')
++    this.stopMic()
+     this.wanted = true
+     const generation = ++this.generation
+     this.state('arming')
+@@ -235,9 +240,19 @@
+     }
+   }
+   async listen(generation, frameLength) {
+-    const mic = await this.capture((...args) => this.rpc.request(...args), frameLength, error => this.lost(error))
+-    if (generation !== this.generation || !this.wanted) { mic.stop(); return }
+-    this.mic = mic; this.state('listening')
++    this.stopMic()
++    // Drain an earlier acquisition before opening another microphone. getUserMedia
++    // cannot be aborted; its late result must be stopped before a call can start.
++    await this.capturePending?.catch(() => {})
++    if (generation !== this.generation || !this.wanted) return
++    const rpc = this.rpc
++    const pending = this.capturePending = this.capture((...args) => rpc.request(...args), frameLength,
++      error => { if (generation === this.generation) this.lost(error) })
++    try {
++      const mic = await pending
++      if (generation !== this.generation || !this.wanted) { mic.stop(); return }
++      this.mic = mic; this.state('listening')
++    } finally { if (this.capturePending === pending) this.capturePending = null }
+   }
+   detected(payload) {
+     if (!this.wanted || this.phase !== 'listening') return
+@@ -247,15 +262,17 @@
+       return
+     }
+     this.stopMic(); this.state('calling')
+-    void Promise.resolve(this.onDetect(payload)).catch(error => this.state('error', error.message))
++    void Promise.resolve(this.onDetect(payload)).catch(error => { if (error.code !== 'CALL_CANCELLED') this.state('error', error.message) })
+   }
+   async pauseForCall({ training = false } = {}) {
+     if (trainingRecorder?.running && !training) throw new Error('Stop the training recording before starting a call.')
+     if (this.probing) throw new Error('Finish the eight-second wake sample before starting a call.')
+-    ++this.generation; this.stopMic()
++    const generation = ++this.generation; this.stopMic()
++    await this.capturePending?.catch(() => {})
++    if (generation !== this.generation) return
+     if (this.wanted) {
+       if (this.rpc) await this.rpc.request('wake.pause')
+-      this.state('calling')
++      if (generation === this.generation && this.wanted) this.state('calling')
+     }
+   }
+   async sample() {
+@@ -278,7 +295,7 @@
+     finally { this.probing = false }
+   }
+   async resumeAfterCall() {
+-    if (!this.wanted) return
++    if (!this.wanted || this.phase === 'listening' || callStarting || bus.live) return
+     if (!this.rpc) { try { await this.enable(false) } catch {}; return }
+     const generation = ++this.generation
+     try {
+@@ -928,24 +945,56 @@
+ }
+ 
+ async function startLive(ctx, options) {
++  if (pluginDisposed) throw new Error('Live Voice plugin was unloaded.')
+   if (trainingRecorder?.running) throw new Error('Stop the training recording before starting a call.')
++  if (micTestStop) throw new Error('Stop the microphone test before starting a call.')
+   if (callStarting || bus.live) throw new Error('A Live Voice call is already starting or active.')
+   callStarting = true
++  const attempt = { cancelled: false, stop: null, close() { this.cancelled = true; this.stop?.() } }
++  activeCall = attempt
++  // Expose cancellation during permission acquisition and SDP negotiation too.
++  window.__talkLiveHandle = attempt
++  let failed = true
+   try {
+     await wakeClient?.pauseForCall()
+-    const handle = await startLiveSession(ctx, options)
+-    if (pluginDisposed) { handle.close(); throw new Error('Live Voice plugin was unloaded.') }
++    if (pluginDisposed || attempt.cancelled) throw new Error('Live Voice call was cancelled.')
++    const handle = await startLiveSession(ctx, options, attempt)
++    failed = false
+     return handle
+   } catch (error) {
+-    bus.set({ live: false, stage: 'error', err: String(error.message || error) })
+-    void wakeClient?.resumeAfterCall()
++    if (attempt.cancelled || pluginDisposed) error = Object.assign(new Error('Live Voice call was cancelled.'), { code: 'CALL_CANCELLED' })
++    bus.set({ live: false, stage: attempt.cancelled ? 'idle' : 'error', err: attempt.cancelled ? '' : String(error.message || error) })
+     throw error
+-  } finally { callStarting = false }
+-}
+-
+-async function startLiveSession(ctx, { profile, voice, micId, outId, engine, log }) {
++  } finally {
++    callStarting = false
++    if (failed) {
++      if (activeCall === attempt) activeCall = null
++      if (!pluginDisposed) void wakeClient?.resumeAfterCall()
++    }
++  }
++}
++
++async function startLiveSession(ctx, { profile, voice, micId, outId, engine, log }, attempt) {
+   const eng = engine || 'codex'
+   if (eng !== 'codex') throw new Error('This installation uses GPT-Live with Codex OAuth only; no API-key fallback.')
++  const resources = []
++  let closed = false, connectedAt = 0
++  const release = dispose => { try { dispose()?.catch?.(() => {}) } catch {} }
++  const own = dispose => { if (closed) release(dispose); else resources.push(dispose) }
++  const check = () => { if (closed || attempt.cancelled || pluginDisposed) throw new Error('Live Voice call was cancelled.') }
++  const ctl = { close: () => {
++    if (closed) return
++    closed = true
++    if (bus.stage === 'connected' && !pluginDisposed) playChime('hangup')
++    while (resources.length) release(resources.pop())
++    currentBotTurnId = ''; _botSpeakingSince = 0
++    if (activeCall === attempt) activeCall = null
++    bus.set({ live: false, stage: 'idle', micLevel: 0, remoteLevel: 0, widget: false, muted: false, spkUser: false, spkBot: false })
++    if (!callStarting && !pluginDisposed) void wakeClient?.resumeAfterCall()
++  } }
++  attempt.stop = ctl.close
++  try {
++  check()
+   clearTranscript()
+   liveAudioMs = 0
+   bus.set({ err: '', widget: true, stage: 'mint' })
+@@ -961,27 +1010,26 @@
+   let stream
+   try {
+     stream = await navigator.mediaDevices.getUserMedia({ audio: audioC })
+-  } catch (e) {
+-    if (micId) {
+-      try {
+-        stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } })
+-        pushTranscript('sys', tr('No pude abrir el micrófono elegido; usé el predeterminado del sistema.', 'Could not open the selected mic; using the system default.'))
+-      } catch (e2) {
+-        throw new Error('MIC: ' + ((e2 && e2.name) || e?.name || '') + tr(' — revisa permisos o prueba otro micrófono en el engranaje', ' — check permissions or try another microphone in the gear menu'))
+-      }
+-    } else {
+-      throw new Error('MIC: ' + (e?.name || '') + tr(' — revisa permisos o prueba otro micrófono en el engranaje', ' — check permissions or try another microphone in the gear menu'))
+-    }
+-  }
++  } catch (error) {
++    // Keep the selected route: wake and calls must not silently use different mics.
++    throw new Error('MIC: ' + (error?.name || '') + tr(' — revisa permisos o elige otro micrófono', ' — check permissions or select another microphone'))
++  }
++  own(() => stream.getTracks().forEach(track => track.stop()))
++  check()
++  if (!stream.getAudioTracks().some(track => track.readyState === 'live')) throw new Error('Call microphone is unavailable.')
+   log('mic OK')
+   bus.set({ live: true, stage: 'offering', micLevel: 0, remoteLevel: 0 })
+ 
+   const audioCtx = new AudioContext()
++  own(() => audioCtx.close())
+   if (audioCtx.state === 'suspended') { try { await audioCtx.resume() } catch {} }
++  check()
+   const analyserMic = audioCtx.createAnalyser(); analyserMic.fftSize = 512
+   // grafo de medición: mantiene el analyser alimentado independientemente del destination
+   const micMute = audioCtx.createGain(); micMute.gain.value = 0
+-  audioCtx.createMediaStreamSource(stream).connect(analyserMic)
++  const micSource = audioCtx.createMediaStreamSource(stream)
++  own(() => { micSource.disconnect(); analyserMic.disconnect(); micMute.disconnect() })
++  micSource.connect(analyserMic)
+   analyserMic.connect(micMute); micMute.connect(audioCtx.destination)
+   const remoteRef = { an: null }
+ 
+@@ -1000,11 +1048,19 @@
+   }
+ 
+   const pc = new RTCPeerConnection()
++  own(() => { pc.ontrack = null; pc.onconnectionstatechange = null; pc.close() })
+   stream.getTracks().forEach(t => pc.addTrack(t, stream))
+-  _liveRefs = { pc, audioEl: null, ctx }
++  const refs = _liveRefs = { pc, audioEl: null, ctx, stream, audioCtx, micId, outId }
++  own(() => { if (_liveRefs === refs) _liveRefs = null })
++  for (const track of stream.getAudioTracks()) {
++    const ended = () => { ctl.close(); bus.set({ stage: 'error', err: 'Call microphone disconnected; select a microphone and reconnect.' }) }
++    track.addEventListener('ended', ended)
++    own(() => track.removeEventListener('ended', ended))
++  }
+ 
+   // canal de eventos: transcripción en vivo + llamadas a tools
+   const dc = pc.createDataChannel('oai-events')
++  own(() => { dc.onopen = null; dc.onmessage = null; dc.close() })
+   dc.onopen = () => log('canal de eventos abierto')
+   dc.onmessage = ev => {
+     let msg = null
+@@ -1012,25 +1068,45 @@
+     handleRealtimeEvent(msg, dc, ctx)
+   }
+ 
+-  let audioEl = null
++  let audioEl = null, remoteNodes = []
++  const clearRemote = () => {
++    if (audioEl) { audioEl.pause(); audioEl.srcObject = null; audioEl = null }
++    for (const node of remoteNodes) { try { node.disconnect() } catch {} }
++    remoteNodes = []; remoteRef.an = null; refs.audioEl = null
++  }
++  own(clearRemote)
+   pc.ontrack = ev => {
++    if (closed || ev.track.kind !== 'audio') return
++    clearRemote()
+     log('audio del bot conectado')
+-    const remoteStream = ev.streams[0]
++    const remoteStream = ev.streams?.[0] || new MediaStream([ev.track])
+     audioEl = new Audio()
+     audioEl.srcObject = remoteStream
+-    audioEl.autoplay = true
+-    audioEl.play().catch(() => log('click para reproducir audio'))
+-  if (_liveRefs) _liveRefs.audioEl = audioEl
+-    if (outId && audioEl.setSinkId) audioEl.setSinkId(outId).catch(e => log('salida: ' + e.message))
+-    const an = audioCtx.createAnalyser(); an.fftSize = 256
+-    const src = audioCtx.createMediaStreamSource(remoteStream)
+-    const mute = audioCtx.createGain(); mute.gain.value = 0
+-    src.connect(an); an.connect(mute); mute.connect(audioCtx.destination)
+-    remoteRef.an = an
+-  }
+-
+-  let closed = false
+-  let connectedAt = 0
++    audioEl.autoplay = false
++    refs.audioEl = audioEl
++    // Select the sink before playback to avoid a burst on the wrong output.
++    const output = audioEl
++    void (async () => {
++      if (outId) {
++        if (typeof output.setSinkId !== 'function') {
++          if (!closed && audioEl === output) bus.set({ err: 'Audio output selection is not supported by this client; choose System default and reconnect.' })
++          return
++        }
++        try { await output.setSinkId(outId) }
++        catch { if (!closed && audioEl === output) bus.set({ err: 'Selected audio output is unavailable; choose an output and reconnect.' }); return }
++      }
++      if (!closed && audioEl === output) await output.play()
++    })().catch(() => log('click para reproducir audio'))
++    try {
++      const an = audioCtx.createAnalyser(); an.fftSize = analyserMic.fftSize
++      remoteNodes.push(an)
++      const src = audioCtx.createMediaStreamSource(remoteStream); remoteNodes.push(src)
++      const mute = audioCtx.createGain(); mute.gain.value = 0; remoteNodes.push(mute)
++      src.connect(an); an.connect(mute); mute.connect(audioCtx.destination)
++      remoteRef.an = an
++    } catch { /* Meter failure must not interrupt native WebRTC playback. */ }
++  }
++
+   // cierra bubbles inactivos (2.6s) para separar intervenciones sin duplicar
+   const idleTimer = setInterval(() => {
+     const now = Date.now()
+@@ -1041,7 +1117,7 @@
+     }
+     if (changed) _bumpTranscript()
+   }, 1000)
+-  const ctl = { close: null }
++  own(() => clearInterval(idleTimer))
+   // Mute del micrófono: alterna enabled en los tracks de audio del PC (robusto a fallback de device).
+   let mutedNow = false
+   ctl.toggleMute = () => {
+@@ -1055,6 +1131,7 @@
+   }
+ 
+   pc.onconnectionstatechange = () => {
++    if (closed) return
+     log('rtc: ' + pc.connectionState)
+     bus.set({ stage: pc.connectionState })
+     if (pc.connectionState === 'connected') { playChime('connect'); if (!connectedAt) connectedAt = Date.now() }
+@@ -1065,21 +1142,19 @@
+   }
+ 
+   log('negociando…')
+-  let codexSession = null
+-  try {
+   const offer = await pc.createOffer()
++  check()
+   await pc.setLocalDescription(offer)
++  check()
+   if (eng === 'codex') {
+     const r2 = await ctx.rest('/codexlive/session', {
+       method: 'POST',
+       body: { language: EN ? 'en' : 'es', profile: profile || null, voice: voice || 'cove', offer: offer.sdp },
+       timeoutMs: 120000
+     })
+-    if (!r2 || !r2.answer) {
+-      try { stream.getTracks().forEach(t => t.stop()) } catch {}
+-      throw new Error(tr('codex live: sin SDP de respuesta', 'codex live: no answer SDP'))
+-    }
+-    codexSession = r2
++    own(() => { if (r2?.threadId) return ctx.rest('/codexlive/stop', { method: 'POST', body: { threadId: r2.threadId }, timeoutMs: 8000 }) })
++    check()
++    if (!r2 || !r2.answer) throw new Error(tr('codex live: sin SDP de respuesta', 'codex live: no answer SDP'))
+     handoffMode = (r2.handoff === 'server') ? 'server' : 'client'
+     bus.botName = r2.botName || bus.botName || ''
+     await pc.setRemoteDescription({ type: 'answer', sdp: r2.answer })
+@@ -1096,25 +1171,17 @@
+     }
+     await pc.setRemoteDescription({ type: 'answer', sdp: await res.text() })
+   }
+-  } catch (error) {
+-    // A refused subscription/SDP must not leave the microphone or meter alive.
+-    clearInterval(idleTimer)
+-    try { pc.close() } catch {}
+-    try { stream.getTracks().forEach(t => t.stop()) } catch {}
+-    try { audioEl?.pause() } catch {}
+-    try { await audioCtx.close() } catch {}
+-    _liveRefs = null
+-    if (codexSession?.threadId) {
+-      try { await ctx.rest('/codexlive/stop', { method: 'POST', body: { threadId: codexSession.threadId } }) } catch {}
+-    }
+-    throw error
+-  }
++  check()
+   log('en vivo')
+ 
+   // poll de niveles WebRTC cada 250ms (audioLevel outbound=mic / inbound=bot)
++  let statsPending = false
+   const statsTimer = setInterval(() => {
++    if (closed || statsPending) return
+     try {
++      statsPending = true
+       pc.getStats().then(report => {
++        if (closed) return
+         try {
+           report.forEach(r => {
+             // Chrome: outbound-rtp.audioLevel es null (el mic va por WebAudio);
+@@ -1124,14 +1191,15 @@
+             if (r.type === 'inbound-rtp' && typeof r.audioLevel === 'number') meter.sBot = Math.max(r.audioLevel, meter.sBot * 0.8)
+           })
+         } catch {}
+-      }).catch(() => {})
+-    } catch {}
++      }).catch(() => {}).finally(() => { statsPending = false })
++    } catch { statsPending = false }
+   }, 250)
++  own(() => clearInterval(statsTimer))
+ 
+   const buf = new Uint8Array(analyserMic.frequencyBinCount)
+-  const bufR = new Uint8Array(256)
++  const bufR = new Uint8Array(analyserMic.frequencyBinCount)
+   const tdM = new Uint8Array(analyserMic.fftSize)
+-  const tdR = new Uint8Array(256)
++  const tdR = new Uint8Array(analyserMic.fftSize)
+   const NB = 6
+   const binOf = f => Math.min(buf.length - 1, Math.round(f / (audioCtx.sampleRate / 2) * buf.length))
+   const edges = [100, 250, 500, 900, 1600, 2800, 4500].map(binOf)
+@@ -1179,34 +1247,30 @@
+   }
+   const meterLoop = makeLoop(tick, 24)
+ 
+-  ctl.close = () => {
+-    if (closed) return
+-    closed = true
+-    if (bus.stage === 'connected') playChime('hangup')
+-    try { clearInterval(statsTimer) } catch {}
+-    try { clearInterval(idleTimer) } catch {}
+-    try { for (let i = 0; i < transcript.length; i++) transcript[i].done = true } catch {}
+-    try { disposeLoop(meterLoop) } catch {}
+-    try {
+-      const durMs = connectedAt ? Date.now() - connectedAt : 0
+-      if (durMs > 4000) {
+-        ctx.rest('/voice/usage/report', { method: 'POST', body: { durationMs: Math.round(durMs), audioMs: Math.round(liveAudioMs || 0) }, timeoutMs: 8000 }).catch(() => {})
+-      }
+-    } catch {}
+-    try { audioEl && audioEl.pause() } catch {}
+-    try { stream.getTracks().forEach(t => t.stop()) } catch {}
+-    try { if (eng === 'codex' && codexSession && codexSession.threadId) ctx.rest('/codexlive/stop', { method: 'POST', body: { threadId: codexSession.threadId }, timeoutMs: 8000 }).catch(() => {}) } catch {}
+-    try { pc.close() } catch {}
+-    try { audioCtx.close() } catch {}
+-    _liveRefs = null
+-    currentBotTurnId = ''
+-    _botSpeakingSince = 0
+-    bus.set({ live: false, stage: 'idle', micLevel: 0, remoteLevel: 0, widget: false, muted: false })
+-    void wakeClient?.resumeAfterCall()
+-  }
++  own(() => disposeLoop(meterLoop))
++  own(() => {
++    for (const item of transcript) item.done = true
++    const durMs = connectedAt ? Date.now() - connectedAt : 0
++    if (durMs > 4000) return ctx.rest('/voice/usage/report', { method: 'POST', body: { durationMs: Math.round(durMs), audioMs: Math.round(liveAudioMs || 0) }, timeoutMs: 8000 })
++  })
++  return { close: () => ctl.close(), toggleMute: () => closed ? false : ctl.toggleMute() }
++  } catch (error) { ctl.close(); throw error }
++}
++
++// Explicit local snapshot only: no capture, stats polling, SDP, audio or persistence.
++function audioDiagnostics() {
++  const refs = _liveRefs, track = refs?.stream?.getAudioTracks()[0]
++  const settings = track?.getSettings?.() || {}
+   return {
+-    close: () => { try { ctl.close && ctl.close() } catch {} },
+-    toggleMute: () => { try { return ctl.toggleMute() } catch {} return false }
++    owner: activeCall ? 'call' : micTestStop ? 'microphone test' : wakeClient?.mic ? 'wake' : 'none',
++    call: bus.stage, starting: callStarting, wake: wakeClient?.phase || 'off',
++    input: track ? { label: track.label, state: track.readyState, enabled: track.enabled,
++      selected: refs.micId ? 'selected device' : 'system default', sampleRate: settings.sampleRate,
++      channelCount: settings.channelCount, echoCancellation: settings.echoCancellation,
++      noiseSuppression: settings.noiseSuppression, autoGainControl: settings.autoGainControl } : null,
++    audioContext: refs?.audioCtx ? { state: refs.audioCtx.state, sampleRate: refs.audioCtx.sampleRate } : null,
++    rtc: refs?.pc?.connectionState || null,
++    output: refs?.audioEl ? { route: refs.outId ? 'selected device' : 'system default', paused: refs.audioEl.paused } : null
+   }
+ }
+ 
+@@ -1439,14 +1503,21 @@
+   const [bots, setBots] = useState([])
+   const [devs, setDevs] = useState({ mics: [], outs: [] })
+   const [info, setInfo] = useState(null)
++  const [audioStatus, setAudioStatus] = useState(null)
+ 
+   useEffect(() => {
+     ctx.rest('/status', { timeoutMs: 20000 })
+       .then(r => { setBots(r.bots || []); setInfo(r) })
+       .catch(e => setInfo({ error: String(e?.message || e).slice(0, 100) }))
+-    navigator.mediaDevices?.enumerateDevices?.()
+-      .then(list => setDevs({ mics: list.filter(d => d.kind === 'audioinput'), outs: list.filter(d => d.kind === 'audiooutput') }))
+-      .catch(() => {})
++  }, [])
++  useEffect(() => {
++    let alive = true
++    const refresh = () => { void navigator.mediaDevices?.enumerateDevices?.()
++      .then(list => { if (alive) setDevs({ mics: list.filter(d => d.kind === 'audioinput'), outs: list.filter(d => d.kind === 'audiooutput') }) })
++      .catch(() => {}) }
++    refresh()
++    navigator.mediaDevices?.addEventListener('devicechange', refresh)
++    return () => { alive = false; navigator.mediaDevices?.removeEventListener('devicechange', refresh) }
+   }, [])
+   useEffect(() => { ctx.storage.set(KEY_VOICE, voice) }, [voice])
+   useEffect(() => { ctx.storage.set(KEY_PROFILE, profile) }, [profile])
+@@ -1492,32 +1563,45 @@
+   const stopMicTest = () => {
+     const t = micTestRef.current
+     if (t) {
+-      try { t.stream.getTracks().forEach(x => x.stop()) } catch {}
+-      try { t.ctx.close() } catch {}
++      t.stopped = true
++      try { t.stream?.getTracks().forEach(x => x.stop()) } catch {}
++      try { t.ctx?.close()?.catch(() => {}) } catch {}
+       try { cancelAnimationFrame(t.raf) } catch {}
+     }
++    // Keep the acquisition reserved until an unabortable late getUserMedia result
++    // has been stopped. A new call/test must not race that pending microphone.
++    if (t && !t.acquiring && micTestStop === t.stop) micTestStop = null
+     micTestRef.current = null
+     setMicTest({ on: false, err: '' })
+   }
+   const toggleMicTest = async () => {
+-    if (micTest.on) { stopMicTest(); return }
+-    if (trainingRecorder?.running || wakeClient?.wanted || bus.live || callStarting) {
++    if (micTestRef.current) { stopMicTest(); return }
++    if (pluginDisposed || micTestStop || trainingRecorder?.running || wakeClient?.wanted || bus.live || callStarting) {
+       sdk.host.notifyError('Turn off wake listening and end the call before testing the microphone.', 'Live Voice')
+       return
+     }
++    const test = { stopped: false, acquiring: true, stop: stopMicTest, stream: null, ctx: null, raf: 0 }
++    micTestRef.current = test; micTestStop = stopMicTest
+     setMicTest({ on: true, err: '' })
+     try {
+       const stream = await navigator.mediaDevices.getUserMedia({ audio: micId ? { deviceId: { exact: micId } } : true })
+-      const actx = new AudioContext()
++      test.stream = stream; test.acquiring = false
++      if (test.stopped || pluginDisposed) {
++        stream.getTracks().forEach(track => track.stop())
++        if (micTestStop === test.stop) micTestStop = null
++        return
++      }
++      const actx = test.ctx = new AudioContext()
+       try { await actx.resume() } catch {}
++      if (test.stopped || pluginDisposed) return
+       const an = actx.createAnalyser(); an.fftSize = 512
+       const mute = actx.createGain(); mute.gain.value = 0
+       actx.createMediaStreamSource(stream).connect(an); an.connect(mute); mute.connect(actx.destination)
+       const buf = new Uint8Array(an.fftSize)
+-      micTestRef.current = { stream, ctx: actx, raf: 0 }
++      test.ctx = actx
+       const loop = () => {
+         const t = micTestRef.current
+-        if (!t) return
++        if (t !== test || test.stopped) return
+         try {
+           an.getByteTimeDomainData(buf)
+           let s = 0
+@@ -1532,6 +1616,9 @@
+         .then(list => setDevs({ mics: list.filter(d => d.kind === 'audioinput'), outs: list.filter(d => d.kind === 'audiooutput') }))
+         .catch(() => {})
+     } catch (e) {
++      test.acquiring = false
++      if (test.stopped) { if (micTestStop === test.stop) micTestStop = null; return }
++      stopMicTest()
+       setMicTest({ on: false, err: tr('No se pudo abrir el micrófono: ', 'Could not open the microphone: ') + String((e && e.name) || e) })
+     }
+   }
+@@ -1621,6 +1708,8 @@
+       })
+     ] }),
+     micTest.on && !micTest.err && jsx('div', { style: { fontSize: 10, color: '#16a34a', marginTop: -6, marginBottom: 8 }, children: tr('Habla y mira la barra: si no se mueve, este micrófono no capta.', 'Speak and watch the bar: if it stays flat, this mic is not capturing.') }),
++    jsx(Button, { variant: 'secondary', size: 'sm', onClick: () => setAudioStatus(audioDiagnostics()), children: 'Show audio status' }),
++    audioStatus && jsx('pre', { style: { fontSize: 10, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }, children: JSON.stringify(audioStatus, null, 2) }),
+     micTest.err && jsx('div', { style: { fontSize: 10.5, color: '#dc2626', marginTop: -6, marginBottom: 8, lineHeight: 1.4 }, children: micTest.err }),
+     jsxs('div', { style: { ...field, marginBottom: 4 }, children: [
+       jsx('div', { style: label, children: tr('Salida', 'Output') }),
+@@ -1976,7 +2065,7 @@
+   }, [])
+ 
+   const toggle = async () => {
+-    if (s.live) { try { window.__talkLiveHandle?.close() } catch {}; return }
++    if (callStarting || s.live) { try { window.__talkLiveHandle?.close() } catch {}; return }
+     if (busy || bus.live) return
+     try { window.__talkLiveHandle?.close() } catch {}
+     const effProfile = profile === '__host' ? '' : (profile || autoBot())
+@@ -1986,6 +2075,7 @@
+     try {
+       window.__talkLiveHandle = await startLive(ctx, { profile: effProfile, voice: vv, micId, outId, engine: eng, log: () => {} })
+     } catch (e) {
++      if (e?.code === 'CALL_CANCELLED') return
+       let m = backendHint(String(e?.message || e))
+       if (m.indexOf('LIVE_SIN_QUOTA') >= 0) {
+         m = m.replace('LIVE_SIN_QUOTA: ', '')
+@@ -2257,6 +2347,8 @@
+     }))
+     ctx.onDispose(() => {
+       pluginDisposed = true
++      micTestStop?.()
++      activeCall?.close()
+       trainingRecorder.cancel()
+       wakeClient.dispose()
+       try { window.__talkLiveHandle?.close() } catch {}
+diff --git a/tests/test_loom_wake.mjs b/tests/test_loom_wake.mjs
+--- a/tests/test_loom_wake.mjs
++++ b/tests/test_loom_wake.mjs
+@@ -5,7 +5,7 @@
+ 
+ const source = readFileSync(new URL('../desktop/plugin.js', import.meta.url), 'utf8')
+ const section = source.slice(source.indexOf("const KEY_WAKE ="), source.indexOf('// END LOOM NATIVE WAKE'))
+-const context = { setTimeout, clearTimeout, setInterval, clearInterval, sdk: {} }
++const context = { setTimeout, clearTimeout, setInterval, clearInterval, sdk: {}, bus: { live: false } }
+ vm.createContext(context)
+ vm.runInContext(`${section}\nthis.Client = NativeWakeClient; this.openRpc = openWakeRpc; this.capture = captureWakePcm`, context)
+ 

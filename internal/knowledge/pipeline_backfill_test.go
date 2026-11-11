@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"loom.local/loom/internal/storagecatalog"
 )
@@ -93,5 +94,73 @@ func TestPipelineAPIRedactsFailureMessagesButKeepsCodes(t *testing.T) {
 	redacted := string(redactPipelineStageError(json.RawMessage(`{"code":"ocr_failed","message":"secret OCR text","retryable":true}`)))
 	if strings.Contains(redacted, "secret") || !strings.Contains(redacted, "ocr_failed") || !strings.Contains(redacted, "retryable") {
 		t.Fatalf("redacted stage error=%s", redacted)
+	}
+}
+
+func TestPipelineProgressPublicationRequiresExactBodyAndVersion(t *testing.T) {
+	run := PipelineRun{KnowledgeObjectVersionID: "selected"}
+	refresh := PipelineRefreshStatus{LexicalVersionID: "selected", SemanticVersionID: "previous"}
+	metadata := pipelineProgressPublication(run, refresh, false)
+	if metadata.BodyCurrent || !metadata.LexicalCurrent || metadata.SemanticCurrent {
+		t.Fatalf("metadata was counted as body: %+v", metadata)
+	}
+	body := pipelineProgressPublication(run, refresh, true)
+	if !body.BodyCurrent {
+		t.Fatal("actual exact-version body publication missing")
+	}
+	refresh.Pending = true
+	stale := pipelineProgressPublication(run, refresh, true)
+	if stale.CatalogCurrent || stale.BodyCurrent || stale.LexicalCurrent || stale.SemanticCurrent {
+		t.Fatalf("pending source presented as current: %+v", stale)
+	}
+}
+
+func TestPipelineProgressUnknownDenominatorsAndReferenceOnly(t *testing.T) {
+	now := time.Now().UTC()
+	progress := newPipelineProgress(now)
+	if progress.CountsKnown || progress.Unknown["eta"] == "" || progress.Unknown["protected_generation"] == "" {
+		t.Fatal(progress)
+	}
+	run := PipelineRun{PlanSnapshot: json.RawMessage(`{"stages":[{"stage_key":"embedding","selected":false,"skip_reason":"reference_only"}]}`)}
+	stage := pipelineStageProgress(run, PipelineStageRun{StageKey: "embedding", Status: "skipped_by_policy"})
+	if stage.Selected == nil || *stage.Selected || stage.SkipReason != "reference_only" || stage.TotalUnits != nil || stage.ReusedUnits != nil || stage.Unknown["total_units"] == "" {
+		t.Fatalf("reference-only or unknown lost: %+v", stage)
+	}
+	stage = pipelineStageProgress(run, PipelineStageRun{StageKey: "embedding", ProgressCompleted: 3, ProgressTotal: 10})
+	if stage.TotalUnits == nil || *stage.TotalUnits != 10 || stage.CompletedUnits != 3 {
+		t.Fatal(stage)
+	}
+}
+
+func TestPipelineProgressUnknownOperationsEncodeNullAndRemainReadable(t *testing.T) {
+	status := PipelineOperationsStatus{Unknown: map[string]string{"active_vectors": "not inspected", "activation_mismatches": "not inspected"}}
+	raw, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"active_vectors":null`, `"activation_mismatches":null`, `"heavy_capacity":null`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("unknown encoded as zero: %s", raw)
+		}
+	}
+	var oldReader PipelineOperationsStatus
+	if err = json.Unmarshal(raw, &oldReader); err != nil || oldReader.Unknown["active_vectors"] == "" {
+		t.Fatalf("legacy reader shape failed: %+v %v", oldReader, err)
+	}
+}
+
+func TestPipelineProgressUnknownWorkerAdmissionEncodesNull(t *testing.T) {
+	var worker PipelineWorkerProgress
+	if err := json.Unmarshal([]byte(`{"worker_key":"main.knowledge_indexer","status":"succeeded"}`), &worker); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(worker)
+	if err != nil || worker.AdmissionTimedOut != nil || worker.AdmissionWarning != nil || !strings.Contains(string(raw), `"admission_timed_out":null`) || strings.Contains(string(raw), `"admission_warning"`) {
+		t.Fatalf("historical unknown became false/a warning: %s %v", raw, err)
+	}
+	worker.AdmissionTimedOut = boolPointer(false)
+	raw, err = json.Marshal(worker)
+	if err != nil || !strings.Contains(string(raw), `"admission_timed_out":false`) {
+		t.Fatalf("explicit false was lost: %s %v", raw, err)
 	}
 }

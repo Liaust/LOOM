@@ -43,7 +43,7 @@ func capturedPipelineObject(run PipelineRun, fallback KnowledgeObject) (Knowledg
 }
 
 func pipelineAdmissionMatches(selected, current KnowledgeObject) bool {
-	if selected.NotesSourceRootID != current.NotesSourceRootID || selected.SourcePath != current.SourcePath ||
+	if (selected.BoxMembershipDigest != "" && selected.BoxMembershipDigest != current.BoxMembershipDigest) || selected.NotesSourceRootID != current.NotesSourceRootID || selected.SourcePath != current.SourcePath ||
 		selected.RelativePath != current.RelativePath || selected.SourceNodeKey != current.SourceNodeKey ||
 		!reflect.DeepEqual(selected.ProjectID, current.ProjectID) || !reflect.DeepEqual(selected.SourceNodeID, current.SourceNodeID) {
 		return false
@@ -55,13 +55,13 @@ func pipelineAdmissionMatches(selected, current KnowledgeObject) bool {
 	}
 	if a != nil {
 		a.Refresh = nil
-		if a.Processing == nil {
+		if a.Processing == nil && a.Files == nil {
 			a = nil
 		}
 	}
 	if b != nil {
 		b.Refresh = nil
-		if b.Processing == nil {
+		if b.Processing == nil && b.Files == nil {
 			b = nil
 		}
 	}
@@ -80,7 +80,7 @@ func (s *Service) capturePipelineSource(ctx context.Context, item PipelineWorkIt
 			cleanup()
 		}
 	}()
-	if pipelineFileFamily(item.Object) != "metadata_only" {
+	if pipelinePlanNeedsSource(item.Run.PlanSnapshot, item.Object) {
 		if isSyncedKnowledgeObject(item.Object) {
 			binding, err := s.resolveSyncedSource(ctx, item.Object)
 			if err != nil {
@@ -190,13 +190,68 @@ func (s *Service) capturePipelineSource(ctx context.Context, item PipelineWorkIt
 	return item, err
 }
 
+func pipelinePlanNeedsSource(raw json.RawMessage, object KnowledgeObject) bool {
+	var plan CompiledPipelinePlan
+	if json.Unmarshal(raw, &plan) != nil || len(plan.Stages) == 0 {
+		return pipelineFileFamily(object) != "metadata_only"
+	}
+	for _, stage := range plan.Stages {
+		if !stage.Selected {
+			continue
+		}
+		switch stage.StageKey {
+		case FilePipelineStageNativeText, FilePipelineStagePDFPageAnalysis, FilePipelineStagePDFOCR, FilePipelineStageImageOCR, FilePipelineStageImageDescription:
+			return true
+		}
+	}
+	return false
+}
+
+type selectedPipelineSourceRow struct {
+	row      *sql.Row
+	run      *PipelineRun
+	admitted *bool
+}
+
+func (r selectedPipelineSourceRow) Scan(dest ...any) error {
+	return r.row.Scan(append(dest, &r.run.KnowledgePipelineRunID, &r.run.KnowledgeObjectID,
+		&r.run.SourceHash, &r.run.SourceRevision, &r.run.Status, &r.run.SourceSnapshot, r.admitted)...)
+}
+
 func (s *Service) selectedPipelineBinding(ctx context.Context, object KnowledgeObject) (syncedSourceBinding, error) {
 	selected := object.pipelineSource
 	if selected == nil {
 		return syncedSourceBinding{}, fmt.Errorf("%w: no selected source", ErrConflict)
 	}
-	run, err := s.store.GetPipelineRun(ctx, selected.RunID)
+	tx, err := s.store.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
+		return syncedSourceBinding{}, err
+	}
+	defer tx.Rollback()
+	if err = preparePipelineSingletonTx(ctx, tx); err != nil {
+		return syncedSourceBinding{}, err
+	}
+	var run PipelineRun
+	var admitted bool
+	current, err := scanKnowledgeObject(selectedPipelineSourceRow{
+		row: tx.QueryRowContext(ctx, `SELECT `+knowledgeObjectColumnsWithAlias("o")+`,
+		 r.knowledge_pipeline_run_id,r.knowledge_object_id,r.source_hash,r.source_revision,r.status,r.source_snapshot,
+		 (`+visibleNotesKnowledgeObjectSQL("o")+` AND `+notesCustodyWriteAllowedSQL("o")+`)
+		 FROM knowledge.knowledge_objects o
+		 JOIN knowledge.pipeline_runs r ON r.knowledge_object_id=o.knowledge_object_id
+		 WHERE o.knowledge_object_id=$1 AND r.knowledge_pipeline_run_id=$2 AND o.deleted_at IS NULL`, object.KnowledgeObjectID, selected.RunID),
+		run: &run, admitted: &admitted,
+	})
+	if err == sql.ErrNoRows {
+		return syncedSourceBinding{}, fmt.Errorf("%w: selected source no longer exists", ErrConflict)
+	}
+	if err != nil {
+		return syncedSourceBinding{}, err
+	}
+	if err := bindObjectBoxMembership(ctx, tx, &current); err != nil {
+		return syncedSourceBinding{}, err
+	}
+	if err = tx.Commit(); err != nil {
 		return syncedSourceBinding{}, err
 	}
 	if run.Status != FilePipelineStatusProcessing {
@@ -209,17 +264,7 @@ func (s *Service) selectedPipelineBinding(ctx context.Context, object KnowledgeO
 	if bound.pipelineSource == nil || bound.pipelineSource.Input != selected.Input {
 		return syncedSourceBinding{}, fmt.Errorf("%w: selected source binding changed", ErrConflict)
 	}
-	current, err := s.store.GetKnowledgeObject(ctx, object.KnowledgeObjectID)
-	if err != nil {
-		return syncedSourceBinding{}, err
-	}
-	var admitted bool
-	err = s.store.db.QueryRowContext(ctx, `SELECT `+visibleNotesKnowledgeObjectSQL("o")+` AND `+notesCustodyWriteAllowedSQL("o")+`
-		FROM knowledge.knowledge_objects o WHERE o.knowledge_object_id=$1 AND o.deleted_at IS NULL`, object.KnowledgeObjectID).Scan(&admitted)
-	if err != nil {
-		return syncedSourceBinding{}, err
-	}
-	if !admitted || !pipelineAdmissionMatches(bound, current) {
+	if !admitted || bound.SourceHash != current.SourceHash || bound.SourceRevision != current.SourceRevision || !pipelineAdmissionMatches(bound, current) {
 		return syncedSourceBinding{}, fmt.Errorf("%w: selected source admission changed", ErrConflict)
 	}
 	return selected.Input, nil
@@ -300,7 +345,7 @@ func selectedPipelineRunTx(ctx context.Context, tx *sql.Tx, object KnowledgeObje
 	if err != nil {
 		return PipelineRun{}, false, err
 	}
-	if !pipelineExecutionPlansEqual(run.PlanSnapshot, snapshot) {
+	if run.SourceHash != object.SourceHash || run.SourceRevision != object.SourceRevision || !pipelineExecutionPlansEqual(run.PlanSnapshot, snapshot) {
 		return run, false, nil
 	}
 	if len(run.SourceSnapshot) == 0 {

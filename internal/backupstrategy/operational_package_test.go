@@ -13,11 +13,59 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"loom.local/loom/internal/restoreauthority"
 )
 
+func TestOperationalPackagePGSearchMetadataIsHashedAndValidated(t *testing.T) {
+	fixture := newOperationalFixture(t)
+	input := fixture.input("operational-pg-search", time.Now().UTC())
+	legacyDump := input.PostgresDump
+	input.PostgresDump = nil
+	input.PostgresDumpWithExtensions = func(ctx context.Context, destination string) ([]restoreauthority.ExtensionRequirement, error) {
+		return []restoreauthority.ExtensionRequirement{{Name: "pg_search", Version: restoreauthority.PGSearchVersion}}, legacyDump(ctx, destination)
+	}
+	created, err := CreateOperationalPackage(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := *created.Verification.Manifest
+	if len(manifest.PostgresExtensions) != 1 || manifest.PostgresExtensions[0].Version != restoreauthority.PGSearchVersion {
+		t.Fatalf("metadata missing from verified manifest: %#v", manifest.PostgresExtensions)
+	}
+	for _, extensions := range [][]restoreauthority.ExtensionRequirement{
+		{{Name: "pg_search", Version: "0.26.0"}},
+		{{Name: "pg_search", Version: restoreauthority.PGSearchVersion}, {Name: "pg_search", Version: restoreauthority.PGSearchVersion}},
+		{{Name: "arbitrary", Version: "1"}},
+	} {
+		manifest.PostgresExtensions = extensions
+		if err := validateOperationalManifest(manifest); err == nil {
+			t.Fatalf("unverified metadata accepted: %#v", extensions)
+		}
+	}
+	manifest.PostgresExtensions = nil
+	if err := validateOperationalManifest(manifest); err != nil {
+		t.Fatalf("legacy metadata was rejected: %v", err)
+	}
+	// Even erasing the declaration changes the authenticated manifest identity.
+	raw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWriteOperational(t, filepath.Join(created.PackageDir, OperationalManifestFile), raw)
+	digest := sha256.Sum256(raw)
+	mustWriteOperational(t, filepath.Join(created.PackageDir, OperationalManifestHashFile), []byte(hex.EncodeToString(digest[:])+"  manifest.json\n"))
+	verification, err := VerifyOperationalPackage(context.Background(), OperationalPackageVerificationInput{
+		PackageDir: created.PackageDir, ExpectedManifestSHA256: created.ManifestSHA256,
+	})
+	if err != nil || verification.Status == "succeeded" {
+		t.Fatalf("altered extension declaration accepted: %#v err=%v", verification, err)
+	}
+}
+
 func TestOperationalDatabaseCapacityBound(t *testing.T) {
-	if operationalDumpMaxBytes != 16<<30 || OperationalPackageMaxBytes != 17<<30 {
-		t.Fatal("database capacity regressed to the pre-Notes limit")
+	if operationalDumpMaxBytes != restoreauthority.DefaultMaxDumpBytes || OperationalPackageMaxBytes != 65<<30 {
+		t.Fatal("database capacity disagrees with the restore reader")
 	}
 	var sum int64
 	for _, spec := range operationalArtifactSpecs {
@@ -36,8 +84,14 @@ func TestOperationalDatabaseCapacityBound(t *testing.T) {
 	if err := f.Truncate(operationalDumpMaxBytes + 1); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := inspectStableFile(f.Name(), operationalDumpMaxBytes, false); err == nil {
-		t.Fatal("oversized dump accepted")
+	if _, err := inspectStableFile(f.Name(), operationalDumpMaxBytes, false); err == nil || !strings.Contains(err.Error(), "observed 68719476737 bytes, maximum 68719476736 bytes") {
+		t.Fatal("oversized dump lacks exact size diagnostics", err)
+	}
+	if err := f.Truncate(0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inspectStableFile(f.Name(), operationalDumpMaxBytes, false); err == nil || !strings.Contains(err.Error(), "file is empty: observed 0 bytes") {
+		t.Fatal("empty dump lacks distinct diagnostics", err)
 	}
 }
 
@@ -86,8 +140,8 @@ func TestOperationalPackageNormalIsCompleteVerifiedAndIndependentOfUserData(t *t
 	if bytes.Contains(packageRaw, []byte(fixture.secret)) || bytes.Contains(packageRaw, []byte(userRoot)) {
 		t.Fatal("secret or unrelated user-data root entered operational package")
 	}
-	if len(second.RetentionPlan.Keep) != 2 || len(second.RetentionPlan.Remove) != 0 {
-		t.Fatalf("retention plan = %#v, want two kept and no removals", second.RetentionPlan)
+	if len(second.RetentionPlan.Keep) != 1 || len(second.RetentionPlan.Remove) != 1 {
+		t.Fatalf("retention plan = %#v, want newest kept and older planned for removal", second.RetentionPlan)
 	}
 }
 
@@ -491,7 +545,7 @@ func TestOperationalPackageVerificationFailsOnIncompleteAndTamperedArtifacts(t *
 	}
 }
 
-func TestOperationalPackageRetentionPlansLatestThreeWithoutMutation(t *testing.T) {
+func TestOperationalPackageRetentionPlansLatestOneWithoutMutation(t *testing.T) {
 	fixture := newOperationalFixture(t)
 	results := make([]OperationalPackageCreateResult, 0, 4)
 	for index := 0; index < 4; index++ {
@@ -503,11 +557,11 @@ func TestOperationalPackageRetentionPlansLatestThreeWithoutMutation(t *testing.T
 		t.Fatal(err)
 	}
 	after := packageIdentities(t, fixture.packagesRoot)
-	if len(plan.Keep) != 3 || len(plan.Remove) != 1 {
-		t.Fatalf("retention plan = %#v, want latest three and one exact removal", plan)
+	if plan.KeepLatest != 1 || len(plan.Keep) != 1 || len(plan.Remove) != 3 || plan.Keep[0].PackageID != "operational-004" {
+		t.Fatalf("retention plan = %#v, want latest one and three exact removals", plan)
 	}
-	if plan.Remove[0].PackageID != "operational-001" || plan.Remove[0].Path != results[0].PackageDir || plan.Remove[0].Reason != "older_than_latest_three_verified" {
-		t.Fatalf("removal candidate = %#v, want exact oldest package", plan.Remove[0])
+	if plan.Remove[2].PackageID != "operational-001" || plan.Remove[2].Path != results[0].PackageDir || plan.Remove[2].Reason != "older_than_latest_verified" {
+		t.Fatalf("removal candidate = %#v, want exact oldest package", plan.Remove[2])
 	}
 	if len(before) != len(after) {
 		t.Fatalf("package set changed during plan: before=%#v after=%#v", before, after)

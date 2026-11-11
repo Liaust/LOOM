@@ -21,6 +21,17 @@ type DefaultInstanceProvider interface {
 	DefaultInstances() []InstanceDescriptor
 }
 
+// Explicit RunOnce is unchanged; readiness does not replace its claim fence.
+type AutomaticReadiness interface {
+	AutomaticReady(context.Context, WorkerInstance, time.Time) (bool, *time.Time, error)
+}
+
+// Only bounded post-commit notifications belong here. A notification failure
+// must not relabel a successfully completed job or replay its expensive work.
+type RunCompletionObserver interface {
+	AfterRunCompletion(context.Context, WorkerRun) error
+}
+
 type RunContext struct {
 	Service        Service
 	Instance       WorkerInstance

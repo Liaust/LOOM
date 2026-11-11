@@ -20,10 +20,11 @@ func (store *Store) resolveSearchProject(ctx context.Context, slug string) (stri
 		), matching AS (
 			SELECT project_id FROM latest
 			WHERE lower(projection_json->>'slug') = lower($1::text)
+			  AND ($2::text[] IS NULL OR projection_json->>'home_box_id'=ANY($2::text[]))
 			ORDER BY project_id LIMIT 2
 		)
 		SELECT coalesce(array_agg(project_id), ARRAY[]::text[]) FROM matching
-	`, slug).Scan(&matches)
+	`, slug, selectedBoxes(ctx)).Scan(&matches)
 	if err != nil {
 		return "", fmt.Errorf("resolve provenance search project: %w", err)
 	}
@@ -73,6 +74,7 @@ func (store *Store) searchAcceptedRecords(ctx context.Context, terms []string, p
 			           record.record_kind, record.domain, coalesce(record.anchors_json::text, ''))) AS haystack
 			FROM provenance.records AS record
 			WHERE ($2::text = '' OR coalesce(record.anchors_json->'projects', '[]'::jsonb) ? $2::text)
+			  AND `+anchorsBoxSQL("record.anchors_json", "$11")+`
 			  AND ($3::text = '' OR coalesce(record.anchors_json->'entities', '[]'::jsonb) ? $3::text)
 			  AND NOT EXISTS (
 				SELECT 1
@@ -118,7 +120,7 @@ func (store *Store) searchAcceptedRecords(ctx context.Context, terms []string, p
 		LIMIT $10::integer
 		`, terms, projectID, repositoryID, cursor.Enabled, cursor.Score,
 		searchAcceptedRecordPriority, cursor.CollectionPriority, nullableSearchCursorTime(cursor),
-		nullableSearchCursorID(cursor, searchAcceptedRecordPriority), limit+1)
+		nullableSearchCursorID(cursor, searchAcceptedRecordPriority), limit+1, selectedBoxes(ctx))
 	if err != nil {
 		return nil, false, fmt.Errorf("search accepted provenance records: %w", err)
 	}
@@ -134,6 +136,7 @@ func (store *Store) searchUnresolvedCases(ctx context.Context, terms []string, p
 			           resolution_case.initial_status)) AS haystack
 			FROM provenance.resolution_cases AS resolution_case
 			WHERE lower(btrim(resolution_case.initial_status)) NOT IN ('closed', 'resolved', 'dismissed')
+			  AND `+caseBoxSQL("resolution_case.id", "$11")+`
 			  AND NOT EXISTS (
 				SELECT 1 FROM provenance.case_events AS case_event
 				WHERE case_event.case_id = resolution_case.id
@@ -181,7 +184,7 @@ func (store *Store) searchUnresolvedCases(ctx context.Context, terms []string, p
 		LIMIT $10::integer
 		`, terms, projectID, repositoryID, cursor.Enabled, cursor.Score,
 		searchUnresolvedCasePriority, cursor.CollectionPriority, nullableSearchCursorTime(cursor),
-		nullableSearchCursorID(cursor, searchUnresolvedCasePriority), limit+1)
+		nullableSearchCursorID(cursor, searchUnresolvedCasePriority), limit+1, selectedBoxes(ctx))
 	if err != nil {
 		return nil, false, fmt.Errorf("search unresolved provenance cases: %w", err)
 	}
@@ -203,6 +206,7 @@ func (store *Store) searchPendingCandidates(ctx context.Context, terms []string,
 				  AND candidate_event.event_type IN ('accepted', 'consolidated', 'rejected')
 			  )
 			  AND ($2::text = '' OR coalesce(candidate.submitted_json->'anchors'->'projects', '[]'::jsonb) ? $2::text)
+			  AND `+anchorsBoxSQL("candidate.submitted_json->'anchors'", "$11")+`
 			  AND ($3::text = '' OR coalesce(candidate.submitted_json->'anchors'->'entities', '[]'::jsonb) ? $3::text)
 		), ranked AS (
 			SELECT id, sort_time,
@@ -224,7 +228,7 @@ func (store *Store) searchPendingCandidates(ctx context.Context, terms []string,
 		LIMIT $10::integer
 		`, terms, projectID, repositoryID, cursor.Enabled, cursor.Score,
 		searchPendingCandidatePriority, cursor.CollectionPriority, nullableSearchCursorTime(cursor),
-		nullableSearchCursorID(cursor, searchPendingCandidatePriority), limit+1)
+		nullableSearchCursorID(cursor, searchPendingCandidatePriority), limit+1, selectedBoxes(ctx))
 	if err != nil {
 		return nil, false, fmt.Errorf("search pending provenance candidates: %w", err)
 	}
@@ -255,6 +259,7 @@ func (store *Store) searchRepositoryState(ctx context.Context, terms []string, p
 			       lower(searchable_summary) AS haystack
 			FROM latest
 			WHERE ($2::text = '' OR project_id=$2::text)
+			  AND `+projectBoxSQL("latest.project_id", "$11")+`
 			  AND ($3::text = '' OR id=$3::text)
 		), ranked AS (
 			SELECT id, project_id, sort_time, searchable_summary, card_json,
@@ -278,7 +283,7 @@ func (store *Store) searchRepositoryState(ctx context.Context, terms []string, p
 		LIMIT $10::integer
 	`, terms, projectID, repositoryID, cursor.Enabled, cursor.Score,
 		searchRepositoryStatePriority, cursor.CollectionPriority, nullableSearchCursorTime(cursor),
-		nullableSearchCursorID(cursor, searchRepositoryStatePriority), limit+1)
+		nullableSearchCursorID(cursor, searchRepositoryStatePriority), limit+1, selectedBoxes(ctx))
 	if err != nil {
 		return nil, false, fmt.Errorf("search repository provenance state: %w", err)
 	}
@@ -296,6 +301,7 @@ func (store *Store) searchProjectState(ctx context.Context, terms []string, proj
 			SELECT *, lower(searchable_summary) AS haystack
 			FROM latest
 			WHERE ($2::text = '' OR id=$2::text)
+			  AND ($11::text[] IS NULL OR projection_json->>'home_box_id'=ANY($11::text[]))
 			  AND ($3::text = '' OR EXISTS (
 			      SELECT 1 FROM jsonb_array_elements(coalesce(projection_json->'memberships', '[]'::jsonb)) AS binding
 			      WHERE binding->>'repository_id'=$3::text
@@ -328,7 +334,7 @@ func (store *Store) searchProjectState(ctx context.Context, terms []string, proj
 		LIMIT $10::integer
 	`, terms, projectID, repositoryID, cursor.Enabled, cursor.Score,
 		searchProjectStatePriority, cursor.CollectionPriority, nullableSearchCursorTime(cursor),
-		nullableSearchCursorID(cursor, searchProjectStatePriority), limit+1)
+		nullableSearchCursorID(cursor, searchProjectStatePriority), limit+1, selectedBoxes(ctx))
 	if err != nil {
 		return nil, false, fmt.Errorf("search project provenance state: %w", err)
 	}

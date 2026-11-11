@@ -50,6 +50,7 @@ type ProducerIdentity struct {
 }
 
 type StructuralAnchors struct {
+	Boxes    []string `json:"boxes,omitempty"`
 	Entities []string `json:"entities,omitempty"`
 	Topics   []string `json:"topics,omitempty"`
 	Projects []string `json:"projects,omitempty"`

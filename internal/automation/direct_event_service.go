@@ -658,7 +658,7 @@ func (s Service) ListDirectEventEndpoints(ctx context.Context, filter DirectEven
 		query += fmt.Sprintf(" AND automation_id IN (SELECT automation_id FROM automation.automations WHERE project_id = $%d)", len(args))
 	}
 	if !hasExplicitRuntimeRef(filter.IntegrationRef, filter.AutomationRef, filter.ProjectRef) {
-		query += archivedProjectByAutomationColumnSQL("automation_id")
+		query += archivedProjectByAutomationColumnSQL("direct_event_endpoints.automation_id")
 	}
 	args = append(args, filter.Limit)
 	query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d", len(args))
@@ -897,6 +897,9 @@ type normalizedCreateDirectEventEndpoint struct {
 }
 
 func (s Service) normalizeCreateDirectEventEndpoint(ctx context.Context, req requestctx.Context, input CreateDirectEventEndpointInput) (normalizedCreateDirectEventEndpoint, error) {
+	if err := validateHermesEvents(input); err != nil {
+		return normalizedCreateDirectEventEndpoint{}, err
+	}
 	slug := strings.ToLower(strings.TrimSpace(input.EndpointSlug))
 	if slug == "" {
 		return normalizedCreateDirectEventEndpoint{}, fmt.Errorf("endpoint_slug is required")
@@ -1131,6 +1134,9 @@ func (s Service) updateIntegrationStatus(ctx context.Context, req requestctx.Con
 }
 
 func (s Service) updateDirectEventEndpointStatus(ctx context.Context, req requestctx.Context, ref, status, eventType string, input UpdateDirectEventEndpointStatusInput) (DirectEventEndpointDetail, error) {
+	if hasHermesEvents(input.Metadata) {
+		return DirectEventEndpointDetail{}, fmt.Errorf("change internal event subscriptions through endpoint creation/reconciliation, not status metadata")
+	}
 	if s.DB == nil {
 		return DirectEventEndpointDetail{}, fmt.Errorf("database is required")
 	}

@@ -12,6 +12,7 @@ import (
 type staleRunRepair struct {
 	WorkerInstanceID   string
 	WorkerRunID        string
+	TriggerKind        string
 	ConsecutiveFailure int
 	ExpiredLeases      int
 }
@@ -83,7 +84,7 @@ func (s Service) RepairStaleRuns(ctx context.Context, req requestctx.Context, no
 			    updated_at = now()
 			FROM stale
 			WHERE wr.worker_run_id = stale.worker_run_id
-			RETURNING wr.worker_run_id, wr.worker_instance_id
+			RETURNING wr.worker_run_id, wr.worker_instance_id, wr.trigger_kind
 		),
 		updated_instances AS (
 			UPDATE workers.worker_instances wi
@@ -100,10 +101,11 @@ func (s Service) RepairStaleRuns(ctx context.Context, req requestctx.Context, no
 			FROM updated_runs
 			WHERE wi.worker_instance_id = updated_runs.worker_instance_id
 			  AND wi.current_run_id = updated_runs.worker_run_id
-			RETURNING wi.worker_instance_id, updated_runs.worker_run_id, wi.consecutive_failures
+			RETURNING wi.worker_instance_id, updated_runs.worker_run_id, updated_runs.trigger_kind, wi.consecutive_failures
 		)
 		SELECT worker_instance_id,
 		       worker_run_id,
+		       trigger_kind,
 		       consecutive_failures,
 		       (SELECT count(*) FROM expired_stale_leases) AS expired_stale_leases
 		FROM updated_instances
@@ -118,13 +120,16 @@ func (s Service) RepairStaleRuns(ctx context.Context, req requestctx.Context, no
 	expiredStaleLeases := 0
 	for rows.Next() {
 		var repair staleRunRepair
-		if err := rows.Scan(&repair.WorkerInstanceID, &repair.WorkerRunID, &repair.ConsecutiveFailure, &repair.ExpiredLeases); err != nil {
+		if err := rows.Scan(&repair.WorkerInstanceID, &repair.WorkerRunID, &repair.TriggerKind, &repair.ConsecutiveFailure, &repair.ExpiredLeases); err != nil {
 			return StaleRunRepairResult{}, err
 		}
 		expiredStaleLeases = repair.ExpiredLeases
 		repairs = append(repairs, repair)
 	}
 	if err := rows.Err(); err != nil {
+		return StaleRunRepairResult{}, err
+	}
+	if err := rows.Close(); err != nil {
 		return StaleRunRepairResult{}, err
 	}
 
@@ -136,6 +141,18 @@ func (s Service) RepairStaleRuns(ctx context.Context, req requestctx.Context, no
 		RunIDs:            make([]string, 0, len(repairs)),
 	}
 	for _, repair := range repairs {
+		// Older daemon versions did not consume daily occurrences at admission.
+		// Repair only an overdue automatic occurrence; preserve future/operator state.
+		instance, err := resolveWorkerInstance(ctx, tx, repair.WorkerInstanceID)
+		if err != nil {
+			return StaleRunRepairResult{}, err
+		}
+		if next := claimedDailyNextRunAfter(instance, repair.TriggerKind, now); next != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE workers.worker_instances SET next_run_after=$2
+			 WHERE worker_instance_id=$1`, repair.WorkerInstanceID, next); err != nil {
+				return StaleRunRepairResult{}, err
+			}
+		}
 		result.RunIDs = append(result.RunIDs, repair.WorkerRunID)
 		health, err := upsertTimedOutHealth(ctx, tx, repair.WorkerInstanceID, repair.WorkerRunID, now, repair.ConsecutiveFailure, runErr)
 		if err != nil {

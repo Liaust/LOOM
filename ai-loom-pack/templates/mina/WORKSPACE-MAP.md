@@ -1,46 +1,43 @@
 # MINA Workspace Map
 
-All paths below are relative to this workspace. Deployment chooses and verifies
+Paths below are relative to the existing non-Git workspace. Deployment verifies
 the canonical root; portable instructions contain no machine-local locator.
 
 | Path | Owner and purpose |
 |---|---|
-| `.hermes/SOUL.md` | Single substantive personality source; preserved on scaffold replay |
-| `AGENTS.md` | Workspace authority, instruction priority and routing |
+| `SOUL.md` | One active personality source, preserving live edits during migration |
+| `AGENTS.md` | Bootstrap, instruction priority and routing |
 | `WORKFLOW.md` | Intake, evidence, delegation, verification and handoff |
-| `OPERATING-POLICY.md` | Inspection, reversible action and explicit approval boundaries |
+| `OPERATING-POLICY.md` | Task authority and sensitive-action boundaries |
 | `TOOLING.md` | Supported interfaces and tool ownership |
 | `protocols/` | Task-scoped operating instructions |
-| `skills/installed/` | LOOM-managed external deployed skills; owner/ACL/service custody governs access, not a creation target |
-| `.hermes/skills/` | Native Hermes bundled and user skill store; existing bundled skills stay in place |
-| `.hermes/skills/created/<name>/SKILL.md` | New native skills use `category="created"`; writes save immediately under the task policy |
-| `.hermes/pending/` | Existing proposals remain reviewable through native pending/diff/approve/reject surfaces; normal writes no longer queue |
+| `.agents/skills/<name>/SKILL.md` | Existing MINA-owned Codex skills, externally discoverable by Hermes without duplication |
+| `skills/installed/` | Installed LOOM skill sources, externally discoverable; edit their canonical source |
+| `.hermes/` | Native Hermes configuration, memory, sessions and skills plus retained attributed history |
+| `context/` | Source-attributed operational handoffs and the transferred reconciliation cursor; not a semantic ledger |
+| `automations/` | Registered script packages; timing and execution owners stay explicit, with one timer per occurrence |
 | `investigations/` | Bounded redacted evidence and pointers to original sources |
-| `handoffs/` | Task-specific transfers of scope and evidence |
-| `recovery/` | Reserved for later verified recovery publication, not scratch data |
-| `tmp/` | Disposable task scratch; never canonical evidence or credentials |
+| `handoffs/` | Task-specific scope and evidence transfers |
+| `recovery/` | Verified published recovery packages, never scratch |
+| `recovery-codex/` | Selected private Codex captures for encrypted cloud protection, not workspace Git export |
+| `tmp/` | Disposable task scratch, not canonical evidence or credentials |
 
-A reviewed provisioner prepares Hermes' config, session/history state,
-memories, cron, logs and native/created `.hermes/skills` under the same profile.
-The scaffold supplies only the SOUL there. It creates no runtime database,
-config, session, private memory, account, provider or schedule state and does
-not initialize Hermes.
+Hermes-created skills live in `.hermes/skills`; do not shadow externally installed
+names. Its profile SOUL references the canonical root personality. Native
+conversational memory is separate from Notes and Provenance.
 
-There is no root personality compatibility file, hand-written memory tree or
-speculative integrations directory. Existing legacy workspaces need a separate
-non-overwriting migration with a reviewed inventory and rollback evidence.
-Scaffolding stops when it encounters legacy or runtime state; it cannot migrate
-or validate a live workspace.
+Codex threads, auth and settings belong to the shared account's CODEX_HOME,
+outside this workspace. A settings profile is not a separate agent, account or
+conversation store. Normal cwd-filtered resume distinguishes MINA and project
+conversations. Follow `SESSION-RETRIEVAL.md` before continuing an exact thread.
 
-Nix owns harness versions, dependencies, services and immutable package paths.
-The runtime profile is not all immutable: native skill and memory tools,
-sessions, theme files and bounded task state keep their own permissions.
-The baseline template does not automatically overwrite live state. See
-`TOOLING.md` for managed-setting refusals and a bounded handoff.
+The scaffold supplies portable instructions only. It does not provision a login,
+create a schedule, initialize Git, migrate live files or verify a backup. A live
+workspace update separately preserves edited files and historical Hermes state.
+There is no automatic bulk memory import or second personality source.
 
-The `created` category does not transfer ownership to the curator. Foreground
-skills remain user-owned until explicit supported adoption. The effective native selection
-is authoritative; historical counts are not a curated catalogue or a ceiling.
-Native and managed installed skills retain their separate owners. See
-`protocols/SKILL-CREATION-AND-PROMOTION.md` for selection and maintenance rules.
-Same-user read-only modes alone are not a security sandbox for installed skills.
+Nix owns system tool versions and service definitions; native Codex releases
+use their installer and coordinated updates. Runtime state and created skills
+remain writable. Shared installed skills use the supported account/admin root
+and retain their source owner. See
+`protocols/SKILL-CREATION-AND-PROMOTION.md` for discovery and promotion.

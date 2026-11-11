@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"strings"
 	"time"
+
+	"loom.local/loom/internal/boxregistry"
 )
 
 const (
@@ -32,6 +34,7 @@ type WorkspaceRestorePlanRequest struct {
 }
 
 type WorkspaceMovePlanReview struct {
+	BoxID                 string                 `json:"box_id,omitempty"`
 	SchemaVersion         string                 `json:"schema_version"`
 	OperationID           string                 `json:"operation_id"`
 	OperationKind         WorkspaceOperationKind `json:"operation_kind"`
@@ -92,10 +95,13 @@ type WorkspaceMoveInspectionSummary struct {
 	UpdatedAt          time.Time                        `json:"updated_at"`
 	CompletedAt        *time.Time                       `json:"completed_at,omitempty"`
 	Findings           []WorkspaceArchiveFindingSummary `json:"findings"`
+	CurrentPayload     *WorkspacePathRef                `json:"current_payload,omitempty"`
+	RelocationID       string                           `json:"relocation_id,omitempty"`
 }
 
 func NewWorkspaceMovePlanReview(plan WorkspaceArchivePlan) (WorkspaceMovePlanReview, error) {
 	review := WorkspaceMovePlanReview{
+		BoxID:                 plan.BoxID,
 		SchemaVersion:         WorkspaceMovePlanReviewSchemaVersion,
 		OperationID:           plan.OperationID,
 		OperationKind:         plan.OperationKind,
@@ -124,6 +130,9 @@ func NewWorkspaceMovePlanReview(plan WorkspaceArchivePlan) (WorkspaceMovePlanRev
 }
 
 func ValidateWorkspaceMovePlanReview(review WorkspaceMovePlanReview) error {
+	if review.BoxID != "" && !boxregistry.IsBoxRef("box:"+review.BoxID) {
+		return fmt.Errorf("invalid workspace move review Box identity")
+	}
 	if review.SchemaVersion != WorkspaceMovePlanReviewSchemaVersion || !workspacePathID(review.OperationID, workspaceOperationID) || (review.OperationKind != WorkspaceOperationArchive && review.OperationKind != WorkspaceOperationRestore) || validateWorkspaceObject(review.Kind, review.ObjectID, review.Slug) != nil || !validWorkspaceActorID(review.ActorID) || validateBoundedText("reason", review.Reason, maxWorkspaceArchiveReasonBytes) != nil || review.PlannedAt.IsZero() || !sha256DigestPattern.MatchString(review.PlanDigest) || !sha256DigestPattern.MatchString(review.InventoryDigest) || review.InventoryEntries < 0 || review.InventoryBytes < 0 || review.CatalogRebinds < 0 {
 		return fmt.Errorf("invalid workspace move plan review")
 	}
@@ -159,6 +168,14 @@ func (s WorkspaceMoveService) ReviewRestorePlan(ctx context.Context, input Works
 func (s WorkspaceMoveService) ReplanReviewed(ctx context.Context, review WorkspaceMovePlanReview) (WorkspaceArchivePlan, error) {
 	if err := ValidateWorkspaceMovePlanReview(review); err != nil {
 		return WorkspaceArchivePlan{}, err
+	}
+	if err := validateWorkspaceBoxBinding(review.BoxID, s.Roots); err != nil {
+		return WorkspaceArchivePlan{}, err
+	}
+	// Pending Personal reviews predate Box attribution. Reproduce their exact
+	// signed schema/hash, not a newly attributed version of the same operation.
+	if review.BoxID == "" && s.Roots.Primary {
+		s.Roots.BoxID = ""
 	}
 	var (
 		plan WorkspaceArchivePlan
@@ -205,6 +222,12 @@ func NewWorkspaceMoveInspectionSummary(inspection WorkspaceArchiveInspection) Wo
 	}
 	summary.Source.AbsolutePath = ""
 	summary.Destination.AbsolutePath = ""
+	if inspection.CurrentPayload != nil {
+		ref := *inspection.CurrentPayload
+		ref.AbsolutePath = ""
+		summary.CurrentPayload = &ref
+	}
+	summary.RelocationID = inspection.RelocationID
 	if inspection.Manifest != nil {
 		summary.LifecycleState = inspection.Manifest.LifecycleState
 	}

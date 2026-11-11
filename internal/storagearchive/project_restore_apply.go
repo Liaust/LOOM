@@ -124,6 +124,9 @@ func (s ProjectRuntimeService) applyProjectPhysicalRestore(ctx context.Context, 
 			return result, err
 		}
 		fresh.WorkspaceRequest = plan.WorkspaceRequest
+		if err := normalizeLegacyProjectMembership(plan.ArchivePlan, s.WorkspaceRoots, plan.Registration.Project.Project.Metadata, plan.Registration.Project.Project.UpdatedAt, plan.Repository.Project.UpdatedAt, &fresh.Registration.Project.Project.Metadata, &fresh.Registration.Project.Project.UpdatedAt, &fresh.Repository.Project.UpdatedAt); err != nil {
+			return result, err
+		}
 		if err := SealProjectPhysicalRestorePlan(&fresh); err != nil {
 			return result, err
 		}
@@ -268,6 +271,9 @@ func (s ProjectRuntimeService) currentProjectRestoreSnapshots(ctx context.Contex
 	if err != nil {
 		return current, repository, state, err
 	}
+	if err := normalizeLegacyProjectMembership(plan.ArchivePlan, s.WorkspaceRoots, plan.Registration.Project.Project.Metadata, plan.Registration.Project.Project.UpdatedAt, plan.Repository.Project.UpdatedAt, &actual.Project.Project.Metadata, &actual.Project.Project.UpdatedAt, &repos.Project.UpdatedAt); err != nil {
+		return current, repository, state, err
+	}
 	actual.Project.Project.ArchiveState = plan.Registration.Project.Project.ArchiveState
 	actual.Project.Project.UpdatedAt = plan.Registration.Project.Project.UpdatedAt
 	repos.Project.UpdatedAt = plan.Repository.Project.UpdatedAt
@@ -339,6 +345,11 @@ func validateCompletedProjectRestore(plan ProjectPhysicalRestorePlan, state proj
 		return err
 	}
 	expected := *plan.Archive.Manifest
+	if plan.Workspace.Placement != nil {
+		expected.SchemaVersion = WorkspaceArchiveManifestSchemaForPlan(plan.Workspace)
+		ref := plan.Workspace.Source.Path
+		expected.RestoredFromPath = &ref
+	}
 	expected.LifecycleState = WorkspaceLifecycleActive
 	expected.RestoreOperationID, expected.RestorePlanDigest = state.OperationID, state.WorkspacePlanDigest
 	expected.RestoredAt = op.PayloadMovedAt

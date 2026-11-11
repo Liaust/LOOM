@@ -1,0 +1,18 @@
+{
+  "fill-specializations": [
+    {"value": {"solid": "srgb:1.00000,1.00000,1.00000,1.00000"}},
+    {"appearance": "dark", "value": {"solid": "srgb:0.14118,0.14118,0.14118,1.00000"}}
+  ],
+  "groups": [{
+    "name": "Spool",
+    "blur-material": null,
+    "layers": [{
+      "name": "Spool", "image-name": "loom-spool.svg", "glass": false,
+      "position-specializations": [{"idiom": "square", "value": {"scale": 0.88, "translation-in-points": [0, 0]}}]
+    }],
+    "shadow": {"kind": "neutral", "opacity": 0},
+    "specular": false,
+    "translucency": {"enabled": false, "value": 0}
+  }],
+  "supported-platforms": {"squares": "shared"}
+}

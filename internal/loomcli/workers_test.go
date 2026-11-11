@@ -1,6 +1,7 @@
 package loomcli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -13,6 +14,30 @@ import (
 	"loom.local/loom/internal/response"
 	"loom.local/loom/internal/workers"
 )
+
+func TestWorkerAdmissionWarningHumanForwarding(t *testing.T) {
+	for _, tc := range []struct{ raw, phase, reason string }{
+		{`{"admission_warning":{"phase":"catalog_hydration","reason":"deadline_exceeded","elapsed_ms":10300,"budget_ms":10000,"retryable":true},"private":"source-body"}`, "catalog_hydration", "deadline_exceeded"},
+		{`{"admission_warning":{"phase":"source-body","reason":"source-body","elapsed_ms":-1,"budget_ms":-2}}`, "unknown", "operation_failed"},
+	} {
+		cmd := &cobra.Command{}
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		renderWorkerAdmissionWarning(cmd, workers.WorkerRun{ResultSummaryJSON: json.RawMessage(tc.raw), CorrelationID: "original-correlation"})
+		if !strings.Contains(out.String(), "phase="+tc.phase) || !strings.Contains(out.String(), "reason="+tc.reason) || !strings.Contains(out.String(), "original-correlation") || strings.Contains(out.String(), "source-body") || strings.Contains(out.String(), "=-") {
+			t.Fatalf("unsafe or lost warning: %s", out.String())
+		}
+	}
+	for _, raw := range []string{`{}`, `{"processed":2}`, `invalid`, `{"admission_warning":null}`} {
+		cmd := &cobra.Command{}
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		renderWorkerAdmissionWarning(cmd, workers.WorkerRun{ResultSummaryJSON: json.RawMessage(raw)})
+		if out.Len() != 0 {
+			t.Fatalf("ordinary or invalid result gained warning: %s", out.String())
+		}
+	}
+}
 
 func TestWorkerRunCommandContextKeepsClientDeadlineLongerThanCloudWorkerDeadline(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())

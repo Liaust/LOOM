@@ -1,86 +1,87 @@
 ---
 title: "Main And Mac Operations"
-description: "Understand the reference Main/workspace topology, storage roles and separately authorized device routes."
+description: "Operate the private Main/desktop connection and distinguish server sources, client working copies and independent agent access."
 audience: [operator, developer]
-tags: [loom, operations, configuration]
+tags: [loom, operations, configuration, workspace]
 status: draft
-verified_at: "2026-09-15"
-source_scope: ["nix/profiles/main-hardware-desktop.nix", "nix/modules/loom-smb.nix", "nix/modules/loom-orca.nix", "scripts/loom-macbook"]
-related: ["[[Canonical Paths]]", "[[ORCA Main Operations]]", "[[Files Storage And Lane]]", "[[Backup Restore And Drills]]", "[[Main-To-Mac Computer Use]]"]
+verified_at: "2026-11-11"
+source_scope: ["modules/workspace-electron/src/transport.mjs", "internal/workspacefiles", "internal/notesworkspace", "nix/modules/loom-agents.nix", "nix/modules/loom-hermes-platform.nix"]
+related: ["[[Canonical Paths]]", "[[Desktop Workspace]]", "[[Box Storage And Lane]]", "[[Backup Restore And Drills]]", "[[Main-To-Mac Computer Use]]"]
 ---
 
 # Main And Mac Operations
 
-## Reference Topology, Not A Live Inventory
+## Separate The Owners
 
-Main coordinates policy, providers, jobs, storage and knowledge. A Mac workspace
-owns its local Box and node-agent state. An optional replaceable edge host
-provides private-network routing and public ingress; it must not become the
-canonical store for project or database state.
+Main coordinates shared project, file, knowledge, job and recovery state. The
+Mac desktop owns its local working copies, drafts and outbox. Its independent
+local Mac Box is not a replica of every Main file. A replaceable edge can route
+the private network or public application ingress, but must not hold canonical
+LOOM state.
 
-The Nix reference uses a private WireGuard network, with Main at `10.44.0.2`.
-Those are example bindings, not discovery results or authority to connect.
-Supply your own peers, keys and addresses. The public example contains no
-working maintainer account, public endpoint or hardware configuration.
+The reference server is NixOS and the reference desktop is macOS. Addresses,
+SSH aliases, users, mounts and credentials belong to the operator. The public
+source supplies no working connection to the maintainer's installation.
 
-## Storage Roles
+## Desktop Connection
 
-The current reference separates Main's operating/database storage from a data
-filesystem mounted at `/srv/loom`. Box lives at `/srv/loom/box`, archive and
-retained user-data custody under `/srv/loom/storage`, and agent workspaces under
-`/srv/loom/agents`. The exact layout is configured, not created by reading this page.
+The desktop connects through ordinary private SSH and forwards the configured
+Main Unix-socket API. `LOOM_FILES_SSH_HOST` selects the existing operator-owned
+SSH host entry. Configure its identity, pinned host key and bounded connection
+behavior before starting the client. Do not expose a database or desktop-control
+service publicly to make the file browser connect.
 
-Box and archive payloads must share a filesystem where lifecycle operations use
-atomic rename. Mount dependencies prevent services from silently writing into
-an unmounted underlying directory. A Nix rebuild does not itself migrate
-existing payloads, catalog paths or ownership.
+Opening a folder requests a shallow listing. Opening working text establishes
+an exact base and durable local copy. Large originals can stay remote and be
+read through bounded, version-checked downloads. Main-first operations retain
+their request identity across a lost response. Offline local save, Main
+acceptance and later backup coverage are three different results.
 
-A Mac can mount a writable `loom-main-box` share and read-only `loom-storage`
-inspection share. The Mac's own `~/loom-box` remains a different source.
-Generated or retained copies are not alternate writable sources.
+The client does not require an Obsidian vault or SMB mount. Existing mounts and
+legacy vaults remain independent user state: do not overwrite them or treat a
+new app build as permission to migrate them. Local development can point its
+read-only recovery browser at `LOOM_FILES_LOCAL_ROOT`; that is not a replacement
+for the native writable working-set owner.
 
-## Inspect Before Acting
+## Inspect Actual State
 
-On the configured node/client:
+On your configured node/client:
 
 ```sh
+loom version
 loom status
 loom health
-loom storage filesystem status
 loom storage doctor
 loom backup coverage
 ```
 
-Check the selected backend, source roots and errors. The helper
-`scripts/loom-macbook` supports the reference Mac mount/workspace operations,
-but its defaults need the operator's own configuration. It is not a
-general-purpose installer or an instruction to create historical aliases.
+Check the selected node, source roots, workers and explicit failures. A healthy
+daemon can coexist with a deliberately paused indexer. File existence does not
+prove source publication, index coverage, embeddings or cloud protection.
 
-## Network And Device Access
+## Agent And Device Access
 
-Keep PostgreSQL, private APIs, SMB, remote terminals and desktop services on
-their intended private interfaces. Public application HTTPS is a separate
-Caddy/edge configuration with explicit domain and credential prerequisites.
-Never expose a private management port merely to get a client connected.
+Native Hermes on Main owns conversational sessions and schedules; independent
+Codex sessions own coding work. Neither needs ORCA or the Mac client online to
+perform server-side work once configured. A remote conversation client is not
+the same as a browser cookie store or graphical desktop session.
 
-ORCA pairing connects its workspace/terminal client to the configured Main
-runtime. Main Chromium, ORCA's shared browser, Mac computer use and normal SSH
-are distinct routes. A paired computer-use key is restricted to that endpoint;
-it is not a general shell credential. See [[ORCA Main Operations]] and
-[[Main-To-Mac Computer Use]].
+Main-side browser/desktop tools and the paired Main-to-Mac connector are
+different providers. A Mac capture/input permission is not shell access, and
+an SSH key is not permission to capture a screen. Preserve session/profile
+selection and actual device-consent boundaries; do not substitute another
+device when the intended provider is unavailable.
 
 ## Changes And Recovery
 
-Review the exact update or migration plan. Preserve relevant existing recovery,
-identify writers and rollback behavior, then perform the authorized operation.
-For ordinary patches use focused checks and the supported update path;
-a full cloud transfer or restore drill is not required for every change.
+Keep host configuration outside public source. Review actual mounts and
+writer/recovery owners before activation. Box and archive must share a
+filesystem where the operation relies on atomic rename; a Nix rebuild is not
+a data migration.
 
-For an actual filesystem move, inventory the selected data, verify recovery,
-stop the affected writers, preserve identity and metadata, and recheck the
-result before resuming. Do not copy commands from a historical machine receipt
-or treat a different mount layout as interchangeable.
-
-General maintenance must not remove old data or keys merely because their
-paths appear stale. Use a reviewed cleanup scope and preserve evidence of
-what was retained, moved or deleted.
+Preserve current drafts, pending operations, live agent profiles and relevant
+existing recovery. Use the supported update/rollback and file-operation paths,
+not a historical machine receipt. Ordinary source patches do not need another
+full backup transfer; destructive migrations need their own inventory,
+protection evidence and authority. Never remove retained data simply because
+its path or client looks old.

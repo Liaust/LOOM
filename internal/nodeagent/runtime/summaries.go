@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io/fs"
@@ -10,10 +11,23 @@ import (
 	"time"
 )
 
+var ErrQueueRecordsAbsent = errors.New("queue record store absent")
+
 func (s Store) BuildLocalSummary() (LocalSummary, error) {
+	return s.BuildLocalSummaryContext(context.Background())
+}
+
+func (s Store) BuildLocalSummaryContext(ctx context.Context) (LocalSummary, error) {
+	summary, _, err := s.buildLocalSummary(ctx)
+	return summary, err
+}
+
+func (s Store) buildLocalSummary(ctx context.Context) (LocalSummary, fileQueueSnapshot, error) {
+	previous, _ := s.LoadLatestSummary()
+	now := time.Now().UTC()
 	instances, err := s.LoadInstances()
 	if err != nil {
-		return LocalSummary{}, err
+		return LocalSummary{}, fileQueueSnapshot{}, err
 	}
 	workerCounts := WorkerCounts{Total: len(instances)}
 	for _, instance := range instances {
@@ -27,7 +41,7 @@ func (s Store) BuildLocalSummary() (LocalSummary, error) {
 			continue
 		}
 		if err != nil {
-			return LocalSummary{}, err
+			return LocalSummary{}, fileQueueSnapshot{}, err
 		}
 		switch health.Status {
 		case WorkerStatusHealthy:
@@ -43,25 +57,20 @@ func (s Store) BuildLocalSummary() (LocalSummary, error) {
 		}
 	}
 
-	outbox, err := s.OutboxSummary()
-	if err != nil {
-		return LocalSummary{}, err
+	files, fileErr := s.fileQueueSummary()
+	outbox, inbox := files.Outbox, files.Inbox
+	var snapshot QueueSnapshot
+	var queueErr error
+	if previous.QueueUnavailableReason != "" && previous.RetryAt != nil && now.Before(*previous.RetryAt) {
+		queueErr = errors.New(previous.QueueUnavailableReason)
+	} else {
+		snapshot, queueErr = s.queueSnapshot(ctx)
 	}
-	inbox, err := s.InboxSummary()
-	if err != nil {
-		return LocalSummary{}, err
-	}
-	legacyOutbox, err := countLegacyJSONFiles(filepath.Join(s.DataDir, "outbox"))
-	if err != nil {
-		return LocalSummary{}, err
-	}
-	syncCounts, err := s.localSyncCounts()
-	if err != nil {
-		return LocalSummary{}, err
-	}
-	backupCounts, err := s.localWatchedRootBackupCounts()
-	if err != nil {
-		return LocalSummary{}, err
+	if queueErr != nil {
+		snapshot = QueueSnapshot{Revision: previous.QueueRevision,
+			SyncPending: previous.Queues.SyncPending, SyncFailed: previous.Queues.SyncFailed, SyncConflicted: previous.Queues.SyncConflicted,
+			BackupPending: previous.Queues.BackupPending, BackupRetryable: previous.Queues.BackupRetryable,
+			BackupFailed: previous.Queues.BackupFailed, BackupManualAction: previous.Queues.BackupManualAction, BackupPendingBytes: previous.Queues.BackupPendingBytes}
 	}
 	queues := QueueCounts{
 		InboxPending:        inbox.Counts[OutboxStatusPending],
@@ -73,27 +82,81 @@ func (s Store) BuildLocalSummary() (LocalSummary, error) {
 		OutboxFailed:        outbox.Counts[OutboxStatusFailed],
 		OutboxManualAction:  outbox.Counts[OutboxStatusManualAction],
 		LegacyInboxRecords:  inbox.LegacyRecords,
-		LegacyOutboxRecords: legacyOutbox,
-		SyncPending:         syncCounts.Pending,
-		SyncFailed:          syncCounts.Failed,
-		SyncConflicted:      syncCounts.Conflicted,
-		BackupPending:       backupCounts.Pending,
-		BackupRetryable:     backupCounts.Retryable,
-		BackupFailed:        backupCounts.Failed,
-		BackupManualAction:  backupCounts.ManualAction,
-		BackupPendingBytes:  backupCounts.PendingBytes,
+		LegacyOutboxRecords: files.LegacyOutbox,
+		SyncPending:         snapshot.SyncPending,
+		SyncFailed:          snapshot.SyncFailed,
+		SyncConflicted:      snapshot.SyncConflicted,
+		BackupPending:       snapshot.BackupPending,
+		BackupRetryable:     snapshot.BackupRetryable,
+		BackupFailed:        snapshot.BackupFailed,
+		BackupManualAction:  snapshot.BackupManualAction,
+		BackupPendingBytes:  snapshot.BackupPendingBytes,
 		PendingBytes:        outbox.TotalPendingBytes,
 	}
 	summary := LocalSummary{
-		GeneratedAt: time.Now().UTC(),
-		Workers:     workerCounts,
-		Queues:      queues,
+		GeneratedAt:     now,
+		CheckedAt:       now,
+		Availability:    "available",
+		QueueRevision:   snapshot.Revision,
+		QueueObservedAt: now,
+		FileRevision:    files.Revision,
+		Workers:         workerCounts,
+		Queues:          queues,
 		OldestPending: OldestPending{
 			Outbox: outbox.OldestPendingAt,
 		},
 		HighestStatus: highestStatus(workerCounts, queues),
 	}
-	return summary, nil
+	if queueErr != nil {
+		summary.QueueObservedAt, summary.QueueUnavailableReason = previous.QueueObservedAt, queueErr.Error()
+	}
+	if unavailable := errors.Join(queueErr, fileErr); unavailable != nil {
+		summary.Availability = "unavailable"
+		if (queueErr == nil || !previous.QueueObservedAt.IsZero()) && (fileErr == nil || files.Revision != 0) {
+			summary.Availability = "stale"
+		}
+		summary.UnavailableReason = unavailable.Error()
+		retry := now.Add(30 * time.Second)
+		if errors.Is(fileErr, errFileSummaryRebuilding) {
+			retry = now.Add(time.Second)
+		}
+		if previous.RetryAt != nil && now.Before(*previous.RetryAt) {
+			retry = *previous.RetryAt
+		}
+		summary.RetryAt = &retry
+		if summary.HighestStatus == WorkerStatusHealthy {
+			summary.HighestStatus = WorkerStatusDegraded
+		}
+	}
+	if sameSummaryMaterial(previous, summary) {
+		summary.GeneratedAt = previous.GeneratedAt
+	}
+	if err := s.SaveLatestSummary(summary); err != nil {
+		return LocalSummary{}, files, err
+	}
+	return summary, files, nil
+}
+
+func (s Store) queueSnapshot(ctx context.Context) (QueueSnapshot, error) {
+	if s.ReadQueueSnapshot != nil {
+		snapshot, err := s.ReadQueueSnapshot(ctx)
+		if !errors.Is(err, ErrQueueRecordsAbsent) {
+			return snapshot, err
+		}
+	} else if _, err := os.Lstat(filepath.Join(s.DataDir, "sync", "records.db")); !errors.Is(err, fs.ErrNotExist) {
+		if err != nil {
+			return QueueSnapshot{}, err
+		}
+		return QueueSnapshot{}, errors.New("queue owner summary reader unavailable")
+	}
+	sync, err := s.localSyncCounts()
+	if err != nil {
+		return QueueSnapshot{}, err
+	}
+	backup, err := s.localWatchedRootBackupCounts()
+	return QueueSnapshot{SyncPending: sync.Pending, SyncFailed: sync.Failed, SyncConflicted: sync.Conflicted,
+		BackupPending: backup.Pending, BackupRetryable: backup.Retryable, BackupFailed: backup.Failed,
+		BackupManualAction: backup.ManualAction, BackupPendingBytes: backup.PendingBytes}, err
 }
 
 type syncStatusCounts struct {
@@ -103,6 +166,7 @@ type syncStatusCounts struct {
 }
 
 func (s Store) localSyncCounts() (syncStatusCounts, error) {
+	var counts syncStatusCounts
 	path := filepath.Join(s.DataDir, "sync", "outbox.json")
 	file, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -118,7 +182,6 @@ func (s Store) localSyncCounts() (syncStatusCounts, error) {
 	if err := json.NewDecoder(file).Decode(&items); err != nil {
 		return syncStatusCounts{}, err
 	}
-	var counts syncStatusCounts
 	for _, item := range items {
 		switch item.Status {
 		case "pending":
@@ -141,6 +204,7 @@ type watchedRootBackupStatusCounts struct {
 }
 
 func (s Store) localWatchedRootBackupCounts() (watchedRootBackupStatusCounts, error) {
+	var counts watchedRootBackupStatusCounts
 	root := filepath.Join(s.DataDir, "watched-root-backups")
 	outboxPath := filepath.Join(root, "outbox.json")
 	file, err := os.Open(outboxPath)
@@ -181,7 +245,6 @@ func (s Store) localWatchedRootBackupCounts() (watchedRootBackupStatusCounts, er
 		return watchedRootBackupStatusCounts{}, err
 	}
 
-	var counts watchedRootBackupStatusCounts
 	for _, item := range outbox {
 		switch item.Status {
 		case "failed":

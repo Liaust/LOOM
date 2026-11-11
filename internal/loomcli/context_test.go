@@ -3,8 +3,10 @@ package loomcli
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"loom.local/loom/internal/config"
 	"loom.local/loom/internal/loomcli/ui"
 	"loom.local/loom/internal/setup"
 )
@@ -209,6 +211,106 @@ func TestResolveCLIClientSocketFlagOverridesMainURLEnv(t *testing.T) {
 	}
 	if client.SocketPath != "/tmp/loom-test.sock" {
 		t.Fatalf("client socket path = %q, want explicit socket", client.SocketPath)
+	}
+}
+
+func TestResolveCLIConfigClientEnvFallback(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("LOOM_CONFIG_FILE", "")
+	t.Setenv("LOOM_SOCKET_PATH", "")
+	if _, ok := defaultInstallManifest(); ok {
+		t.Skip("host install manifest takes precedence over client-env fallback")
+	}
+	path := filepath.Join(t.TempDir(), "loom-client.env")
+	wantSocket := filepath.Join(t.TempDir(), "client.sock")
+	if err := os.WriteFile(path, []byte("LOOM_SOCKET_PATH="+wantSocket+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := resolveCLIConfigWithClientEnv(nil, path)
+	if err != nil || cfg.ConfigFile != path || cfg.SocketPath != wantSocket {
+		t.Fatalf("client-env fallback: config=%+v err=%v", cfg.SafeFields(), err)
+	}
+	if got := os.Getenv("LOOM_CONFIG_FILE"); got != "" {
+		t.Fatalf("fallback mutated process configuration: %q", got)
+	}
+	t.Setenv("LOOM_SOCKET_PATH", "/tmp/env.sock")
+	cfg, err = resolveCLIConfigWithClientEnv(nil, path)
+	if err != nil || cfg.SocketPath != "/tmp/env.sock" {
+		t.Fatalf("environment lost precedence: socket=%q err=%v", cfg.SocketPath, err)
+	}
+	cfg, err = resolveCLIConfigWithClientEnv(&options{socketPath: "/tmp/flag.sock"}, path)
+	if err != nil || cfg.SocketPath != "/tmp/flag.sock" {
+		t.Fatalf("socket flag lost precedence: socket=%q err=%v", cfg.SocketPath, err)
+	}
+	t.Setenv("LOOM_SOCKET_PATH", "")
+	cfg, err = resolveCLIConfigWithClientEnv(nil, path+"-absent")
+	if err != nil || cfg.ConfigFile != "" || cfg.SocketPath != config.DefaultSocketPath {
+		t.Fatalf("absent client-env changed legacy defaults: config=%+v err=%v", cfg.SafeFields(), err)
+	}
+	if err := os.WriteFile(path, []byte("not an env file\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveCLIConfigWithClientEnv(nil, path); err == nil {
+		t.Fatal("invalid client configuration silently ignored")
+	}
+	if _, err := resolveCLIConfigWithClientEnv(nil, filepath.Dir(path)); err == nil {
+		t.Fatal("non-file client configuration accepted")
+	}
+}
+
+func TestResolveCLIConfigExplicitSelectionSkipsClientEnv(t *testing.T) {
+	for _, selection := range []string{"flag", "env", "missing-flag", "missing-env", "explicit-manifest", "default-manifest"} {
+		t.Run(selection, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("LOOM_CONFIG_FILE", "")
+			t.Setenv("LOOM_SOCKET_PATH", "")
+			dir := t.TempDir()
+			clientEnv := filepath.Join(dir, "loom-client.env")
+			if err := os.WriteFile(clientEnv, []byte("must not be read\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			selected := filepath.Join(dir, "chosen.env")
+			wantSocket := filepath.Join(dir, "chosen.sock")
+			if err := os.WriteFile(selected, []byte("LOOM_SOCKET_PATH="+wantSocket+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			opts := &options{}
+			switch selection {
+			case "flag":
+				opts.configFile = selected
+			case "env":
+				t.Setenv("LOOM_CONFIG_FILE", selected)
+			case "missing-flag":
+				opts.configFile = selected + "-absent"
+			case "missing-env":
+				t.Setenv("LOOM_CONFIG_FILE", selected+"-absent")
+			case "explicit-manifest", "default-manifest":
+				selected = filepath.Join(dir, "install.yaml")
+				if selection == "default-manifest" {
+					selected = filepath.Join(os.Getenv("HOME"), ".config", "loom", "install.yaml")
+				} else {
+					opts.configFile = selected
+				}
+				if err := setup.WriteManifest(selected, setup.InstallManifest{
+					SchemaVersion: setup.ManifestSchemaVersion,
+					NodeID:        "main", NodeKind: "main", NodeRole: "main",
+					DataDir: filepath.Join(dir, "data"), BoxPath: filepath.Join(dir, "box"),
+					BoxProfile: "main", SocketPath: wantSocket,
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg, err := resolveCLIConfigWithClientEnv(opts, clientEnv)
+			if strings.HasPrefix(selection, "missing-") {
+				if err == nil || !strings.Contains(err.Error(), selected+"-absent") {
+					t.Fatalf("missing explicit config fell back: %v", err)
+				}
+				return
+			}
+			if err != nil || cfg.SocketPath != wantSocket {
+				t.Fatalf("selected config lost to fallback: socket=%q err=%v", cfg.SocketPath, err)
+			}
+		})
 	}
 }
 

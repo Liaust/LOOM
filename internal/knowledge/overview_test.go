@@ -9,6 +9,22 @@ import (
 	"loom.local/loom/internal/storagecatalog"
 )
 
+func TestOverviewPipelinePartitionsPreserveCounts(t *testing.T) {
+	older, newer := time.Now().UTC(), time.Now().UTC().Add(time.Minute)
+	rows := []notesOverviewObjectRow{
+		{NotesSourceRootID: "a", ObjectCount: 2, PipelineStatus: "complete", PipelineUpdatedAt: &older},
+		{NotesSourceRootID: "a", ObjectCount: 3, PipelineStatus: "complete", PipelineUpdatedAt: &newer},
+		{NotesSourceRootID: "a", ObjectCount: 1, PipelineStatus: "failed", PipelineFailedAt: &older},
+		{NotesSourceRootID: "b", ObjectCount: 0, PipelineStatus: "complete"},
+		{NotesSourceRootID: "c", ObjectCount: 1},
+	}
+	out := notesOverviewPipelineRows(rows)
+	if len(out) != 2 || out[0].Count != 5 || !out[0].LastUpdatedAt.Equal(newer) ||
+		out[1].Count != 1 || !out[1].LastFailedAt.Equal(older) {
+		t.Fatalf("pipeline partitions changed totals: %+v", out)
+	}
+}
+
 func TestOverviewUnifiedStatusBuckets(t *testing.T) {
 	var health NotesIndexHealth
 	for _, status := range []string{"waiting_quiet_window", "waiting_coordinator", "waiting_heavy", "complete_with_warnings", "blocked_manual_action", "stale", "cancelled"} {

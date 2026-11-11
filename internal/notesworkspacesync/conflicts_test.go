@@ -138,6 +138,7 @@ func TestConflictResolutionClaimSurvivesCommitReceiptGap(t *testing.T) {
 	if other.Reason != "resolution_in_progress" {
 		t.Fatalf("unfinished claim was bypassed: %+v", other)
 	}
+	s.RetryRevision = "source-commit-wake"
 	step(t, s)
 	first, _ := load[Join](t.Context(), r, "operation", "afirst")
 	other, _ = load[Join](t.Context(), r, "operation", "bother")

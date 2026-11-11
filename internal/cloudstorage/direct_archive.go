@@ -46,10 +46,13 @@ var (
 
 type DirectArchiveInput struct {
 	// Trusted injection for isolated acceptance; runtime callers use daemon config.
-	HermesPolicy *hermesprofile.Policy `json:"-"`
-	Config       Config
-	Request      backupstrategy.DirectArchiveRequest
-	RequestV2    *backupstrategy.DirectArchiveRequestV2
+	HermesPolicy                  *hermesprofile.Policy `json:"-"`
+	NotesRecoveryPublicationsRoot string                `json:"-"`
+	Config                        Config
+	Request                       backupstrategy.DirectArchiveRequest
+	RequestV2                     *backupstrategy.DirectArchiveRequestV2
+	RequestV3                     *backupstrategy.DirectArchiveRequestV3
+	Progress                      func(DirectArchiveProgress) `json:"-"`
 }
 
 type DirectArchiveResult struct {
@@ -69,6 +72,7 @@ type DirectArchiveResult struct {
 	ManifestSHA256                   string                                  `json:"manifest_sha256"`
 	Manifest                         *backupstrategy.DirectArchiveManifest   `json:"manifest,omitempty"`
 	ManifestV2                       *backupstrategy.DirectArchiveManifestV2 `json:"manifest_v2,omitempty"`
+	ManifestV3                       *backupstrategy.DirectArchiveManifestV3 `json:"manifest_v3,omitempty"`
 	Checks                           map[string]string                       `json:"checks"`
 	Idempotent                       bool                                    `json:"idempotent"`
 	Committed                        bool                                    `json:"committed"`
@@ -78,10 +82,12 @@ type DirectArchiveResult struct {
 	DeduplicatedBytes                int64                                   `json:"deduplicated_bytes,omitempty"`
 	BorgCommandCounts                map[string]int64                        `json:"borg_command_counts"`
 	StageDurationsMS                 map[string]int64                        `json:"stage_durations_ms"`
+	BorgProgress                     *BorgProgress                           `json:"borg_progress,omitempty"`
 	OperationalPackageID             string                                  `json:"operational_package_id"`
 	OperationalPackageManifestSHA256 string                                  `json:"operational_package_manifest_sha256"`
 	ProvenancePackageID              string                                  `json:"provenance_package_id"`
 	ProvenancePackageManifestSHA256  string                                  `json:"provenance_package_manifest_sha256"`
+	NotesRecovery                    []NotesRecoveryObservation              `json:"notes_recovery,omitempty"`
 }
 
 var directPendingArchivePattern = regexp.MustCompile(`^__loom-direct-pending-([0-9a-f]{12})-([0-9a-f]{8})$`)
@@ -117,6 +123,7 @@ type directArchiveResumeEnvelope struct {
 }
 
 type directArchiveResumeEnvelopeV2 struct {
+	References          *backupstrategy.DirectArchiveManifestV3                  `json:"references,omitempty"`
 	HermesRecovery      []hermesprofile.Evidence                                 `json:"hermes_recovery,omitempty"`
 	Schema              string                                                   `json:"schema"`
 	ManifestSchema      string                                                   `json:"manifest_schema"`
@@ -148,6 +155,9 @@ func preparedDirectArchiveIsV2(prepared backupstrategy.PreparedDirectArchiveMani
 }
 
 func preparedDirectArchiveSchema(prepared backupstrategy.PreparedDirectArchiveManifest) string {
+	if prepared.ManifestV3 != nil {
+		return prepared.ManifestV3.Schema
+	}
 	if prepared.ManifestV2 != nil {
 		return prepared.ManifestV2.Schema
 	}
@@ -190,6 +200,7 @@ func preparedDirectArchiveCreatedAt(prepared backupstrategy.PreparedDirectArchiv
 }
 
 func applyPreparedDirectArchiveResult(result *DirectArchiveResult, prepared backupstrategy.PreparedDirectArchiveManifest) {
+	result.ManifestV3 = prepared.ManifestV3
 	result.ManifestSHA256 = prepared.ManifestSHA256
 	result.ManifestSchema = preparedDirectArchiveSchema(prepared)
 	result.VerificationProfile = preparedDirectArchiveVerificationProfile(prepared)
@@ -224,10 +235,28 @@ func ArchiveCanonicalRoots(ctx context.Context, input DirectArchiveInput) (Direc
 		return DirectArchiveResult{}, fmt.Errorf("direct canonical-root archives require the existing Borg snapshot backend")
 	}
 	backend := NewBorgSnapshotBackend(cfg)
-	return backend.ArchiveCanonicalRoots(ctx, DirectArchiveInput{Config: cfg, Request: input.Request, RequestV2: input.RequestV2})
+	return backend.ArchiveCanonicalRoots(ctx, DirectArchiveInput{Config: cfg, Request: input.Request, RequestV2: input.RequestV2, RequestV3: input.RequestV3, NotesRecoveryPublicationsRoot: input.NotesRecoveryPublicationsRoot, Progress: input.Progress})
 }
 
 func (b BorgSnapshotBackend) ArchiveCanonicalRoots(ctx context.Context, input DirectArchiveInput) (DirectArchiveResult, error) {
+	if input.RequestV3 != nil {
+		if input.RequestV2 != nil || input.Request.Schema != "" || input.RequestV3.Schema != backupstrategy.DirectArchiveRequestSchemaV3 {
+			return DirectArchiveResult{}, fmt.Errorf("exactly one supported archive request is required")
+		}
+		base := input.RequestV3.Archive
+		input.RequestV2 = &base
+	}
+	packagePath := input.Request.OperationalPackage.Path
+	if input.RequestV2 != nil {
+		packagePath = input.RequestV2.OperationalPackage.Path
+	}
+	if packagePath != "" {
+		lease, err := backupstrategy.LockOperationalPackages(filepath.Dir(packagePath), false)
+		if err != nil {
+			return DirectArchiveResult{}, err
+		}
+		defer lease.Close()
+	}
 	policy, err := config.LoadHermesRecoveryPolicy()
 	if input.HermesPolicy != nil {
 		policy = *input.HermesPolicy
@@ -246,6 +275,14 @@ func (b BorgSnapshotBackend) ArchiveCanonicalRoots(ctx context.Context, input Di
 	} else {
 		input.Request.Exclusions, hermesEvidence, err = backupstrategy.HermesArchiveBoundary(ctx, input.Request.Roots, input.Request.Exclusions, policy, now)
 		input.Request.HermesRecovery = hermesEvidence
+	}
+	if err != nil {
+		return DirectArchiveResult{}, err
+	}
+	if input.RequestV2 != nil {
+		input.RequestV2.Exclusions, err = backupstrategy.CodexArchiveBoundary(ctx, input.RequestV2.Roots, input.RequestV2.Exclusions, backupstrategy.CodexRecoveryPath, now)
+	} else {
+		input.Request.Exclusions, err = backupstrategy.CodexArchiveBoundary(ctx, input.Request.Roots, input.Request.Exclusions, backupstrategy.CodexRecoveryPath, now)
 	}
 	if err != nil {
 		return DirectArchiveResult{}, err
@@ -318,7 +355,13 @@ func (b BorgSnapshotBackend) ArchiveCanonicalRoots(ctx context.Context, input Di
 	}
 	prepareStarted := time.Now()
 	if v2 {
-		prepared, err = backupstrategy.PrepareDirectArchiveManifestV2(ctx, prepareInputV2)
+		if input.RequestV3 != nil {
+			request := *input.RequestV3
+			request.Archive = prepareInputV2.Request
+			prepared, err = backupstrategy.PrepareDirectArchiveManifestV3(ctx, prepareInputV2, request)
+		} else {
+			prepared, err = backupstrategy.PrepareDirectArchiveManifestV2(ctx, prepareInputV2)
+		}
 	} else {
 		prepared, err = backupstrategy.PrepareDirectArchiveManifest(ctx, prepareInput)
 	}
@@ -333,6 +376,12 @@ func (b BorgSnapshotBackend) ArchiveCanonicalRoots(ctx context.Context, input Di
 		result.StageDurationsMS["source_manifest_preparation"] = time.Since(prepareStarted).Milliseconds()
 	}
 	applyPreparedDirectArchiveResult(&result, prepared)
+	roots := input.Request.Roots
+	if input.RequestV2 != nil {
+		roots = input.RequestV2.Roots
+	}
+	notesSelected, notesHeld := collectNotesRecoveryPublications(ctx, roots, input.NotesRecoveryPublicationsRoot, cfg)
+	result.NotesRecovery = notesHeld
 
 	evidenceRoot, err := writeDirectArchiveEvidence(cfg.StateDir, prepared)
 	if err != nil {
@@ -343,15 +392,37 @@ func (b BorgSnapshotBackend) ArchiveCanonicalRoots(ctx context.Context, input Di
 	runner := b.runner(cfg)
 	runner.DisableRemoteLock = true
 	previousObserver := runner.observeCommand
+	notify := func(phase string, progress *BorgProgress) {
+		if progress != nil {
+			copy := *progress
+			result.BorgProgress = &copy
+		}
+		if input.Progress != nil {
+			input.Progress(DirectArchiveProgress{Phase: phase, ObservedAt: time.Now().UTC(), Borg: progress})
+		}
+	}
+	defer func() {
+		if result.Committed {
+			notify("committed", nil)
+		} else {
+			notify("incomplete", nil)
+		}
+	}()
 	runner.observeCommand = func(command BorgCommand) {
 		if previousObserver != nil {
 			previousObserver(command)
 		}
 		result.BorgCommandCounts[command.Name()]++
+		notify("borg."+command.Name(), nil)
 	}
 	operationErr := WithRemoteLock(ctx, cfg, RemoteLockOptions{
 		Operation: "borg.direct_archive", Wait: RemoteLockEffectfulWait(cfg),
 	}, func(ctx context.Context) error {
+		defer func() {
+			if result.Committed && result.Status == DirectArchiveStatusSucceeded {
+				protectArchivedNotesRecovery(ctx, runner, cfg, &result, notesSelected)
+			}
+		}()
 		archives, listErr := listBorgArchives(ctx, runner)
 		if listErr != nil {
 			return directArchiveFailure(&result, DirectArchiveCodeRemoteFailure, true, listErr)
@@ -406,12 +477,17 @@ func (b BorgSnapshotBackend) ArchiveCanonicalRoots(ctx context.Context, input Di
 			}
 			result.PendingArchive = pendingArchive
 			createArgs := directArchiveCreateArgs(cfg, pendingArchive, prepared)
+			createCommand := BorgCommand{Args: createArgs, Dir: evidenceRoot}
+			if input.Progress != nil {
+				createCommand.Args = append([]string{"create", "--progress", "--log-json"}, createArgs[1:]...)
+				createCommand.Progress = func(progress BorgProgress) { notify("borg.create", &progress) }
+			}
 			createStarted := time.Now()
-			createOut, createErr := runner.Run(ctx, BorgCommand{Args: createArgs, Dir: evidenceRoot})
+			createOut, createErr := runner.Run(ctx, createCommand)
 			result.StageDurationsMS["create"] = time.Since(createStarted).Milliseconds()
 			if createErr != nil {
 				result.Checks["borg_create_pending"] = DirectArchiveStatusFailed
-				if v2 && borgCommandHasExitCode(createErr) {
+				if v2 && ctx.Err() == nil && !errors.Is(createErr, context.Canceled) && !errors.Is(createErr, context.DeadlineExceeded) && borgCommandHasExitCode(createErr) {
 					result.VerificationPhase = "create_failed"
 					return directArchiveFailure(&result, DirectArchiveCodeSourceUnstable, false, createErr)
 				}
@@ -421,6 +497,10 @@ func (b BorgSnapshotBackend) ArchiveCanonicalRoots(ctx context.Context, input Di
 						result.VerificationPhase = "create_interrupted"
 						return directArchiveFailure(&result, DirectArchiveCodeInterrupted, true, createErr)
 					}
+				}
+				if ctx.Err() != nil || errors.Is(createErr, context.Canceled) || errors.Is(createErr, context.DeadlineExceeded) {
+					result.VerificationPhase = "create_interrupted"
+					return directArchiveFailure(&result, DirectArchiveCodeInterrupted, true, createErr)
 				}
 				archivesAfterCreate, listErr := listBorgArchives(ctx, runner)
 				if listErr != nil || !borgArchiveExists(archivesAfterCreate, pendingArchive) {
@@ -451,7 +531,12 @@ func (b BorgSnapshotBackend) ArchiveCanonicalRoots(ctx context.Context, input Di
 		if v2 {
 			result.VerificationPhase = "package_stability"
 			stabilityStarted := time.Now()
-			stabilityErr := backupstrategy.VerifyDirectArchiveV2PackageStability(ctx, prepareInputV2, prepared)
+			var stabilityErr error
+			if prepared.ManifestV3 != nil {
+				stabilityErr = backupstrategy.VerifyDirectArchiveV3PackageStability(ctx, prepareInputV2, prepared)
+			} else {
+				stabilityErr = backupstrategy.VerifyDirectArchiveV2PackageStability(ctx, prepareInputV2, prepared)
+			}
 			result.StageDurationsMS["package_stability"] = time.Since(stabilityStarted).Milliseconds()
 			if stabilityErr != nil {
 				result.Checks["package_stability"] = DirectArchiveStatusFailed
@@ -724,6 +809,7 @@ func immutableDirectArchiveResumeEnvelope(prepared backupstrategy.PreparedDirect
 	if prepared.ManifestV2 != nil {
 		manifest := prepared.ManifestV2
 		return directArchiveResumeEnvelopeV2{
+			References:          prepared.ManifestV3,
 			HermesRecovery:      append([]hermesprofile.Evidence(nil), manifest.HermesRecovery...),
 			Schema:              directArchiveResumeEnvelopeSchema,
 			ManifestSchema:      manifest.Schema,
@@ -959,6 +1045,9 @@ func directArchiveCreateArgs(cfg Config, pendingArchive string, prepared backups
 		args = append(args, root.sourcePath)
 	}
 	args = append(args, operationalSource, provenanceSource)
+	for _, dep := range backupstrategy.AdditionalNotesRecoveryPackages(prepared) {
+		args = append(args, dep.Package.SourcePath)
+	}
 	return args
 }
 

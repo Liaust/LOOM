@@ -23,8 +23,9 @@ const (
 )
 
 type BorgCommand struct {
-	Args []string
-	Dir  string
+	Args     []string
+	Dir      string
+	Progress func(BorgProgress)
 }
 
 type BorgExecFunc func(ctx context.Context, binary string, command BorgCommand, env []string) ([]byte, error)
@@ -90,7 +91,10 @@ func (r BorgCommandRunner) RunStream(ctx context.Context, command BorgCommand, s
 	if err := validateBorgCommandConfig(cfg); err != nil {
 		return err
 	}
-	env := borgEnv(cfg)
+	env, err := borgEnv(cfg)
+	if err != nil {
+		return err
+	}
 	operationName := command.Name()
 	command = command.withCommonArgs(cfg)
 	run := func(ctx context.Context) error {
@@ -150,7 +154,10 @@ func (r BorgCommandRunner) Run(ctx context.Context, command BorgCommand) ([]byte
 	if err := validateBorgCommandConfig(cfg); err != nil {
 		return nil, err
 	}
-	env := borgEnv(cfg)
+	env, err := borgEnv(cfg)
+	if err != nil {
+		return nil, err
+	}
 	execFunc := r.Exec
 	if execFunc == nil {
 		execFunc = defaultBorgExec
@@ -486,9 +493,14 @@ func (c BorgCommand) withCommonArgs(cfg Config) BorgCommand {
 	return out
 }
 
-func borgEnv(cfg Config) []string {
+func borgEnv(cfg Config) ([]string, error) {
 	borg := cfg.Snapshots.Borg
+	hostID, err := borgHostID(cfg)
+	if err != nil {
+		return nil, err
+	}
 	env := []string{
+		"BORG_HOST_ID=" + hostID,
 		"BORG_REPO=" + borg.Repository,
 		"BORG_CACHE_DIR=" + borg.CacheDir,
 		"BORG_SECURITY_DIR=" + borg.SecurityDir,
@@ -502,7 +514,7 @@ func borgEnv(cfg Config) []string {
 		cat := resolveCommandPath("cat")
 		env = append(env, "BORG_PASSCOMMAND="+cat+" "+shellQuote(borg.PassphraseFile))
 	}
-	return env
+	return env, nil
 }
 
 func strictBorgRSH(value string) string {
@@ -527,8 +539,17 @@ func strictBorgRSH(value string) string {
 	return value
 }
 
+func borgProcess(ctx context.Context, binary string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, resolveCommandPath(binary), args...)
+	// Borg releases its cache/repository locks on SIGINT. CommandContext's
+	// default SIGKILL strands those locks when a worker reaches its deadline.
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	cmd.WaitDelay = 60 * time.Second
+	return cmd
+}
+
 func defaultBorgExec(ctx context.Context, binary string, command BorgCommand, env []string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, resolveCommandPath(binary), command.Args...)
+	cmd := borgProcess(ctx, binary, command.Args...)
 	if strings.TrimSpace(command.Dir) != "" {
 		cmd.Dir = command.Dir
 	}
@@ -543,7 +564,7 @@ func defaultBorgExec(ctx context.Context, binary string, command BorgCommand, en
 		return stdout.Bytes(), nil
 	}
 	var stdout bytes.Buffer
-	var stderr bytes.Buffer
+	stderr := borgProgressWriter{notify: command.Progress}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
@@ -554,7 +575,7 @@ func defaultBorgExec(ctx context.Context, binary string, command BorgCommand, en
 }
 
 func defaultBorgStreamExec(ctx context.Context, binary string, command BorgCommand, env []string, stdout io.Writer) error {
-	cmd := exec.CommandContext(ctx, resolveCommandPath(binary), command.Args...)
+	cmd := borgProcess(ctx, binary, command.Args...)
 	if strings.TrimSpace(command.Dir) != "" {
 		cmd.Dir = command.Dir
 	}

@@ -482,6 +482,9 @@ func (s Service) TransitionProjectPhysicalArchive(ctx context.Context, req reque
 	if err != nil {
 		return ProjectPhysicalArchiveTransitionResult{}, err
 	}
+	if _, err := tx.ExecContext(ctx, `SELECT pg_notify('loom_worker_wake','knowledge_indexer')`); err != nil {
+		return ProjectPhysicalArchiveTransitionResult{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return ProjectPhysicalArchiveTransitionResult{}, err
 	}

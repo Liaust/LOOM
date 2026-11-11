@@ -170,6 +170,9 @@ type notesOverviewObjectRow struct {
 	LastSeenAt          *time.Time
 	LastProcessedAt     *time.Time
 	LastIndexedAt       *time.Time
+	PipelineStatus      string
+	PipelineUpdatedAt   *time.Time
+	PipelineFailedAt    *time.Time
 }
 
 type notesOverviewPipelineRow struct {
@@ -204,10 +207,7 @@ func (s *Service) GetNotesOverview(ctx context.Context, input NotesOverviewInput
 	if err != nil {
 		return NotesOverview{}, err
 	}
-	pipelineRows, err := s.store.ListNotesOverviewPipelineRows(ctx, input)
-	if err != nil {
-		return NotesOverview{}, err
-	}
+	pipelineRows := notesOverviewPipelineRows(rows)
 	out := buildNotesOverview(s.currentTime(), rows, pipelineRows, input.Projection)
 	out.SourceLifecycle = lifecycle
 	if err := tx.Commit(); err != nil {

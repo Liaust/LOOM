@@ -265,12 +265,17 @@ func CompileApplicationPlan(input ApplicationPlanInput) ApplicationPlan {
 		}
 		return s, true
 	}
-	root, ok := source(".loom/project.yaml", pc.ProjectSchemaV05)
+	rootVersion := in.Sources[".loom/project.yaml"].Source.SchemaVersion
+	if !pc.IsDeclarationSchemaVersion(rootVersion) {
+		fail(pc.DeclarationInvalid, "project", "project.source_scope")
+		return p
+	}
+	root, ok := source(".loom/project.yaml", rootVersion)
 	if !ok {
 		return p
 	}
 	var project pc.ProjectDeclaration
-	if applicationDecode(root.Bytes, &project) != nil || project.Kind != "loom.project" || project.SchemaVersion != pc.ProjectSchemaV05 || project.Project.ID != target.ProjectID || project.Project.OwnerNode != target.OwnerNodeID || project.Resources == nil {
+	if applicationDecode(root.Bytes, &project) != nil || project.Kind != "loom.project" || project.SchemaVersion != rootVersion || project.Project.ID != target.ProjectID || project.Project.OwnerNode != target.OwnerNodeID || project.Resources == nil {
 		fail(pc.DeclarationInvalid, "project", "project.source_scope")
 		return p
 	}
@@ -291,9 +296,18 @@ func CompileApplicationPlan(input ApplicationPlanInput) ApplicationPlan {
 		return p
 	}
 	app := selected.Application
+	if rootVersion == pc.ProjectSchemaV06 {
+		if _, err := pc.ParseProjectDeclaration(root.Bytes); err != nil {
+			fail(pc.DeclarationInvalid, "project", "project.source_scope")
+			return p
+		}
+	}
 	// Validate closed unions and portable paths across this source before checking
 	// application data overlap. D1 remains owner of general declaration compilation.
 	for _, key := range applicationKeys(project.Resources) {
+		if rootVersion == pc.ProjectSchemaV06 {
+			continue
+		} // The shared strict decoder above owns the complete new resource language.
 		r := project.Resources[key]
 		count := 0
 		for _, b := range []bool{r.Repository != nil, r.Knowledge != nil, r.Protection != nil, r.Application != nil} {
@@ -411,7 +425,7 @@ func CompileApplicationPlan(input ApplicationPlanInput) ApplicationPlan {
 			if r.Repository != nil {
 				roots = append(roots, r.Repository.Path)
 			}
-			if r.Knowledge != nil {
+			if r.Knowledge != nil && !(rootVersion == pc.ProjectSchemaV06 && (r.Knowledge.Path == "." || r.Knowledge.ApplicationData != nil)) {
 				roots = append(roots, r.Knowledge.Path)
 			}
 			if r.Application != nil {

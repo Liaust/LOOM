@@ -117,6 +117,14 @@ func SnapshotBackendStatus(ctx context.Context, input SnapshotBackendStatusInput
 			report.RepairHint = "Wait for the active cloud operation to finish, then retry the live backend status."
 			return report, nil
 		}
+		var execution *BorgExecutionError
+		if errors.As(err, &execution) && strings.Contains(execution.Diagnostic, "Failed to create/acquire the lock") {
+			report.Status = "lock_blocked"
+			report.Checks["borg_list"] = "lock_blocked"
+			report.Error = err.Error()
+			report.RepairHint = "Inspect the Borg lock owner and active cloud worker; recover only proven abandoned ownership under the cloud lock. Do not initialize the repository or delete cache data."
+			return report, nil
+		}
 		_ = RecordRemoteFailureAt(cfg, err, report.CheckedAt, "cloud.borg_backend.status")
 		report.Status = "not_ready"
 		report.Checks["borg_list"] = SnapshotStatusFailed

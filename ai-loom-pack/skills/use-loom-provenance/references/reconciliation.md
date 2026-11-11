@@ -2,7 +2,11 @@
 
 ## Review Inputs
 
-Begin with a deliberately included pending result, then exact-get the candidate.
+Use effective review work or a relevant known candidate/case. Before a lifecycle
+write, read the exact candidate and related state needed by that operation.
+Use `--details --json` for the full lifecycle representation; a routine view or
+search preview is not the complete mutation input. Add `--sources` when stored
+receipts are needed, preserving their separate completeness flags.
 Check verification posture, actor and producer distinction, entity and project
 scope, time, ambiguity, lineage, relationship hints, source gaps, truncation,
 accepted competitors, and unresolved cases.
@@ -49,7 +53,24 @@ the candidate and resulting records, relationships or cases.
 
 The equivalent CLI is `loom provenance operations apply --file review.json
 --idempotency-key <stable-batch-key> --yes --json`. Save the exact request and
-operation UUIDs for retries. `loom provenance candidate list --limit 10 --json`
+operation UUIDs for retries. For an explicitly intended one-candidate acceptance,
+`loom provenance review prepare <candidate-id> --producer-file reviewer.json
+--out review.json` builds the saved batch from exact current receipts, preserving
+original capture and your actual reviewer context. The producer file contains
+your actual `producer_id`, `producer_kind` and `task_id` (and `run_id` if known).
+Preparation performs no acceptance or source fetch; review the file before the
+returned explicit apply command. Optional `--supersedes <accepted-record-id>`
+requires an explicit `--relationship-context`; no relationship is inferred.
+Use `loom provenance relationship get <relationship-id>` for its exact direction,
+evidence and effective state; `--details` exposes the full bounded lifecycle.
+`loom provenance review list --limit 10 --json`
+selects bounded effective review work; completed states are not pending merely
+because their immutable initial state says so. Respect pagination/truncation and
+deferrals. Unchanged human-blocked cases should not be repeatedly re-reviewed;
+new durable evidence, clarification or an explicit due time can make work useful.
+Exact-get when the interpretation needs missing evidence, and always obtain the
+state required for a mutation; the list is not acceptance or an authorization
+grant. `loom provenance candidate list --limit 10 --json`
 pages all candidate lifecycle states using `--after-time` and `--after-id` from
 the preceding page; exact-get and skip already resolved items. These surfaces
 do not themselves grant reconciliation authority to an ordinary capture agent.

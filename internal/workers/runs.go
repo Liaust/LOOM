@@ -168,6 +168,11 @@ func (s Service) RunOnce(ctx context.Context, req requestctx.Context, workerRef 
 	if completeErr != nil {
 		return RunOnceResult{}, completeErr
 	}
+	if observer, ok := runtime.(RunCompletionObserver); ok {
+		if err := observer.AfterRunCompletion(completionCtx, completedRun); err != nil && s.Logger != nil {
+			s.Logger.Warn("worker completion notification failed; completed outcome is unchanged", "worker_kind", instance.WorkerKind, "worker_run_id", completedRun.WorkerRunID, "error", err)
+		}
+	}
 	detail, err := s.InspectWorker(completionCtx, instance.WorkerInstanceID)
 	if err != nil {
 		return RunOnceResult{}, err
@@ -235,6 +240,13 @@ func (s Service) completeRunOnce(ctx context.Context, req requestctx.Context, in
 			return s.completeRunOnce(ctx, req, instance, run, lease, control, RunResult{}, err)
 		}
 	}
+	// A runtime can commit useful progress and its own durable retry while still
+	// reporting failed processing. Preserve that checkpoint before recording the
+	// failure; returning an execution error would deliberately discard it.
+	committedFailure := runErr == nil && runtimeResult.Status == RunStatusFailed
+	if committedFailure {
+		runErr = fmt.Errorf("worker processing is incomplete; inspect the retained result summary")
+	}
 
 	var completedRun WorkerRun
 	var health WorkerHealth
@@ -244,6 +256,12 @@ func (s Service) completeRunOnce(ctx context.Context, req requestctx.Context, in
 		completedRun, consecutiveFailures, err = failRun(ctx, tx, instance, run, lease, runErr)
 		if err != nil {
 			return WorkerRun{}, WorkerHealth{}, nil, nil, err
+		}
+		if committedFailure || len(runtimeResult.ResultSummary) > 0 {
+			completedRun, err = persistFailedRunResult(ctx, tx, instance, completedRun, runtimeResult)
+			if err != nil {
+				return WorkerRun{}, WorkerHealth{}, nil, nil, err
+			}
 		}
 		health, err = upsertFailedHealth(ctx, tx, instance, completedRun, consecutiveFailures, runErr)
 		if err != nil {
@@ -279,16 +297,6 @@ func (s Service) completeRunOnce(ctx context.Context, req requestctx.Context, in
 		if err != nil {
 			return WorkerRun{}, WorkerHealth{}, nil, nil, err
 		}
-		for _, checkpoint := range checkpoints {
-			if err := appendWorkerEvent(ctx, tx, req, events.TypeWorkerCheckpointUpdated, "worker_checkpoint", checkpoint.WorkerCheckpointID, "updated", map[string]any{
-				"worker_instance_id": instance.WorkerInstanceID,
-				"worker_key":         instance.WorkerKey,
-				"worker_run_id":      completedRun.WorkerRunID,
-				"checkpoint_key":     checkpoint.CheckpointKey,
-			}); err != nil {
-				return WorkerRun{}, WorkerHealth{}, nil, nil, err
-			}
-		}
 		if err := appendWorkerEvent(ctx, tx, req, events.TypeWorkerRunSucceeded, "worker_run", completedRun.WorkerRunID, RunStatusSucceeded, map[string]any{
 			"worker_instance_id": instance.WorkerInstanceID,
 			"worker_key":         instance.WorkerKey,
@@ -303,6 +311,16 @@ func (s Service) completeRunOnce(ctx context.Context, req requestctx.Context, in
 		}
 	}
 
+	for _, checkpoint := range checkpoints {
+		if err := appendWorkerEvent(ctx, tx, req, events.TypeWorkerCheckpointUpdated, "worker_checkpoint", checkpoint.WorkerCheckpointID, "updated", map[string]any{
+			"worker_instance_id": instance.WorkerInstanceID,
+			"worker_key":         instance.WorkerKey,
+			"worker_run_id":      completedRun.WorkerRunID,
+			"checkpoint_key":     checkpoint.CheckpointKey,
+		}); err != nil {
+			return WorkerRun{}, WorkerHealth{}, nil, nil, err
+		}
+	}
 	if err := releaseLease(ctx, tx, lease); err != nil {
 		return WorkerRun{}, WorkerHealth{}, nil, nil, err
 	}
@@ -323,10 +341,38 @@ func (s Service) completeRunOnce(ctx context.Context, req requestctx.Context, in
 	}); err != nil {
 		return WorkerRun{}, WorkerHealth{}, nil, nil, err
 	}
+	// Queue owners emit committed work hints. Completion alone is not new work;
+	// the supervisor already recalculates policy and lease deadlines after a run.
 	if err := tx.Commit(); err != nil {
 		return WorkerRun{}, WorkerHealth{}, nil, nil, err
 	}
 	return completedRun, health, checkpoints, controlOut, nil
+}
+
+func persistFailedRunResult(ctx context.Context, tx *sql.Tx, instance WorkerInstance, run WorkerRun, result RunResult) (WorkerRun, error) {
+	counts := result.Counters
+	if counts == nil {
+		counts = map[string]int64{}
+	}
+	counters, err := marshalJSONObject(counts, "counters_json")
+	if err != nil {
+		return WorkerRun{}, err
+	}
+	run.ResultSummaryJSON = rawJSONObjectOrDefault(result.ResultSummary)
+	run.CountersJSON = counters
+	run.ResourceUsageJSON = rawJSONObjectOrDefault(result.ResourceUsage)
+	run.Retryable = result.Retryable
+	if _, err := tx.ExecContext(ctx, `UPDATE workers.worker_runs SET result_summary_json=$2,counters_json=$3,resource_usage_json=$4,retryable=$5 WHERE worker_run_id=$1`, run.WorkerRunID, []byte(run.ResultSummaryJSON), []byte(counters), []byte(run.ResourceUsageJSON), result.Retryable); err != nil {
+		return WorkerRun{}, err
+	}
+	if result.NextRunAfter != nil {
+		// Its exact eligibility lives in the retained checkpoint/queue. An
+		// unrelated generic failure delay must not hide a fresh committed edit.
+		if _, err := tx.ExecContext(ctx, `UPDATE workers.worker_instances SET next_run_after=$2 WHERE worker_instance_id=$1 AND tick_policy_json=$3::jsonb`, instance.WorkerInstanceID, *result.NextRunAfter, []byte(instance.TickPolicyJSON)); err != nil {
+			return WorkerRun{}, err
+		}
+	}
+	return run, nil
 }
 
 func startRun(ctx context.Context, tx *sql.Tx, req requestctx.Context, instance WorkerInstance, lease WorkerLease, input RunOnceInput, deadline time.Time) (WorkerRun, error) {
@@ -358,16 +404,30 @@ func startRun(ctx context.Context, tx *sql.Tx, req requestctx.Context, instance 
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE workers.worker_instances
 		SET current_run_id = $2,
+		    next_run_after = COALESCE($3::timestamptz, next_run_after),
 		    lifecycle_status = CASE
 		        WHEN lifecycle_status IN ('disabled', 'retired') THEN lifecycle_status
 		        ELSE 'active'
 		    END,
 		    updated_at = now()
 		WHERE worker_instance_id = $1
-	`, instance.WorkerInstanceID, run.WorkerRunID); err != nil {
+	`, instance.WorkerInstanceID, run.WorkerRunID, claimedDailyNextRunAfter(instance, input.TriggerKind, run.StartedAt)); err != nil {
 		return WorkerRun{}, err
 	}
 	return run, nil
+}
+
+// Consume an automatic daily occurrence with its lease, not after execution.
+// A daemon interruption must not turn retry_policy=none into another daily run.
+func claimedDailyNextRunAfter(instance WorkerInstance, trigger string, now time.Time) *time.Time {
+	if trigger != TriggerSupervisorTick || instance.NextRunAfter == nil || instance.NextRunAfter.After(now) {
+		return nil
+	}
+	policy, err := ParseTickPolicy(instance.TickPolicyJSON)
+	if err != nil || policy.Mode != TickModeDailyLocal {
+		return nil
+	}
+	return policy.NextAfter(now)
 }
 
 func completeRun(ctx context.Context, tx *sql.Tx, instance WorkerInstance, run WorkerRun, lease WorkerLease, result RunResult) (WorkerRun, error) {
@@ -410,14 +470,14 @@ func completeRun(ctx context.Context, tx *sql.Tx, instance WorkerInstance, run W
 		    last_run_id = $2,
 		    last_success_at = $3,
 		    next_run_after = $4,
-		    consecutive_failures = 0,
+		    consecutive_failures = CASE WHEN $5 THEN consecutive_failures ELSE 0 END,
 		    lifecycle_status = CASE
 		        WHEN lifecycle_status IN ('disabled', 'retired') THEN lifecycle_status
 		        ELSE 'active'
 		    END,
 		    updated_at = now()
 		WHERE worker_instance_id = $1
-	`, instance.WorkerInstanceID, completedRun.WorkerRunID, finishedAt, result.NextRunAfter)
+	`, instance.WorkerInstanceID, completedRun.WorkerRunID, finishedAt, result.NextRunAfter, admissionTimedOut(resultSummary))
 	if err != nil {
 		return WorkerRun{}, err
 	}
@@ -452,6 +512,11 @@ func failRun(ctx context.Context, tx *sql.Tx, instance WorkerInstance, run Worke
 		SET current_run_id = NULL,
 		    last_run_id = $2,
 		    last_failure_at = $3,
+		    next_run_after = CASE
+		        WHEN $4::timestamptz IS NOT NULL AND tick_policy_json = $5::jsonb
+		        THEN GREATEST(next_run_after, $4::timestamptz)
+		        ELSE next_run_after
+		    END,
 		    consecutive_failures = consecutive_failures + 1,
 		    lifecycle_status = CASE
 		        WHEN lifecycle_status IN ('disabled', 'retired') THEN lifecycle_status
@@ -461,10 +526,24 @@ func failRun(ctx context.Context, tx *sql.Tx, instance WorkerInstance, run Worke
 		    updated_at = now()
 		WHERE worker_instance_id = $1
 		RETURNING consecutive_failures
-	`, instance.WorkerInstanceID, failedRun.WorkerRunID, finishedAt).Scan(&consecutiveFailures); err != nil {
+	`, instance.WorkerInstanceID, failedRun.WorkerRunID, finishedAt, failedIntervalNextRunAfter(instance, run, finishedAt), []byte(instance.TickPolicyJSON)).Scan(&consecutiveFailures); err != nil {
 		return WorkerRun{}, 0, err
 	}
 	return failedRun, consecutiveFailures, nil
+}
+
+func failedIntervalNextRunAfter(instance WorkerInstance, run WorkerRun, finishedAt time.Time) *time.Time {
+	if run.TriggerKind != TriggerSupervisorTick {
+		return nil
+	}
+	policy, err := ParseTickPolicy(instance.TickPolicyJSON)
+	if err != nil || policy.Mode != TickModeInterval {
+		return nil
+	}
+	// Completion emits a wake that invalidates the supervisor's in-memory probes.
+	// Persist the delay so that hint (or a restart) cannot repeat an immediate failure.
+	next := finishedAt.Add(max(defaultSupervisorPollInterval, time.Duration(policy.IntervalSeconds)*time.Second))
+	return &next
 }
 
 func appendWorkerEvent(ctx context.Context, tx *sql.Tx, req requestctx.Context, eventType, targetKind, targetID, status string, payload map[string]any) error {

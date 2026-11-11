@@ -30,6 +30,8 @@ func newNotesCommand(opts *options) *cobra.Command {
 	cmd.AddCommand(newNotesObjectsCommand(opts))
 	cmd.AddCommand(newNotesPassageCommand(opts))
 	cmd.AddCommand(newNotesSearchCommand(opts))
+	cmd.AddCommand(newNotesReadCommand(opts))
+	cmd.AddCommand(newNotesFilesCommand(opts))
 	cmd.AddCommand(newNotesEmbeddingsCommand(opts))
 	cmd.AddCommand(newNotesPipelinesCommand(opts))
 	cmd.AddCommand(newNotesProjectionCommand(opts))
@@ -37,6 +39,7 @@ func newNotesCommand(opts *options) *cobra.Command {
 	cmd.AddCommand(newNotesEnrichCommand(opts))
 	cmd.AddCommand(newNotesRunCommand(opts))
 	cmd.AddCommand(newNotesConflictsCommand(opts))
+	cmd.AddCommand(newNotesSourceMovesCommand(opts))
 	return cmd
 }
 
@@ -238,9 +241,11 @@ func newNotesObjectsCommand(opts *options) *cobra.Command {
 
 func newNotesObjectsListCommand(opts *options) *cobra.Command {
 	filter := knowledge.KnowledgeObjectFilter{}
+	var details bool
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List indexed notes knowledge objects",
+		Long:  "List indexed Notes objects. JSON defaults to identity/source/processing summaries without raw metadata. --details returns the full diagnostic object array. Published version IDs identify retained outputs; inspect the pipeline for current processing readiness.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			commandCtx, err := resolveCommandContext(opts)
 			if err != nil {
@@ -253,7 +258,7 @@ func newNotesObjectsListCommand(opts *options) *cobra.Command {
 				return renderError(cmd, opts, commandCtx.CorrelationID, loomerrors.Wrap("notes.objects_list_failed", "knowledge", "notes_objects", "Could not list notes knowledge objects.", err))
 			}
 			if opts.jsonOutput {
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(envelope.Data)
+				return writeNotesObjectList(cmd, envelope.Data, details || opts.verboseOutput)
 			}
 			renderNotesObjects(cmd, opts, envelope.Data)
 			renderResponseMeta(cmd, opts, envelope.Meta)
@@ -261,6 +266,7 @@ func newNotesObjectsListCommand(opts *options) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&filter.NotesSourceRootID, "root", "", "filter by notes source root id")
+	cmd.Flags().BoolVar(&details, "details", false, "return full JSON objects including diagnostic metadata")
 	cmd.Flags().StringVar(&filter.ProjectID, "project-id", "", "filter by project id")
 	cmd.Flags().StringVar(&filter.SourceNodeKey, "node", "", "filter by source node key")
 	cmd.Flags().StringVar(&filter.ProcessingState, "state", "", "filter by processing state")
@@ -345,13 +351,17 @@ func newNotesObjectsReconcileCommand(opts *options) *cobra.Command {
 
 func notesSearchCommandError(err error) *loomerrors.Error {
 	if errors.Is(err, context.DeadlineExceeded) {
-		return loomerrors.Wrap("notes.search_timeout", "knowledge", "notes_search", "Notes search exceeded its 10-second deadline; no complete result was returned. Retry, or use --project or --path to narrow the search. Persistent timeouts require query investigation.", err)
+		return loomerrors.Wrap("notes.search_timeout", "knowledge", "notes_search", "Notes search exceeded its request deadline (the CLI has a 10-second maximum); no complete result was returned. Retry, or use --project or --path to narrow the search. Persistent timeouts require query investigation.", err)
+	}
+	if errors.Is(err, context.Canceled) {
+		return loomerrors.Wrap("notes.search_canceled", "knowledge", "notes_search", "Notes search was canceled; no complete result was returned.", err)
 	}
 	return loomerrors.Wrap("notes.search_failed", "knowledge", "notes_search", "Could not search notes knowledge.", err)
 }
 
 func newNotesSearchCommand(opts *options) *cobra.Command {
 	input := knowledge.NotesSearchInput{}
+	var details bool
 	cmd := &cobra.Command{
 		Use:   "search <query>",
 		Short: "Search indexed notes knowledge",
@@ -364,8 +374,19 @@ func newNotesSearchCommand(opts *options) *cobra.Command {
 			if err != nil {
 				return renderError(cmd, opts, correlation.Normalize(opts.correlationID), loomerrors.Wrap("transport.unavailable", "runtime", "client", "Could not connect to LOOM backend.", err))
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
 			defer cancel()
+			if !details {
+				envelope, err := commandCtx.Client.SearchKnowledgeFiles(ctx, commandCtx.CorrelationID, searchInput)
+				if err != nil {
+					return renderError(cmd, opts, commandCtx.CorrelationID, notesSearchCommandError(err))
+				}
+				if opts.jsonOutput {
+					return json.NewEncoder(cmd.OutOrStdout()).Encode(envelope.Data)
+				}
+				renderFileSearchResults(cmd, opts, envelope.Data)
+				return nil
+			}
 			envelope, err := commandCtx.Client.SearchKnowledgeNotes(ctx, commandCtx.CorrelationID, searchInput)
 			if err != nil {
 				return renderError(cmd, opts, commandCtx.CorrelationID, notesSearchCommandError(err))
@@ -379,6 +400,7 @@ func newNotesSearchCommand(opts *options) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&input.ProjectRef, "project", "", "filter by project id, slug, or scope key")
+	cmd.Flags().BoolVar(&details, "details", false, "show diagnostic ranking, publication and citation metadata")
 	cmd.Flags().StringVar(&input.SourceCategory, "category", "", "source category: notes, topics, library, or projects")
 	cmd.Flags().StringVar(&input.SourceNodeKey, "node", "", "filter by source node key")
 	cmd.Flags().StringVar(&input.RootRef, "root", "", "filter by notes source root id, backend key, or source path")
@@ -1032,6 +1054,9 @@ func notesSearchSelectedDateLabel(result knowledge.NotesSearchResult) string {
 }
 
 func renderNotesSearchSummary(cmd *cobra.Command, results knowledge.NotesSearchResultSet) {
+	if coverage := results.Coverage; coverage != nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "Coverage of returned results: body=%d reference-only=%d compatible-vector matches=%d. Search covers enrolled readable sources; preserved files outside enrollment and missing bodies/vectors are not counted.\n", coverage.BodyResults, coverage.ReferenceOnlyResults, coverage.CompatibleVectorMatches)
+	}
 	if results.RefreshingMatchesOmitted > 0 || results.RefreshingMatchesOmittedTruncated {
 		fmt.Fprintf(cmd.OutOrStdout(), "Refreshing matches omitted=%d truncated=%t\n", results.RefreshingMatchesOmitted, results.RefreshingMatchesOmittedTruncated)
 	}

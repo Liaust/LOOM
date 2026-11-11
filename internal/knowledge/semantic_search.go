@@ -75,6 +75,7 @@ func (s *Service) searchSemanticNotes(ctx context.Context, input NotesSearchInpu
 
 func (s *Service) notesSearchQueryVector(ctx context.Context, input NotesSearchInput, settings EmbeddingSettings) (vector []float32, err error) {
 	if input.queryEmbedding != nil {
+		input.queryEmbedding.wait()
 		if input.queryEmbedding.loaded {
 			return input.queryEmbedding.vector, input.queryEmbedding.err
 		}
@@ -372,9 +373,11 @@ func scanSemanticNotesSearchResult(scanner notesSearchResultScanner) (NotesSearc
 	result.SourceModifiedAt = nullTimePtr(sourceModifiedAt)
 	result.SemanticDistance = distance
 	result.SemanticScore = lexical.VectorDistanceScore(distance)
+	result.SemanticCoverage = notesSemanticCoverageAvailable
 	result.RankScore = result.SemanticScore
 	result.FinalScore = result.SemanticScore
 	result.MatchReasons = []string{"semantic"}
+	result.MetadataOnly = passageMetadataOnly
 	result.PassageFollowup = notesSearchPassageFollowup(result, passageSourceHash, passageMetadataOnly)
 	return result, nil
 }
@@ -382,6 +385,15 @@ func scanSemanticNotesSearchResult(scanner notesSearchResultScanner) (NotesSearc
 func fuseNotesSearchResults(lexicalResults []NotesSearchResult, semanticResults []NotesSearchResult, input NotesSearchInput, queryNow time.Time) []NotesSearchResult {
 	lexicalByID, lexicalCandidates := notesSearchRelevanceRankedList(lexicalResults, NotesSearchModeLexical)
 	semanticByID, semanticCandidates := notesSearchRelevanceRankedList(semanticResults, NotesSearchModeSemantic)
+	for i, candidate := range lexicalCandidates {
+		result := lexicalByID[candidate.ID]
+		_, retrieved := semanticByID[candidate.ID]
+		if !retrieved && result.SourceKind == KnowledgeSearchSourceKind && !result.MetadataOnly && result.TextSource != TextSourceMetadataText && result.SemanticCoverage == notesSemanticCoverageUnavailable {
+			// Normalize only the available relevance channels. Recency and the
+			// actual lexical/semantic ranks remain unchanged; no vector is invented.
+			lexicalCandidates[i].Weight = 2 * lexical.DefaultRelevanceRankWeight
+		}
+	}
 	combined := make([]NotesSearchResult, 0, len(lexicalByID)+len(semanticByID))
 	seen := map[string]bool{}
 	for _, source := range []map[string]NotesSearchResult{lexicalByID, semanticByID} {
@@ -411,6 +423,7 @@ func fuseNotesSearchResults(lexicalResults []NotesSearchResult, semanticResults 
 			result.SemanticRank = semanticResult.SemanticRank
 			result.SemanticDistance = semanticResult.SemanticDistance
 			result.SemanticScore = semanticResult.SemanticScore
+			result.SemanticCoverage = notesSemanticCoverageAvailable
 			result.MatchReasons = appendNotesSearchReason(result.MatchReasons, "semantic")
 			if result.Snippet == "" {
 				result.Snippet = semanticResult.Snippet
@@ -426,7 +439,7 @@ func fuseNotesSearchResults(lexicalResults []NotesSearchResult, semanticResults 
 		results = append(results, result)
 	}
 	results = sortNotesSearchResults(results, input.Sort)
-	return groupNotesSearchResults(results, input.Limit)
+	return groupNotesSearchResultsByFile(results, input.Limit, input.fileView)
 }
 
 func rerankNotesSearchResults(results []NotesSearchResult, input NotesSearchInput, queryNow time.Time, relevanceName string) []NotesSearchResult {
@@ -456,6 +469,9 @@ func rerankNotesSearchResults(results []NotesSearchResult, input NotesSearchInpu
 func notesSearchRelevanceRankedList(results []NotesSearchResult, name string) (map[string]NotesSearchResult, []lexical.RankedCandidate) {
 	ranked := append([]NotesSearchResult(nil), results...)
 	sort.SliceStable(ranked, func(i, j int) bool {
+		if name == NotesSearchModeLexical && ranked[i].lexicalFallback != ranked[j].lexicalFallback {
+			return !ranked[i].lexicalFallback
+		}
 		leftScore := notesSearchRawRelevanceScore(ranked[i])
 		rightScore := notesSearchRawRelevanceScore(ranked[j])
 		if leftScore != rightScore {
@@ -467,7 +483,7 @@ func notesSearchRelevanceRankedList(results []NotesSearchResult, name string) (m
 	candidates := make([]lexical.RankedCandidate, 0, len(ranked))
 	for index, result := range ranked {
 		rank := index + 1
-		if index > 0 && notesSearchRawRelevanceScore(result) == notesSearchRawRelevanceScore(ranked[index-1]) {
+		if index > 0 && result.lexicalFallback == ranked[index-1].lexicalFallback && notesSearchRawRelevanceScore(result) == notesSearchRawRelevanceScore(ranked[index-1]) {
 			previous := byID[ranked[index-1].SearchDocumentID]
 			if name == NotesSearchModeSemantic {
 				rank = previous.SemanticRank

@@ -22,6 +22,7 @@ import (
 	"loom.local/loom/internal/filesystemmeta"
 	"loom.local/loom/internal/ids"
 	"loom.local/loom/internal/provenance"
+	"loom.local/loom/internal/restoreauthority"
 	"loom.local/loom/internal/storagearchive"
 	"loom.local/loom/internal/storagecatalog"
 	"loom.local/loom/internal/watchedroots"
@@ -145,9 +146,10 @@ type BackupManifestLoom struct {
 }
 
 type BackupManifestDatabase struct {
-	Name     string `json:"name,omitempty"`
-	DumpFile string `json:"dump_file"`
-	Format   string `json:"format,omitempty"`
+	Name       string                                  `json:"name,omitempty"`
+	DumpFile   string                                  `json:"dump_file"`
+	Format     string                                  `json:"format,omitempty"`
+	Extensions []restoreauthority.ExtensionRequirement `json:"extensions,omitempty"`
 }
 
 type BackupManifestPaths struct {
@@ -314,6 +316,14 @@ func readBackupManifestWithSHA256(path string, requiredMode *os.FileMode) (Backu
 	}
 	if strings.TrimSpace(manifest.BackupKind) == "" {
 		return BackupManifest{}, "", 0, fmt.Errorf("%w: backup manifest missing backup_kind", ErrInvalid)
+	}
+	if err := restoreauthority.ValidateExtensionRequirements(restoreauthority.KindOperational, manifest.Database.Extensions); err != nil {
+		return BackupManifest{}, "", 0, fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
+	if manifest.Provenance != nil {
+		if err := restoreauthority.ValidateExtensionRequirements(restoreauthority.KindProvenance, manifest.Provenance.Database.Extensions); err != nil {
+			return BackupManifest{}, "", 0, fmt.Errorf("%w: %v", ErrInvalid, err)
+		}
 	}
 	digest := sha256.Sum256(raw)
 	return manifest, hex.EncodeToString(digest[:]), int64(len(raw)), nil

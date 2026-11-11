@@ -76,7 +76,7 @@ func uploadQueuedSyncObject(ctx context.Context, c Client, correlationID string,
 		return out, err
 	}
 	if hash != object.HashURI || info.Size() != object.SizeBytes {
-		return out, fmt.Errorf("queued source content changed before upload")
+		return out, syncSourceContentChanged{Path: path, Expected: object.HashURI, Actual: hash}
 	}
 	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {

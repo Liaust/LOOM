@@ -2,6 +2,7 @@ package runtimes
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -99,5 +100,40 @@ func TestKnowledgeHeavyDrainDeadlineCancellationAndError(t *testing.T) {
 	_, err = drainKnowledgeHeavy(t.Context(), 600*time.Second, manual, func() time.Time { return at }, stage)
 	if err == nil || !called {
 		t.Fatal("stage error was lost")
+	}
+}
+
+func TestKnowledgeHeavyDrainPressurePauseKeepsDeadlineAndObservation(t *testing.T) {
+	at := time.Now().UTC()
+	next := at.Add(30 * time.Second)
+	result, err := drainKnowledgeHeavy(t.Context(), 600*time.Second, workers.TickPolicy{Mode: workers.TickModeInterval, IntervalSeconds: 60}, func() time.Time { return at }, func() (knowledge.HeavyExecutorRunResult, error) {
+		return knowledge.HeavyExecutorRunResult{Observation: knowledge.HeavyStageObservation{Admission: &workers.ResourceTurnAdmission{Reason: "memory_headroom", SampledAt: at, NextEligibleAt: &next}}}, nil
+	})
+	if err != nil || result.Counters["claimed"] != 0 || result.Counters["pressure_samples"] != 1 || result.Counters["pressure_deferred"] != 1 || result.NextRunAfter == nil || !result.NextRunAfter.Equal(next) {
+		t.Fatalf("%+v %v", result, err)
+	}
+	var summary struct {
+		Stages []knowledge.HeavyExecutorRunResult `json:"stages"`
+	}
+	if err = json.Unmarshal(result.ResultSummary, &summary); err != nil || len(summary.Stages) != 1 || summary.Stages[0].Observation.Admission.Reason != "memory_headroom" {
+		t.Fatal("lost unclaimed pressure reason")
+	}
+}
+
+func TestKnowledgeHeavyDrainCountsDurableUnitsAndYield(t *testing.T) {
+	at := time.Now().UTC()
+	calls := 0
+	result, err := drainKnowledgeHeavy(t.Context(), 600*time.Second, workers.TickPolicy{Mode: workers.TickModeInterval, IntervalSeconds: 30}, func() time.Time { return at }, func() (knowledge.HeavyExecutorRunResult, error) {
+		calls++
+		at = at.Add(31 * time.Second)
+		return knowledge.HeavyExecutorRunResult{Claimed: 1, Observation: knowledge.HeavyStageObservation{Observed: json.RawMessage(`{"units":8}`)}}, nil
+	})
+	if err != nil || calls != 1 || result.Counters["completed_units"] != 8 || result.Counters["yielded_turns"] != 1 {
+		t.Fatalf("%+v %v", result, err)
+	}
+	old := json.RawMessage(`{"schema_version":"knowledge_heavy.config.v1","lease_duration_seconds":600,"resource":{"schema_version":"knowledge.heavy_resource_policy.v1","timeout_seconds":600,"max_units":200,"max_input_bytes":134217728,"max_temp_bytes":536870912}}`)
+	config, err := parseKnowledgeHeavyConfig(old)
+	if err != nil || config.Resource.TurnSeconds != 30 {
+		t.Fatalf("saved config stopped working: %+v %v", config, err)
 	}
 }

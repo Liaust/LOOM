@@ -15,6 +15,13 @@ const notesWorkspaceKind = "notes_workspace_sync"
 type NotesWorkspaceRuntime struct{ Runtime *notesworkspacesync.Runtime }
 
 func (r NotesWorkspaceRuntime) Kind() string { return notesWorkspaceKind }
+
+func (r NotesWorkspaceRuntime) AutomaticReady(ctx context.Context, _ workers.WorkerInstance, now time.Time) (bool, *time.Time, error) {
+	if r.Runtime == nil {
+		return false, nil, nil
+	}
+	return r.Runtime.Readiness(ctx, now)
+}
 func (r NotesWorkspaceRuntime) DefaultConfig() json.RawMessage {
 	return json.RawMessage(`{"schema_version":"notes_workspace.config.v1"}`)
 }
@@ -78,7 +85,7 @@ func (r NotesWorkspaceRuntime) RunOnce(ctx context.Context, run workers.RunConte
 	next := notesWorkspaceNextRun(policy, r.Runtime.Config.WatchSeconds, result.Replication, run.StartedAt, time.Now().UTC())
 	return workers.RunResult{Status: workers.RunStatusSucceeded, ResultSummary: summary,
 		NextRunAfter:      next,
-		Counters:          map[string]int64{"imported": int64(result.Imported), "processed": int64(result.Processed), "held": int64(result.Held), "exported": int64(result.Exported), "skipped": int64(result.Skipped)},
+		Counters:          map[string]int64{"imported": int64(result.Imported), "processed": int64(result.Processed), "applied": int64(result.Applied), "held": int64(result.Held), "pending_operations": int64(result.PendingOperations), "retained_holds": int64(result.RetainedHolds), "exported": int64(result.Exported), "skipped": int64(result.Skipped)},
 		CheckpointUpdates: []workers.CheckpointUpdate{{Key: "sources", SchemaVersion: "notes_workspace.cursor.v1", Value: checkpoint}},
 	}, nil
 }

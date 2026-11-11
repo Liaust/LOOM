@@ -100,6 +100,7 @@ type CandidateRegistrationBatchReceipt struct {
 }
 
 type EvidenceRegistrationRequest struct {
+	Anchors          *StructuralAnchors `json:"anchors,omitempty"`
 	RegistrationID   SemanticID         `json:"registration_id,omitempty"`
 	Domain           string             `json:"domain"`
 	Visibility       string             `json:"visibility"`
@@ -180,6 +181,9 @@ func (service *Service) RegisterCandidateBatch(ctx context.Context, batch Candid
 		}
 		if strings.TrimSpace(batch.Candidates[index].Visibility) == "" {
 			batch.Candidates[index].Visibility = "private"
+		}
+		if err := service.store.checkAnchors(ctx, batch.Candidates[index].Anchors); err != nil {
+			return CandidateRegistrationBatchReceipt{}, err
 		}
 	}
 	producer, payload, workflowKey, digest, err := validateRegistrationBatch(batch)
@@ -319,6 +323,11 @@ func (service *Service) RegisterCandidateBatch(ctx context.Context, batch Candid
 func (service *Service) RegisterEvidence(ctx context.Context, request EvidenceRegistrationRequest) (EvidenceRegistrationReceipt, error) {
 	if err := validateEvidenceRequest(request); err != nil {
 		return EvidenceRegistrationReceipt{}, err
+	}
+	if request.Anchors != nil || request.ResolutionCaseID == nil {
+		if err := service.store.checkAnchors(ctx, request.Anchors); err != nil {
+			return EvidenceRegistrationReceipt{}, err
+		}
 	}
 	registeredAt := request.RegisteredAt.UTC()
 	if registeredAt.IsZero() {
@@ -501,7 +510,7 @@ func validateCandidateRegistration(registration CandidateRegistration) error {
 		len(registration.DerivedFromCandidateIDs) > MaximumSourcesPerObject {
 		return errors.New("candidate repeated fields exceed their bounded collection limit")
 	}
-	if registration.Anchors != nil && (len(registration.Anchors.Entities) > MaximumSourcesPerObject ||
+	if registration.Anchors != nil && (len(registration.Anchors.Boxes) > MaximumSourcesPerObject || len(registration.Anchors.Entities) > MaximumSourcesPerObject ||
 		len(registration.Anchors.Topics) > MaximumSourcesPerObject || len(registration.Anchors.Projects) > MaximumSourcesPerObject) {
 		return errors.New("candidate anchors exceed their bounded collection limit")
 	}

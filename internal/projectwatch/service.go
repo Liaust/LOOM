@@ -74,16 +74,18 @@ type ProjectWatchPlan struct {
 }
 
 type ProjectSyncStatus struct {
-	ProjectRef        string                                    `json:"project_ref"`
-	WatchedRoots      []projects.ProjectWatchedRootRegistration `json:"watched_roots"`
-	Statuses          []watchedroots.RootStatus                 `json:"statuses,omitempty"`
-	NodeStatuses      []loomsync.SyncStatus                     `json:"node_statuses,omitempty"`
-	Replicas          []loomsync.SyncReplica                    `json:"replicas,omitempty"`
-	SyncRoots         int                                       `json:"sync_roots"`
-	PendingAgentApply int                                       `json:"pending_agent_apply"`
-	Reported          int                                       `json:"reported"`
-	Stale             int                                       `json:"stale"`
-	Blocked           int                                       `json:"blocked"`
+	NotesAdmission      []projectcontracts.KnowledgeAdmissionStatus `json:"notes_admission,omitempty"`
+	NotesAdmissionState string                                      `json:"notes_admission_state,omitempty"`
+	ProjectRef          string                                      `json:"project_ref"`
+	WatchedRoots        []projects.ProjectWatchedRootRegistration   `json:"watched_roots"`
+	Statuses            []watchedroots.RootStatus                   `json:"statuses,omitempty"`
+	NodeStatuses        []loomsync.SyncStatus                       `json:"node_statuses,omitempty"`
+	Replicas            []loomsync.SyncReplica                      `json:"replicas,omitempty"`
+	SyncRoots           int                                         `json:"sync_roots"`
+	PendingAgentApply   int                                         `json:"pending_agent_apply"`
+	Reported            int                                         `json:"reported"`
+	Stale               int                                         `json:"stale"`
+	Blocked             int                                         `json:"blocked"`
 }
 
 type ProjectBackupStatus struct {
@@ -162,7 +164,7 @@ func (s Service) ApplyDesiredState(ctx context.Context, req requestctx.Context, 
 	if detail.Registration == nil {
 		return projects.ApplyProjectWatchPolicyResult{}, fmt.Errorf("project has no registered project contract")
 	}
-	if detail.Registration.ContractSchemaVersion == projects.ProjectRepositoryProjectSchemaV05 && !input.DryRun {
+	if projectcontracts.IsDeclarationSchemaVersion(detail.Registration.ContractSchemaVersion) && !input.DryRun {
 		return projects.ApplyProjectWatchPolicyResult{}, fmt.Errorf("v0.5 knowledge and backup declarations are applied by loom project apply; legacy watch-policy mutation is retired")
 	}
 	plan, err := s.BuildPlan(ctx, ref, BuildPlanInput{ProjectRoot: input.ProjectRoot, UseRegisteredSnapshot: input.UseRegisteredSnapshot})

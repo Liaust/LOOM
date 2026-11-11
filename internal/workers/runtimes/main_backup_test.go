@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"loom.local/loom/internal/hermesprofile"
 	"os"
 	"os/exec"
@@ -24,6 +26,7 @@ import (
 	"loom.local/loom/internal/ids"
 	"loom.local/loom/internal/maintenance"
 	"loom.local/loom/internal/provenance"
+	"loom.local/loom/internal/restoreauthority"
 	"loom.local/loom/internal/version"
 	"loom.local/loom/internal/workers"
 )
@@ -227,6 +230,7 @@ func TestMainBackupRuntimeCreatesBoundedOperationalPackageAndReplaysExactly(t *t
 		return path
 	}
 	runtime := NewMainBackupRuntime(nil, maintenance.Service{}, testHealthService(dataDir), "postgres://unused", dataDir, filepath.Join(dataDir, "object-store"), "test")
+	runtime.DB, _ = mainBackupSnapshotDB(t, `[]`)
 	runtime.ExecCommand = func(ctx context.Context, _ string, args ...string) *exec.Cmd {
 		destination := args[len(args)-1]
 		return exec.CommandContext(ctx, "/bin/sh", "-c", `printf 'PGDMP\001bounded-operational-package' > "$1"`, "sh", destination)
@@ -442,6 +446,7 @@ func TestHistoricalV09BackupReaderAcceptsMixedCustodyEvidence(t *testing.T) {
 	}
 
 	runtime := NewMainBackupRuntime(nil, maintenance.Service{}, service, "postgres://unused", dataDir, service.Config.ObjectStore, "test")
+	runtime.DB, _ = mainBackupSnapshotDB(t, `[]`)
 	var recorded []maintenance.CreateArtifactInput
 	runtime.recordArtifact = func(_ context.Context, input maintenance.CreateArtifactInput) error {
 		recorded = append(recorded, input)
@@ -533,6 +538,103 @@ func TestHistoricalV09BackupReaderAcceptsMixedCustodyEvidence(t *testing.T) {
 	if !seenEvidenceArtifact {
 		t.Fatalf("maintenance artifacts did not authenticate private backup evidence: %#v", recorded)
 	}
+}
+
+func TestMainBackupPGSearchMetadataUsesDumpSnapshot(t *testing.T) {
+	for _, version := range []string{"", restoreauthority.PGSearchVersion, "0.26.0"} {
+		t.Run("version_"+version, func(t *testing.T) {
+			raw := `[]`
+			if version != "" {
+				raw = fmt.Sprintf(`[{"name":"pg_search","version":%q}]`, version)
+			}
+			db, state := mainBackupSnapshotDB(t, raw)
+			r := MainBackupRuntime{DB: db, DBURL: "postgres://unused"}
+			called := false
+			r.ExecCommand = func(ctx context.Context, _ string, args ...string) *exec.Cmd {
+				called = true
+				if !state.active || !strings.Contains(strings.Join(args, " "), "--snapshot=00000001-00000002-1") {
+					t.Fatalf("dump is not bound to the open metadata snapshot: active=%t args=%#v", state.active, args)
+				}
+				return exec.CommandContext(ctx, "/usr/bin/true")
+			}
+			extensions, err := r.runPgDump(context.Background(), mainBackupConfig{PgDumpPath: "pg_dump"}, filepath.Join(t.TempDir(), "dump"))
+			if state.active {
+				t.Fatal("snapshot was not released")
+			}
+			if version == "0.26.0" {
+				if err == nil || called {
+					t.Fatalf("unsupported extension dumped: called=%t err=%v", called, err)
+				}
+				return
+			}
+			if err != nil || !called || (version == "" && len(extensions) != 0) || (version != "" && (len(extensions) != 1 || extensions[0].Version != version)) {
+				t.Fatalf("metadata=%#v called=%t err=%v", extensions, called, err)
+			}
+		})
+	}
+}
+
+// A single-row driver keeps the producer regression independent of a live DB.
+type mainBackupSnapshotConn struct {
+	active bool
+	raw    string
+}
+
+type mainBackupSnapshotConnector struct{ conn *mainBackupSnapshotConn }
+type mainBackupSnapshotDriver struct{}
+type mainBackupSnapshotRows struct {
+	raw  string
+	done bool
+}
+
+func mainBackupSnapshotDB(t *testing.T, raw string) (*sql.DB, *mainBackupSnapshotConn) {
+	t.Helper()
+	state := &mainBackupSnapshotConn{raw: raw}
+	db := sql.OpenDB(mainBackupSnapshotConnector{state})
+	t.Cleanup(func() { _ = db.Close() })
+	return db, state
+}
+
+func (c mainBackupSnapshotConnector) Connect(context.Context) (driver.Conn, error) {
+	return c.conn, nil
+}
+func (mainBackupSnapshotConnector) Driver() driver.Driver { return mainBackupSnapshotDriver{} }
+func (mainBackupSnapshotDriver) Open(string) (driver.Conn, error) {
+	return nil, errors.New("use connector")
+}
+func (*mainBackupSnapshotConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("no prepared queries")
+}
+func (*mainBackupSnapshotConn) Close() error { return nil }
+func (*mainBackupSnapshotConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("explicit snapshot options required")
+}
+func (c *mainBackupSnapshotConn) BeginTx(_ context.Context, options driver.TxOptions) (driver.Tx, error) {
+	if !options.ReadOnly || options.Isolation != driver.IsolationLevel(sql.LevelRepeatableRead) {
+		return nil, errors.New("wrong snapshot options")
+	}
+	c.active = true
+	return c, nil
+}
+func (*mainBackupSnapshotConn) Commit() error {
+	return errors.New("read-only snapshot should roll back")
+}
+func (c *mainBackupSnapshotConn) Rollback() error { c.active = false; return nil }
+func (c *mainBackupSnapshotConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	if !c.active || !strings.Contains(query, "pg_export_snapshot()") || !strings.Contains(query, "WHERE extname = 'pg_search'") {
+		return nil, errors.New("unexpected metadata query")
+	}
+	return &mainBackupSnapshotRows{raw: c.raw}, nil
+}
+func (*mainBackupSnapshotRows) Columns() []string { return []string{"snapshot", "extensions"} }
+func (*mainBackupSnapshotRows) Close() error      { return nil }
+func (r *mainBackupSnapshotRows) Next(values []driver.Value) error {
+	if r.done {
+		return io.EOF
+	}
+	r.done = true
+	values[0], values[1] = "00000001-00000002-1", r.raw
+	return nil
 }
 
 func TestCreateBackupRejectsMissingRequiredCustodyRootBeforeMutation(t *testing.T) {

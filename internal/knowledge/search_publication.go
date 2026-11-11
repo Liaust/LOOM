@@ -29,7 +29,7 @@ func notesLatestSourceSQL(object, field string) string {
 
 func notesPublicationCurrentSQL(object, version string) string {
 	return "(COALESCE(" + version + ".source_revision," + object + ".source_revision)=" + notesLatestSourceSQL(object, "source_revision") +
-		" AND COALESCE(" + version + ".source_hash," + object + ".source_hash)=" + notesLatestSourceSQL(object, "source_hash") + ")"
+		" AND COALESCE(" + version + ".source_hash," + object + ".source_hash)=" + notesLatestSourceSQL(object, "source_hash") + " AND " + notesObservedSourcePresentSQL(object) + ")"
 }
 
 func notesPublishedVersionSQL(object, chunk, version string, semantic, strict bool) string {

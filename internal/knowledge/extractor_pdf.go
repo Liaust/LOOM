@@ -15,11 +15,12 @@ import (
 )
 
 const (
-	ExtractorKeyPDF          = "pdf_poppler"
-	ExtractorVersionPDF      = "pdf_poppler_extractor_v1"
-	DefaultPDFMaxPages       = 250
-	DefaultPDFMaxSourceBytes = 1 << 30
-	defaultPDFCommandTimout  = 30 * time.Second
+	ExtractorKeyPDF           = "pdf_poppler"
+	ExtractorVersionPDF       = "pdf_poppler_extractor_v1"
+	ExtractorVersionPDFNative = "pdf_poppler_native_v2"
+	DefaultPDFMaxPages        = 250
+	DefaultPDFMaxSourceBytes  = 1 << 30
+	defaultPDFCommandTimout   = 30 * time.Second
 )
 
 var pdfAbsoluteTimePattern = regexp.MustCompile(`^D:(\d{14})(Z|([+-])(\d{2})'?(\d{2})'?)$`)
@@ -54,7 +55,8 @@ func (execCommandRunner) Run(ctx context.Context, name string, args ...string) (
 }
 
 type pdfExtractor struct {
-	runner commandRunner
+	runner     commandRunner
+	nativeOnly bool
 }
 
 func newPDFExtractor(runner commandRunner) pdfExtractor {
@@ -68,7 +70,10 @@ func (pdfExtractor) Key() string {
 	return ExtractorKeyPDF
 }
 
-func (pdfExtractor) Version() string {
+func (extractor pdfExtractor) Version() string {
+	if extractor.nativeOnly {
+		return ExtractorVersionPDFNative
+	}
 	return ExtractorVersionPDF
 }
 
@@ -80,7 +85,12 @@ func (pdfExtractor) RequiresContent(KnowledgeObject) bool {
 	return false
 }
 
-func (extractor pdfExtractor) Extract(input ExtractionInput) (ExtractionResult, error) {
+func (extractor pdfExtractor) Extract(input ExtractionInput) (result ExtractionResult, err error) {
+	defer func() {
+		if extractor.nativeOnly {
+			result.ExtractorVersion = extractor.Version()
+		}
+	}()
 	sourcePath := strings.TrimSpace(input.Object.SourcePath)
 	if sourcePath == "" {
 		return metadataOnlyExtraction(input.Object, ExtractionStatusSourceUnavailable, "source_path is required for PDF extraction"), nil
@@ -119,12 +129,13 @@ func (extractor pdfExtractor) Extract(input ExtractionInput) (ExtractionResult, 
 		return attachPDFAbsoluteTime(pdfMetadataOnly(input.Object, ExtractionStatusTooLarge, metadata, append(warnings, fmt.Sprintf("pdf page count %d exceeds max_pages %d", info.PageCount, DefaultPDFMaxPages))), metadata), nil
 	}
 
-	if imageOutput, imageErr := extractor.runner.Run(ctx, "pdfimages", "-list", sourcePath); imageErr == nil {
-		metadata["image_count"] = parsePDFImagesListCount(string(imageOutput))
-	} else {
-		warnings = append(warnings, "pdf_image_count_unavailable")
+	if !extractor.nativeOnly {
+		if imageOutput, imageErr := extractor.runner.Run(ctx, "pdfimages", "-list", sourcePath); imageErr == nil {
+			metadata["image_count"] = parsePDFImagesListCount(string(imageOutput))
+		} else {
+			warnings = append(warnings, "pdf_image_count_unavailable")
+		}
 	}
-
 	textOutput, err := extractor.runner.Run(ctx, "pdftotext", "-layout", "-enc", "UTF-8", sourcePath, "-")
 	if err != nil {
 		if pdfCommandIndicatesPassword(textOutput, err) {
@@ -139,7 +150,7 @@ func (extractor pdfExtractor) Extract(input ExtractionInput) (ExtractionResult, 
 		return attachPDFAbsoluteTime(pdfMetadataOnly(input.Object, ExtractionStatusNoEmbeddedText, metadata, append(warnings, "no_embedded_text", "ocr_deferred")), metadata), nil
 	}
 	document := TextDocument{Text: text, Warnings: warnings}
-	result, err := extractionResultFromDocument(input, extractor, ExtractionStatusExtracted, TextSourceEmbeddedText, document, metadata)
+	result, err = extractionResultFromDocument(input, extractor, ExtractionStatusExtracted, TextSourceEmbeddedText, document, metadata)
 	if err == nil {
 		result.TextSections = pdfEmbeddedTextSections(SplitPDFPages(text, 1))
 	}

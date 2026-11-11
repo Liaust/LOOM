@@ -9,6 +9,36 @@ import (
 	"time"
 )
 
+func TestCloudProtectionUploadProjectionBoundedAndNotRestore(t *testing.T) {
+	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	// Shape from cloudDirectArchiveSummary: IDs and upload result, not archive
+	// class or payload capture time. No inference from the archive-ref spelling.
+	operation := Operation{MaintenanceOperationID: "operation", Status: OperationSucceeded, FinishedAt: &now, ResultJSON: json.RawMessage(`{"schema_version":"cloud_snapshot_upload.result.v1","status":"succeeded","phase":"direct_borg_archive","committed":true,"backend":"borg","cloud_operation_id":"operation","archive_ref":"history-user-data-20260830T120000Z","operational_package_id":"package","provenance_package_id":"provenance","backup_operation_id":"backup","operational_package_dir":"/private/canary","error":"secret-canary","root_coverage":[{"name":"documents","path_sha256":"digest","node_id":"main","snapshot_at":"2026-08-30T12:00:00Z"}]}`)}
+	projection := cloudUploadEvidence(operation)
+	if projection.OperationID != "operation" || projection.Result != OperationSucceeded || projection.ArchiveRef != "history-user-data-20260830T120000Z" || projection.OperationalPackageID != "package" || projection.ProvenancePackageID != "provenance" || projection.BackupOperationID != "backup" || projection.ArchiveClass != "unknown" || projection.FinishedAt != &now || projection.CapturedAt != nil {
+		t.Fatalf("projection: %+v", projection)
+	}
+	raw, _ := json.Marshal(projection)
+	if strings.Contains(string(raw), "canary") || strings.Contains(string(raw), "root_coverage") || strings.Contains(string(raw), "captured_at") || !strings.Contains(string(raw), "finished_at") {
+		t.Fatal("display projection leaked unrelated receipt")
+	}
+	operation.ResultJSON = json.RawMessage(`{"archive_class":"user_data","archive_ref":"unsafe\nref","operational_package_id":"` + strings.Repeat("x", 257) + `"}`)
+	projection = cloudUploadEvidence(operation)
+	if projection.ArchiveClass != "unknown" || projection.ArchiveRef != "" || projection.OperationalPackageID != "" {
+		t.Fatal("unsafe evidence rendered")
+	}
+	operation.Status = OperationFailed
+	operation.ResultJSON = json.RawMessage(`{"status":"succeeded","archive_class":"invented"}`)
+	projection = cloudUploadEvidence(operation)
+	if projection.Result != OperationFailed || projection.ArchiveClass != "unknown" {
+		t.Fatal("result/unknown overwritten by arbitrary receipt")
+	}
+	operation.ResultJSON = json.RawMessage(`{`)
+	if cloudUploadEvidence(operation).ArchiveClass != "unknown" {
+		t.Fatal("malformed receipt accepted")
+	}
+}
+
 func TestNormalizeFindingInputDefaultsKeyAndJSON(t *testing.T) {
 	input, err := normalizeFindingInput(UpsertFindingInput{
 		WorkerInstanceID: "worker_instance_01ARZ3NDEKTSV4RRFFQ69G5FAV",
@@ -108,6 +138,27 @@ func TestDeriveBackupStatus(t *testing.T) {
 	}
 	if got := deriveBackupStatus(nil, success, nil, FindingSummary{Critical: 1}); got != OverallCritical {
 		t.Fatalf("status = %q, want %q", got, OverallCritical)
+	}
+}
+
+func TestBackupRunObservationDoesNotResolveHistoryOrAssertCloudCoverage(t *testing.T) {
+	now := time.Now().UTC()
+	success := &BackupOperation{Operation: Operation{MaintenanceOperationID: "current", Status: OperationSucceeded, StartedAt: now, ResultJSON: json.RawMessage(`{"verification_status":"succeeded"}`)}}
+	failure := &BackupOperation{Operation: Operation{MaintenanceOperationID: "historical", Status: OperationFailed, StartedAt: now.Add(-time.Hour)}}
+	got := latestBackupRunObservation(success, failure)
+	if got.OperationID != "current" || got.Status != OperationSucceeded || got.VerificationStatus != VerificationSucceeded {
+		t.Fatalf("unexpected latest run: %+v", got)
+	}
+	if deriveBackupStatus(nil, success, failure, FindingSummary{Critical: 1}) != OverallCritical {
+		t.Fatal("current success silently resolved retained critical findings")
+	}
+	failure.Operation.StartedAt = now.Add(time.Minute)
+	if latestBackupRunObservation(success, failure).OperationID != "historical" {
+		t.Fatal("newer failed run hidden behind prior success")
+	}
+	success.Operation.ResultJSON = json.RawMessage(`{"verification_status":"invented"}`)
+	if latestBackupRunObservation(success, nil).VerificationStatus != "unknown" {
+		t.Fatal("unknown verification promoted to success")
 	}
 }
 

@@ -128,6 +128,9 @@ func readOptionalContract(path string) ([]byte, bool, error) {
 }
 
 func parseProjectContract(raw []byte, absolutePath, displayPath string) (ProjectContract, error) {
+	if invalidProjectWorkState(raw, "") {
+		return ProjectContract{}, LoadError{Code: "project.work_state_invalid", File: absolutePath, Err: fmt.Errorf("project.work_state must be working or passive; omit the field for legacy working selection")}
+	}
 	var contract ProjectContract
 	decoder := yaml.NewDecoder(bytes.NewReader(raw))
 	decoder.KnownFields(true)

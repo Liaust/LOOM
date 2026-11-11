@@ -25,6 +25,9 @@ type ApplicationPrerequisiteQuery struct {
 // This snapshot describes scoped existing facts; effects must revalidate them.
 // No field attests available quota, reservation, protection or fresh health.
 type ApplicationPrerequisiteSnapshot struct {
+	SourceIdentity   string                                       `json:"source_identity,omitempty"`
+	RuntimeDesired   string                                       `json:"runtime_desired,omitempty"`
+	BrowseRevision   string                                       `json:"browse_revision,omitempty"`
 	SchemaVersion    string                                       `json:"schema_version"`
 	Owner            ApplicationOwner                             `json:"owner"`
 	IdentityRevision string                                       `json:"identity_revision"`
@@ -43,6 +46,7 @@ type ApplicationPrerequisiteSnapshot struct {
 }
 
 type ApplicationPrerequisiteArtifact struct {
+	SourceIdentity      string              `json:"source_identity,omitempty"`
 	DescriptorDigest    string              `json:"descriptor_digest"`
 	RepositoryID        string              `json:"repository_id"`
 	SourceRevision      string              `json:"source_revision"`
@@ -199,7 +203,7 @@ func (r ApplicationRuntime) collectPrerequisites(ctx context.Context, peer uint3
 			return empty, "", e
 		}
 	}
-	out := ApplicationPrerequisiteSnapshot{SchemaVersion: ApplicationPrerequisiteSchema, Owner: q.Owner, GrantMissing: e != nil, PolicyRevision: grant.PolicyRevision, LocationRevision: grant.LocationRevision, RepositoryID: grant.RepositoryID, Platform: policy.Platform, Data: map[string]ApplicationPrerequisiteData{}, Credentials: map[string]ApplicationPrerequisiteCredential{}}
+	out := ApplicationPrerequisiteSnapshot{SchemaVersion: ApplicationPrerequisiteSchema, Owner: q.Owner, GrantMissing: e != nil, PolicyRevision: grant.PolicyRevision, LocationRevision: grant.LocationRevision, RepositoryID: grant.RepositoryID, SourceIdentity: grant.SourceIdentity, Platform: policy.Platform, Data: map[string]ApplicationPrerequisiteData{}, Credentials: map[string]ApplicationPrerequisiteCredential{}}
 	vector := applicationPrerequisiteVector{Policy: policyHash, Grant: applicationSHA(grant), Metadata: map[string]string{}}
 	record := func(kind string, value any) (bool, string, error) {
 		hash, e := applicationPrerequisiteRead(filepath.Join(r.Store.Root, kind+"-"+q.Owner.Instance()+".json"), r.Store.OwnerUID, false, value)
@@ -225,7 +229,7 @@ func (r ApplicationRuntime) collectPrerequisites(ctx context.Context, peer uint3
 		if publication.Owner != q.Owner || !applicationRevisionPattern.MatchString(publication.Revision) || publication.Descriptor.Validate() != nil || !applicationRevisionPattern.MatchString(publication.PolicyRevision) || !applicationRevisionPattern.MatchString(publication.LocationRevision) {
 			return empty, "", applicationError("prerequisites.publication_invalid")
 		}
-		match := !out.GrantMissing && publication.GrantDigest == applicationSHA(grant) && publication.PolicyRevision == grant.PolicyRevision && publication.LocationRevision == grant.LocationRevision && publication.Descriptor.RepositoryID == grant.RepositoryID && publication.Descriptor.Artifact.Platform == policy.Platform
+		match := !out.GrantMissing && publication.GrantDigest == applicationSHA(grant) && publication.PolicyRevision == grant.PolicyRevision && publication.LocationRevision == grant.LocationRevision && publication.Descriptor.ProducerIdentity() == grant.ProducerIdentity() && publication.Descriptor.Artifact.Platform == policy.Platform
 		out.Publication = ApplicationPrerequisitePublication{ArchiveTarget: publication.ArchiveTarget, Present: true, Revision: publication.Revision, PolicyRevision: publication.PolicyRevision, LocationRevision: publication.LocationRevision, GrantMatches: &match, Artifact: applicationPrerequisiteArtifact(publication.Descriptor)}
 	}
 	var installation ApplicationInstallation
@@ -235,10 +239,14 @@ func (r ApplicationRuntime) collectPrerequisites(ctx context.Context, peer uint3
 	}
 	vector.Installation = hash
 	if present {
-		if installation.Owner != q.Owner || !applicationRevisionPattern.MatchString(installation.Revision) || (installation.Generation != "" && !applicationRevisionPattern.MatchString(installation.Generation)) {
+		preparing := installation.Revision == "" && installation.Generation == "" && !installation.Committed && !installation.Applied && !installation.Retired && !installation.Fenced && installation.Request == nil && installation.Descriptor.SchemaVersion == "" && installation.UID == applicationAccountUID(q.Owner)
+		if installation.Owner != q.Owner || (!preparing && !applicationRevisionPattern.MatchString(installation.Revision)) || (installation.Generation != "" && !applicationRevisionPattern.MatchString(installation.Generation)) {
 			return empty, "", applicationError("prerequisites.installation_invalid")
 		}
-		out.Installation = ApplicationPrerequisiteInstallation{Present: true, Revision: installation.Revision, Generation: installation.Generation, Committed: &installation.Committed, Applied: &installation.Applied, Retired: &installation.Retired, Fenced: &installation.Fenced}
+		out.Installation = ApplicationPrerequisiteInstallation{Present: !preparing, Revision: installation.Revision, Generation: installation.Generation, Committed: &installation.Committed, Applied: &installation.Applied, Retired: &installation.Retired, Fenced: &installation.Fenced}
+		if installation.Request != nil {
+			out.RuntimeDesired = installation.Request.RuntimeDesiredDigest()
+		}
 		if installation.Descriptor.SchemaVersion != "" {
 			if installation.Descriptor.Validate() != nil {
 				return empty, "", applicationError("prerequisites.installation_invalid")
@@ -246,6 +254,13 @@ func (r ApplicationRuntime) collectPrerequisites(ctx context.Context, peer uint3
 			out.Installation.Artifact = applicationPrerequisiteArtifact(installation.Descriptor)
 		}
 	}
+	var browse ApplicationBrowseRecord
+	_, hash, e = record("browse", &browse)
+	if e != nil {
+		return empty, "", e
+	}
+	vector.Metadata["browse"] = hash
+	out.BrowseRevision = browse.Revision
 	for alias, p := range grant.Data {
 		if p.BindingRef != "" && !applicationPrerequisiteBindingRef(p.BindingRef) {
 			return empty, "", applicationError("prerequisites.binding_ref_invalid")
@@ -253,7 +268,18 @@ func (r ApplicationRuntime) collectPrerequisites(ctx context.Context, peer uint3
 		if e := ctx.Err(); e != nil {
 			return empty, "", e
 		}
-		data, identity := applicationPrerequisiteDataTrusted(r.Store.OwnerUID, p, installation.Data[alias], r.Store.TrustedParentOwners)
+		var data ApplicationPrerequisiteData
+		var identity string
+		if p.StorageClass == ApplicationProjectStateStorageClass {
+			data, identity = ApplicationPrerequisiteData{BindingRef: p.BindingRef, Availability: "unavailable", Custody: "unknown"}, "project_state_inspector_unavailable"
+			if inspector, ok := r.System.(interface {
+				inspectProjectState(context.Context, ApplicationDataPolicy, uint32, ApplicationDataIdentity) (ApplicationPrerequisiteData, string)
+			}); ok {
+				data, identity = inspector.inspectProjectState(ctx, p, applicationAccountUID(grant.Owner), installation.Data[alias])
+			}
+		} else {
+			data, identity = applicationPrerequisiteDataTrusted(r.Store.OwnerUID, p, installation.Data[alias], r.Store.TrustedParentOwners)
+		}
 		if q.SourceData != alias {
 			data.Path = ""
 			if data.Identity != nil {
@@ -320,7 +346,7 @@ func (r ApplicationRuntime) collectPrerequisites(ctx context.Context, peer uint3
 }
 
 func applicationPrerequisiteArtifact(d ApplicationArtifactDescriptor) *ApplicationPrerequisiteArtifact {
-	return &ApplicationPrerequisiteArtifact{DescriptorDigest: applicationSHA(d), RepositoryID: d.RepositoryID, SourceRevision: d.SourceRevision, SourceDigest: d.SourceDigest, Artifact: d.Artifact, ConfigurationSchema: d.Configuration.Schema, ConfigurationDigest: d.ConfigurationDigest, DataFormat: d.DataFormat}
+	return &ApplicationPrerequisiteArtifact{DescriptorDigest: applicationSHA(d), RepositoryID: d.RepositoryID, SourceIdentity: d.SourceIdentity, SourceRevision: d.SourceRevision, SourceDigest: d.SourceDigest, Artifact: d.Artifact, ConfigurationSchema: d.Configuration.Schema, ConfigurationDigest: d.ConfigurationDigest, DataFormat: d.DataFormat}
 }
 
 // Open each directory relative to a held descriptor. Neither a final symlink
@@ -517,6 +543,21 @@ func decodeApplicationPrerequisiteEnvelope(raw []byte) (ApplicationHelperEnvelop
 		return envelope, applicationError("request.envelope")
 	}
 	count := 0
+	if envelope.Action != nil {
+		count++
+	}
+	if envelope.ActionStatus != nil {
+		count++
+	}
+	if envelope.CredentialImport != nil {
+		count++
+	}
+	if envelope.Browse != nil {
+		count++
+	}
+	if envelope.BrowseRead != nil {
+		count++
+	}
 	if envelope.Prepared != nil {
 		count++
 	}

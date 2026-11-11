@@ -190,6 +190,40 @@ func TestProjectRegistrationMetadataPreservesContractState(t *testing.T) {
 	}
 }
 
+func TestProjectWorkStateMetadataReplay(t *testing.T) {
+	input := validRegisterProjectContractInput()
+	input.Project.Status = "active"
+	metadata := json.RawMessage(`{"keep":"value"}`)
+	for _, state := range []string{"", "passive", "passive", "working", "working", ""} {
+		input.Project.WorkState = state
+		before := Project{Slug: input.Project.Slug, Name: input.Project.Name, Description: input.Project.Description, Status: "active", Metadata: metadata}
+		previous := ProjectWorkState(metadata)
+		keys := changedProjectKeys(before, "", input)
+		if (len(keys) != 0) != (previous != state) || (len(keys) != 0 && keys[0] != "project.work_state") {
+			t.Fatalf("metadata-only change keys: %v", keys)
+		}
+		var err error
+		metadata, err = projectRegistrationMetadata(metadata, input)
+		if err != nil || ProjectWorkState(metadata) != state {
+			t.Fatalf("metadata=%s err=%v", metadata, err)
+		}
+		var fields map[string]any
+		if err = json.Unmarshal(metadata, &fields); err != nil || fields["keep"] != "value" {
+			t.Fatal("unrelated metadata changed", fields, err)
+		}
+		_, explicit := fields["work_state"]
+		if explicit != (state != "") || projectStatusFromContract(input.Project.Status) != "active" {
+			t.Fatal("injected default or lifecycle change", fields)
+		}
+	}
+	for _, state := range []string{"paused", "archived", "PASSIVE", " passive "} {
+		input.Project.WorkState = state
+		if _, err := normalizeRegisterProjectContractInput(input); err == nil || !strings.Contains(err.Error(), "project.work_state must be working or passive") {
+			t.Fatalf("invalid classification %q: %v", state, err)
+		}
+	}
+}
+
 func TestJSONRawEqualUsesSemanticComparison(t *testing.T) {
 	if !jsonRawEqual(json.RawMessage(`{"b":2,"a":1}`), json.RawMessage(`{"a":1,"b":2}`)) {
 		t.Fatal("expected object key order to compare equal")

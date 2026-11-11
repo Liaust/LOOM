@@ -118,6 +118,15 @@ func (r JobRunnerRuntime) ValidateConfig(ctx context.Context, config json.RawMes
 	return err
 }
 
+func (r JobRunnerRuntime) AutomaticReady(ctx context.Context, instance workers.WorkerInstance, now time.Time) (bool, *time.Time, error) {
+	nodeID := instance.HostNodeID
+	if nodeID == "" {
+		nodeID = instance.OwnerNodeID
+	}
+	next, err := r.Jobs.NextLocalJobAt(ctx, nodeID, now)
+	return err == nil && next != nil && !next.After(now), next, err
+}
+
 func (r JobRunnerRuntime) RunOnce(ctx context.Context, run workers.RunContext) (workers.RunResult, error) {
 	if r.Jobs.DB == nil {
 		return workers.RunResult{}, fmt.Errorf("job runner jobs service is not configured")

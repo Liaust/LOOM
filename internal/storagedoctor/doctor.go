@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path"
 	"strings"
 	"time"
 
@@ -341,13 +342,21 @@ func checkMainDocuments(entries []storagecatalog.Entry, status mainstorage.Statu
 		check.Findings = append(check.Findings, Finding{Severity: SeverityWarning, Kind: "main_documents_import_failures", Target: status.BackingRoot, Message: fmt.Sprintf("%d main Documents imports failed.", status.FilesFailed)})
 	}
 	if status.FilesMissingCataloged > 0 {
-		check.Findings = append(check.Findings, Finding{
-			Severity:   SeverityWarning,
-			Kind:       "main_documents_missing_cataloged",
-			Target:     status.BackingRoot,
-			Message:    fmt.Sprintf("%d active main Documents catalog rows are missing from the backing filesystem.", status.FilesMissingCataloged),
-			RepairHint: "Run loom storage main-documents reconcile --dry-run. If the paths were intentionally deleted or moved through SMB, run reconcile --yes after verifying retained bytes and cloud backup.",
-		})
+		fixtures := mainDocumentsMissingAcceptanceRows(status)
+		if fixtures > 0 {
+			check.Findings = append(check.Findings, Finding{Severity: SeverityWarning, Kind: "main_documents_missing_acceptance_rows", Target: status.BackingRoot,
+				Message:    fmt.Sprintf("%d missing catalog rows are under .loom-acceptance in the saved source observation; this is unresolved fixture bookkeeping, not proof of missing ordinary notes.", fixtures),
+				RepairHint: "Review the exact historical fixture rows separately. Do not delete or tombstone files based only on the folder name."})
+		}
+		if missing := status.FilesMissingCataloged - fixtures; missing > 0 {
+			check.Findings = append(check.Findings, Finding{
+				Severity:   SeverityWarning,
+				Kind:       "main_documents_missing_cataloged",
+				Target:     status.BackingRoot,
+				Message:    fmt.Sprintf("%d active main Documents catalog rows are missing from the backing filesystem (excluding separately identified acceptance rows).", missing),
+				RepairHint: "Run loom storage main-documents reconcile --dry-run. If the paths were intentionally deleted or moved through SMB, run reconcile --yes after verifying retained bytes and cloud backup.",
+			})
+		}
 	}
 	if status.FilesTombstoned > 0 {
 		check.Findings = append(check.Findings, Finding{
@@ -363,6 +372,23 @@ func checkMainDocuments(entries []storagecatalog.Entry, status mainstorage.Statu
 	}
 	check.Summary = fmt.Sprintf("Main Documents accepted=%d failed=%d missing=%d tombstoned=%d cataloged=%d.", status.FilesAccepted, status.FilesFailed, status.FilesMissingCataloged, status.FilesTombstoned, cataloged)
 	return finalizeCheck(check)
+}
+
+func mainDocumentsMissingAcceptanceRows(status mainstorage.Status) int64 {
+	seen := map[string]bool{}
+	for _, item := range status.Imports {
+		if (item.State != mainstorage.StateMissingDeferred && item.State != mainstorage.StateMissingSource) || item.StorageEntryID == "" {
+			continue
+		}
+		clean := path.Clean(item.RelativePath)
+		if clean == item.RelativePath && strings.HasPrefix(clean, ".loom-acceptance/") {
+			seen[item.StorageEntryID] = true
+		}
+	}
+	if int64(len(seen)) > status.FilesMissingCataloged {
+		return 0
+	}
+	return int64(len(seen))
 }
 
 func checkDropzoneEntries(entries []storagecatalog.Entry) Check {
@@ -497,8 +523,16 @@ func checkProjectRuntimeArchives(ctx context.Context, client Client, correlation
 			continue
 		}
 		if physical := inspect.Data.Physical; physical != nil {
-			if physical.ProjectID != project.ProjectID || !physical.MutationBlocked {
+			if physical.ProjectID != project.ProjectID {
 				check.Findings = append(check.Findings, Finding{Severity: SeverityError, Kind: "project_physical_archive_conflict", Target: project.Slug, Message: "Physical archive inspection does not match the project identity or runtime guard."})
+				continue
+			}
+			if physical.EvidenceStatus == "historical" && physical.Status == "reactivated" && !physical.MutationBlocked && project.Status == "active" {
+				check.Findings = append(check.Findings, Finding{Severity: SeverityInfo, Kind: "project_archive_historical", Target: project.Slug, Message: "Project is reactivated; preserved archive/restore evidence is historical, not a current mutation guard or runtime-health assertion."})
+				continue
+			}
+			if !physical.MutationBlocked {
+				check.Findings = append(check.Findings, Finding{Severity: SeverityError, Kind: "project_physical_archive_conflict", Target: project.Slug, Message: "Physical archive evidence does not match the current project runtime guard."})
 				continue
 			}
 			switch physical.EvidenceStatus {

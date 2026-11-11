@@ -26,6 +26,7 @@ import (
 )
 
 var ErrInvalid = errors.New("invalid watched-root input")
+var ErrBackupBindingMismatch = errors.New("backup artifact identity mismatch")
 
 type Service struct {
 	DB         *sql.DB
@@ -63,6 +64,10 @@ func (s Service) Report(ctx context.Context, input ReportInput) (ReportResult, e
 	}
 	defer tx.Rollback()
 
+	previous, found, err := previousSourceAdmissionTx(ctx, tx, node.NodeID, input.RootKey)
+	if err != nil {
+		return ReportResult{}, err
+	}
 	root, err := upsertRootTx(ctx, tx, node.NodeID, input)
 	if err != nil {
 		return ReportResult{}, err
@@ -90,10 +95,45 @@ func (s Service) Report(ctx context.Context, input ReportInput) (ReportResult, e
 	if err := correlateProjectReportTx(ctx, tx, node, root); err != nil {
 		return ReportResult{}, err
 	}
+	if !found || previous != sourceAdmissionFingerprint(root) {
+		if _, err := tx.ExecContext(ctx, `SELECT pg_notify('loom_worker_wake','notes_workspace_sync'), pg_notify('loom_worker_wake','knowledge_indexer')`); err != nil {
+			return ReportResult{}, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return ReportResult{}, err
 	}
 	return ReportResult{Root: root, Findings: findings, ResolvedCount: resolvedCount}, nil
+}
+
+func previousSourceAdmissionTx(ctx context.Context, tx *sql.Tx, nodeID, rootKey string) (string, bool, error) {
+	var root WatchedRoot
+	// Lock in the existing report-before-registration order; don't fetch the
+	// large per-file output plan merely to compare bounded readiness evidence.
+	err := tx.QueryRowContext(ctx, `SELECT status,config_hash,safe_root_key,metadata,
+ jsonb_build_object('summary',summary_json->'summary','scan_counts',summary_json->'scan_counts',
+ 'output_plan',jsonb_build_object('counts',summary_json#>'{output_plan,counts}'))
+ FROM watched_roots.roots WHERE node_id=$1 AND root_key=$2 FOR UPDATE`, nodeID, rootKey).
+		Scan(&root.Status, &root.ConfigHash, &root.SafeRootKey, &root.Metadata, &root.SummaryJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return sourceAdmissionFingerprint(root), true, nil
+}
+
+func sourceAdmissionFingerprint(root WatchedRoot) string {
+	var metadata any
+	_ = json.Unmarshal(root.Metadata, &metadata)
+	raw, _ := json.Marshal(struct {
+		ConfigHash string
+		SafeRoot   string
+		Metadata   any
+		Admission  SourceAdmission
+	}{root.ConfigHash, root.SafeRootKey, metadata, SourceAdmissionState(root.Status, root.SummaryJSON, root.Metadata)})
+	return fmt.Sprintf("%x", sha256.Sum256(raw))
 }
 
 // Ordinary Box policies have no backup-contract revision acknowledgement.
@@ -837,7 +877,11 @@ func validateMetadataOnlyBackupInput(localBatchID string, input BackupBatchItemI
 	if localBatchID == "" || input.RelativePath == "" || input.ArtifactKind != "" || input.ArtifactRef != "" || input.PrivateBackupOperationID != "" {
 		return fmt.Errorf("%w: metadata-only backup item has inconsistent batch, path, or artifact evidence", ErrInvalid)
 	}
-	if input.SizeBytes < 0 || !validBackupHashURI(input.ContentHashURI) || (input.PreviousHashURI != "" && !validBackupHashURI(input.PreviousHashURI)) {
+	validCurrentHash := validBackupHashURI(input.ContentHashURI)
+	if input.ItemKind == BackupItemKindDeletionMarker {
+		validCurrentHash = input.ContentHashURI == "" || validCurrentHash
+	}
+	if input.SizeBytes < 0 || !validCurrentHash || (input.PreviousHashURI != "" && !validBackupHashURI(input.PreviousHashURI)) {
 		return fmt.Errorf("%w: metadata-only backup item has invalid size or hash evidence", ErrInvalid)
 	}
 	var metadata struct {
@@ -849,6 +893,7 @@ func validateMetadataOnlyBackupInput(localBatchID string, input BackupBatchItemI
 		FileTransferStorageEntryID string                      `json:"file_transfer_storage_entry_id"`
 		FileTransferAcceptedPath   string                      `json:"file_transfer_accepted_path"`
 		FilesystemObservation      *filesystemmeta.Observation `json:"filesystem_observation"`
+		PriorContentUnavailable    bool                        `json:"prior_content_unavailable"`
 	}
 	if err := json.Unmarshal(input.Metadata, &metadata); err != nil {
 		return fmt.Errorf("%w: metadata-only backup item metadata is invalid: %v", ErrInvalid, err)
@@ -857,8 +902,17 @@ func validateMetadataOnlyBackupInput(localBatchID string, input BackupBatchItemI
 		return fmt.Errorf("%w: metadata-only backup item identity or transport evidence is inconsistent", ErrInvalid)
 	}
 	observation := metadata.FilesystemObservation
-	if observation == nil || !filesystemmeta.ValidObjectKind(observation.Kind) || observation.LogicalSizeBytes != input.SizeBytes {
-		return fmt.Errorf("%w: metadata-only backup item filesystem observation is inconsistent", ErrInvalid)
+	if metadata.PriorContentUnavailable && input.ItemKind != BackupItemKindDeletionMarker {
+		return fmt.Errorf("%w: prior-content qualification is only valid for a deletion marker", ErrInvalid)
+	}
+	// A deletion marker records an absent path and its prior hash, not a new
+	// filesystem object. Older queued paths may have no retained stat observation.
+	if observation == nil && input.ItemKind != BackupItemKindDeletionMarker || observation != nil &&
+		(!filesystemmeta.ValidObjectKind(observation.Kind) || observation.LogicalSizeBytes != input.SizeBytes) {
+		if observation == nil {
+			return fmt.Errorf("%w: metadata-only backup item filesystem observation is missing (kind=%s)", ErrInvalid, input.ItemKind)
+		}
+		return fmt.Errorf("%w: metadata-only backup item filesystem observation is inconsistent (kind=%s observation=%s size=%d observed=%d)", ErrInvalid, input.ItemKind, observation.Kind, input.SizeBytes, observation.LogicalSizeBytes)
 	}
 	switch input.ItemKind {
 	case BackupItemKindDirectory:
@@ -870,7 +924,12 @@ func validateMetadataOnlyBackupInput(localBatchID string, input BackupBatchItemI
 			return fmt.Errorf("%w: metadata backup item lifecycle evidence is inconsistent", ErrInvalid)
 		}
 	case BackupItemKindDeletionMarker:
-		if input.DeletedAt == nil || input.PreviousHashURI == "" {
+		// A path may disappear before its first stable hash is captured. This
+		// records absence only; it does not claim custody of its former bytes.
+		unknownPrior := input.PreviousHashURI == "" && input.ContentHashURI == ""
+		if input.DeletedAt == nil || input.DeletedAt.IsZero() ||
+			(metadata.PriorContentUnavailable != unknownPrior) ||
+			(input.PreviousHashURI == "" && !unknownPrior) {
 			return fmt.Errorf("%w: deletion-marker backup item lifecycle evidence is inconsistent", ErrInvalid)
 		}
 	}
@@ -1124,6 +1183,12 @@ func backupFindingHealth(findings []Finding) string {
 func upsertRootTx(ctx context.Context, tx *sql.Tx, nodeID string, input ReportInput) (WatchedRoot, error) {
 	query := rootInsertSQL() + `
 		ON CONFLICT (node_id, root_key) DO UPDATE SET
+			observation_generations = CASE WHEN
+			 watched_roots.content_config(watched_roots.roots.config_json)=watched_roots.content_config(EXCLUDED.config_json)
+			 AND watched_roots.roots.safe_root_key=EXCLUDED.safe_root_key
+			 AND watched_roots.roots.metadata-'root_reachable'=EXCLUDED.metadata-'root_reachable'
+			 THEN watched_roots.roots.observation_generations || jsonb_build_object(EXCLUDED.config_hash,true)
+			 ELSE jsonb_build_object(EXCLUDED.config_hash,true) END,
 			worker_key = EXCLUDED.worker_key,
 			display_name = EXCLUDED.display_name,
 			safe_root_key = EXCLUDED.safe_root_key,
@@ -1274,10 +1339,10 @@ func validatePrivateBackupArtifact(backupRoot, rootKey, localBatchID string, ite
 		return fmt.Errorf("%w: private backup operation %s metadata is invalid", ErrInvalid, operationID)
 	}
 	if metadata.BackupKind != "watched_root_file" || metadata.SourceNodeKey != node.NodeKey || metadata.RootKey != rootKey || metadata.LocalBatchID != localBatchID || metadata.CustodyBatchKey != localBatchID {
-		return fmt.Errorf("%w: private backup operation %s identity does not match backup batch", ErrInvalid, operationID)
+		return fmt.Errorf("%w: %w: private backup operation %s identity does not match backup batch", ErrInvalid, ErrBackupBindingMismatch, operationID)
 	}
 	if metadata.RelativePath != item.RelativePath || metadata.ContentHashURI != item.ContentHashURI || metadata.BackupMode != item.BackupMode || metadata.LocalItemID != item.LocalItemRef {
-		return fmt.Errorf("%w: private backup operation %s evidence does not match backup item", ErrInvalid, operationID)
+		return fmt.Errorf("%w: %w: private backup operation %s evidence does not match backup item", ErrInvalid, ErrBackupBindingMismatch, operationID)
 	}
 	if strings.TrimSpace(metadata.PayloadSHA256) == "" {
 		return fmt.Errorf("%w: private backup operation %s has no payload checksum", ErrInvalid, operationID)
@@ -1416,7 +1481,7 @@ func verifyWatchedRootPrivateBackupPayload(backupRoot, payloadPath, rootKey, loc
 		artifactManifest.RootKey != rootKey || artifactManifest.RelativePath != item.RelativePath ||
 		artifactManifest.ContentHashURI != item.ContentHashURI || artifactManifest.SizeBytes != item.SizeBytes ||
 		artifactManifest.BackupMode != item.BackupMode || artifactManifest.LocalBatchID != localBatchID || artifactManifest.LocalItemID != item.LocalItemRef {
-		return fmt.Errorf("%w: private backup artifact manifest does not match backup item", ErrInvalid)
+		return fmt.Errorf("%w: %w: private backup artifact manifest does not match backup item", ErrInvalid, ErrBackupBindingMismatch)
 	}
 	return nil
 }
@@ -1848,8 +1913,8 @@ func rootInsertSQL() string {
 	return `
 		INSERT INTO watched_roots.roots (
 			watched_root_id, node_id, root_key, worker_key, display_name,
-			safe_root_key, status, config_hash, config_json, summary_json, metadata
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+			safe_root_key, status, config_hash, config_json, summary_json, metadata, observation_generations
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,jsonb_build_object($8::text,true))
 	`
 }
 

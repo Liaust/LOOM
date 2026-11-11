@@ -273,7 +273,7 @@ func TestProvenanceExactSourcesCLIRoundtrip(t *testing.T) {
 				_, _ = w.Write([]byte(`{"ok":true,"data":{"schema_version":"1.0","` + kind + `":{"` + kind + `_id":"` + id + `","claim":"retained claim"},"effective_state":"accepted","source_reference_ids":[],"sources":{"schema_version":"loom.provenance.linked_sources.v1","parent_kind":"` + kind + `","parent_id":"` + id + `","posture":"stored_resolution","items":[],"returned":0,"sources_truncated":false,"incomplete_items":0}}}`))
 			})
 			defer stop()
-			stdout, stderr, err := executeRootCommand("--socket", socket, "--json", "provenance", kind, "get", id, "--sources")
+			stdout, stderr, err := executeRootCommand("--socket", socket, "--json", "provenance", kind, "get", id, "--sources", "--details")
 			if err != nil || stderr != "" || calls != 1 {
 				t.Fatalf("expanded get: %v stderr=%q calls=%d stdout=%s", err, stderr, calls, stdout)
 			}
@@ -285,7 +285,7 @@ func TestProvenanceExactSourcesCLIRoundtrip(t *testing.T) {
 					}
 				}
 			}
-			if err := json.Unmarshal([]byte(stdout), &got); err != nil || !strings.Contains(stdout, `"parent_id":"`+id+`"`) || got.Data.Sources.Posture != "stored_resolution" {
+			if err := json.Unmarshal([]byte(stdout), &got); err != nil || !strings.Contains(stdout, `"parent_id":"`+id+`"`) || got.Data.Sources.Posture != "stored_resolution" || !strings.Contains(stdout, `"schema_version":"1.0"`) {
 				t.Fatalf("lost explicit expansion: %s %v", stdout, err)
 			}
 		})
@@ -313,7 +313,7 @@ func TestProvenanceExactSourcesHumanPlainAndOrdinary(t *testing.T) {
 			})
 			defer stop()
 			stdout, stderr, err := executeRootCommand("--socket", socket, "provenance", kind, "get", string(id), "--sources")
-			if err != nil || stderr != "" || calls != 1 || !expanded || strings.Contains(stdout, "\x1b") || !strings.Contains(stdout, `\n\x1b[31m$(touch /must-not-run)`+strings.Repeat("x", 2048)) || !strings.Contains(stdout, "sources_truncated=true; incomplete_items=1") || !strings.Contains(stdout, "no current source access performed") {
+			if err != nil || stderr != "" || calls != 1 || !expanded || strings.Contains(stdout, "\x1b") || !strings.Contains(stdout, `\n\u001b[31m$(touch /must-not-run)`) || !strings.Contains(stdout, `"canonical_locator"`) || !strings.Contains(stdout, `"sources_truncated": true`) || !strings.Contains(stdout, `"incomplete_items": 1`) || !strings.Contains(stdout, `"posture": "stored_resolution"`) {
 				t.Fatalf("unsafe/lossy human output=%q err=%v", stdout, err)
 			}
 			stdout, _, err = executeRootCommand("--socket", socket, "--plain", "provenance", kind, "get", string(id), "--sources")

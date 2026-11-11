@@ -24,6 +24,7 @@ const (
 )
 
 type KnowledgeObjectReconcileInput struct {
+	AuditMetadata     bool                   `json:"audit_metadata,omitempty"`
 	DryRun            bool                   `json:"dry_run,omitempty"`
 	DiscoverFromStore bool                   `json:"discover_from_store,omitempty"`
 	SourceRootID      string                 `json:"source_root_id,omitempty"`
@@ -39,7 +40,11 @@ type KnowledgeObjectReconcileResult struct {
 	KnowledgeObjects []KnowledgeObject          `json:"knowledge_objects"`
 	PipelineRuns     []PipelineRun              `json:"pipeline_runs,omitempty"`
 	Skipped          []KnowledgeObjectSkip      `json:"skipped,omitempty"`
-	Applied          int                        `json:"applied"`
+	// Applied retains its historical count. Changed/Unchanged count object
+	// admission (including canonical repair), not pipeline policy work.
+	Applied   int `json:"applied"`
+	Changed   int `json:"changed"`
+	Unchanged int `json:"unchanged"`
 }
 
 type KnowledgeObjectCandidate struct {
@@ -124,24 +129,32 @@ func (s *Service) ReconcileKnowledgeObjects(ctx context.Context, input Knowledge
 		return result, err
 	}
 	for _, candidate := range candidates {
-		object, err := s.store.UpsertKnowledgeObject(ctx, candidate.Object)
+		finishAdmission := admissionPhase(ctx, "object_admission")
+		object, changed, err := s.store.upsertKnowledgeObject(ctx, candidate.Object, input.AuditMetadata)
 		if err != nil {
 			if errors.Is(err, ErrNotesCustodyPaused) {
 				result.Skipped = append(result.Skipped, KnowledgeObjectSkip{Origin: candidate.Origin, OriginRef: candidate.OriginRef, Reason: "source_custody_paused"})
 				continue
 			}
-			return result, err
+			return result, finishAdmission(err)
 		}
 		result.KnowledgeObjects = append(result.KnowledgeObjects, object)
 		result.Applied++
+		if changed {
+			result.Changed++
+		} else {
+			result.Unchanged++
+		}
+		// Source equivalence alone cannot establish pipeline policy equivalence.
 		if object.DeletedAt == nil && object.ProcessingState != ProcessingStateDeleted {
+			finishPipeline := admissionPhase(ctx, "pipeline_ensure")
 			run, err := s.EnsurePipelineRun(ctx, object, policy.Policy, false, DefaultPipelinePriority)
 			if err != nil {
 				if errors.Is(err, ErrNotesCustodyPaused) {
 					result.Skipped = append(result.Skipped, KnowledgeObjectSkip{Origin: candidate.Origin, OriginRef: candidate.OriginRef, Reason: "source_custody_paused"})
 					continue
 				}
-				return result, err
+				return result, finishPipeline(err)
 			}
 			result.PipelineRuns = append(result.PipelineRuns, run)
 		}
@@ -424,7 +437,10 @@ func shouldPreserveKnowledgeObjectProcessing(existing, next KnowledgeObject) boo
 	case ProcessingStateTextExtracted, ProcessingStateChunked, ProcessingStateIndexed, ProcessingStateEmbedded, ProcessingStateFailed:
 		return true
 	case ProcessingStateStale:
-		return existing.PipelineKey == KnowledgeObjectPipelineNotesFileExtraction || existing.PipelineKey == KnowledgeObjectPipelineMarkdownText
+		// Current pipeline definitions also mark a queued unchanged version stale.
+		// Admission must not replace its owner with the generic text-ready seed.
+		// EnsurePipelineRun still reconciles any actual policy change afterward.
+		return existing.PipelineKey != ""
 	default:
 		return false
 	}
@@ -855,6 +871,7 @@ func knowledgeObjectMetadata(root SourceRoot, entry storagecatalog.Entry, textRe
 		"text_pipeline_ready": textReady,
 		"source_root": map[string]any{
 			"notes_source_root_id": root.NotesSourceRootID,
+			"box_id":               stringMapValue(jsonObject(root.Metadata), "box_id"),
 			"root_kind":            root.RootKind,
 			"node_key":             root.NodeKey,
 			"backend_root_key":     root.BackendRootKey,
@@ -903,6 +920,7 @@ func knowledgeObjectSyncedMetadata(root SourceRoot, entry SyncedObjectEntry, tex
 		"text_pipeline_ready": textReady,
 		"source_root": map[string]any{
 			"notes_source_root_id": root.NotesSourceRootID,
+			"box_id":               stringMapValue(jsonObject(root.Metadata), "box_id"),
 			"root_kind":            root.RootKind,
 			"node_key":             root.NodeKey,
 			"backend_root_key":     root.BackendRootKey,

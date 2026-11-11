@@ -125,10 +125,13 @@ func TestManifestDeclaresAdaptivePackContract(t *testing.T) {
 	if got := manifest.Skills[len(manifest.Skills)-1].Name; got != "eighth-test-skill" {
 		t.Fatalf("manifest shape rejected arbitrary skill addition: %q", got)
 	}
-	if manifest.Compatibility["project_layout"] == "" || manifest.Compatibility["worktree_authority"] != "orca" || manifest.Compatibility["credential_authority"] != "proton-pass" {
+	if manifest.Compatibility["project_layout"] == "" || manifest.Compatibility["worktree_authority"] != "native-harness" || manifest.Compatibility["credential_authority"] != "proton-pass" {
 		t.Fatalf("missing compatibility boundaries: %#v", manifest.Compatibility)
 	}
-	for _, harness := range []string{"codex", "orca"} {
+	if _, legacy := manifest.Harnesses["orca"]; legacy {
+		t.Fatal("retired ORCA must not be advertised as a current harness")
+	}
+	for _, harness := range []string{"codex", "hermes"} {
 		if manifest.Harnesses[harness].Mechanism == "" {
 			t.Fatalf("missing native harness deployment metadata for %q: %#v", harness, manifest.Harnesses)
 		}

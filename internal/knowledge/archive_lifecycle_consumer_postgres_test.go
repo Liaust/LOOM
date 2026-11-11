@@ -258,11 +258,21 @@ func TestNotesCustodyConsumerConcurrentPostgres(t *testing.T) {
 func TestNotesCustodyConsumerValidationAndRedaction(t *testing.T) {
 	for _, err := range []error{errors.New("password=fixture-secret /private/fixture"),
 		notesCustodyFailure(NotesCustodySourceConflict, errors.New("password=fixture-secret /private/fixture")),
+		notesCustodyFailure(NotesCustodySourceConflict, &notesCustodyEvidenceError{ObjectID: "fixture-secret", Reason: "file"}),
+		notesCustodyFailure(NotesCustodySourceConflict, &notesCustodyEvidenceError{ObjectID: "knowledge_object_01ARZ3NDEKTSV4RRFFQ69G5FAV", Reason: "/private/fixture-secret"}),
 		fmt.Errorf("wrapper: %w", &pgconn.PgError{Code: "40001", Message: "fixture-secret"})} {
-		data, marshalErr := json.Marshal(NotesCustodyBatchItem{Finding: notesCustodyFinding(err)})
+		item := NotesCustodyBatchItem{}
+		item.recordFinding(err)
+		data, marshalErr := json.Marshal(item)
 		if marshalErr != nil || strings.Contains(string(data), "fixture-secret") || strings.Contains(string(data), "/private") {
 			t.Fatalf("finding leaks cause: %s %v", data, marshalErr)
 		}
+	}
+	item := NotesCustodyBatchItem{}
+	item.recordFinding(notesCustodyFailure(NotesCustodySourceConflict, &notesCustodyEvidenceError{
+		ObjectID: "knowledge_object_01ARZ3NDEKTSV4RRFFQ69G5FAV", Reason: "inventory"}))
+	if item.Finding != NotesCustodySourceConflict || item.KnowledgeObjectID == "" || item.EvidenceReason != "inventory" {
+		t.Fatal("closed source-conflict diagnostic is missing", item)
 	}
 	if notesCustodyFinding(fmt.Errorf("wrapped: %w", &pgconn.PgError{Code: "40001"})) != NotesCustodyDatabaseRetryable {
 		t.Fatal("retryable SQL state lost")

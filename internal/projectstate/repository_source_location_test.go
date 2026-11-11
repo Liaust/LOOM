@@ -3,13 +3,77 @@ package projectstate
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"loom.local/loom/internal/projects"
 )
+
+type historicalSourceInspector struct {
+	root   string
+	checks int
+	fail   bool
+}
+
+func (i *historicalSourceInspector) Inspect(context.Context, ProjectDevelopmentInput) ProjectDevelopmentState {
+	return ProjectDevelopmentState{}
+}
+
+func (i *historicalSourceInspector) ResolveRepositoryReadSource(_ context.Context, _ ProjectDevelopmentInput, model projects.ProjectRepositoryReadModel) (RepositoryReadLocation, error) {
+	selected, err := RelocateRepositoryReadSource(model.Source, i.root)
+	return RepositoryReadLocation{Source: selected, Archive: &ArchivedSourceContext{OperationID: "archive_fixture", ManifestDigest: "sha256:" + strings.Repeat("a", 64), ArchivedAt: time.Date(2026, 10, 3, 6, 0, 0, 0, time.UTC)}, Revalidate: func(context.Context) error {
+		i.checks++
+		if i.fail {
+			return errors.New("archive changed")
+		}
+		return nil
+	}}, err
+}
+
+func TestRepositorySourceLocationArchiveUsesOnlyVerifiedRetainedRoot(t *testing.T) {
+	retained := t.TempDir()
+	memberRoot := filepath.Join(retained, "repos/api")
+	initializeCommittedRepository(t, memberRoot)
+	model := localReadModel("/retired/active/project", "project_test", []projects.ProjectRepositoryReadMember{localReadMember("repo_test", "api", "api", "")})
+	model.Project.Status = "archived"
+	model.Members[0].MembershipLifecycle, model.Members[0].RepositoryLifecycle = projects.RepositoryLifecycleArchived, projects.RepositoryLifecycleArchived
+	model.Members[0].ObservationRevision = 4
+	inspector := &historicalSourceInspector{root: retained}
+	git := &staticGitObserver{}
+	service := Service{Reader: staticProjectReader{model: model}, LocalNode: "main", ProjectDevelopment: inspector, Git: git}
+	got, err := service.ObserveProjectForProvenance(t.Context(), "project_test")
+	if err != nil || len(got.Repositories) != 1 {
+		t.Fatalf("retained navigation unavailable: %+v %v", got, err)
+	}
+	r := got.Repositories[0]
+	if !r.Available || !sameResolvedPath(r.RepositoryRoot, memberRoot) || r.Projection.Archive == nil || r.Projection.Git != nil || len(git.calls) != 0 || r.ValidateRead == nil || r.SourceVersion != 4 || r.NavigationPath != "repos/api" || inspector.checks < 2 {
+		t.Fatalf("retained historical binding changed: %+v checks=%d", r, inspector.checks)
+	}
+	raw, err := json.Marshal(got)
+	if err != nil || strings.Contains(string(raw), retained) || strings.Contains(string(raw), "/retired/active") {
+		t.Fatalf("execution location leaked: %s %v", raw, err)
+	}
+	inspector.fail = true
+	if _, err := service.ObserveProjectForProvenance(t.Context(), "project_test"); err == nil {
+		t.Fatal("changed archive released retained output")
+	}
+}
+
+func TestRepositorySourceLocationArchiveCannotProbeOldBinding(t *testing.T) {
+	model := localReadModel("/retired/project", "project_test", []projects.ProjectRepositoryReadMember{localReadMember("repo_test", "api", "api", "")})
+	model.Project.Status = "archived"
+	model.Members[0].ObservationRevision = 1
+	paths := &staticPathResolver{byRelative: map[string]ResolvedPath{"repos/api": {Path: "/replacement/project/repos/api", Exists: true, Directory: true}}}
+	service := Service{Reader: staticProjectReader{model: model}, LocalNode: "main", Paths: paths, Git: &staticGitObserver{}}
+	got, err := service.ObserveProjectForProvenance(t.Context(), "project_test")
+	if err != nil || len(paths.calls) != 0 || len(got.Repositories) != 1 || got.Repositories[0].Available || got.Repositories[0].ReasonCode != "archive_source_unverified" {
+		t.Fatalf("unverified archived root probed: %+v paths=%v err=%v", got, paths.calls, err)
+	}
+}
 
 func TestRepositorySourceLocationUnsupportedVersionDoesNotReadGit(t *testing.T) {
 	for _, version := range []string{"", "project.contract.v999", projects.ProjectRepositoryProjectSchemaV05} {
@@ -35,7 +99,7 @@ func TestRepositorySourceLocationSupportedVersionsAndAttribution(t *testing.T) {
 				source.ProjectContractSchemaVersion, source.ReposContractSchemaVersion = versions.ProjectContract, versions.ReposContract
 				source.ReposContractPath = filepath.Join(source.ProjectRoot, ref)
 				want := "repos/custom-code"
-				if versions.ProjectContract == projects.ProjectRepositoryProjectSchemaV05 {
+				if versions.ProjectContract == projects.ProjectRepositoryProjectSchemaV05 || versions.ProjectContract == projects.ProjectRepositoryProjectSchemaV06 {
 					source.ReposContractPath = source.ProjectContractPath
 					ref, want = ".loom/project.yaml", "custom-code"
 				}

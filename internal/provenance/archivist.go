@@ -856,6 +856,7 @@ func cloneArchivistAnchors(value *StructuralAnchors) *StructuralAnchors {
 		return nil
 	}
 	return &StructuralAnchors{
+		Boxes:    append([]string(nil), value.Boxes...),
 		Entities: append([]string(nil), value.Entities...), Topics: append([]string(nil), value.Topics...), Projects: append([]string(nil), value.Projects...),
 	}
 }

@@ -255,6 +255,15 @@ func applicationDropIn(grant ApplicationGrant, m ApplicationManifest, descriptor
 	var b strings.Builder
 	fmt.Fprintf(&b, "[Service]\nUser=%d\nGroup=%d\nExecStart=\nExecStart=%s %s\nMemoryMax=%d\nRestart=%s\n", uid, uid, descriptor.Launcher, configPath, m.Process.MemoryMaxBytes, m.Process.Restart)
 	fmt.Fprintf(&b, "Environment=LOOM_APPLICATION_GENERATION=%s\n", filepath.Base(filepath.Dir(configPath)))
+	if grant.SourceIdentity != "" {
+		b.WriteString("Environment=SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt\n")
+	}
+	if grant.Network == ApplicationNetworkOutboundHTTPS {
+		// UID-scoped dual-stack output policy is verified before this drop-in
+		// is published. This resets the template's loopback-only address fence;
+		// it does not grant inbound firewall access.
+		b.WriteString("IPAddressDeny=\nIPAddressAllow=\n")
+	}
 	keys := make([]string, 0, len(grant.Data))
 	for k := range grant.Data {
 		keys = append(keys, k)

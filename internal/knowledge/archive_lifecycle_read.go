@@ -76,8 +76,9 @@ func visibleNotesCustodyObjectSQL(object string, legacySearch bool) string {
 	 OR (EXISTS (` + notesCurrentCustodySQL(object) + `) AND ` + notesKnowledgeArchiveVisibilitySQL(object) + `)))`
 }
 
-// A path match is a conservative stop, never positive custody evidence. New
-// identities admitted after a historical intent are not members of that move.
+// A path match is a conservative stop, never positive custody evidence. A
+// completed restore closes it for nonmembers too. They remain unavailable while
+// the workspace is archived, without acquiring false positive archive custody.
 func notesCustodyReadCaughtUpSQL(object string) string {
 	return `NOT EXISTS (
 	 SELECT 1 FROM knowledge.notes_source_roots lag_root
@@ -91,14 +92,20 @@ func notesCustodyReadCaughtUpSQL(object string) string {
 	 THEN lag_op.source_absolute_path ELSE lag_op.destination_absolute_path END) || '/'))
 	 AND NOT EXISTS (
 	 SELECT 1 FROM storage.workspace_lifecycle_events lag_event
-	 JOIN knowledge.notes_custody_transitions lag_transition USING(workspace_lifecycle_event_id)
 	 JOIN knowledge.notes_custody_projection_receipts lag_receipt USING(workspace_lifecycle_event_id)
+	 LEFT JOIN knowledge.notes_custody_transitions lag_transition ON lag_transition.workspace_lifecycle_event_id=lag_event.workspace_lifecycle_event_id
+	 AND lag_transition.knowledge_object_id=` + object + `.knowledge_object_id
 	 WHERE lag_event.workspace_archive_operation_id=lag_op.workspace_archive_operation_id
 	 AND lag_op.terminal_status='complete' AND lag_op.phase IN ('archive_complete','restore_complete')
-	 AND lag_transition.knowledge_object_id=` + object + `.knowledge_object_id
 	 AND lag_receipt.node_id=lag_root.node_id AND lag_receipt.node_id=` + object + `.source_node_id
-	 AND lag_receipt.manifest_digest=lag_transition.manifest_digest
-	 AND lag_receipt.project_event_id IS NOT DISTINCT FROM lag_transition.project_event_id))`
+	 AND ((lag_transition.knowledge_object_id IS NOT NULL AND lag_receipt.manifest_digest=lag_transition.manifest_digest
+	 AND lag_receipt.project_event_id IS NOT DISTINCT FROM lag_transition.project_event_id)
+	 OR (lag_transition.knowledge_object_id IS NULL AND (lag_event.to_state='active' OR EXISTS (
+	 SELECT 1 FROM knowledge.notes_custody_projection_receipts restored_receipt
+	 JOIN storage.workspace_lifecycle_events restored_event USING(workspace_lifecycle_event_id)
+	 JOIN storage.workspace_archive_operations restored_op USING(workspace_archive_operation_id)
+	 WHERE restored_receipt.node_id=lag_receipt.node_id AND restored_receipt.previous_event_id=lag_event.workspace_lifecycle_event_id
+	 AND restored_event.to_state='active' AND restored_op.terminal_status='complete' AND restored_op.phase='restore_complete'))))))`
 }
 
 func notesCustodyContextSQL(object string) string {

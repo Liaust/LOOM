@@ -1,7 +1,8 @@
-# ORCA Workflow
+# ORCA Workflow (Legacy)
 
-A Codex model inside ORCA remains ORCA-owned. Use the running harness and selected
-host for lifecycle; never transfer ownership based on model or vendor name.
+ORCA is retired. Do not launch it, load legacy skills or use it as a fallback.
+Use native Codex/Hermes controls for current work. Historically, a Codex model
+inside ORCA remains ORCA-owned; a model name never transfers lifecycle ownership.
 
 ## Ordinary edits
 
@@ -13,23 +14,18 @@ optional `.repo/` needs no installation or administration.
 
 ## Planned features
 
-Use the repository's accepted plan and ORCA-native project, thread and worktree
-flow when it requires an isolated worker. Verify scope, branch and accepted base;
-checkpoint completed slices with validation and progress, then provide the
-committed handoff for the integrator. Workers do not merge stable or integration
-branches. Keep handoff, recovery and cleanup within ORCA ownership.
+Use the accepted plan and current native harness. Verify scope and base;
+checkpoint slices with validation and progress for the integrator. Workers do
+not merge integration branches. Preserve legacy pending edits, conversations,
+non-Git workspaces and recovery history; do not adopt or delete them automatically.
 
-Load the installed `orca-cli` skill for ORCA operations and `orchestration` when
-structured multi-worker coordination is needed. Follow the version-matched guidance
-served by the selected ORCA CLI; this repository pack intentionally does not
-duplicate subcommands or flags. Source-bound Linux proof covers patched non-Git
-folder registration, not installed availability. Registration does not create or
-validate directories. Use supported native operations without inventing a Git
-wrapper or mutating runtime databases.
+Do not load `orca-cli` or `orchestration`. Historical version-matched guidance
+describes the retired client only. This compatibility page does not
+duplicate subcommands or flags or establish installed availability. Never mutate
+runtime databases or fabricate a Git wrapper to recover legacy work.
 
 ## Optional repository state
 
-Only an explicit `.repo/` opt-in uses `REPOSITORY_STATE_PROTOCOL.md`. Stay in the
-ORCA-owned worktree, review its local plan/digest and unstaged output, and commit
-explicitly. Keep runtime identifiers in ORCA; LOOM never stages, commits,
-archives a thread or changes ORCA ownership.
+Only explicit `.repo/` opt-in uses `REPOSITORY_STATE_PROTOCOL.md`. Review the
+current worktree's plan and output; commit explicitly. LOOM never stages,
+commits or transfers legacy ownership.

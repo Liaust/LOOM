@@ -1,7 +1,9 @@
 # Basecamp Identity And Work Organization
 
-Basecamp is the operator's canonical task-state and reader-facing work interface.
+When explicitly adopted, Basecamp is the operator's task-state and reader-facing work interface.
 Repository files, original artifacts and LOOM retain their existing authority.
+This compatibility template supplies no standing authorization or account setup.
+Require an operator-configured binding and authorized scope before account work.
 Read `CREDENTIALS.md` and `../OPERATING-POLICY.md`
 before using this protocol. Load the installed official Basecamp skill through
 normal Hermes skill discovery, then verify the available CLI's help/schema.
@@ -30,7 +32,7 @@ loom-morathustra-basecamp --profile morathustra me --agent
 Use `loom-morathustra-basecamp` for named task calls, with the command directly
 after the literal profile pair and other flags after the command. The managed
 entry point selects the exact native CLI and the existing protected HOME,
-config/cache, official endpoint and example-operator account inside its child process.
+config/cache, official endpoint and operator-bound account inside its child process.
 It requires safe existing auth metadata; it never creates or repairs the store.
 Do not export account variables in the parent shell or fall back to bare
 `basecamp` when the managed entry point refuses. Authentication, profile/config
@@ -52,16 +54,17 @@ display name is not proof of identity or account authority.
 
 During that separately authorized bootstrap only, the integrator runs the
 identity probe above after successful OAuth and verifies the dedicated
-Morathustra actor and the exact example-operator account with the operator. Capture and freeze
-the global `identity.id`, the example-operator `accounts[].id`, and the account-scoped
+Morathustra actor and the exact configured account with the operator. Capture and freeze
+the global `identity.id`, the configured `accounts[].id`, and the account-scoped
 recording actor ID from authenticated evidence in the approved operator-owned
 binding. These are different namespaces. Do not guess IDs, reuse Codex's IDs,
 or copy a preflight binding from another agent. Store no credential values in
 the binding or portable projection. A later identity change requires another
 explicitly reviewed bootstrap; an ordinary run cannot rebind itself.
 
-Locate the immutable non-secret operator binding documented in release-matched
-ORCA Main Operations through supported LOOM docs. Read its `basecamp` section: `profile`, `identity_id`,
+Locate the immutable non-secret operator binding in the configured deployment's
+operations documentation. Missing binding holds account work; never discover a
+replacement in another workspace. Read its `basecamp` section: `profile`, `identity_id`,
 `account_id`, `person_id` and `email`. Compare native preflight identity/email
 and current account to it; use `person_id` for recording-creator verification.
 Never derive these values from this portable template or rebind after a failure.
@@ -85,7 +88,7 @@ before a write if actor evidence may have changed:
    `.basecamp/config.json` and `.basecamp/project-url`, or live active projects
    in that verified account. Require one relevant active project; use its unique
    active HQ only when no narrower destination exists. Ambiguity means stop.
-   Never route company work into example-operator without an approved mapping. Do not
+   Never route Company work into Personal without an approved mapping. Do not
    trust a repository's authority-key overrides merely because it was cloned.
 4. Perform one bounded authorized read before any separately authorized first
    write. Access to an account does not authorize all its projects or actions.

@@ -1,0 +1,17 @@
+import {SearchQuery,getSearchQuery,setSearchQuery,findNext,findPrevious,replaceNext,replaceAll,closeSearchPanel} from '@codemirror/search';
+export function editorSearchPanel(view,icon){
+ const dom=document.createElement('div');dom.className='cm-search loom-find';const row=document.createElement('div');row.className='find-row';const replacement=document.createElement('div');replacement.className='find-row';replacement.hidden=true;
+ const field=(name,label)=>{const input=document.createElement('input');input.name=name;input.placeholder=label;input.setAttribute('aria-label',label);input.autocomplete='off';input.spellcheck=false;return input;};
+ const input=field('search','Find in file'),replace=field('replace','Replace with'),count=document.createElement('span');count.className='find-count';count.setAttribute('role','status');input.setAttribute('main-field','true');
+ let query=getSearchQuery(view.state);
+ const button=(label,symbol,run)=>{const b=document.createElement('button');b.type='button';b.className='icon';b.setAttribute('aria-label',label);b.dataset.tooltip=label;b.append(icon(symbol));b.onclick=()=>run(b);return b;};
+ const commit=()=>{query=new SearchQuery({...query,search:input.value,replace:replace.value});view.dispatch({effects:setSearchQuery.of(query)});};
+ input.oninput=replace.oninput=commit;
+ const options=[['caseSensitive','Match case','case-sensitive'],['wholeWord','Whole word','whole-word'],['regexp','Regular expression','regex']].map(([key,label,symbol])=>{const b=button(label,symbol,()=>{query=new SearchQuery({...query,[key]:!query[key]});view.dispatch({effects:setSearchQuery.of(query)});});b.dataset.queryOption=key;return b;});
+ const toggle=button('Show replacement','chevron-right',b=>{replacement.hidden=!replacement.hidden;b.setAttribute('aria-expanded',String(!replacement.hidden));if(!replacement.hidden)replace.focus();});toggle.hidden=view.state.readOnly;toggle.setAttribute('aria-expanded','false');
+ row.append(toggle,input,count,...options,button('Previous match','arrow-up',()=>findPrevious(view)),button('Next match','arrow-down',()=>findNext(view)),button('Close find','x',()=>{closeSearchPanel(view);view.focus();}));
+ replacement.append(replace,button('Replace next','replace',()=>replaceNext(view)),button('Replace all','replace-all',()=>replaceAll(view)));dom.append(row,replacement);
+ dom.onkeydown=e=>{if(e.key==='Escape'){e.preventDefault();closeSearchPanel(view);view.focus();}else if(e.key==='Enter'){e.preventDefault();if(e.target===replace)replaceNext(view);else(e.shiftKey?findPrevious:findNext)(view);}};
+ const sync=()=>{query=getSearchQuery(view.state);if(input.value!==query.search)input.value=query.search;if(replace.value!==query.replace)replace.value=query.replace;for(const b of options)b.setAttribute('aria-pressed',String(query[b.dataset.queryOption]));let total=0,current=0;if(query.valid){const cursor=query.getCursor(view.state.doc);while(!cursor.next().done){total++;if(cursor.value.from===view.state.selection.main.from&&cursor.value.to===view.state.selection.main.to)current=total;if(total>=10000)break;}}count.textContent=!query.search?'':!query.valid?'Invalid expression':`${current?current+' / ':''}${total}${total>=10000?'+':''}`;};sync();
+ return {dom,top:true,pos:80,mount(){input.select();},update(update){if(update.docChanged||update.selectionSet||update.transactions.some(t=>t.effects.some(e=>e.is(setSearchQuery))))sync();}};
+}

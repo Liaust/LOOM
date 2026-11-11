@@ -23,6 +23,8 @@ func pipelineNativeSourceLimit(object KnowledgeObject, textLimit int64) int64 {
 }
 
 type PipelineCoordinatorRunInput struct {
+	chunks                *pipelineChunkCache
+	PreferredRunID        string
 	WorkerRunID           string
 	Limit                 int
 	LeaseDuration         time.Duration
@@ -33,6 +35,7 @@ type PipelineCoordinatorRunInput struct {
 }
 
 type PipelineCoordinatorRunResult struct {
+	ElapsedMS       map[string]int64
 	ReleasedExpired int64
 	Claimed         int64
 	Completed       int64
@@ -40,6 +43,11 @@ type PipelineCoordinatorRunResult struct {
 	MoreWork        bool
 	LastRunID       string
 	LastObjectID    string
+}
+
+type pipelineChunkCache struct {
+	runID, artifactID string
+	inputs            []TextChunkInput
 }
 
 // RunPipelineCoordinatorOnce drains a bounded number of lightweight stages.
@@ -56,7 +64,9 @@ func (s *Service) RunPipelineCoordinatorOnce(ctx context.Context, input Pipeline
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	result := PipelineCoordinatorRunResult{ReleasedExpired: released}
+	result := PipelineCoordinatorRunResult{ReleasedExpired: released, ElapsedMS: map[string]int64{}}
+	input.chunks = &pipelineChunkCache{}
+	preferredRun := input.PreferredRunID
 	for result.Claimed < int64(limit) {
 		if err := ctx.Err(); err != nil {
 			return result, err
@@ -65,28 +75,39 @@ func (s *Service) RunPipelineCoordinatorOnce(ctx context.Context, input Pipeline
 			result.MoreWork = true
 			return result, nil
 		}
-		items, err := s.ClaimPipelineRuns(ctx, PipelineExecutionCoordinator, input.WorkerRunID, PipelineClaimOptions{Limit: 1, LeaseDuration: input.LeaseDuration, Now: input.Now})
+		started := time.Now()
+		items, err := s.ClaimPipelineRuns(ctx, PipelineExecutionCoordinator, input.WorkerRunID, PipelineClaimOptions{PreferredRunID: preferredRun, Limit: 1, LeaseDuration: input.LeaseDuration, Now: s.currentTime()})
+		claimMS := time.Since(started).Milliseconds()
+		result.ElapsedMS["claim"] += claimMS
 		if err != nil {
 			return result, err
 		}
 		if len(items) == 0 {
+			result.ElapsedMS["claim.empty"] += claimMS
 			return result, nil
 		}
 		item := items[0]
+		result.ElapsedMS["claim."+item.Stage.StageKey] += claimMS
+		preferredRun = item.Run.KnowledgePipelineRunID
 		result.Claimed++
 		result.LastRunID, result.LastObjectID = item.Run.KnowledgePipelineRunID, item.Object.KnowledgeObjectID
+		started = time.Now()
 		warnings, stageErr := s.executeCoordinatorStage(ctx, item, input)
+		result.ElapsedMS[item.Stage.StageKey] += time.Since(started).Milliseconds()
 		if stageErr != nil {
 			if failErr := s.FailPipelineStage(ctx, item, stageErr, RetryableKnowledgeError(stageErr)); failErr != nil {
 				return PipelineCoordinatorRunResult{}, fmt.Errorf("record pipeline stage failure: %w", failErr)
 			}
 			result.Failed++
+			preferredRun = ""
 			continue
 		}
+		started = time.Now()
 		if _, err := s.CompletePipelineStage(ctx, item, warnings); err != nil {
 			return PipelineCoordinatorRunResult{}, err
 		}
 		result.Completed++
+		result.ElapsedMS["completion"] += time.Since(started).Milliseconds()
 	}
 	result.MoreWork = true
 	return result, nil
@@ -100,9 +121,13 @@ func (s *Service) executeCoordinatorStage(ctx context.Context, item PipelineWork
 	if err != nil {
 		return nil, err
 	}
-	version, err := s.store.getKnowledgeObjectVersion(ctx, item.Run.KnowledgeObjectVersionID)
-	if err != nil {
-		return nil, err
+	var version KnowledgeObjectVersion
+	switch item.Stage.StageKey {
+	case FilePipelineStageMetadata, FilePipelineStageConsolidateText, FilePipelineStageLexicalIndex:
+		version, err = s.store.getKnowledgeObjectVersion(ctx, item.Run.KnowledgeObjectVersionID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	switch item.Stage.StageKey {
 	case FilePipelineStageMetadata:
@@ -113,13 +138,20 @@ func (s *Service) executeCoordinatorStage(ctx context.Context, item PipelineWork
 		})
 		return nil, err
 	case FilePipelineStageNativeText:
-		extraction, err := s.ExtractObject(ctx, TextPipelineInput{Object: item.Object, MaxBytes: pipelineNativeSourceLimit(item.Object, input.MaxTextBytesPerObject), MaxExtractedTextBytes: input.MaxExtractedTextBytes, MaxChunks: input.MaxChunksPerObject})
+		extraction, err := s.extractPipelineNative(ctx, item, input)
 		if err != nil {
 			return nil, err
 		}
 		_, artifacts, err := s.applyUnifiedNativeExtraction(ctx, item, extraction)
 		if err != nil {
 			return nil, err
+		}
+		if effectiveCheapPipelinePlan(item.Run.PlanSnapshot) && (extraction.Status == ExtractionStatusNoEmbeddedText || referenceOnlyPDFExtraction(item.Run.PlanSnapshot, extraction.Status)) {
+			var plan CompiledPipelinePlan
+			_ = json.Unmarshal(item.Run.PlanSnapshot, &plan)
+			if !compiledPlanContainsSelectedStage(plan, FilePipelineStagePDFOCR) {
+				return nil, s.skipEmptyPipelineBody(ctx, item)
+			}
 		}
 		if len(artifacts) == 0 {
 			return []string{"native extraction produced no body text"}, nil
@@ -154,6 +186,9 @@ func (s *Service) executeCoordinatorStage(ctx context.Context, item PipelineWork
 		if err != nil {
 			return nil, err
 		}
+		if input.chunks != nil {
+			*input.chunks = pipelineChunkCache{runID: item.Run.KnowledgePipelineRunID, artifactID: artifact.KnowledgeDerivedArtifactID, inputs: inputs}
+		}
 		tx, err := s.store.db.BeginTx(ctx, nil)
 		if err != nil {
 			return nil, err
@@ -176,6 +211,9 @@ func (s *Service) executeCoordinatorStage(ctx context.Context, item PipelineWork
 			return nil, artifactErr
 		}
 		if found {
+			if input.chunks != nil && input.chunks.runID == item.Run.KnowledgePipelineRunID && input.chunks.artifactID == artifact.KnowledgeDerivedArtifactID {
+				return nil, s.publishConsolidatedLexicalInputs(ctx, item, version, artifact, input.chunks.inputs)
+			}
 			return nil, s.publishConsolidatedLexical(ctx, item, version, artifact)
 		}
 		// An empty replacement is a publication too; it must retire the old body.
@@ -293,6 +331,10 @@ func (s *Service) publishConsolidatedLexical(ctx context.Context, item PipelineW
 	if err != nil {
 		return err
 	}
+	return s.publishConsolidatedLexicalInputs(ctx, item, version, artifact, inputs)
+}
+
+func (s *Service) publishConsolidatedLexicalInputs(ctx context.Context, item PipelineWorkItem, version KnowledgeObjectVersion, artifact DerivedArtifact, inputs []TextChunkInput) error {
 	tx, err := s.store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -320,10 +362,22 @@ func (s *Service) publishConsolidatedLexical(ctx context.Context, item PipelineW
 		if err = replaceKnowledgeMetadataSearchDocumentForObjectTx(ctx, tx, current); err != nil {
 			return err
 		}
+		// No body means no current semantic publication, including when an
+		// otherwise enabled embedding stage intentionally skips empty output.
+		// Retain all historical rows for citations and compatible cache reuse.
+		if _, err = tx.ExecContext(ctx, `UPDATE knowledge.knowledge_objects SET semantic_version_id=NULL,semantic_published_at=NULL,semantic_runtime_key=NULL,semantic_model_key=NULL,semantic_dimensions=NULL WHERE knowledge_object_id=$1`, item.Object.KnowledgeObjectID); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE knowledge.chunk_embeddings SET active=false,status='historical',deactivated_at=COALESCE(deactivated_at,now()) WHERE knowledge_object_id=$1 AND active`, item.Object.KnowledgeObjectID); err != nil {
+			return err
+		}
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE knowledge.knowledge_objects SET lexical_version_id=$2,lexical_published_at=$3,
 		processing_state=CASE WHEN source_hash=$4 AND source_revision=$5 THEN 'indexed' ELSE 'stale' END,
 		last_processed_at=$3,updated_at=$3 WHERE knowledge_object_id=$1`, item.Object.KnowledgeObjectID, version.KnowledgeObjectVersionID, s.currentTime(), item.Run.SourceHash, item.Run.SourceRevision); err != nil {
+		return err
+	}
+	if err = MarkProjectionDirtyTx(ctx, tx, ProjectionDirtyInput{ObjectIDs: []string{item.Object.KnowledgeObjectID}}); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -406,7 +460,74 @@ func (s *Service) FailPipelineStage(ctx context.Context, item PipelineWorkItem, 
 	if err = requireOneRow(result, "pipeline run failure fence is stale"); err != nil {
 		return err
 	}
+	if err := notifyPipelineWorkTx(ctx, tx); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
 var _ = sql.ErrNoRows
+
+// V1 trajectories still use their original extractor. V2 native extraction
+// does not inventory PDF images: no selected stage consumes that inventory.
+func (s *Service) extractPipelineNative(ctx context.Context, item PipelineWorkItem, input PipelineCoordinatorRunInput) (ExtractionResult, error) {
+	if pipelineFileFamily(item.Object) != "pdf" || !effectiveCheapPipelinePlan(item.Run.PlanSnapshot) {
+		return s.ExtractObject(ctx, TextPipelineInput{Object: item.Object, MaxBytes: pipelineNativeSourceLimit(item.Object, input.MaxTextBytesPerObject), MaxExtractedTextBytes: input.MaxExtractedTextBytes, MaxChunks: input.MaxChunksPerObject})
+	}
+	object, cleanup, err := s.preparePathBackedExtractionObject(ctx, item.Object, DefaultPDFMaxSourceBytes)
+	if err != nil {
+		return ExtractionResult{}, err
+	}
+	defer cleanup()
+	extractor := newPDFExtractor(nil)
+	extractor.nativeOnly = true
+	result, err := extractor.Extract(ExtractionInput{Object: object, MaxSourceBytes: DefaultPDFMaxSourceBytes, MaxExtractedTextBytes: input.MaxExtractedTextBytes})
+	if err != nil {
+		return result, err
+	}
+	switch result.Status {
+	case ExtractionStatusPasswordRequired, ExtractionStatusTooLarge, ExtractionStatusSourceUnavailable, ExtractionStatusFailed:
+		if !referenceOnlyPDFExtraction(item.Run.PlanSnapshot, result.Status) {
+			return result, fmt.Errorf("%w: PDF native extraction %s", ErrInvalid, result.Status)
+		}
+	}
+	if input.MaxChunksPerObject > 0 && len(result.Chunks) > input.MaxChunksPerObject {
+		return result, fmt.Errorf("%w: text chunk count %d exceeds max_chunks %d", ErrInvalid, len(result.Chunks), input.MaxChunksPerObject)
+	}
+	return result, nil
+}
+
+// An automatic reference-only PDF retains metadata when its body exceeds the
+// extraction cap. Explicit enrichment and selected heavy work still fail closed.
+func referenceOnlyPDFExtraction(snapshot json.RawMessage, status string) bool {
+	if status != ExtractionStatusTooLarge {
+		return false
+	}
+	var plan CompiledPipelinePlan
+	if json.Unmarshal(snapshot, &plan) != nil || plan.FileFamily != "pdf" || plan.Enrichment != nil || !effectiveCheapPipelinePlan(snapshot) {
+		return false
+	}
+	for _, stage := range plan.Stages {
+		if stage.Selected && stage.ExecutionClass == PipelineExecutionHeavy {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Service) skipEmptyPipelineBody(ctx context.Context, item PipelineWorkItem) error {
+	tx, err := s.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = lockPipelineClaimTx(ctx, tx, item); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE knowledge.pipeline_stage_runs SET status='skipped_not_applicable',completed_at=now(),updated_at=now(),metadata=metadata||'{"skip_reason":"no_native_body_or_selected_enrichment"}'::jsonb
+	 WHERE knowledge_pipeline_run_id=$1 AND stage_key IN ('consolidate_text','chunk','embedding') AND status='waiting_dependency'`, item.Run.KnowledgePipelineRunID)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}

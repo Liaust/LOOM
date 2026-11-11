@@ -151,6 +151,11 @@ func newLaneSendCommand(opts *options) *cobra.Command {
 				return err
 			}
 			status := box.Inspect(resolved)
+			if status.Contract != nil {
+				if area, ok := status.Contract.Areas[box.AreaLane]; !ok || !area.Enabled {
+					return fmt.Errorf("Lane is disabled; use Workspace Copy to Main (retained transfer history is unchanged)")
+				}
+			}
 			statePath, err := laneStatePathForMutation(status)
 			if err != nil {
 				return err

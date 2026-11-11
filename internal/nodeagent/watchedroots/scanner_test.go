@@ -295,8 +295,11 @@ func TestAutomaticScanAggregateHashBudgetMakesProgress(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.Counts.HashBytesRead != 5 || result.Counts.HashComputed != 1 || result.Counts.HashReused != i || result.Checkpoint.PendingRescan != (i < 2) {
+		if result.Counts.HashBytesRead != 5 || result.Counts.HashComputed != 1 || result.Counts.HashReused != 0 || result.Checkpoint.PendingRescan != (i < 2) {
 			t.Fatalf("pass %d: %+v", i, result)
+		}
+		if i > 0 && (result.Mode != ScanModeDirty || result.Counts.Visited != 3-i) {
+			t.Fatalf("deferred hash retried whole root: %+v", result)
 		}
 	}
 }
@@ -1052,6 +1055,13 @@ func TestStabilityDefersWithoutSleepingAndResumesPersistedObservation(t *testing
 		t.Fatalf("premature hash: %+v", state)
 	}
 	observed := *state.HashObservedAt
+	if first.Checkpoint.NextHashReadyAt == nil || !first.Checkpoint.NextHashReadyAt.Equal(observed.Add(smallTextStability)) {
+		t.Fatal("stable hash deadline was not retained")
+	}
+	due, err := NextNativeReconcile(store, root, first.FinishedAt, first.StartedAt, true, 15*time.Minute)
+	if err != nil || !due.Equal(observed.Add(smallTextStability)) {
+		t.Fatalf("native stability deadline=%v err=%v", due, err)
+	}
 	second := scan()
 	state, err = store.LoadPathState("notes", "note.md")
 	if err != nil {
@@ -1067,7 +1077,7 @@ func TestStabilityDefersWithoutSleepingAndResumesPersistedObservation(t *testing
 		t.Fatal(err)
 	}
 	ready := scan()
-	if ready.Counts.HashComputed != 1 || ready.Checkpoint.PendingRescan {
+	if ready.Counts.HashComputed != 1 || ready.Checkpoint.PendingRescan || ready.Checkpoint.NextHashReadyAt != nil {
 		t.Fatalf("eligible observation: %+v", ready)
 	}
 	state, err = store.LoadPathState("notes", "note.md")

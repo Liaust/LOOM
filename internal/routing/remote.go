@@ -131,6 +131,9 @@ func (s Service) dispatchRemote(ctx context.Context, req requestctx.Context, pla
 	if err := tx.Commit(); err != nil {
 		return Route{}, CapabilityCall{}, "", eventIDs, err
 	}
+	if s.RemoteDispatchQueued != nil {
+		s.RemoteDispatchQueued(route.TargetNodeID)
+	}
 	return route, call, messageID, eventIDs, nil
 }
 

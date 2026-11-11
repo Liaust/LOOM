@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -36,6 +37,18 @@ type RunResult struct {
 type Runner interface {
 	Kind() string
 	RunOnce(ctx context.Context, store Store, env Env, instance WorkerInstance) (RunResult, error)
+}
+
+type WakeSource interface {
+	io.Closer
+	Healthy() bool
+}
+
+// Optional local event/deadline support. Durable state and RunOnce's existing
+// execution lock remain authoritative, including manual calls and archive fences.
+type EventRunner interface {
+	Watch(context.Context, Store, Env, WorkerInstance, func()) (WakeSource, error)
+	NextRunAt(Store, Env, WorkerInstance, time.Time, time.Time, bool) (time.Time, error)
 }
 
 type Registry struct {
@@ -169,6 +182,12 @@ func (r Registry) RunOnce(ctx context.Context, store Store, env Env, workerKey, 
 		"health_status": run.HealthStatus,
 		"message":       run.HealthMessage,
 	})
+	if instance.Kind == KindLocalQueueReporter && runErr == nil {
+		var summary LocalSummary
+		if json.Unmarshal(result.ResultJSON, &summary) == nil {
+			checkpoint.Metadata = mustJSON(map[string]any{"health_status": run.HealthStatus, "message": run.HealthMessage, "summary_checked_at": summary.CheckedAt})
+		}
+	}
 
 	health := WorkerHealth{
 		WorkerKey:           instance.WorkerKey,
@@ -183,8 +202,10 @@ func (r Registry) RunOnce(ctx context.Context, store Store, env Env, workerKey, 
 		UpdatedAt:           finished,
 	}
 
-	if err := store.AppendRun(run); err != nil {
-		return RunOutput{}, err
+	if instance.Kind != KindLocalQueueReporter || run.Status != RunStatusSkipped {
+		if err := store.AppendRun(run); err != nil {
+			return RunOutput{}, err
+		}
 	}
 	if err := store.SaveCheckpoint(checkpoint); err != nil {
 		return RunOutput{}, err
@@ -260,16 +281,16 @@ func (SelfcheckRunner) RunOnce(ctx context.Context, store Store, env Env, instan
 		}
 		messages = append(messages, "credential token is not configured")
 	}
-	outbox, err := store.OutboxSummary()
-	if err != nil {
-		return RunResult{}, err
+	files, summaryErr := store.fileQueueSummary()
+	if summaryErr != nil {
+		if status == WorkerStatusHealthy {
+			status = WorkerStatusDegraded
+		}
+		messages = append(messages, "queue summary unavailable")
+		checks["queue_summary_error"] = summaryErr.Error()
 	}
-	inbox, err := store.InboxSummary()
-	if err != nil {
-		return RunResult{}, err
-	}
-	checks["outbox"] = outbox
-	checks["inbox"] = inbox
+	checks["outbox"] = files.Outbox
+	checks["inbox"] = files.Inbox
 
 	return RunResult{
 		Status:       RunStatusSucceeded,
@@ -294,7 +315,8 @@ func (QueueReporterRunner) RunOnce(ctx context.Context, store Store, env Env, in
 		return RunResult{}, ctx.Err()
 	default:
 	}
-	summary, err := store.BuildLocalSummary()
+	previous, _ := store.LoadLatestSummary()
+	summary, err := store.BuildLocalSummaryContext(ctx)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -302,10 +324,18 @@ func (QueueReporterRunner) RunOnce(ctx context.Context, store Store, env Env, in
 		return RunResult{}, err
 	}
 	raw := mustJSON(summary)
+	health := WorkerStatusHealthy
+	if summary.Availability != "available" {
+		health = WorkerStatusDegraded
+	}
+	status, message := RunStatusSucceeded, "local queue summary updated"
+	if sameSummaryMaterial(previous, summary) {
+		status, message = RunStatusSkipped, "local queue summary unchanged"
+	}
 	return RunResult{
-		Status:           RunStatusSucceeded,
-		HealthStatus:     WorkerStatusHealthy,
-		Message:          "local queue summary updated",
+		Status:           status,
+		HealthStatus:     health,
+		Message:          message,
 		ResultJSON:       raw,
 		QueueSummaryJSON: raw,
 	}, nil

@@ -1,5 +1,8 @@
 # Named GitHub Identity And Portable Projection
 
+This compatibility example provides no live repository, account binding or
+publication authorization. Configure the approved binding before account access.
+
 Read `CREDENTIALS.md` and `../OPERATING-POLICY.md` before GitHub work.
 Use the installed, release-matched GitHub CLI and Git only within the accepted
 task. Missing tooling stops the operation; do not install or authenticate as an
@@ -31,8 +34,8 @@ Do not fall back to bare `gh`, change the wrapper or invoke auth/config/install
 commands to get past a refusal. Use relative `api` endpoints and explicit
 `--repo OWNER/REPO` or `--repo github.com/OWNER/REPO` when selecting a repository.
 
-Read the immutable non-secret operator binding documented in release-matched
-ORCA Main Operations through supported LOOM docs, using its `github.host`, `github.login` and `github.id`. The native
+Read the immutable non-secret operator binding in the configured deployment's
+operations documentation, using its `github.host`, `github.login` and `github.id`. The native
 current-user probe is `loom-morathustra-gh api user`; compare its structured
 reply to the bound host/login/numeric actor before task use. The shared agents
 UID is not per-agent OS isolation; ordinary coding agents receive no automatic
@@ -56,11 +59,10 @@ transport must use the same verified personal actor and isolated grant with no
 inherited credential or transport fallback. Do not assume isolating the CLI
 also isolates Git. If this cannot be proved, stop before any fetch or push.
 
-The intended access covers the operator's complete account, repositories and
-organisations as their actual granted permissions and SSO policies permit.
-Do not impose a example-operator-only or private-only access limit. The private initial
-workspace projection below is one destination, not the boundary of account
-access. Verify the permissions needed for the exact repository and task.
+Configured access is limited by actual granted permissions, SSO policies and
+the authorized task. The optional private workspace projection below is one
+destination, not a grant of account-wide authority. Verify the permissions
+needed for the exact repository and task; this template supplies none.
 
 Account access does not grant blanket action authority. Use only approved
 scopes needed for the operator's authorized work; do not automatically request
@@ -72,11 +74,12 @@ integrator; never widen access to make a command succeed.
 
 ## Private Portable Workspace Repository
 
-The live Hermes workspace remains a non-Git ORCA folder project. Never initialize
+The live Hermes workspace remains a non-Git native agent workspace. Never initialize
 Git there, place it inside another worktree, add it as a submodule, or mirror it
 wholesale. A private remote is not permission to copy private runtime state.
 
-The initial intended destination is private `example-operator/morathustra-workspace`.
+An optional destination is private `OWNER/morathustra-workspace`; it is not
+claimed to exist and this template does not create it.
 Creation and first publication are separate integrator actions with the operator
 present, after the personality/protocol and CLI slices are accepted and
 deployed. Verify exact owner, repository name, private visibility and the

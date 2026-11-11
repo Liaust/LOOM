@@ -155,6 +155,22 @@ func (c Client) SearchKnowledgeNotes(ctx context.Context, correlationID string, 
 	return doJSON[knowledge.NotesSearchResultSet](c, ctx, http.MethodPost, "/v1/knowledge/notes/search", correlationID, input)
 }
 
+func (c Client) SearchKnowledgeFiles(ctx context.Context, correlationID string, input knowledge.NotesSearchInput) (response.Envelope[knowledge.FileSearchResultSet], error) {
+	return doJSON[knowledge.FileSearchResultSet](c, ctx, http.MethodPost, "/v1/knowledge/notes/files/search", correlationID, input)
+}
+
+func (c Client) ReadKnowledgeFile(ctx context.Context, correlationID string, input knowledge.FileReadInput) (response.Envelope[knowledge.FileReadResult], error) {
+	return doJSON[knowledge.FileReadResult](c, ctx, http.MethodPost, "/v1/knowledge/notes/files/read", correlationID, input)
+}
+
+func (c Client) ReconcileKnowledgeFiles(ctx context.Context, correlationID string, input knowledge.FileIdentityReconcileInput) (response.Envelope[knowledge.FileIdentityReconcileResult], error) {
+	return doJSON[knowledge.FileIdentityReconcileResult](c, ctx, http.MethodPost, "/v1/knowledge/notes/files/reconcile", correlationID, input)
+}
+
+func (c Client) RetainedKnowledgeFileOutputs(ctx context.Context, correlationID string, input knowledge.RetainedFileOutputsInput) (response.Envelope[knowledge.RetainedFileOutputsResult], error) {
+	return doJSON[knowledge.RetainedFileOutputsResult](c, ctx, http.MethodPost, "/v1/knowledge/notes/files/retained", correlationID, input)
+}
+
 func (c Client) GetKnowledgeNotesEmbeddingStatus(ctx context.Context, correlationID string) (response.Envelope[knowledge.EmbeddingStatus], error) {
 	return doJSON[knowledge.EmbeddingStatus](c, ctx, http.MethodGet, "/v1/knowledge/notes/embeddings/status", correlationID, nil)
 }
@@ -169,6 +185,10 @@ func (c Client) DisableKnowledgeNotesEmbeddings(ctx context.Context, correlation
 
 func (c Client) GetKnowledgeNotesPipelineStatus(ctx context.Context, correlationID string) (response.Envelope[knowledge.PipelineOverallStatus], error) {
 	return doJSON[knowledge.PipelineOverallStatus](c, ctx, http.MethodGet, "/v1/knowledge/notes/pipelines/status", correlationID, nil)
+}
+
+func (c Client) InspectKnowledgeNotesPipelineIntegrity(ctx context.Context, correlationID string) (response.Envelope[knowledge.PipelineOverallStatus], error) {
+	return doJSON[knowledge.PipelineOverallStatus](c, ctx, http.MethodGet, "/v1/knowledge/notes/pipelines/status?inspect_integrity=true", correlationID, nil)
 }
 func (c Client) ListKnowledgeNotesPipelines(ctx context.Context, correlationID string, input knowledge.PipelineListInput) (response.Envelope[[]knowledge.PipelineRun], error) {
 	values := url.Values{}

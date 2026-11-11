@@ -1,0 +1,178 @@
+diff --git a/libs/cua-driver/rust/crates/platform-linux/src/interaction/facts.rs b/libs/cua-driver/rust/crates/platform-linux/src/interaction/facts.rs
+index 6100ee7..6df23b5 100644
+--- a/libs/cua-driver/rust/crates/platform-linux/src/interaction/facts.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/interaction/facts.rs
+@@ -24,6 +24,25 @@ pub struct Facts {
+ 
+ const LOCK_PROBE_CAP: Duration = Duration::from_millis(250);
+ 
++// The validated launcher can bind a headless agent to an existing X11 login.
++pub const TARGET_SESSION: &str = "CUA_DRIVER_RS_TARGET_LOGIND_SESSION";
++
++fn validate_session_id(id: &str) -> Result<()> {
++    ensure!(
++        !id.is_empty() && id.len() <= 32
++            && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-'),
++        "invalid bound logind session identifier"
++    );
++    Ok(())
++}
++
++fn validate_bound_session(uid: u32, expected_uid: u32, kind: &str, class: &str, active: bool) -> Result<()> {
++    ensure!(uid == expected_uid, "bound desktop belongs to another user");
++    ensure!(kind == "x11" && class == "user", "bound desktop is not an X11 user session");
++    ensure!(active, "bound desktop is not active");
++    Ok(())
++}
++
+ /// Whether the session's screensaver reports itself active. KWin and X11
+ /// sessions ask `org.freedesktop.ScreenSaver`, GNOME asks
+ /// `org.gnome.ScreenSaver`; the answer counts only when the service's owner
+@@ -38,9 +57,11 @@ pub fn locked() -> Fact<bool> {
+     {
+         return Fact::Unknown("this compositor reports no lock state".into());
+     }
+-    let gnome = std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|desktop| desktop.contains("GNOME"));
+-    let (service, path) = if gnome {
++    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
++    let (service, path) = if desktop.contains("GNOME") {
+         ("org.gnome.ScreenSaver", "/org/gnome/ScreenSaver")
++    } else if desktop.split(':').any(|part| part.eq_ignore_ascii_case("XFCE")) {
++        ("org.xfce.ScreenSaver", "/org/xfce/ScreenSaver")
+     } else {
+         (
+             "org.freedesktop.ScreenSaver",
+@@ -88,15 +109,52 @@ async fn screensaver_active(service: &str, path: &str) -> Result<bool> {
+     )
+     .await?;
+     let theirs: OwnedObjectPath = logind.call("GetSessionByPID", &(owner_pid,)).await?;
+-    let ours: OwnedObjectPath = logind
+-        .call("GetSessionByPID", &(std::process::id(),))
+-        .await?;
++    let ours: OwnedObjectPath = if let Some(id) = std::env::var_os(TARGET_SESSION) {
++        let id = id.into_string().map_err(|_| anyhow::anyhow!("invalid bound session encoding"))?;
++        validate_session_id(&id)?;
++        let target: OwnedObjectPath = logind.call("GetSession", &(id.as_str(),)).await?;
++        let login = zbus::Proxy::new(
++            &system, "org.freedesktop.login1", target.as_str(), "org.freedesktop.login1.Session"
++        ).await?;
++        let (uid, _): (u32, OwnedObjectPath) = login.get_property("User").await?;
++        let kind: String = login.get_property("Type").await?;
++        let class: String = login.get_property("Class").await?;
++        let active: bool = login.get_property("Active").await?;
++        validate_bound_session(uid, unsafe { libc::geteuid() }, &kind, &class, active)?;
++        let locked: bool = login.get_property("LockedHint").await?;
++        if locked { return Ok(true); }
++        target
++    } else {
++        logind.call("GetSessionByPID", &(std::process::id(),)).await?
++    };
+     ensure!(
+         theirs == ours,
+-        "its owner runs in logind session {}, not this process's {}",
++        "its owner runs in logind session {}, not the selected {}",
+         theirs.as_str(),
+         ours.as_str()
+     );
+     let saver = zbus::Proxy::new(&session, owner.as_str(), path, service).await?;
+     Ok(saver.call("GetActive", &()).await?)
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn bound_session_identifiers_are_bounded_and_literal() {
++        for id in ["8208", "c1", "session_2-a"] { validate_session_id(id).unwrap(); }
++        for id in ["", "../8208", "8208\n", "a b", "012345678901234567890123456789012"] {
++            assert!(validate_session_id(id).is_err());
++        }
++    }
++
++    #[test]
++    fn bound_desktop_requires_same_user_active_x11_login() {
++        validate_bound_session(1002, 1002, "x11", "user", true).unwrap();
++        for (uid, kind, class, active) in [
++            (1000, "x11", "user", true), (1002, "wayland", "user", true),
++            (1002, "x11", "greeter", true), (1002, "x11", "user", false),
++        ] { assert!(validate_bound_session(uid, 1002, kind, class, active).is_err()); }
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-linux/src/interaction/mod.rs b/libs/cua-driver/rust/crates/platform-linux/src/interaction/mod.rs
+index 0bc0b44..c168211 100644
+--- a/libs/cua-driver/rust/crates/platform-linux/src/interaction/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/interaction/mod.rs
+@@ -154,6 +154,9 @@ pub fn with_x11_foreground<T>(
+     mode: RestoreMode,
+     body: impl FnOnce() -> Result<T>,
+ ) -> Result<(T, ForegroundReport)> {
++    if std::env::var_os(facts::TARGET_SESSION).is_some() {
++        admit_lock(policy::Scope::TargetBoundInput, facts::Fact::Unknown("before activation".into()))?;
++    }
+     let (_transaction, prior) = match mode {
+         RestoreMode::RestorePrevious => {
+             let held = hold_transaction()?;
+diff --git a/libs/cua-driver/rust/crates/platform-linux/src/interaction/policy.rs b/libs/cua-driver/rust/crates/platform-linux/src/interaction/policy.rs
+index c43f1c6..a67fc93 100644
+--- a/libs/cua-driver/rust/crates/platform-linux/src/interaction/policy.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/interaction/policy.rs
+@@ -25,10 +25,17 @@ pub enum Scope {
+ /// exact focus was read back as `Known(true)`, and admits target-bound input, desktop input
+ /// and capture on the adapter's other checks, as before this rule existed.
+ pub fn lock(scope: Scope, facts: &Facts) -> Result<()> {
++    lock_with_binding(scope, facts, std::env::var_os(super::facts::TARGET_SESSION).is_some())
++}
++
++fn lock_with_binding(scope: Scope, facts: &Facts, bound: bool) -> Result<()> {
+     match (&facts.locked, scope) {
+         (Fact::Known(true), _) => {
+-            bail!("screen_locked: the session screensaver reports itself active, so nothing was sent or captured")
++            bail!("screen_locked: the session is locked or blanked (screensaver active); ask the operator to wake and, if needed, unlock the agents desktop. Nothing was sent or captured")
+         }
++        (Fact::Unknown(why), _) if bound => bail!(
++            "desktop_unavailable: the bound desktop's readiness is unknown ({why}); nothing was sent or captured. Ask the operator to check the agents desktop; do not retry input blindly"
++        ),
+         (Fact::Known(false), _)
+         | (
+             Fact::Unknown(_),
+@@ -293,6 +300,16 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn bound_desktop_unknown_readiness_never_falls_back_to_focus() {
++        for scope in [Scope::WindowInput, Scope::TargetBoundInput, Scope::DesktopInput, Scope::Capture] {
++            let error = lock_with_binding(scope, &facts(unknown(), Fact::Known(true)), true).unwrap_err();
++            assert!(error.to_string().starts_with("desktop_unavailable:"));
++            assert!(lock_with_binding(scope, &facts(Fact::Known(true), Fact::Known(true)), true).is_err());
++            lock_with_binding(scope, &facts(Fact::Known(false), unknown()), true).unwrap();
++        }
++    }
++
+     #[test]
+     fn an_unknown_lock_admits_window_input_only_after_focus_read_back() {
+         lock(Scope::WindowInput, &facts(unknown(), Fact::Known(true))).unwrap();
+diff --git a/libs/cua-driver/rust/crates/platform-linux/src/tools/bring_to_front.rs b/libs/cua-driver/rust/crates/platform-linux/src/tools/bring_to_front.rs
+index fb9ba97..e90315f 100644
+--- a/libs/cua-driver/rust/crates/platform-linux/src/tools/bring_to_front.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/tools/bring_to_front.rs
+@@ -50,6 +50,17 @@ impl Tool for BringToFrontTool {
+ 
+     async fn invoke(&self, args: Value) -> ToolResult {
+         use cua_driver_core::tool_args::ArgsExt;
++        if std::env::var_os(crate::interaction::facts::TARGET_SESSION).is_some() {
++            let readiness = tokio::task::spawn_blocking(|| crate::interaction::admit_lock(
++                crate::interaction::policy::Scope::TargetBoundInput,
++                crate::interaction::facts::Fact::Unknown("before activation".into()),
++            )).await;
++            match readiness {
++                Ok(Ok(())) => (),
++                Ok(Err(error)) => return ToolResult::error(error.to_string()),
++                Err(error) => return ToolResult::error(format!("Desktop readiness probe failed: {error}")),
++            }
++        }
+         let pid = args.u64_or("pid", 0) as u32;
+         if crate::wayland::is_wayland() {
+             let window_id = match args.opt_u64("window_id") {
+

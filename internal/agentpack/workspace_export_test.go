@@ -102,7 +102,7 @@ func TestWorkspaceExportSourceBindingAndReconstruction(t *testing.T) {
 	if _, err := os.Lstat(options.Path); !os.IsNotExist(err) {
 		t.Fatal("planning wrote destination")
 	}
-	if len(plan.Manifest.Files) != 23 || len(plan.payloads) != 24 {
+	if len(plan.Manifest.Files) != 24 || len(plan.payloads) != 25 {
 		t.Fatal("wrong census")
 	}
 
@@ -110,12 +110,12 @@ func TestWorkspaceExportSourceBindingAndReconstruction(t *testing.T) {
 	expectedSources := map[string]bool{}
 	for _, path := range minaSourceFiles {
 		switch path {
-		case "investigations/README.md", "recovery/README.md", "skills/installed/README.md", "tmp/README.md":
+		case ".agents/skills/README.md", "investigations/README.md", "recovery/README.md", "skills/installed/README.md", "tmp/README.md":
 			continue
 		}
 		expectedSources[path] = true
 	}
-	if len(expectedSources) != 20 {
+	if len(expectedSources) != 21 {
 		t.Fatal("instruction source census changed")
 	}
 	for _, entry := range plan.Manifest.Files {
@@ -159,7 +159,7 @@ func TestWorkspaceExportSourceBindingAndReconstruction(t *testing.T) {
 		t.Fatalf("apply: %v", err)
 	}
 	tree := exportTestTree(t, options.Path)
-	if len(tree) != 24 {
+	if len(tree) != 25 {
 		t.Fatalf("tree: %v", tree)
 	}
 	for _, file := range plan.Manifest.Files {
@@ -184,7 +184,7 @@ func TestWorkspaceExportSourceBindingAndReconstruction(t *testing.T) {
 			t.Fatal("wrong generated provenance")
 		}
 	}
-	if plan.payloads[".hermes/SOUL.md"] == nil || exportDigest(plan.payloads["skins/mina-matrix-teal.yaml"]) != workspaceExportSkinHash {
+	if plan.payloads["SOUL.md"] == nil || exportDigest(plan.payloads["skins/mina-matrix-teal.yaml"]) != workspaceExportSkinHash {
 		t.Fatal("soul or skin missing")
 	}
 	// Reconstruct only the explicit portable source inventory using local Git.
@@ -371,7 +371,7 @@ func TestWorkspaceExportRefusesUnsafeAndUnreviewedInputs(t *testing.T) {
 	for _, content := range []string{"password=DO_NOT_LEAK_FIXTURE", "source at /srv/private-fixture/path", "\x00binary", "# Empty soul\n"} {
 		t.Run(fmt.Sprintf("redaction-%x", exportDigest([]byte(content))[:8]), func(t *testing.T) {
 			r, o := exportTestFixture(t)
-			path := "ai-loom-pack/templates/mina/.hermes/SOUL.md"
+			path := "ai-loom-pack/templates/mina/SOUL.md"
 			exportTestWrite(t, filepath.Join(r, path), []byte(content))
 			exportTestGit(t, r, "add", "--", path)
 			exportTestGit(t, r, "commit", "--quiet", "-m", "invalid content fixture")
@@ -446,7 +446,7 @@ func TestWorkspaceExportRevalidationAndPartialInventory(t *testing.T) {
 			}
 		})
 	}
-	for _, stop := range []string{".", ".hermes", ".hermes/SOUL.md", "WORKFLOW.md"} {
+	for _, stop := range []string{".", "protocols", "SOUL.md", "WORKFLOW.md"} {
 		t.Run("partial-"+stop, func(t *testing.T) {
 			_, o := exportTestFixture(t)
 			plan, err := PlanWorkspaceExport(o)
@@ -517,7 +517,7 @@ func TestWorkspaceExportPublicationSubstitutionAndUnknownEntry(t *testing.T) {
 						t.Fatal(err)
 					}
 					exportTestWrite(t, filepath.Join(options.Path, "unknown.txt"), []byte("preserve replacement"))
-				case attack == "directory" && path == ".hermes":
+				case attack == "directory" && path == "protocols":
 					attacked = true
 					p := filepath.Join(options.Path, path)
 					if err := os.Rename(p, p+"-created"); err != nil {
@@ -526,13 +526,13 @@ func TestWorkspaceExportPublicationSubstitutionAndUnknownEntry(t *testing.T) {
 					if err := os.Mkdir(p, 0700); err != nil {
 						t.Fatal(err)
 					}
-				case attack == "file-link" && path == ".hermes/SOUL.md":
+				case attack == "file-link" && path == "SOUL.md":
 					attacked = true
 					p := filepath.Join(options.Path, path)
 					if err := os.Remove(p); err != nil {
 						t.Fatal(err)
 					}
-					if err := os.Link(filepath.Join(root, "ai-loom-pack/templates/mina/.hermes/SOUL.md"), p); err != nil {
+					if err := os.Link(filepath.Join(root, "ai-loom-pack/templates/mina/SOUL.md"), p); err != nil {
 						t.Fatal(err)
 					}
 				case attack == "source" && path == ".":

@@ -430,8 +430,17 @@ func (s Service) deactivateServices(ctx context.Context, req requestctx.Context,
 		metadata   json.RawMessage
 	}
 	archiveTargets := make(map[string]archiveTarget, len(providers))
+	scriptProviders := make(map[string]projects.ProjectDeactivationAction)
 	if physicalArchive {
 		for _, item := range providers {
+			script, err := s.inactiveProjectScriptArchiveAction(ctx, detail, item)
+			if err != nil {
+				return result, err
+			}
+			if script != nil {
+				scriptProviders[item.ProviderID] = *script
+				continue
+			}
 			inspection, actionMetadata, err := s.projectArchiveServiceActionMetadata(ctx, item)
 			if err != nil {
 				return result, fmt.Errorf("seal service deactivation target %s: %w", item.ProviderKey, err)
@@ -440,6 +449,10 @@ func (s Service) deactivateServices(ctx context.Context, req requestctx.Context,
 		}
 	}
 	for _, item := range providers {
+		if script, ok := scriptProviders[item.ProviderID]; ok {
+			result.Actions = append(result.Actions, script)
+			continue
+		}
 		var inspection capabilities.ProviderInspection
 		var actionMetadata json.RawMessage
 		var err error

@@ -1,0 +1,30 @@
+diff --git a/tools/computer_use/cua_backend.py b/tools/computer_use/cua_backend.py
+--- a/tools/computer_use/cua_backend.py
++++ b/tools/computer_use/cua_backend.py
+@@ -410,6 +410,14 @@
+         # working; drivers advertising neither (`additionalProperties: false`) must never see the property.
+         idx = args.get("element_index")
+         token = self._snapshot_tokens.get(idx) if isinstance(idx, int) else None
++        # New strict schemas replaced indices with snapshot-bound tokens. Never
++        # send the removed field or downgrade a missing token to an unsafe index.
++        if idx is not None and self._session.supports_input_property(name, "element_token") \
++                and not self._session.supports_input_property(name, "element_index"):
++            if not token:
++                return ActionResult(ok=False, action=name,
++                                    message="Capture this window again before element input; no current snapshot token is available.")
++            args.pop("element_index")
+         if token and (self._session.supports_input_property(name, "element_token")
+                       or self._session.supports_capability("accessibility.element_tokens", tool=name)):
+             args["element_token"] = token
+diff --git a/tools/computer_use/cua_backend_capture.py b/tools/computer_use/cua_backend_capture.py
+--- a/tools/computer_use/cua_backend_capture.py
++++ b/tools/computer_use/cua_backend_capture.py
+@@ -253,6 +253,8 @@
+         args: dict[str, Any] = {"pid": self._active_pid, "window_id": self._active_window_id,
+                                 "session": self._session_id}
++        if self._session.supports_input_property("get_window_state", "tree_format"):
++            args["tree_format"] = "elements"
+         from tools.computer_use import cua_backend as _cb  # lazy: cua_backend imports this module at import time
+         if capped := _cb._cua_configured_ax_max_elements():
+             args["max_elements"] = capped
+         return args

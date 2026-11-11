@@ -21,22 +21,43 @@ func (s Service) Reconcile(ctx context.Context, id string) (out Recovery, err er
 	if err != nil {
 		return out, err
 	}
+	if requestKind(op.Request) == KindImport {
+		// Imports never displace a live inode; their immutable payload is held
+		// by the upload's blob reference, not an inline edit-chain snapshot.
+		return Recovery{OperationID: id, State: "clean", Reason: "import has no displaced source inode"}, nil
+	}
+	if op.Base.MetadataAction != nil {
+		return s.ReconcileMetadataAction(ctx, id)
+	}
 	err = s.Store.WithLock(ctx, "collection:"+op.File.CollectionID, func(store Store) error {
 		op, err = store.Operation(ctx, id)
 		if err != nil {
 			return err
 		}
 		out = Recovery{OperationID: id, State: "clean"}
+		if op.File.EntryKind == "directory" {
+			out.State, out.Reason = Held, "directory journals retain directory inodes; file-byte reconciliation is not applicable"
+			return nil
+		}
 		if op.Journal == "" {
 			return nil
 		}
 		guard := func(fn func(Source) error) error {
+			if op.JournalLocation != nil {
+				reader, ok := store.(interface {
+					WithJournalLocation(context.Context, JournalLocation, func(Source) error) error
+				})
+				if !ok {
+					return ErrMembership
+				}
+				return reader.WithJournalLocation(ctx, *op.JournalLocation, fn)
+			}
 			if retained, ok := s.Sources.(RetainedResolver); ok && (op.State == Accepted || op.State == Conflict) {
 				return retained.WithRetainedSource(ctx, op.File.CollectionID, op.File.RelativePath, op.Request.Generation, fn)
 			}
 			return s.Sources.WithSource(ctx, op.File.CollectionID, op.File.RelativePath, fn)
 		}
-		if requestKind(op.Request) == KindRename && op.State != Accepted && op.State != Conflict {
+		if op.JournalLocation == nil && requestKind(op.Request) == KindRename && op.State != Accepted && op.State != Conflict {
 			paths, ok := s.Sources.(PathResolver)
 			if !ok {
 				return fmt.Errorf("source resolver does not support fenced rename paths")
@@ -46,13 +67,20 @@ func (s Service) Reconcile(ctx context.Context, id string) (out Recovery, err er
 			}
 		}
 		guardErr := guard(func(src Source) error {
-			if src.CollectionID != op.File.CollectionID || src.Generation != op.Request.Generation {
+			if op.JournalLocation == nil && (src.CollectionID != op.File.CollectionID || src.Generation != op.Request.Generation) {
 				return ErrMembership
 			}
-			if err := validatePath(op.File.RelativePath); err != nil {
+			relative := op.File.RelativePath
+			if op.JournalLocation != nil {
+				relative = op.JournalLocation.RelativePath
+				if src.CollectionID != op.JournalLocation.ScopeID {
+					return ErrMembership
+				}
+			}
+			if err := validatePath(relative); err != nil {
 				return err
 			}
-			parent, name, err := openSourceParent(src.Path, op.File.RelativePath)
+			parent, name, err := openSourceParent(src.Path, relative)
 			if err != nil {
 				return err
 			}

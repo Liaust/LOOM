@@ -58,7 +58,7 @@ in
     pgSearch.enable = lib.mkOption {
       type = lib.types.bool;
       default = false;
-      description = "Load the pinned PostgreSQL 17 pg_search extension for the Notes retrieval evaluation. Does not switch Notes search or create indexes.";
+      description = "Load pinned pg_search. The Notes pg_search backend separately provisions it in the live database.";
     };
 
     provenance = {
@@ -85,10 +85,14 @@ in
   config = lib.mkIf (cfg.enable && cfg.postgres.enable) {
     assertions = [
       {
+        assertion = cfg.notesSearchBackend != "pg_search" || cfg.postgres.pgSearch.enable;
+        message = "Notes BM25 requires the pinned pg_search host extension.";
+      }
+      {
         assertion = !cfg.postgres.pgSearch.enable || (cfg.postgres.pgvector.enable
           && pkgs.stdenv.hostPlatform.system == "x86_64-linux"
           && lib.versions.major cfg.postgres.package.version == "17");
-        message = "The pg_search evaluation requires PostgreSQL 17, pgvector and x86_64 Linux.";
+        message = "The pinned pg_search backend requires PostgreSQL 17, pgvector and x86_64 Linux.";
       }
       {
         assertion = provenanceCfg.database != cfg.postgres.database;
@@ -181,6 +185,17 @@ in
         psql -v ON_ERROR_STOP=1 -d template1 -c 'CREATE EXTENSION IF NOT EXISTS vector;'
         psql -v ON_ERROR_STOP=1 -d "${cfg.postgres.database}" -c 'CREATE EXTENSION IF NOT EXISTS vector;'
       ''}
+      ${lib.optionalString (cfg.postgres.pgSearch.enable && cfg.notesSearchBackend == "pg_search") ''
+        psql -v ON_ERROR_STOP=1 -d "${cfg.postgres.database}" -c "CREATE EXTENSION IF NOT EXISTS pg_search VERSION '0.25.11';"
+        test "$(psql -At -v ON_ERROR_STOP=1 -d "${cfg.postgres.database}" -c "SELECT extversion FROM pg_extension WHERE extname='pg_search'")" = '0.25.11'
+      ''}
+
+      # The API already requires this setup owner. Repair OS/ICU collation
+      # transitions before it starts, and leave versions unchanged on failure.
+      for database in ${lib.escapeShellArgs [ "postgres" "template1" cfg.postgres.database provenanceCfg.database ]}; do
+        psql -X -v ON_ERROR_STOP=1 -d "$database" -f ${../files/postgresql/refresh-collations.sql}
+      done
     '';
+    systemd.services.postgresql-setup.serviceConfig.TimeoutStartSec = "30min";
   };
 }

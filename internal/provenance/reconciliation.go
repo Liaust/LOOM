@@ -15,6 +15,7 @@ import (
 const MaximumOperationBatch = 100
 
 var ErrLifecycleConflict = errors.New("semantic lifecycle transition conflicts with durable state")
+var ErrAcceptedProducerHistory = errors.New("accepted record producer history is invalid")
 
 type CandidateTerminalConflictError struct {
 	CandidateID        SemanticID
@@ -363,6 +364,11 @@ func (service *Service) ApplyOperations(ctx context.Context, batch ManualOperati
 			if existingCount != len(prepared) {
 				return ErrPartialOperationReplay
 			}
+			for _, item := range prepared {
+				if err := tx.checkReplaySelection(ctx, item.operation); err != nil {
+					return err
+				}
+			}
 			result = ManualOperationBatchReceipt{SchemaVersion: SchemaVersion, Result: "applied", Replayed: true, Receipts: replayed}
 			return nil
 		}
@@ -571,6 +577,9 @@ func (state *reconciliationState) validate(ctx context.Context, operation Lifecy
 			return err
 		}
 		if err := validateAcceptedRecord(op.Accepted, candidate, metadata); err != nil {
+			return err
+		}
+		if err := state.store.checkAnchors(ctx, op.Accepted.Record.Anchors); err != nil {
 			return err
 		}
 		state.records[op.Accepted.Record.ID] = op.Accepted.Record
@@ -1100,12 +1109,13 @@ func (state *reconciliationState) sourceInScope(ctx context.Context, id Semantic
 			LEFT JOIN provenance.candidates candidate ON candidate.id=source.candidate_id
 			LEFT JOIN provenance.evidence_registrations evidence ON evidence.source_reference_id=source.id
 			WHERE source.id=$1 AND (
-				(candidate.domain=$2 AND candidate.visibility=$3) OR
-				(evidence.domain=$2 AND evidence.visibility=$3) OR
-				EXISTS(SELECT 1 FROM provenance.record_sources link JOIN provenance.records record ON record.id=link.record_id WHERE link.source_reference_id=source.id AND record.domain=$2 AND record.visibility=$3)
+				(candidate.domain=$2 AND candidate.visibility=$3 AND `+anchorsBoxSQL("candidate.submitted_json->'anchors'", "$4")+`) OR
+				(evidence.domain=$2 AND evidence.visibility=$3 AND (`+anchorsBoxSQL("evidence.payload_json->'anchors'", "$4")+` OR
+				 (evidence.resolution_case_id IS NOT NULL AND `+caseBoxSQL("evidence.resolution_case_id", "$4")+`))) OR
+				EXISTS(SELECT 1 FROM provenance.record_sources link JOIN provenance.records record ON record.id=link.record_id WHERE link.source_reference_id=source.id AND record.domain=$2 AND record.visibility=$3 AND `+anchorsBoxSQL("record.anchors_json", "$4")+`)
 			)
 		)
-	`, string(id), state.scope.Domain, state.scope.Visibility).Scan(&exists)
+	`, string(id), state.scope.Domain, state.scope.Visibility, selectedBoxes(ctx)).Scan(&exists)
 	return exists, err
 }
 
@@ -1172,7 +1182,7 @@ func validateAcceptedRecord(accepted AcceptedRecord, candidate *candidateValidat
 		return errors.New("accepted record requires a bounded unique source set")
 	}
 	if len(record.Ambiguity) > MaximumSourcesPerObject || (record.Anchors != nil &&
-		(len(record.Anchors.Entities) > MaximumSourcesPerObject || len(record.Anchors.Topics) > MaximumSourcesPerObject || len(record.Anchors.Projects) > MaximumSourcesPerObject)) {
+		(len(record.Anchors.Boxes) > MaximumSourcesPerObject || len(record.Anchors.Entities) > MaximumSourcesPerObject || len(record.Anchors.Topics) > MaximumSourcesPerObject || len(record.Anchors.Projects) > MaximumSourcesPerObject)) {
 		return errors.New("accepted record repeated fields exceed their bounded collection limit")
 	}
 	if !idsContainAll(accepted.SourceReferenceIDs, candidate.sourceIDs) {
@@ -1185,19 +1195,20 @@ func validateAcceptedRecord(accepted AcceptedRecord, candidate *candidateValidat
 		return errors.New("accepted record cannot predeclare append-only representation history")
 	}
 	candidateProducer := candidate.registration.Producer
-	if candidateProducer.ProducerID == metadata.Producer.ProducerID && !sameProducer(candidateProducer, metadata.Producer) {
-		return errors.New("accepted record producer history reuses one producer id with conflicting grounded identities")
+	// Task/run context belongs in history; it does not change a stable agent's identity.
+	if candidateProducer.ProducerID == metadata.Producer.ProducerID && candidateProducer.ProducerKind != metadata.Producer.ProducerKind {
+		return fmt.Errorf("%w: one producer id cannot change producer kind", ErrAcceptedProducerHistory)
 	}
 	expected := []ProducerIdentity{candidateProducer}
 	if !sameProducer(candidateProducer, metadata.Producer) {
 		expected = append(expected, metadata.Producer)
 	}
 	if len(expected) != len(accepted.ProducerHistory) {
-		return errors.New("accepted record producer history must exactly preserve candidate then reviewer")
+		return fmt.Errorf("%w: preserve candidate then reviewer contexts exactly", ErrAcceptedProducerHistory)
 	}
 	for index := range expected {
 		if !sameProducer(expected[index], accepted.ProducerHistory[index]) {
-			return errors.New("accepted record producer history must exactly preserve candidate then reviewer")
+			return fmt.Errorf("%w: preserve candidate then reviewer contexts exactly", ErrAcceptedProducerHistory)
 		}
 	}
 	allowed := map[SemanticID]struct{}{}
@@ -1276,8 +1287,12 @@ func applyLifecycleOperation(ctx context.Context, store *Store, operation Lifecy
 				return err
 			}
 		}
-		for _, producer := range accepted.ProducerHistory {
-			if err := store.LinkRecordProducer(ctx, RecordProducer{RecordID: record.ID, CandidateID: &op.CandidateID, Producer: producer, LinkedAt: metadata.OccurredAt.UTC()}); err != nil {
+		for index, producer := range accepted.ProducerHistory {
+			var candidateID *SemanticID
+			if index == 0 {
+				candidateID = &op.CandidateID
+			}
+			if err := store.LinkRecordProducer(ctx, RecordProducer{RecordID: record.ID, CandidateID: candidateID, Producer: producer, LinkedAt: metadata.OccurredAt.UTC()}); err != nil {
 				return err
 			}
 		}

@@ -3,10 +3,27 @@ package watchedroots
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"loom.local/loom/internal/filesystemconnector"
 )
+
+func TestOwnedNotesRecoveryPathsAreNeverOrdinaryContent(t *testing.T) {
+	root := testValidatedRoot(t, RootConfig{RootKey: "notes", SafeRootKey: "slice09", Include: []string{"**/*"}})
+	for _, p := range []string{".loom-notes-" + strings.Repeat("a", 64), "old/.loom-notes-" + strings.Repeat("b", 64) + "/original/note.md"} {
+		obs := PathObservation{RelativePath: p, Safe: true, Exists: true, Kind: PathKindFile}
+		if got := ClassifyPath(obs, root); got.Included || got.ReasonCode != ReasonExcludedFilePolicy {
+			t.Fatalf("journal entered ordinary sync: %+v", got)
+		}
+		if excluded, _ := excludedByCurrentFilePolicy(root, p, false); !excluded {
+			t.Fatal("retained old journal must not become a user deletion")
+		}
+	}
+	if IsNotesRecoveryPath("notes/.loom-notes-personal.md") {
+		t.Fatal("ordinary similarly named user note excluded")
+	}
+}
 
 func TestClassifyPathIncludesAndExcludesByPolicy(t *testing.T) {
 	t.Parallel()

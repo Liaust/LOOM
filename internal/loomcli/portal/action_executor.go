@@ -13,10 +13,12 @@ import (
 	"loom.local/loom/internal/cloudstorage"
 	"loom.local/loom/internal/filepolicy"
 	"loom.local/loom/internal/ids"
+	"loom.local/loom/internal/knowledge"
 	"loom.local/loom/internal/lane"
 	"loom.local/loom/internal/maintenance"
 	"loom.local/loom/internal/projectcontracts"
 	"loom.local/loom/internal/projects"
+	"loom.local/loom/internal/response"
 	"loom.local/loom/internal/search"
 	"loom.local/loom/internal/storagearchive"
 	"loom.local/loom/internal/storagecatalog"
@@ -89,6 +91,9 @@ func (e ActionExecutor) Execute(ctx context.Context, action PortalAction) Portal
 	case PortalExecutorObjectInspect:
 		return e.executeObjectInspect(ctx, action)
 	case PortalExecutorRecordInspect:
+		if action.TargetKind == "notes_search_result" && action.Executor.Payload["file_id"] != "" {
+			return e.executeNotesFileRead(ctx, action)
+		}
 		return e.executeRecordInspect(action)
 	case PortalExecutorProtectedFolderProtect:
 		return e.executeProtectedFolderProtect(ctx, action)
@@ -949,6 +954,28 @@ func (e ActionExecutor) executeObjectInspect(ctx context.Context, action PortalA
 		CorrelationID: firstNonEmpty(envelope.Meta.CorrelationID, e.CorrelationID),
 		RefreshScreen: action.RefreshScreen,
 	}
+}
+
+func (e ActionExecutor) executeNotesFileRead(ctx context.Context, action PortalAction) PortalActionResult {
+	client, ok := e.Client.(interface {
+		ReadKnowledgeFile(context.Context, string, knowledge.FileReadInput) (response.Envelope[knowledge.FileReadResult], error)
+	})
+	if !ok {
+		return failedActionResult(action, "portal.file_reader_unavailable", "Current file reader is unavailable.")
+	}
+	ref := action.Executor.Payload["file_id"]
+	envelope, err := client.ReadKnowledgeFile(ctx, e.CorrelationID, knowledge.FileReadInput{Ref: ref})
+	if err != nil {
+		return failedActionResult(action, "portal.file_read_failed", err.Error())
+	}
+	file := envelope.Data
+	fields := []ActionResultField{{Label: "Path", Value: file.Path}, {Label: "Status", Value: file.Status}, {Label: "Text", Value: file.Text}}
+	if file.Truncated {
+		fields = append(fields, ActionResultField{Label: "Continue", Value: fmt.Sprintf("loom notes read %s --offset %d", file.FileID, file.NextOffset)})
+	}
+	return PortalActionResult{ActionID: action.ID, Title: action.Label, Status: ActionLifecycleSucceeded,
+		Summary: "Current file read.", Fields: fields, RawCommand: append([]string{}, action.RawCommand...),
+		CorrelationID: firstNonEmpty(envelope.Meta.CorrelationID, e.CorrelationID), RefreshScreen: action.RefreshScreen}
 }
 
 func (e ActionExecutor) executeRecordInspect(action PortalAction) PortalActionResult {

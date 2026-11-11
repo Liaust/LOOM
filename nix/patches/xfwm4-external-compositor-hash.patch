@@ -1,0 +1,24 @@
+From 69a16352c9b0b6591099f63a306238272db58b3a
+Subject: compositor: check if 'cwindow_hash' is a valid pointer before use
+
+Upstream: https://github.com/xfce-mirror/xfwm4/commit/69a16352c9b0b6591099f63a306238272db58b3a
+Backport to the pinned Xfwm 4.20.0. With an external compositor,
+compositorIsActive() may be true while the internal window hash is NULL.
+Return the existing not-found result instead of calling GLib with NULL.
+Remove this backport when the pinned upstream source includes the guard.
+
+diff --git a/src/compositor.c b/src/compositor.c
+--- a/src/compositor.c
++++ b/src/compositor.c
+@@ -172,6 +172,11 @@ find_cwindow_in_screen (ScreenInfo *screen_info, Window id)
+     g_return_val_if_fail (screen_info != NULL, NULL);
+     TRACE ("window 0x%lx", id);
+ 
++    if (!screen_info->cwindow_hash)
++    {
++        return NULL;
++    }
++
+     return g_hash_table_lookup(screen_info->cwindow_hash, (gpointer) id);
+ }
+ 

@@ -25,6 +25,7 @@ import (
 	"loom.local/loom/internal/requestctx"
 	"loom.local/loom/internal/search"
 	"loom.local/loom/internal/storagecatalog"
+	"loom.local/loom/internal/workers"
 )
 
 type Service struct {
@@ -170,6 +171,20 @@ func (s Service) PushBatch(ctx context.Context, req requestctx.Context, input Pu
 	batch, err = updateBatchCompletionTx(ctx, tx, batchID, status, acceptedCount, conflictCount, failedCount, cursorAfter)
 	if err != nil {
 		return PushBatchResult{}, err
+	}
+	if acceptedCount > 0 {
+		// A presence/invalidation observation is not usable content. Starting
+		// inventory here can hold the serial coordinator just before its blob
+		// arrives. Metadata refreshes enqueue exact work; blob commit wakes itself.
+		var ready bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM knowledge.pending_source_admissions WHERE next_attempt_at<=now())`).Scan(&ready); err != nil {
+			return PushBatchResult{}, err
+		}
+		if ready {
+			if err := workers.NotifyQueueTx(ctx, tx, workers.KindKnowledgeIndexer); err != nil {
+				return PushBatchResult{}, err
+			}
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -1213,6 +1228,13 @@ func (s Service) recordAcceptedSyncedObject(ctx context.Context, nodeID string, 
 	if err != nil {
 		return SyncedObjectResult{}, err
 	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO knowledge.pending_source_admissions(object_version_id)
+	 VALUES ($1) ON CONFLICT(object_version_id) DO NOTHING`, versionID); err != nil {
+		return SyncedObjectResult{}, err
+	}
+	if err := workers.NotifyQueueTx(ctx, tx, workers.KindKnowledgeIndexer); err != nil {
+		return SyncedObjectResult{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return SyncedObjectResult{}, err
 	}
@@ -1394,12 +1416,13 @@ func (s Service) getLatestAcceptedObjectItemByLocalRef(ctx context.Context, node
 		       status, global_ref, error_code, error_message, payload_hash, metadata
 		FROM sync.batch_items
 		WHERE origin_node_id = $1
-		  AND local_ref = $2
-		  AND item_kind = $3
+		  AND ((local_ref = $2 AND item_kind = $3) OR
+		       (item_kind = 'object_metadata' AND payload_json->'payload'->>'schema_version' = $4
+		        AND payload_json->'payload'->>'local_object_ref' = $2))
 		  AND status IN ('accepted', 'duplicate')
 		ORDER BY created_at DESC
 		LIMIT 1
-	`, nodeID, localRef, ItemKindObjectBlob)
+	`, nodeID, localRef, ItemKindObjectBlob, FileObservationSchema)
 	return scanSyncItemResult(row)
 }
 
@@ -1427,6 +1450,9 @@ func scanSyncItemResult(scanner interface{ Scan(dest ...any) error }) (SyncItemR
 
 func (s Service) ingestBatchItemTx(ctx context.Context, tx *sql.Tx, req requestctx.Context, batchID, nodeID string, item PushBatchItem) (SyncItemResult, *SyncConflict, error) {
 	if item.ItemKind == ItemKindObjectMetadata {
+		if isFileObservation(item.PayloadJSON) {
+			return ingestFileObservationTx(ctx, tx, req, batchID, nodeID, item)
+		}
 		return ingestObjectMetadataTx(ctx, tx, req, batchID, nodeID, item)
 	}
 	payload := objectOrDefault(item.PayloadJSON)
@@ -1723,7 +1749,7 @@ func normalizePushBatchInput(input PushBatchInput) (PushBatchInput, error) {
 		if item.ItemKind == ItemKindObjectMetadata {
 			// Validate the original JSON before generic normalization can erase
 			// duplicate fields or turn malformed values into an empty object.
-			if _, err := decodeMetadataObservation(*item); err != nil {
+			if err := validateMetadataItem(*item); err != nil {
 				return PushBatchInput{}, fmt.Errorf("items[%d]: %w", i, err)
 			}
 		}

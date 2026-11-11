@@ -18,6 +18,7 @@ import (
 	"loom.local/loom/internal/backupcoverage"
 	"loom.local/loom/internal/backupstrategy"
 	"loom.local/loom/internal/bootstrap"
+	"loom.local/loom/internal/boxregistry"
 	"loom.local/loom/internal/cloudstorage"
 	"loom.local/loom/internal/ids"
 	"loom.local/loom/internal/maintenance"
@@ -46,7 +47,7 @@ func TestCloudSnapshotUploadRuntimeDescriptorAndInstance(t *testing.T) {
 	if config.MaxRuntimeMS != cloudSnapshotUploadMaxRuntimeMS {
 		t.Fatalf("seeded cloud worker max runtime = %dms, want %dms", config.MaxRuntimeMS, cloudSnapshotUploadMaxRuntimeMS)
 	}
-	if config.MaxRuntimeMS != cloudSnapshotUploadRunTimeoutSeconds*1000 {
+	if config.MaxRuntimeMS+int(cloudArchiveCompletionReserve/time.Millisecond) != cloudSnapshotUploadRunTimeoutSeconds*1000 {
 		t.Fatalf("seeded cloud worker max runtime = %dms, timeout policy = %ds", config.MaxRuntimeMS, cloudSnapshotUploadRunTimeoutSeconds)
 	}
 }
@@ -514,6 +515,142 @@ func TestCloudSnapshotUploadRuntimeRejectsUnusableExactSelectionsBeforeMaintenan
 	}
 }
 
+func TestCloudSnapshotNamedStorageRootsAreDisjointAndRequired(t *testing.T) {
+	root := t.TempDir()
+	coverage := runtimeDirectArchiveCoverage(t, root)
+	coverage.StorageRoot = filepath.Join(root, "named-storage")
+	for _, area := range []string{"Projects", "Library", "Records", ".loom"} {
+		if err := os.MkdirAll(filepath.Join(coverage.StorageRoot, area), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	count := 0
+	db := sql.OpenDB(cloudMutationCountingConnector{count: &count})
+	defer db.Close()
+	runtime := NewCloudSnapshotUploadRuntime(maintenance.NewService(db), root, "main", coverage)
+	runtime.agentsRoot = runtimeDirectArchiveAgentsRoot(root)
+	roots, _, err := runtime.directArchiveRoots()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, r := range roots {
+		seen[r.Name] = true
+	}
+	for _, name := range []string{"storage_projects", "storage_library", "storage_records", "storage_location_evidence"} {
+		if !seen[name] {
+			t.Fatalf("named storage protection selection omitted %s", name)
+		}
+	}
+	if count != 0 {
+		t.Fatal("root selection mutated maintenance state")
+	}
+	if err = os.Rename(filepath.Join(coverage.StorageRoot, "Projects"), filepath.Join(coverage.StorageRoot, "held-projects")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = runtime.directArchiveRoots(); err == nil {
+		t.Fatal("missing named root silently omitted from protection")
+	}
+}
+
+func TestCloudSnapshotAdditionalBoxRootsAndMissingActivation(t *testing.T) {
+	root := t.TempDir()
+	coverage := runtimeDirectArchiveCoverage(t, root)
+	runtime := NewCloudSnapshotUploadRuntime(maintenance.Service{}, root, "main", coverage)
+	runtime.agentsRoot = runtimeDirectArchiveAgentsRoot(root)
+	baseline, _, err := runtime.directArchiveRoots()
+	if err != nil {
+		t.Fatal(err)
+	}
+	company := boxregistry.Box{ID: "box_company", Key: "company", Label: "Company", RootPath: filepath.Join(root, "company"), StateRoot: filepath.Join(root, "company-state"), ArchiveRoot: filepath.Join(root, "storage", "Boxes", "company"), Available: true}
+	for _, path := range []string{company.RootPath, company.StateRoot, company.ArchiveRoot} {
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime.CoverageOptions.Boxes = boxregistry.Catalog{Boxes: []boxregistry.Box{{Primary: true, RootPath: coverage.MainBoxPath}, company}}
+	roots, exclusions, err := runtime.directArchiveRoots()
+	if err != nil || len(roots) != len(baseline)+3 {
+		t.Fatalf("additional roots=%+v err=%v", roots, err)
+	}
+	for i := range baseline {
+		if roots[i] != baseline[i] {
+			t.Fatalf("Personal root changed: %+v != %+v", roots[i], baseline[i])
+		}
+	}
+	for i, kind := range []string{"source", "state", "archive"} {
+		if roots[len(baseline)+i].Name != "box_company_"+kind {
+			t.Fatalf("Box identity not frozen: %+v", roots)
+		}
+	}
+	if len(exclusions) != 2 || exclusions[1].Root != "box_company_source" || exclusions[1].RelativePath != ".loom-acceptance" {
+		t.Fatalf("unexpected exclusions: %+v", exclusions)
+	}
+	// Pure selection/readability only: no backups, cloud, database or mutation.
+	if err := runtime.RetainedStorageSelected(context.Background(), filepath.Join(company.ArchiveRoot, "Projects", "one")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(company.StateRoot, company.StateRoot+"-held"); err != nil {
+		t.Fatal(err)
+	}
+	if roots, _, err = runtime.directArchiveRoots(); err != nil || len(roots) != len(baseline)+2 {
+		t.Fatalf("missing extra state broke Personal selection: roots=%+v err=%v", roots, err)
+	}
+	runtime.CoverageOptions.Boxes.Boxes[1].Available = false
+	runtime.CoverageOptions.Boxes.Boxes[1].ID = ""
+	if roots, _, err = runtime.directArchiveRoots(); err != nil || len(roots) != len(baseline) {
+		t.Fatalf("unactivated Box broke Personal selection: roots=%+v err=%v", roots, err)
+	}
+	company.StateRoot = coverage.ObjectStoreRoot
+	runtime.CoverageOptions.Boxes.Boxes[1] = company
+	if _, _, err := runtime.directArchiveRoots(); err == nil || !strings.Contains(err.Error(), "overlap") {
+		t.Fatalf("overlapping extra state accepted: %v", err)
+	}
+}
+
+func TestCloudSnapshotExcludesOnlyManagedFailedCaptureHold(t *testing.T) {
+	root := t.TempDir()
+	coverage := runtimeDirectArchiveCoverage(t, root)
+	coverage.ApplicationDataRoot = filepath.Join(root, "application-data")
+	for _, relative := range []string{"notes-recovery-held", "notes-recovery", "la-real-allocation"} {
+		if err := os.MkdirAll(filepath.Join(coverage.ApplicationDataRoot, relative), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime := NewCloudSnapshotUploadRuntime(maintenance.Service{}, root, "main", coverage)
+	runtime.agentsRoot = runtimeDirectArchiveAgentsRoot(root)
+	roots, exclusions, err := runtime.directArchiveRoots()
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := false
+	for _, r := range roots {
+		if r.Name == "application_data" && r.Path == coverage.ApplicationDataRoot {
+			selected = true
+		}
+	}
+	if !selected {
+		t.Fatal("application data omitted")
+	}
+	count := 0
+	for _, exclusion := range exclusions {
+		if exclusion.Root == "application_data" {
+			count++
+			if exclusion.RelativePath != "notes-recovery-held" {
+				t.Fatalf("published/application content excluded: %+v", exclusion)
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("managed hold boundary missing or duplicated: %+v", exclusions)
+	}
+	for _, relative := range []string{"notes-recovery-held", "notes-recovery", "la-real-allocation"} {
+		if _, err := os.Stat(filepath.Join(coverage.ApplicationDataRoot, relative)); err != nil {
+			t.Fatal("source changed", err)
+		}
+	}
+}
+
 func TestCloudSnapshotUploadRuntimeRawBoxRoots(t *testing.T) {
 	for _, area := range []string{"Topics", "Library"} {
 		for _, state := range []string{"empty", "file", "symlink", "unreadable", "overlap", "resolved-alias"} {
@@ -849,21 +986,30 @@ func TestCloudSnapshotUploadRuntimeRecordsReplaySafeFailureTruth(t *testing.T) {
 		OperationalPackageID: packageRef.PackageID, OperationalPackageManifestSHA256: packageRef.ManifestSHA256,
 		ProvenancePackageID: packageRef.ProvenancePackageID, ProvenancePackageManifestSHA256: packageRef.ProvenanceManifestSHA256,
 		Retryable: true, Committed: false,
+		BorgProgress: &cloudstorage.BorgProgress{OriginalBytes: 123, Files: 7},
 	}
 	runtime.ArchiveCanonical = func(_ context.Context, input cloudstorage.DirectArchiveInput) (cloudstorage.DirectArchiveResult, error) {
 		failedResult.ArchiveRef = input.RequestV2.ArchiveRef
 		return failedResult, cloudstorage.ErrDirectArchiveRetryable
 	}
 	run := runtimeDirectArchiveRunContext(t, cloudConfigPath, `{}`)
-	if _, err := runtime.RunOnce(context.Background(), run); !errors.Is(err, cloudstorage.ErrDirectArchiveRetryable) {
+	returned, err := runtime.RunOnce(context.Background(), run)
+	if !errors.Is(err, cloudstorage.ErrDirectArchiveRetryable) {
 		t.Fatalf("failure error = %v", err)
 	}
 	var summary map[string]any
-	if err := json.Unmarshal(cloudDirectArchiveSummary(failedResult, packageRef, "", run, nil), &summary); err != nil {
+	if !returned.Retryable {
+		t.Fatal("retryability lost")
+	}
+	if err := json.Unmarshal(returned.ResultSummary, &summary); err != nil {
 		t.Fatal(err)
 	}
 	durations, _ := summary["stage_durations_ms"].(map[string]any)
 	counts, _ := summary["borg_command_counts"].(map[string]any)
+	progress, _ := summary["borg_progress"].(map[string]any)
+	if progress["original_bytes"] != float64(123) || progress["files"] != float64(7) {
+		t.Fatal("failure lost last numeric progress", summary)
+	}
 	if summary["committed"] != false || summary["manifest_schema"] != backupstrategy.DirectArchiveManifestSchemaV2 || summary["verification_profile"] != backupstrategy.DirectArchiveVerificationProfileRoutineIncrementalV1 || durations["create"] != float64(13) || counts["create"] != float64(1) || counts["rename"] != float64(0) {
 		t.Fatalf("failure evidence = %#v", summary)
 	}

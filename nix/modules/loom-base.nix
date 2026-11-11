@@ -7,6 +7,12 @@ in
   options.loom = {
     enable = lib.mkEnableOption "LOOM runtime";
 
+    notesSearchBackend = lib.mkOption {
+      type = lib.types.enum [ "native" "pg_search" ];
+      default = "native";
+      description = "Notes lexical backend. Native is the explicit rollback reader; pg_search requires the pinned host extension.";
+    };
+
     environment = lib.mkOption {
       type = lib.types.str;
       default = "dev";
@@ -194,6 +200,17 @@ in
       type = lib.types.nullOr lib.types.str;
       default = null;
       description = "Explicit LOOM Box path for this node.";
+    };
+
+    boxes = lib.mkOption {
+      default = {};
+      description = "Additional real workspace Boxes on this node; the existing boxPath remains Personal.";
+      type = lib.types.attrsOf (lib.types.submodule {
+        options = {
+          label = lib.mkOption { type = lib.types.str; };
+          rootPath = lib.mkOption { type = lib.types.str; };
+        };
+      });
     };
 
     canonicalBoxPath = lib.mkOption {

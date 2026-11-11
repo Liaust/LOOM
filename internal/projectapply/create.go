@@ -2,6 +2,7 @@ package projectapply
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 
 	"loom.local/loom/internal/ids"
@@ -65,7 +66,7 @@ type createdProjectResolver struct {
 
 func (r createdProjectResolver) source() error {
 	loaded, err := pc.LoadProject(r.root)
-	if err != nil || loaded.Declaration == nil || loaded.Declaration.Project.ID != r.projectID || len(loaded.Declaration.Resources) != 0 || (loaded.Declaration.Project.Status != "" && loaded.Declaration.Project.Status != pc.ProjectStatusDraft) {
+	if err != nil || loaded.Declaration == nil || loaded.Declaration.Project.ID != r.projectID || (len(loaded.Declaration.Resources) != 0 && !pc.IsDefaultFilesystemDeclaration(*loaded.Declaration)) || (loaded.Declaration.Project.Status != "" && loaded.Declaration.Project.Status != pc.ProjectStatusDraft) {
 		return fail(pc.DeclarationIdentityConflict, "created_project_source_changed")
 	}
 	return nil
@@ -73,7 +74,8 @@ func (r createdProjectResolver) source() error {
 
 func (r createdProjectResolver) resolution(x Resolution) error {
 	b := x.Plan.Basis
-	if b.Target.ProjectID != r.projectID || b.Target.ProjectRoot != r.root || len(b.Bindings) != 0 || len(b.Actions) != 1 || len(x.Payloads) != 1 {
+	defaultFiles := len(b.Bindings) == 1 && b.Bindings["files"] == (pc.DeclarationBinding{Kind: pc.DeclarationKnowledge})
+	if b.Target.ProjectID != r.projectID || b.Target.ProjectRoot != r.root || (len(b.Bindings) != 0 && !defaultFiles) || len(b.Actions) != 1 || len(x.Payloads) != 1 {
 		return fail(pc.DeclarationIdentityConflict, "create_requires_registration_only")
 	}
 	a := b.Actions[0]
@@ -93,6 +95,15 @@ func (r createdProjectResolver) Resolve(ctx context.Context, p Principal, reques
 	}
 	x, err := r.Resolver.Resolve(ctx, p, request)
 	if err == nil {
+		// Constructor defaults describe future folder management; creation still
+		// registers identity/source only. Activation requires a separate plan.
+		for _, action := range x.Plan.Basis.Actions {
+			if action.ID == "register_project:project" {
+				x.Plan.Basis.Actions = []pc.DeclarationAction{action}
+				x.Payloads = map[string]json.RawMessage{action.ID: x.Payloads[action.ID]}
+				break
+			}
+		}
 		err = r.resolution(x)
 	}
 	return x, err

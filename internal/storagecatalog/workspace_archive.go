@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/big"
 	"net/url"
 	"path/filepath"
@@ -27,8 +28,9 @@ func (s Service) ListWorkspaceArchiveCatalogEntries(ctx context.Context, sourceA
 	if !filepath.IsAbs(sourceAbsolutePath) || filepath.Clean(sourceAbsolutePath) != sourceAbsolutePath {
 		return nil, fmt.Errorf("%w: workspace archive source path must be absolute and clean", ErrInvalid)
 	}
-	relative, err := NormalizeLogicalPath(sourceRelativePath)
-	if err != nil || relative != sourceRelativePath {
+	// These are real filesystem names, not logical display labels. Trimming a
+	// legitimate trailing space would select a different custody directory.
+	if !validWorkspaceSourceRelative(sourceRelativePath) {
 		return nil, fmt.Errorf("%w: workspace archive source relative path is invalid", ErrInvalid)
 	}
 	absPrefix := escapeSQLLike(sourceAbsolutePath) + string(filepath.Separator) + "%"
@@ -95,6 +97,10 @@ func (s Service) ListWorkspaceArchiveCatalogEntries(ctx context.Context, sourceA
 	return details, nil
 }
 
+func validWorkspaceSourceRelative(value string) bool {
+	return value != "." && fs.ValidPath(value) && len(value) <= 4096 && !strings.ContainsAny(value, "\\\x00")
+}
+
 // WorkspaceArchiveJournalRecord is the storage-owned, package-neutral view of
 // the physical workspace move journal. The archive package validates and
 // interprets the versioned JSON contracts.
@@ -153,6 +159,7 @@ type WorkspaceArchiveIntentInput struct {
 }
 
 type WorkspaceArchiveProjectionInput struct {
+	Observations              []WorkspaceCatalogObservation
 	OperationID               string
 	PlanDigest                string
 	SourceAbsolutePath        string
@@ -185,6 +192,7 @@ type WorkspaceArchiveProjectionInput struct {
 }
 
 type WorkspaceRestoreProjectionInput struct {
+	Observations              []WorkspaceCatalogObservation
 	ArchiveOperationID        string
 	OperationID               string
 	PlanDigest                string
@@ -216,6 +224,8 @@ type WorkspaceRestoreProjectionInput struct {
 	EventJSON                 json.RawMessage
 	CommittedAt               time.Time
 }
+
+type WorkspaceCatalogObservation struct{ StorageEntryID, OriginalPath, CurrentViewPath string }
 
 type WorkspaceArchiveFailureInput struct {
 	OperationID   string
@@ -361,6 +371,17 @@ func (s Service) CommitWorkspaceArchiveIntent(ctx context.Context, input Workspa
 	defer tx.Rollback()
 	if err := LockWorkspaceCustodyWriterTx(ctx, tx); err != nil {
 		return WorkspaceArchiveJournalRecord{}, false, err
+	}
+	if input.OperationKind == "restore" && (input.SchemaVersion == "storage.workspace_archive_operation.v2" || input.SchemaVersion == "storage.workspace_archive_operation.v3") {
+		var unchanged bool
+		err = tx.QueryRowContext(ctx, `WITH original AS (
+ SELECT workspace_archive_operation_id,plan_json#>>'{destination,path,absolute_path}' AS payload
+ FROM storage.workspace_archive_operations WHERE workspace_archive_operation_id=$1::jsonb->>'archive_operation_id'
+ ) SELECT storage.resolve_custody_path('workspace:'||workspace_archive_operation_id,payload)=$1::jsonb#>>'{source,path,absolute_path}'
+ AND COALESCE((SELECT relocation_id FROM storage.custody_locations WHERE custody_id='workspace:'||workspace_archive_operation_id AND original_prefix=payload),'')=COALESCE($1::jsonb#>>'{placement,relocation_id}','') FROM original`, plan).Scan(&unchanged)
+		if err != nil || !unchanged {
+			return WorkspaceArchiveJournalRecord{}, false, fmt.Errorf("restore custody location changed since review: %v", err)
+		}
 	}
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO storage.workspace_archive_operations (
@@ -518,6 +539,7 @@ func (s Service) CommitWorkspaceArchiveProjection(ctx context.Context, input Wor
 		return record, fmt.Errorf("lock workspace archive catalog writers: %w", err)
 	}
 	if err = verifyWorkspaceArchiveCatalogEvidenceTx(ctx, tx, workspaceCatalogProjectionEvidence{
+		Observations:       input.Observations,
 		SourceAbsolutePath: input.SourceAbsolutePath,
 		SourceRelativePath: input.SourceRelativePath,
 		Rebind:             input.Rebind,
@@ -653,6 +675,7 @@ func (s Service) CommitWorkspaceRestoreProjection(ctx context.Context, input Wor
 		return record, fmt.Errorf("lock workspace restore catalog writers: %w", err)
 	}
 	if err = verifyWorkspaceArchiveCatalogEvidenceTx(ctx, tx, workspaceCatalogProjectionEvidence{
+		Observations:       input.Observations,
 		SourceAbsolutePath: input.SourceAbsolutePath,
 		SourceRelativePath: input.CatalogSourceRelativePath,
 		Rebind:             input.Rebind,
@@ -688,7 +711,7 @@ func (s Service) CommitWorkspaceRestoreProjection(ctx context.Context, input Wor
 		}
 		result, updateErr := tx.ExecContext(ctx, `
 			UPDATE storage.workspace_archive_manifests
-			SET lifecycle_state = 'active', restore_operation_id = $2,
+			SET schema_version = $4::jsonb->>'schema_version', lifecycle_state = 'active', restore_operation_id = $2,
 				restore_operation_kind = 'restore', restore_plan_digest = $3,
 				manifest_json = $4, authentication_key_id = $5,
 				authentication_tag = $6, restored_at = $7,
@@ -769,6 +792,7 @@ func (s Service) CommitWorkspaceRestoreProjection(ctx context.Context, input Wor
 }
 
 type workspaceCatalogProjectionEvidence struct {
+	Observations       []WorkspaceCatalogObservation
 	SourceAbsolutePath string
 	SourceRelativePath string
 	Rebind             RebindPathsInput
@@ -819,12 +843,35 @@ func verifyWorkspaceArchiveCatalogEvidenceTx(ctx context.Context, tx *sql.Tx, in
 		entryByID[item.StorageEntryID] = item
 	}
 	observed := RebindPathsInput{}
+	observations := map[string]WorkspaceCatalogObservation{}
+	for _, item := range input.Observations {
+		if item.StorageEntryID == "" {
+			return fmt.Errorf("invalid catalog observation")
+		}
+		if _, exists := observations[item.StorageEntryID]; exists {
+			return fmt.Errorf("duplicate catalog observation")
+		}
+		if _, exists := entryByID[item.StorageEntryID]; exists {
+			return fmt.Errorf("catalog observation overlaps mutation")
+		}
+		observations[item.StorageEntryID] = item
+	}
 	for entryRows.Next() {
 		var id, original, current string
 		if err := entryRows.Scan(&id, &original, &current); err != nil {
 			return err
 		}
+		if item, ok := observations[id]; ok {
+			if item.OriginalPath != original || item.CurrentViewPath != current {
+				return fmt.Errorf("unchanged catalog entry changed after review")
+			}
+			delete(observations, id)
+			continue
+		}
 		item, ok := entryByID[id]
+		if input.AlreadyCommitted && ok && item.NewOriginalSourcePath == original && item.NewCurrentViewPath == current {
+			continue
+		}
 		if !ok || item.ExpectedOriginalSourcePath != original || item.ExpectedCurrentViewPath != current {
 			return fmt.Errorf("workspace archive catalog entries changed after review")
 		}
@@ -838,6 +885,9 @@ func verifyWorkspaceArchiveCatalogEvidenceTx(ctx context.Context, tx *sql.Tx, in
 	}
 	if err := entryRows.Close(); err != nil {
 		return err
+	}
+	if len(observations) != 0 {
+		return fmt.Errorf("unchanged catalog entry disappeared after review")
 	}
 
 	refRows, err := tx.QueryContext(ctx, `

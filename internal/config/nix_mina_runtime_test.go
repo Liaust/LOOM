@@ -71,7 +71,7 @@ const minaRender = `actual: let system = (import ./tests/nix/legacy_agent_host.n
    (system.extendModules { modules = [ { loom.mina.retainedMorathustra = [ "old" ]; } ]; }).config
  ];
  names = c: builtins.filter (n: builtins.match "loom-(mina|morathustra)(-recovery-publish)?" n != null) (builtins.attrNames c.systemd.services);
- summary = c: { services = names c; env = c.systemd.services.loomd.environment; failed = failures c; acl = c.system.activationScripts.loomOrcaAccess.text; };
+ summary = c: { services = names c; env = c.systemd.services.loomd.environment; failed = failures c; acl = c.system.activationScripts.loomAgentsAccess.text; };
  spec = identity: system.pkgs.callPackage ./nix/packages/orca-headless.nix { agentIdentity = identity; buildFHSEnv = args: args; };
  tools = system.pkgs.callPackage ./nix/packages/morathustra-external-tools.nix { agentIdentity = "mina"; basecampAccountID = 300001; basecamp-cli = ((import ./tests/nix/source-flake.nix {})).packages.x86_64-linux.basecamp-cli; };
  in {
@@ -90,8 +90,8 @@ const minaRender = `actual: let system = (import ./tests/nix/legacy_agent_host.n
    publishScript = on.systemd.services.loom-mina-recovery-publish.serviceConfig.ExecStart.text;
    custodyScript = on.systemd.services.loom-mina.serviceConfig.ExecStartPre.text;
    timer = on.systemd.units."loom-mina-recovery-publish.timer".text;
-   shellActivation = on.system.activationScripts.loomOrcaShell.text;
-   shellDerivations = builtins.attrNames (builtins.getContext on.system.activationScripts.loomOrcaShell.text);
+   shellActivation = on.system.activationScripts.loomAgentsShell.text;
+   shellDerivations = builtins.attrNames (builtins.getContext on.system.activationScripts.loomAgentsShell.text);
    # The shell file is an input of the activation script, exposed as a
    # writeText derivation in its string context; exact content is tested below.
    baseline = on.loom.mina.baselineSettings;

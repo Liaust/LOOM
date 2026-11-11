@@ -1,76 +1,66 @@
 # Nix Configuration
 
-The flake packages LOOM and optional dependencies and exposes NixOS modules and
-reference hosts. It is not an installer that can discover a safe disk layout or
-authenticate external services for you.
+The flake packages LOOM and optional dependencies and exposes reusable NixOS
+modules. It does not discover your disks, authenticate accounts or safely adopt
+an existing host by itself. Keep real hardware, addresses, keys, accounts and
+service policy in an operator-owned configuration outside this public source.
 
-`hosts/hardware-main` is a fully enabled **evaluation example** retained for
-configuration contract tests. Its disk labels, node/account IDs, public keys,
-hashes and documentation IP/domain are synthetic. It deliberately has no admin
-SSH key, real credentials, or usable Mac pairing. Do not rebuild an existing
-machine using it unchanged. `dev-utm` is a historical development example, not
-a required runtime, test executor, or supported installation path.
+The checked-in `hosts/hardware-main` is a synthetic evaluation example. It has
+no usable administrator SSH key or real pairing credentials. Never activate it
+unchanged. The historical `dev-utm` example is not a required test executor or
+installation platform. Start with your own `nixos-generate-config` output and
+[the installation guide](../docs/operations/installation.md).
 
-For an installation, start from the modules needed by your machine and the
-output of `nixos-generate-config`. Keep your machine-specific module outside
-this public source and import it from an operator-owned flake/configuration.
-Review mounts and service access before enabling writers. Box and archive
-payloads must remain on the same filesystem where atomic moves require it.
+## Owners And Optional Modules
 
-Configure node identity, addresses, WireGuard peers, account ownership, ingress,
-credential sources and recovery keys for your own deployment. Example
-`192.0.2.1` and `apps.example.com` values are not working endpoints. External
-agent features are optional and their module options default off; the example
-host enables them to exercise configuration, not to establish readiness.
+- Core modules provide the daemon, PostgreSQL, node agent, Box/storage and
+  private service interfaces.
+- The shared `loom.agents` account is independent of the retired ORCA client.
+  Optional native Hermes and Codex runtime modules use that existing account.
+- Native Hermes owns its conversations, memory, tools and agent schedules.
+  LOOM supplies native schedule observation/declared jobs and system operations,
+  not a duplicate timer for the same work.
+- Box, archive and application-data roots remain real configured paths. Mount
+  dependencies must prevent writers from using an unmounted underlying tree.
+  Rebuilds do not move payloads or migrate catalog identity automatically.
 
-## Named External Accounts
+Installing optional packages does not authenticate model providers, create
+business-service grants, pair a Mac or prove recovery. Default-off options and
+missing-binding refusals are intentional.
 
-Enabling `loom.mina.externalAccountsEnabled` also requires
-`loom.mina.externalAccountBinding`. It contains non-secret, independently
-verified `githubLogin`, `githubID`, `basecampIdentityID`, `basecampAccountID`,
-`basecampPersonID`, and `basecampEmail` fields. The account wrapper's Basecamp
-profile is fixed to `mina`; the legacy runtime uses `morathustra`. Neither
-profile inherits the maintainer's accounts. OAuth tokens remain in protected
-operator-provisioned auth storage, never in Nix values or this repository.
+## External Accounts
 
-The checked-in host uses unmistakably synthetic account values for evaluation.
-Copying them cannot authenticate an account. Obtain and verify your real public
-identifiers during your own authorized bootstrap. The agent protocols describe
-the distinction between named-agent and general coding-agent profiles.
+Named tooling requires an explicit operator-verified `externalAccountBinding`.
+It identifies the expected GitHub login/ID and Basecamp identity/account/person/
+email without storing OAuth tokens in Nix values. Enabled account tooling with
+no binding must refuse rather than inherit the maintainer's account or another
+native profile. The synthetic example cannot authenticate anything.
 
-## Agent SSH Hosts
+Company and Personal tool contexts select approved stores independently of
+agent personality. Source policy examples are unconfigured guidance, not a
+standing grant to send, publish or capture tasks. Shared Unix users and Box
+policies are soft workflow separation, not OS-level isolation.
 
-When ORCA's shared agent account is enabled, the system SSH client includes the
-optional operator-owned `/etc/loom-agent-ssh/config`. An absent file enables no
-remote access. Configure ordinary OpenSSH host blocks there; keep the file and
-its parent root-owned and not writable by agents. End the included file with
-`Host *` so its last host block does not scope later system defaults.
+## Private Connections And Updates
 
-Provision dedicated private keys outside both Git/Nix values and `/home`, for
-example in `/var/lib/loom-agent-ssh` with directory mode 0700 and key mode 0600,
-owned by the intended agent account. This also works for the existing
-`ProtectHome` gateway without weakening its filesystem restrictions. Pin the
-remote host key in a protected known-hosts file; use `IdentitiesOnly yes`,
-`StrictHostKeyChecking yes`, `BatchMode yes` and bounded connection timeouts.
-The normal SSH client, not an extra LOOM wrapper, performs the connection.
+Supply ordinary SSH host entries and protected keys outside Git. The optional
+operator `/etc/loom-agent-ssh/config` grants nothing when absent. Pin host keys
+and keep key/private parent modes restrictive. A computer-use forced-command
+key is not a general shell key. Private connectivity does not authorize a new
+public listener or broader device permissions.
 
-The pinned ORCA FHS environment exposes the host's `/etc` at `/.host-etc` and
-does not expose `/etc/ssh`. For these terminals, also install the selected host
-block as the agent's ordinary `~/.ssh/config` (agent-owned, mode 0600); preserve
-unrelated existing entries. List both the normal and `/.host-etc` known-hosts
-paths in `UserKnownHostsFile`. The system include serves the home-isolated
-gateway, while the user config serves ORCA. Keep their host/key values in sync.
+The Electron client uses the selected private SSH alias and Unix-socket API;
+its own build is under `modules/workspace-electron`. Development builds do not
+receive native signed updates. Operators must configure a signed release
+repository explicitly; this source contains no maintainer update credential.
 
-For a configured `loom-mac` alias, validate from an actual ORCA terminal and the
-gateway environment. Account access is broad user-level access, not per-agent
-isolation. Do not reuse a computer-use forced-command key, grant sudo, expose
-SSH publicly or change remote privacy permissions as part of host discovery.
-Revocation is the ordinary removal of this dedicated public key on the target.
+## Dependency Pins And Recovery
 
-## Dependency Ownership
+`flake.lock` pins inputs; package definitions pin fetched binaries and upstream
+patches. Native runtime and legacy recovery/tool closures may be separate.
+Use the owner update path rather than self-updating a Nix-owned immutable binary.
+Inspect relevant third-party licenses in [the notices](../THIRD_PARTY_NOTICES.md).
 
-`flake.lock` pins the input sources. Package definitions pin separately fetched
-binaries. Update the appropriate pin and inspect local compatibility patches;
-do not run an upstream self-updater against a Nix-owned package. Model APIs,
-messaging, accounts and platform permissions are configured separately from
-installing a binary. See ../THIRD_PARTY_NOTICES.md and the installation guide.
+Account stores, learned profiles, service state and selected user roots need
+their actual recovery owners. A successful package build or Nix evaluation is
+not service, device, application-consistency or cloud-protection acceptance.

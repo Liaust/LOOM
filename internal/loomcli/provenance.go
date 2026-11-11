@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -25,7 +25,9 @@ func newProvenanceCommand(opts *options) *cobra.Command {
 	command.AddCommand(newProvenanceRecordCommand(opts))
 	command.AddCommand(newProvenanceCandidateCommand(opts))
 	command.AddCommand(newProvenanceCaseCommand(opts))
+	command.AddCommand(newProvenanceRelationshipCommand(opts))
 	command.AddCommand(newProvenanceOperationsCommand(opts))
+	command.AddCommand(newProvenanceReviewCommand(opts))
 	return command
 }
 
@@ -51,9 +53,15 @@ func newProvenanceProjectCommand(opts *options) *cobra.Command {
 			return nil
 		}
 		p := env.Data
-		fmt.Fprintf(cmd.OutOrStdout(), "Project: %s (%s) [%s]\nSnapshot: %s; observation revision: %d\n", declarationDisplay(p.Context.Name), p.ProjectID, p.Context.Lifecycle, p.SnapshotID, p.ProjectionRevision)
+		fmt.Fprintf(cmd.OutOrStdout(), "Project: %s (%s) [%s]\nSnapshot: %s; observation revision: %d; source revision: %d; observed: %s\n", declarationDisplay(p.Context.Name), p.ProjectID, p.Context.Lifecycle, p.SnapshotID, p.ProjectionRevision, p.SourceRevision, p.ObservedAt.UTC().Format(time.RFC3339))
 		if d := p.Context.Development; d != nil {
 			fmt.Fprintf(cmd.OutOrStdout(), "Context: %s; complete: %t; omitted files: %d\n", d.Posture, d.Complete, d.OmittedFiles)
+			if d.Archive != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Historical archive: %s; archived: %s; manifest: %s. Captured context does not establish current runtime health.\n", declarationDisplay(d.Archive.OperationID), d.Archive.ArchivedAt.UTC().Format(time.RFC3339), declarationDisplay(d.Archive.ManifestDigest))
+			}
+			if len(d.MissingDocuments) > 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "Missing retained documents: "+declarationDisplay(strings.Join(d.MissingDocuments, ", ")))
+			}
 			for _, f := range []struct{ name, value string }{{"Purpose", d.Purpose}, {"Focus", d.CurrentFocus}, {"Progress", d.Progress}, {"Blockers", d.Blockers}, {"Next", d.NextAction}, {"Structure", d.Structure}} {
 				if f.value != "" {
 					fmt.Fprintf(cmd.OutOrStdout(), "%s: %s\n", f.name, declarationDisplay(strings.Join(strings.Fields(f.value), " ")))
@@ -158,6 +166,15 @@ func newProvenanceRepoGetCommand(opts *options) *cobra.Command {
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Repository %s: %s\n", card.RepositoryID, card.Name)
 			fmt.Fprintf(cmd.OutOrStdout(), "Project: %s (%s); role: %s; tracking: %s\n", card.OwningProject.Name, card.OwningProject.ProjectID, card.Role, card.TrackingStatus)
+			if card.OwningProject.Lifecycle == "archived" {
+				fmt.Fprintln(cmd.OutOrStdout(), "Historical repository snapshot from an archived project; captured state does not establish current runtime health.")
+				if card.Freshness.SourceDigest != nil {
+					fmt.Fprintln(cmd.OutOrStdout(), "Source digest: "+declarationDisplay(*card.Freshness.SourceDigest))
+				}
+				if card.Freshness.ObservedCommit != nil {
+					fmt.Fprintln(cmd.OutOrStdout(), "Observed commit: "+declarationDisplay(*card.Freshness.ObservedCommit))
+				}
+			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Purpose: %s\n", card.Purpose)
 			fmt.Fprintf(cmd.OutOrStdout(), "Focus: %s\n", strings.Join(card.ActiveFocus, "; "))
 			fmt.Fprintf(cmd.OutOrStdout(), "Accepted context: %d; diagnostics: %s\n", len(card.AcceptedContext), strings.Join(card.Diagnostics, ", "))
@@ -206,7 +223,7 @@ func newProvenanceRepoSyncCommand(opts *options) *cobra.Command {
 func newProvenanceSearchCommand(opts *options) *cobra.Command {
 	var project, repository, cursor string
 	var collections []string
-	var includePending bool
+	var includePending, details bool
 	var limit int
 	command := &cobra.Command{
 		Use:   "search <query>",
@@ -230,11 +247,16 @@ func newProvenanceSearchCommand(opts *options) *cobra.Command {
 			if err != nil {
 				return renderError(cmd, opts, commandCtx.CorrelationID, loomerrors.Wrap("transport.unavailable", "provenance", "search", "Could not search provenance.", err))
 			}
-			if opts.jsonOutput {
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(envelope)
+			view := newProvenanceSearchView(envelope.Data)
+			if opts.jsonOutput || details && !opts.plainOutput {
+				return renderProvenanceView(cmd, opts, envelope, view, details)
 			}
-			renderProvenanceSearch(cmd, opts, envelope.Data)
-			renderResponseMeta(cmd, opts, envelope.Meta)
+			if opts.plainOutput {
+				renderProvenanceSearchIDs(cmd, envelope.Data)
+			} else {
+				renderProvenanceSearchView(cmd, view)
+				renderResponseMeta(cmd, opts, envelope.Meta)
+			}
 			return nil
 		},
 	}
@@ -244,6 +266,7 @@ func newProvenanceSearchCommand(opts *options) *cobra.Command {
 	command.Flags().BoolVar(&includePending, "include-pending", false, "include unaccepted candidates in a separate typed collection")
 	command.Flags().IntVar(&limit, "limit", 0, fmt.Sprintf("total result limit (default %d, maximum %d)", provenance.DefaultSearchLimit, provenance.MaximumSearchLimit))
 	command.Flags().StringVar(&cursor, "cursor", "", "opaque next cursor from a prior identical search")
+	command.Flags().BoolVar(&details, "details", false, "show the full search representation including match diagnostics")
 	return command
 }
 
@@ -255,7 +278,7 @@ func newProvenanceRecordCommand(opts *options) *cobra.Command {
 
 func newProvenanceRecordGetCommand(opts *options) *cobra.Command {
 	limit := searchExactProjectionLimitCLI
-	var sources bool
+	var sources, details bool
 	command := &cobra.Command{
 		Use:   "get <record-id>",
 		Short: "Load one accepted record through the foundation exact-get operation",
@@ -274,11 +297,10 @@ func newProvenanceRecordGetCommand(opts *options) *cobra.Command {
 				if err != nil {
 					return renderError(cmd, opts, commandCtx.CorrelationID, err)
 				}
-				if opts.jsonOutput {
+				if opts.jsonOutput && details {
 					return json.NewEncoder(cmd.OutOrStdout()).Encode(expanded)
 				}
-				envelope = response.Success(commandCtx.CorrelationID, expanded.Data.RecordLifecycleProjection)
-				envelope.Meta = expanded.Meta
+				envelope = response.Envelope[provenance.RecordLifecycleProjection]{OK: expanded.OK, Data: expanded.Data.RecordLifecycleProjection, Meta: expanded.Meta}
 				expansion = &expanded.Data.Sources
 			} else {
 				envelope, err = commandCtx.Client.GetProvenanceRecord(ctx, commandCtx.CorrelationID, id, limit)
@@ -286,28 +308,20 @@ func newProvenanceRecordGetCommand(opts *options) *cobra.Command {
 					return renderError(cmd, opts, commandCtx.CorrelationID, err)
 				}
 			}
-			if opts.jsonOutput {
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(envelope)
-			}
 			if opts.plainOutput {
 				fmt.Fprintln(cmd.OutOrStdout(), envelope.Data.Record.ID)
 				return nil
 			}
-			item := envelope.Data
-			fmt.Fprintf(cmd.OutOrStdout(), "Provenance record %s\n", item.Record.ID)
-			fmt.Fprintf(cmd.OutOrStdout(), "Posture: %s\n", item.Record.AssertionPosture)
-			fmt.Fprintf(cmd.OutOrStdout(), "Currentness: %s\n", item.Record.Temporal.Interpretation)
-			fmt.Fprintf(cmd.OutOrStdout(), "Claim: %s\n", item.Record.Claim)
-			fmt.Fprintf(cmd.OutOrStdout(), "Sources: %d; representation events: %d; truncated: %t\n", len(item.SourceReferenceIDs), len(item.Events), item.Truncated)
-			if expansion != nil {
-				renderProvenanceLinkedSources(cmd, *expansion)
+			if details && expansion != nil {
+				full := response.Envelope[provenance.RecordWithSources]{OK: envelope.OK, Data: provenance.RecordWithSources{RecordLifecycleProjection: envelope.Data, Sources: *expansion}, Meta: envelope.Meta}
+				return renderProvenanceView(cmd, opts, full, newProvenanceRecordView(envelope.Data, expansion), true)
 			}
-			renderResponseMeta(cmd, opts, envelope.Meta)
-			return nil
+			return renderProvenanceView(cmd, opts, envelope, newProvenanceRecordView(envelope.Data, expansion), details)
 		},
 	}
 	command.Flags().IntVar(&limit, "limit", searchExactProjectionLimitCLI, "maximum lifecycle items per bounded exact collection")
 	command.Flags().BoolVar(&sources, "sources", false, "include linked stored source receipts without accessing current sources")
+	command.Flags().BoolVar(&details, "details", false, "show the full record lifecycle representation")
 	return command
 }
 
@@ -315,12 +329,13 @@ func newProvenanceCandidateCommand(opts *options) *cobra.Command {
 	command := &cobra.Command{Use: "candidate", Short: "Load exact provenance candidates across lifecycle states"}
 	command.AddCommand(newProvenanceCandidateGetCommand(opts))
 	command.AddCommand(newProvenanceCandidateListCommand(opts))
+	command.AddCommand(newProvenanceCandidateRegisterCommand(opts))
 	return command
 }
 
 func newProvenanceCandidateGetCommand(opts *options) *cobra.Command {
 	limit := searchExactProjectionLimitCLI
-	var sources bool
+	var sources, details bool
 	command := &cobra.Command{
 		Use:   "get <candidate-id>",
 		Short: "Load one candidate through the foundation exact-get operation",
@@ -339,11 +354,10 @@ func newProvenanceCandidateGetCommand(opts *options) *cobra.Command {
 				if err != nil {
 					return renderError(cmd, opts, commandCtx.CorrelationID, err)
 				}
-				if opts.jsonOutput {
+				if opts.jsonOutput && details {
 					return json.NewEncoder(cmd.OutOrStdout()).Encode(expanded)
 				}
-				envelope = response.Success(commandCtx.CorrelationID, expanded.Data.CandidateLifecycleProjection)
-				envelope.Meta = expanded.Meta
+				envelope = response.Envelope[provenance.CandidateLifecycleProjection]{OK: expanded.OK, Data: expanded.Data.CandidateLifecycleProjection, Meta: expanded.Meta}
 				expansion = &expanded.Data.Sources
 			} else {
 				envelope, err = commandCtx.Client.GetProvenanceCandidate(ctx, commandCtx.CorrelationID, id, limit)
@@ -351,28 +365,20 @@ func newProvenanceCandidateGetCommand(opts *options) *cobra.Command {
 					return renderError(cmd, opts, commandCtx.CorrelationID, err)
 				}
 			}
-			if opts.jsonOutput {
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(envelope)
-			}
 			if opts.plainOutput {
 				fmt.Fprintln(cmd.OutOrStdout(), envelope.Data.Candidate.ID)
 				return nil
 			}
-			item := envelope.Data
-			fmt.Fprintf(cmd.OutOrStdout(), "Provenance candidate %s\n", item.Candidate.ID)
-			fmt.Fprintf(cmd.OutOrStdout(), "State: %s\n", item.EffectiveState)
-			fmt.Fprintf(cmd.OutOrStdout(), "Posture: %s\n", item.Candidate.AssertionPosture)
-			fmt.Fprintf(cmd.OutOrStdout(), "Claim: %s\n", item.Candidate.Claim)
-			fmt.Fprintf(cmd.OutOrStdout(), "Sources: %d; lifecycle events: %d; truncated: %t\n", len(item.SourceReferenceIDs), len(item.Events), item.Truncated)
-			if expansion != nil {
-				renderProvenanceLinkedSources(cmd, *expansion)
+			if details && expansion != nil {
+				full := response.Envelope[provenance.CandidateWithSources]{OK: envelope.OK, Data: provenance.CandidateWithSources{CandidateLifecycleProjection: envelope.Data, Sources: *expansion}, Meta: envelope.Meta}
+				return renderProvenanceView(cmd, opts, full, newProvenanceCandidateView(envelope.Data, expansion), true)
 			}
-			renderResponseMeta(cmd, opts, envelope.Meta)
-			return nil
+			return renderProvenanceView(cmd, opts, envelope, newProvenanceCandidateView(envelope.Data, expansion), details)
 		},
 	}
 	command.Flags().IntVar(&limit, "limit", searchExactProjectionLimitCLI, "maximum lifecycle items per bounded exact collection")
 	command.Flags().BoolVar(&sources, "sources", false, "include linked stored source receipts without accessing current sources")
+	command.Flags().BoolVar(&details, "details", false, "show the full candidate lifecycle representation")
 	return command
 }
 
@@ -384,6 +390,7 @@ func newProvenanceCaseCommand(opts *options) *cobra.Command {
 
 func newProvenanceCaseGetCommand(opts *options) *cobra.Command {
 	limit := searchExactProjectionLimitCLI
+	var details bool
 	command := &cobra.Command{
 		Use:   "get <case-id>",
 		Short: "Load one resolution case through the foundation exact-get operation",
@@ -399,27 +406,46 @@ func newProvenanceCaseGetCommand(opts *options) *cobra.Command {
 			if err != nil {
 				return renderError(cmd, opts, commandCtx.CorrelationID, err)
 			}
-			if opts.jsonOutput {
-				return json.NewEncoder(cmd.OutOrStdout()).Encode(envelope)
-			}
 			if opts.plainOutput {
 				fmt.Fprintln(cmd.OutOrStdout(), envelope.Data.Case.ID)
 				return nil
 			}
-			item := envelope.Data
-			fmt.Fprintf(cmd.OutOrStdout(), "Provenance case %s\n", item.Case.ID)
-			fmt.Fprintf(cmd.OutOrStdout(), "State: %s\n", item.EffectiveState)
-			fmt.Fprintf(cmd.OutOrStdout(), "Issue: %s\n", item.Case.Issue)
-			fmt.Fprintf(cmd.OutOrStdout(), "Members: %d; lifecycle events: %d; truncated: %t\n", len(item.Members), len(item.Events), item.Truncated)
-			renderResponseMeta(cmd, opts, envelope.Meta)
-			return nil
+			return renderProvenanceView(cmd, opts, envelope, newProvenanceCaseView(envelope.Data), details)
 		},
 	}
 	command.Flags().IntVar(&limit, "limit", searchExactProjectionLimitCLI, "maximum lifecycle items per bounded exact collection")
+	command.Flags().BoolVar(&details, "details", false, "show the full resolution case lifecycle representation")
 	return command
 }
 
 const searchExactProjectionLimitCLI = 16
+
+func newProvenanceRelationshipCommand(opts *options) *cobra.Command {
+	parent := &cobra.Command{Use: "relationship", Short: "Read an exact Provenance relationship"}
+	limit := searchExactProjectionLimitCLI
+	var details bool
+	get := &cobra.Command{Use: "get <relationship-id>", Args: cobra.ExactArgs(1), Short: "Read relationship direction, evidence and effective state", RunE: func(cmd *cobra.Command, args []string) error {
+		id, cc, err := provenanceExactCommandContext(opts, args[0], limit)
+		if err != nil {
+			return renderError(cmd, opts, opts.correlationID, err)
+		}
+		ctx, cancel := context.WithTimeout(cmd.Context(), provenance.FoundationRequestTimeout)
+		defer cancel()
+		env, err := cc.Client.GetProvenanceRelationship(ctx, cc.CorrelationID, id, limit)
+		if err != nil {
+			return renderError(cmd, opts, cc.CorrelationID, err)
+		}
+		if opts.plainOutput {
+			fmt.Fprintln(cmd.OutOrStdout(), env.Data.Relationship.ID)
+			return nil
+		}
+		return renderProvenanceView(cmd, opts, env, newProvenanceRelationshipView(env.Data), details)
+	}}
+	get.Flags().IntVar(&limit, "limit", searchExactProjectionLimitCLI, "maximum bounded relationship lifecycle events")
+	get.Flags().BoolVar(&details, "details", false, "return the full relationship lifecycle representation")
+	parent.AddCommand(get)
+	return parent
+}
 
 func provenanceExactCommandContext(opts *options, rawID string, limit int) (provenance.SemanticID, commandContext, error) {
 	id, err := provenance.ParseSemanticID(rawID)
@@ -433,87 +459,20 @@ func provenanceExactCommandContext(opts *options, rawID string, limit int) (prov
 	return id, commandCtx, err
 }
 
-func renderProvenanceSearch(cmd *cobra.Command, opts *options, result provenance.SearchResponse) {
-	if opts.plainOutput {
-		for _, item := range result.AcceptedRecords.Items {
-			fmt.Fprintln(cmd.OutOrStdout(), item.RecordID)
-		}
-		for _, item := range result.UnresolvedCases.Items {
-			fmt.Fprintln(cmd.OutOrStdout(), item.CaseID)
-		}
-		for _, item := range result.PendingCandidates.Items {
-			fmt.Fprintln(cmd.OutOrStdout(), item.CandidateID)
-		}
-		for _, item := range result.RepositoryState.Items {
-			fmt.Fprintln(cmd.OutOrStdout(), item.RepositoryID)
-		}
-		for _, item := range result.ProjectState.Items {
-			fmt.Fprintln(cmd.OutOrStdout(), item.ProjectID)
-		}
-		return
+func renderProvenanceSearchIDs(cmd *cobra.Command, result provenance.SearchResponse) {
+	for _, item := range result.AcceptedRecords.Items {
+		fmt.Fprintln(cmd.OutOrStdout(), item.RecordID)
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Provenance search: %s\n", result.Query)
-	renderProvenanceSearchSection(cmd, "Project state (source declarations)", result.ProjectState.Truncated, len(result.ProjectState.Items), func(index int) (string, provenance.SearchCompactMatch) {
-		item := result.ProjectState.Items[index]
-		return item.ProjectID, item.Match
-	})
-	renderProvenanceSearchSection(cmd, "Accepted records", result.AcceptedRecords.Truncated, len(result.AcceptedRecords.Items), func(index int) (string, provenance.SearchCompactMatch) {
-		item := result.AcceptedRecords.Items[index]
-		return string(item.RecordID), item.Match
-	})
-	renderProvenanceSearchSection(cmd, "Unresolved cases", result.UnresolvedCases.Truncated, len(result.UnresolvedCases.Items), func(index int) (string, provenance.SearchCompactMatch) {
-		item := result.UnresolvedCases.Items[index]
-		return string(item.CaseID), item.Match
-	})
-	renderProvenanceSearchSection(cmd, "Pending candidates (unaccepted)", result.PendingCandidates.Truncated, len(result.PendingCandidates.Items), func(index int) (string, provenance.SearchCompactMatch) {
-		item := result.PendingCandidates.Items[index]
-		return string(item.CandidateID), item.Match
-	})
-	renderProvenanceSearchSection(cmd, "Repository state", result.RepositoryState.Truncated, len(result.RepositoryState.Items), func(index int) (string, provenance.SearchCompactMatch) {
-		item := result.RepositoryState.Items[index]
-		return item.RepositoryID, item.Match
-	})
-	if result.NextCursor != "" {
-		fmt.Fprintf(cmd.OutOrStdout(), "Next cursor: %s\n", result.NextCursor)
+	for _, item := range result.UnresolvedCases.Items {
+		fmt.Fprintln(cmd.OutOrStdout(), item.CaseID)
 	}
-}
-
-func renderProvenanceSearchSection(cmd *cobra.Command, title string, truncated bool, count int, item func(int) (string, provenance.SearchCompactMatch)) {
-	fmt.Fprintf(cmd.OutOrStdout(), "%s: %d", title, count)
-	if truncated {
-		fmt.Fprint(cmd.OutOrStdout(), " (truncated)")
+	for _, item := range result.PendingCandidates.Items {
+		fmt.Fprintln(cmd.OutOrStdout(), item.CandidateID)
 	}
-	fmt.Fprintln(cmd.OutOrStdout())
-	for index := 0; index < count; index++ {
-		id, match := item(index)
-		fmt.Fprintf(cmd.OutOrStdout(), "- %s [%s; %s]\n", id, match.AssertionPosture, match.Freshness.Currentness)
-		fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", match.Summary.Text)
-		fmt.Fprintf(cmd.OutOrStdout(), "  Match: %s\n", match.MatchExplanation.Text)
+	for _, item := range result.RepositoryState.Items {
+		fmt.Fprintln(cmd.OutOrStdout(), item.RepositoryID)
 	}
-}
-
-func renderProvenanceLinkedSources(cmd *cobra.Command, sources provenance.LinkedSources) {
-	fmt.Fprintf(cmd.OutOrStdout(), "Stored source receipts: %d; sources_truncated=%t; incomplete_items=%d; no current source access performed\n", sources.Returned, sources.SourcesTruncated, sources.IncompleteItems)
-	for _, item := range sources.Items {
-		fmt.Fprintf(cmd.OutOrStdout(), "Source %s", strconv.Quote(string(item.SourceReferenceID)))
-		if item.ReceiptUnavailable != "" {
-			fmt.Fprintf(cmd.OutOrStdout(), " receipt_unavailable=%s\n", strconv.Quote(item.ReceiptUnavailable))
-			continue
-		}
-		if item.StoredSourceReceipt == nil {
-			fmt.Fprintln(cmd.OutOrStdout(), " receipt_unavailable=missing_receipt")
-			continue
-		}
-		fmt.Fprintf(cmd.OutOrStdout(), " kind=%s status=%s verification=%s resolver=%s version=%s resolved=%s\n",
-			strconv.Quote(item.SourceKind), strconv.Quote(item.Status), strconv.Quote(item.VerificationPosture),
-			strconv.Quote(item.ResolverName), strconv.Quote(item.ResolverVersion), item.ResolutionAt.Format("2006-01-02T15:04:05.999999999Z07:00"))
-		for _, field := range []struct {
-			name  string
-			value *string
-		}{{"locator", item.CanonicalLocator}, {"version", item.VersionAddress}, {"digest", item.ContentDigest}, {"gap", item.GapReason}} {
-			if field.value != nil {
-				fmt.Fprintf(cmd.OutOrStdout(), "  %s=%s\n", field.name, strconv.Quote(*field.value))
-			}
-		}
+	for _, item := range result.ProjectState.Items {
+		fmt.Fprintln(cmd.OutOrStdout(), item.ProjectID)
 	}
 }

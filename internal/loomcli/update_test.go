@@ -41,6 +41,27 @@ func TestUpdateStatusJSONDoesNotRequireDaemon(t *testing.T) {
 	}
 }
 
+func TestUpdateReconcileLegacyReceiptRemainsUnverified(t *testing.T) {
+	stateDir := t.TempDir()
+	path := update.ActiveManifestPath(stateDir)
+	if err := update.WriteUpdateManifest(path, update.UpdateManifest{SchemaVersion: update.UpdateManifestSchemaVersion, UpdateID: "update_legacy", Status: update.UpdateStatusFailed, PlanHash: "sha256:reviewed", StartedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	original, _ := os.ReadFile(path)
+	stdout, _, err := executeRootCommand("--json", "update", "reconcile", "--state-dir", stateDir)
+	if err == nil || !strings.Contains(err.Error(), "no reviewed executable identity") {
+		t.Fatalf("output=%s error=%v", stdout, err)
+	}
+	current, _ := os.ReadFile(path)
+	if !bytes.Equal(current, original) {
+		t.Fatal("reconcile rewrote legacy failure")
+	}
+	var payload any
+	if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+		t.Fatalf("expected one valid JSON error, got %s", stdout)
+	}
+}
+
 func TestUpdateMaintenanceStatusAllowsMissingActiveManifest(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "update")
 

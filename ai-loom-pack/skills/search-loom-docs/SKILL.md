@@ -5,9 +5,11 @@ description: Find and cite release-matched LOOM documentation when a user asks h
 
 # Search LOOM Docs
 
-Use LOOM's packaged documentation before relying on memory. This skill is
-inspect-only: it finds authoritative guidance and verifies claims, but does not
-perform the workflow being researched.
+Use known commands directly and local `--help` for unfamiliar syntax. Load this
+skill when a LOOM workflow or architecture needs explanation beyond that help,
+or current-versus-historical support is unclear. It is not needed for ordinary
+known-file lookup. This skill is inspect-only: it finds authoritative guidance
+and verifies claims, but does not perform the workflow being researched.
 
 ## Trigger Boundary
 
@@ -18,8 +20,8 @@ a substitute for a project, storage, node, incident, or credential workflow.
 ## Source-Of-Truth Order
 
 1. The current scope's `AGENTS.md` and repository/project instructions.
-2. The release-matched public corpus resolved by `loom docs`.
-3. Current CLI help for the installed `loom` executable.
+2. Current CLI help for the installed `loom` executable, for command syntax.
+3. The release-matched public corpus resolved by `loom docs`, for explanation.
 4. Runtime evidence when a question is about observed deployed state.
 5. Development plans only when the task is development work or public docs
    explicitly mark behavior deferred.
@@ -38,7 +40,8 @@ describe work that is not shipped.
 4. Inspect the exact page or heading with `loom docs inspect`.
 5. Follow related-page edges only when the first page does not settle the
    question.
-6. Verify every proposed command with `loom <group> <command> --help`.
+6. Verify unfamiliar or conflicting command syntax with local `--help`; known
+   supported commands need no repeated help lookup.
 7. Answer with the document title, repository-relative path, and status.
 
 Read [the docs workflow](references/docs-workflow.md) for concrete commands and

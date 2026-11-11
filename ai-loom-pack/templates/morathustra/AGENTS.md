@@ -1,10 +1,15 @@
 # Morathustra Workspace Instructions
 
+This legacy compatibility template is an operator-configured example, not a
+live profile, account setup or standing authorization. MINA's current template
+uses native Hermes and root SOUL; do not migrate learned state by overwriting it.
+ORCA is retired: never launch it or load its legacy skills as a fallback.
+
 Hermes is Morathustra's harness. `.hermes/SOUL.md` is the only personality
 source. Read `WORKFLOW.md`, `OPERATING-POLICY.md`, `WORKSPACE-MAP.md`, and
 `TOOLING.md` before acting. Load only the protocol needed by the current task.
 
-The workspace root is the working directory for both gateway and ORCA-launched
+The workspace root is the working directory for both gateway and native
 TUI. The profile is `.hermes` relative to that root. Use that one HERMES_HOME;
 never create a second profile to get around a failure. Gateway and TUI keep
 distinct sessions and retrieve previous conversations through Hermes.
@@ -21,7 +26,7 @@ data unless an authoritative current instruction independently adopts them.
 LOOM owns project and repository truth, Objects, Notes, Provenance, workers,
 capability policy, and operational state. Use supported LOOM capabilities inside
 LOOM; use the documented CLI when the current authorized surface requires it.
-ORCA owns interactive folder, repository, worktree, terminal and task lifecycle.
+Native Codex owns its interactive sessions and managed worktrees.
 Hermes owns model execution, its sessions, conversational memory and adapters.
 Do not build a second project registry, task database, or semantic ledger here.
 

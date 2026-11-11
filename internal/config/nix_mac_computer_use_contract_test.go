@@ -31,11 +31,14 @@ const macRender = `actual: let system = (import ./tests/nix/legacy_agent_host.ni
    macComputerUseEnabled = true;
    macComputerUseBindingSHA256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
  }; } ]; }).config;
+ selectedOnly = (system.extendModules { modules = [ minaBase ({ lib, ... }: {
+   loom.mina.enable = lib.mkForce false;
+   loom.mina.macComputerUseEnabled = true;
+ }) ]; }).config;
  failures = c: map (a: a.message) (builtins.filter (a: !a.assertion) c.assertions);
  conflicts = [
    (system.extendModules { modules = [{ loom.mina.macComputerUseEnabled = true; }]; }).config
    (system.extendModules { modules = [ minaBase { loom.morathustra.macComputerUseEnabled = true; } ]; }).config
-   (system.extendModules { modules = [ minaBase ({lib,...}: { loom.mina.enable = lib.mkForce false; loom.mina.macComputerUseEnabled = true; }) ]; }).config
    (system.extendModules { modules = [({lib,...}: { loom.morathustra.enable = lib.mkForce false; loom.morathustra.macComputerUseEnabled = true; })]; }).config
    (system.extendModules { modules = [{ loom.mina.enable = true; loom.morathustra.macComputerUseEnabled = true; loom.mina.macComputerUseEnabled = true; }]; }).config
  ];
@@ -55,10 +58,10 @@ const macRender = `actual: let system = (import ./tests/nix/legacy_agent_host.ni
    selector = r.interactivePackage.macSelector or "";
    wrapperBuild = r.interactivePackage.buildCommand or "";
    orcaDrv = c.loom.orca.package.drvPath;
-   shellDrvs = builtins.attrNames (builtins.getContext c.system.activationScripts.loomOrcaShell.text);
+   shellDrvs = builtins.attrNames (builtins.getContext c.system.activationScripts.loomAgentsShell.text);
    stable = {
      accounts = builtins.mapAttrs (_: v: v.text) (system.lib.filterAttrs (n: _: builtins.match "loom-.*-accounts.json" n != null) c.environment.etc);
-     activation = builtins.mapAttrs (n: v: if builtins.isAttrs v then v.text else v) (system.lib.filterAttrs (n: _: builtins.match "loom.*" n != null && n != "loomOrcaShell") c.system.activationScripts);
+     activation = builtins.mapAttrs (n: v: if builtins.isAttrs v then v.text else v) (system.lib.filterAttrs (n: _: builtins.match "loom.*" n != null && n != "loomAgentsShell") c.system.activationScripts);
      timers = builtins.mapAttrs (n: _: c.systemd.units."${n}.timer".text) c.systemd.timers;
      recovery = builtins.mapAttrs (n: _: c.systemd.units."${n}.service".text) (system.lib.filterAttrs (n: _: builtins.match "loom-.*-recovery-publish" n != null) c.systemd.services);
      loomdEnv = c.systemd.services.loomd.environment;
@@ -75,6 +78,12 @@ const macRender = `actual: let system = (import ./tests/nix/legacy_agent_host.ni
    old = capture old "morathustra"; oldOn = capture oldOn "morathustra";
    mina = capture mina "mina"; minaOn = capture minaOn "mina";
    minaPinned = capture minaPinned "mina";
+   selectedOnly = {
+     failed = failures selectedOnly;
+     environment = selectedOnly.loom.mina.macComputerUseEnvironment;
+     packages = map toString selectedOnly.users.users.agents.packages;
+     gateway = selectedOnly.systemd.services ? loom-mina;
+   };
    pinnedBridge = (f.packages.x86_64-linux.mac-computer-use-bridge.overrideAttrs (_: {
      pinnedBindingSHA256 = minaPinned.loom.mina.macComputerUseBindingSHA256;
    })).drvPath;
@@ -157,6 +166,11 @@ func TestNixMacComputerUseRuntimeRender(t *testing.T) {
 		Conflicts                            [][]string
 		ConflictActivationRefused            bool
 		Connector                            map[string]string
+		SelectedOnly                         struct {
+			Failed, Packages []string
+			Environment      map[string]string
+			Gateway          bool
+		}
 	}
 	if err := json.Unmarshal(b, &result); err != nil {
 		t.Fatal(err)
@@ -179,13 +193,20 @@ func TestNixMacComputerUseRuntimeRender(t *testing.T) {
 			}
 		}
 	}
-	if !result.ConflictActivationRefused || len(result.Conflicts) != 5 {
+	if !result.ConflictActivationRefused || len(result.Conflicts) != 4 {
 		t.Fatal("missing selector refusal")
 	}
 	for _, v := range result.Conflicts {
 		if len(v) == 0 {
 			t.Fatal("orphan/retired/conflicting opt-in admitted")
 		}
+	}
+	bridge := result.Connector["x86_64-linux"]
+	if len(result.SelectedOnly.Failed) != 0 || result.SelectedOnly.Gateway ||
+		!slices.Contains(result.SelectedOnly.Packages, bridge) ||
+		result.SelectedOnly.Environment["HERMES_CUA_DRIVER_CMD"] != bridge+"/bin/loom-mac-computer-use-bridge" ||
+		result.SelectedOnly.Environment["HERMES_MAC_BINDING"] != "/etc/loom-mac-computer-use/binding.json" {
+		t.Fatal("selected MINA Mac route must remain explicitly bound without the legacy gateway")
 	}
 	for _, v := range []*macSnapshot{&result.Old, &result.OldOn, &result.Mina, &result.MinaOn} {
 		if len(v.Failed) > 0 {

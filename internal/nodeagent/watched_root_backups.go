@@ -178,20 +178,21 @@ type LocalWatchedRootBackupItem struct {
 }
 
 type LocalWatchedRootBackupOutboxItem struct {
-	LocalOutboxID    string          `json:"local_outbox_id"`
-	LocalRef         string          `json:"local_ref"`
-	ItemKind         string          `json:"item_kind"`
-	RootKey          string          `json:"root_key"`
-	LocalSequence    int64           `json:"local_sequence"`
-	PayloadHash      string          `json:"payload_hash"`
-	Status           string          `json:"status"`
-	CreatedAt        time.Time       `json:"created_at"`
-	LastAttemptAt    *time.Time      `json:"last_attempt_at,omitempty"`
-	SyncedAt         *time.Time      `json:"synced_at,omitempty"`
-	GlobalRef        string          `json:"global_ref,omitempty"`
-	LastErrorCode    string          `json:"last_error_code,omitempty"`
-	LastErrorMessage string          `json:"last_error_message,omitempty"`
-	PayloadJSON      json.RawMessage `json:"payload_json"`
+	LocalOutboxID          string          `json:"local_outbox_id"`
+	LocalRef               string          `json:"local_ref"`
+	ItemKind               string          `json:"item_kind"`
+	RootKey                string          `json:"root_key"`
+	LocalSequence          int64           `json:"local_sequence"`
+	PayloadHash            string          `json:"payload_hash"`
+	Status                 string          `json:"status"`
+	CreatedAt              time.Time       `json:"created_at"`
+	LastAttemptAt          *time.Time      `json:"last_attempt_at,omitempty"`
+	SyncedAt               *time.Time      `json:"synced_at,omitempty"`
+	GlobalRef              string          `json:"global_ref,omitempty"`
+	LastErrorCode          string          `json:"last_error_code,omitempty"`
+	LastErrorMessage       string          `json:"last_error_message,omitempty"`
+	PayloadJSON            json.RawMessage `json:"payload_json"`
+	BindingRepairAttempted bool            `json:"binding_repair_attempted,omitempty"`
 }
 
 type LocalWatchedRootBackupCursor struct {
@@ -207,6 +208,7 @@ type LocalWatchedRootBackupPushRun struct {
 	Batches        []mainwatchedroots.BackupBatchResult `json:"batches,omitempty"`
 	LocalStatus    LocalWatchedRootBackupStatus         `json:"local_status"`
 	SubmittedItems int                                  `json:"submitted_items"`
+	Persistence    QueuePersistenceStats                `json:"persistence"`
 }
 
 type LocalWatchedRootBackupQueueCompaction struct {
@@ -280,8 +282,23 @@ func (s Store) EnsureWatchedRootBackupDataDirs() error {
 
 func (s Store) LocalWatchedRootBackupStatus(config Config, state State, rootKey string) (LocalWatchedRootBackupStatus, error) {
 	rootKey = strings.TrimSpace(rootKey)
+	if s.queueDB != nil {
+		return s.recordBackupStatus(config, state, rootKey)
+	}
+	if s.recordsExist() {
+		var status LocalWatchedRootBackupStatus
+		err := s.withRecordAccess(func(locked Store) error {
+			var err error
+			status, err = locked.recordBackupStatus(config, state, rootKey)
+			return err
+		})
+		return status, err
+	}
+	if s.syncBatch != nil {
+		return s.localWatchedRootBackupStatusUncached(config, state, rootKey)
+	}
 	status, err := cachedLocalStatus("backup:"+rootKey+":"+state.NodeID+":"+config.NodeKey,
-		[]string{s.watchedRootBackupArtifactsPath(), s.watchedRootBackupBatchesPath(), s.watchedRootBackupItemsPath(), s.watchedRootBackupOutboxPath()},
+		s.queueStatusPaths([]string{s.watchedRootBackupArtifactsPath(), s.watchedRootBackupBatchesPath(), s.watchedRootBackupItemsPath(), s.watchedRootBackupOutboxPath()}),
 		func() (LocalWatchedRootBackupStatus, error) {
 			return s.localWatchedRootBackupStatusUncached(config, state, rootKey)
 		})
@@ -393,11 +410,27 @@ func (s Store) localWatchedRootBackupStatusUncached(config Config, state State, 
 }
 
 func (s Store) QueueWatchedRootBackupAction(config Config, state State, action watchedroots.OutputAction, contentPath string) (LocalWatchedRootBackupBatch, LocalWatchedRootBackupOutboxItem, error) {
+	s, unlock, err := s.lockLocalSync(context.Background())
+	if err != nil {
+		return LocalWatchedRootBackupBatch{}, LocalWatchedRootBackupOutboxItem{}, err
+	}
+	defer unlock()
 	var batch LocalWatchedRootBackupBatch
 	var outboxItem LocalWatchedRootBackupOutboxItem
-	err := s.withWatchedRootBackupQueueLock(func() error {
+	err = s.withWatchedRootBackupQueueLock(func(s Store) error {
+		owned := s.syncBatch == nil
+		if owned {
+			var err error
+			s, err = s.beginSyncBatch()
+			if err != nil {
+				return err
+			}
+		}
 		var queueErr error
 		batch, outboxItem, queueErr = s.queueWatchedRootBackupActionLocked(config, state, action, contentPath)
+		if queueErr == nil && owned {
+			queueErr = s.commitSyncBatch()
+		}
 		return queueErr
 	})
 	if compactErr := s.compactWatchedRootBackupQueueEventsIfLarge(); err == nil {
@@ -423,22 +456,11 @@ func (s Store) queueWatchedRootBackupActionLocked(config Config, state State, ac
 		return LocalWatchedRootBackupBatch{}, LocalWatchedRootBackupOutboxItem{}, err
 	}
 
-	artifacts, err := s.LoadWatchedRootBackupArtifacts()
+	queue, err := s.loadWatchedRootBackupAction(action)
 	if err != nil {
 		return LocalWatchedRootBackupBatch{}, LocalWatchedRootBackupOutboxItem{}, err
 	}
-	batches, err := s.LoadWatchedRootBackupBatches()
-	if err != nil {
-		return LocalWatchedRootBackupBatch{}, LocalWatchedRootBackupOutboxItem{}, err
-	}
-	items, err := s.LoadWatchedRootBackupItems()
-	if err != nil {
-		return LocalWatchedRootBackupBatch{}, LocalWatchedRootBackupOutboxItem{}, err
-	}
-	outbox, err := s.LoadWatchedRootBackupOutbox()
-	if err != nil {
-		return LocalWatchedRootBackupBatch{}, LocalWatchedRootBackupOutboxItem{}, err
-	}
+	artifacts, batches, items, outbox := queue.artifacts, queue.batches, queue.items, queue.outbox
 	if batch, outboxItem, ok := existingWatchedRootBackupQueue(action, batches, items, outbox); ok {
 		return batch, outboxItem, nil
 	}
@@ -453,6 +475,12 @@ func (s Store) queueWatchedRootBackupActionLocked(config Config, state State, ac
 	}
 
 	sequence := nextWatchedRootBackupSequence(outbox)
+	if s.queueDB != nil {
+		sequence, err = s.nextBackupRecordSequence()
+		if err != nil {
+			return LocalWatchedRootBackupBatch{}, LocalWatchedRootBackupOutboxItem{}, err
+		}
+	}
 	batch := LocalWatchedRootBackupBatch{
 		LocalBatchID:  ids.NewLocalBackupBatchID(),
 		RootKey:       action.RootKey,
@@ -521,16 +549,16 @@ func (s Store) queueWatchedRootBackupActionLocked(config Config, state State, ac
 	batches = append(batches, batch)
 	items = append(items, item)
 	outbox = append(outbox, outboxItem)
-	if err := s.SaveWatchedRootBackupArtifacts(artifacts); err != nil {
+	if err := s.saveBackupQueueSelection(s.watchedRootBackupArtifactsPath(), artifacts); err != nil {
 		return LocalWatchedRootBackupBatch{}, LocalWatchedRootBackupOutboxItem{}, err
 	}
-	if err := s.SaveWatchedRootBackupBatches(batches); err != nil {
+	if err := s.saveBackupQueueSelection(s.watchedRootBackupBatchesPath(), batches); err != nil {
 		return LocalWatchedRootBackupBatch{}, LocalWatchedRootBackupOutboxItem{}, err
 	}
-	if err := s.SaveWatchedRootBackupItems(items); err != nil {
+	if err := s.saveBackupQueueSelection(s.watchedRootBackupItemsPath(), items); err != nil {
 		return LocalWatchedRootBackupBatch{}, LocalWatchedRootBackupOutboxItem{}, err
 	}
-	if err := s.SaveWatchedRootBackupOutbox(outbox); err != nil {
+	if err := s.saveBackupQueueSelection(s.watchedRootBackupOutboxPath(), outbox); err != nil {
 		return LocalWatchedRootBackupBatch{}, LocalWatchedRootBackupOutboxItem{}, err
 	}
 	return batch, outboxItem, nil
@@ -571,7 +599,7 @@ func flushWatchedRootBackupsForRoot(ctx context.Context, store Store, config Con
 		flush.ManualAfter = before.Counts.ManualAction
 		return flush
 	}
-	push, err := pushLocalWatchedRootBackupsForRoot(ctx, store, config, state, correlationID, rootKey, 16)
+	push, err := pushLocalWatchedRootBackupsForRoot(ctx, store, config, state, correlationID, rootKey, watchedroots.OutputBackupPageSize)
 	if err != nil {
 		flush.Status = watchedroots.OutputStatusFailed
 		flush.Error = err.Error()
@@ -611,11 +639,24 @@ func pushLocalWatchedRootBackupsLimited(ctx context.Context, store Store, config
 }
 
 func pushLocalWatchedRootBackupsForRoot(ctx context.Context, store Store, config Config, state State, correlationID, rootKey string, maxItems int) (LocalWatchedRootBackupPushRun, error) {
+	store, unlock, err := store.lockLocalSync(ctx)
+	if err != nil {
+		return LocalWatchedRootBackupPushRun{}, err
+	}
+	defer unlock()
+	lockStarted := time.Now()
 	var result LocalWatchedRootBackupPushRun
-	err := store.withWatchedRootBackupQueueLock(func() error {
+	err = store.withWatchedRootBackupQueueLock(func(store Store) error {
+		store, commit, err := store.joinSyncBatch()
+		if err != nil {
+			return err
+		}
 		var pushErr error
 		result, pushErr = pushLocalWatchedRootBackupsOnceLocked(ctx, store, config, state, correlationID, rootKey, maxItems)
-		return pushErr
+		commitErr := commit()
+		store.syncBatch.stats.LockHeldMillis = time.Since(lockStarted).Milliseconds()
+		result.Persistence = store.syncBatch.stats
+		return errors.Join(pushErr, commitErr)
 	})
 	if compactErr := store.compactWatchedRootBackupQueueEventsIfLarge(); err == nil {
 		err = compactErr
@@ -630,34 +671,12 @@ func pushLocalWatchedRootBackupsOnceLocked(ctx context.Context, store Store, con
 	if strings.TrimSpace(state.CredentialToken) == "" {
 		return LocalWatchedRootBackupPushRun{}, errors.New("node credential is not imported: missing credential_token")
 	}
-	artifacts, err := store.LoadWatchedRootBackupArtifacts()
+	if maxItems <= 0 || maxItems > localQueueCommitPageSize {
+		maxItems = localQueueCommitPageSize
+	}
+	pending, err := store.pendingWatchedRootBackupOutbox(rootKey, maxItems)
 	if err != nil {
 		return LocalWatchedRootBackupPushRun{}, err
-	}
-	batches, err := store.LoadWatchedRootBackupBatches()
-	if err != nil {
-		return LocalWatchedRootBackupPushRun{}, err
-	}
-	items, err := store.LoadWatchedRootBackupItems()
-	if err != nil {
-		return LocalWatchedRootBackupPushRun{}, err
-	}
-	outbox, err := store.LoadWatchedRootBackupOutbox()
-	if err != nil {
-		return LocalWatchedRootBackupPushRun{}, err
-	}
-	pending := pendingWatchedRootBackupOutboxItems(outbox)
-	if rootKey != "" {
-		selected := make([]LocalWatchedRootBackupOutboxItem, 0, len(pending))
-		for _, item := range pending {
-			if item.RootKey == rootKey {
-				selected = append(selected, item)
-			}
-		}
-		pending = selected
-	}
-	if maxItems > 0 && len(pending) > maxItems {
-		pending = pending[:maxItems]
 	}
 	if len(pending) == 0 {
 		status, statusErr := store.LocalWatchedRootBackupStatus(config, state, rootKey)
@@ -667,16 +686,25 @@ func pushLocalWatchedRootBackupsOnceLocked(ctx context.Context, store Store, con
 		return LocalWatchedRootBackupPushRun{LocalStatus: status}, nil
 	}
 	now := time.Now().UTC()
-	pendingOutboxIDs := make(map[string]struct{}, len(pending))
-	for _, pendingItem := range pending {
-		pendingOutboxIDs[pendingItem.LocalOutboxID] = struct{}{}
+	for idx := range pending {
+		pending[idx].LastAttemptAt = &now
 	}
-	for idx := range outbox {
-		if _, ok := pendingOutboxIDs[outbox[idx].LocalOutboxID]; ok {
-			outbox[idx].LastAttemptAt = &now
+	if store.queueDB == nil {
+		outbox, err := store.LoadWatchedRootBackupOutbox()
+		if err != nil {
+			return LocalWatchedRootBackupPushRun{}, err
 		}
-	}
-	if err := store.SaveWatchedRootBackupOutbox(outbox); err != nil {
+		for idx := range outbox {
+			for _, item := range pending {
+				if outbox[idx].LocalOutboxID == item.LocalOutboxID {
+					outbox[idx] = item
+				}
+			}
+		}
+		if err := store.SaveWatchedRootBackupOutbox(outbox); err != nil {
+			return LocalWatchedRootBackupPushRun{}, err
+		}
+	} else if err := store.saveBackupQueueSelection(store.watchedRootBackupOutboxPath(), pending); err != nil {
 		return LocalWatchedRootBackupPushRun{}, err
 	}
 	client, err := NewClient(config.MainURL)
@@ -684,12 +712,19 @@ func pushLocalWatchedRootBackupsOnceLocked(ctx context.Context, store Store, con
 		return LocalWatchedRootBackupPushRun{}, err
 	}
 
+	deliveryStarted := time.Now()
+	defer func() { store.syncBatch.stats.DeliveryMillis += time.Since(deliveryStarted).Milliseconds() }()
 	results := make([]mainwatchedroots.BackupBatchResult, 0, len(pending))
 	submittedItems := 0
 	for _, outboxItem := range pending {
 		if err := ctx.Err(); err != nil {
 			return LocalWatchedRootBackupPushRun{}, err
 		}
+		queue, err := store.loadWatchedRootBackupBatch(outboxItem)
+		if err != nil {
+			return LocalWatchedRootBackupPushRun{}, err
+		}
+		artifacts, batches, items, outbox := queue.artifacts, queue.batches, queue.items, queue.outbox
 		batchIdx := watchedRootBackupBatchIndex(batches, outboxItem.LocalRef)
 		if batchIdx < 0 {
 			err := fmt.Errorf("local backup batch not found for outbox item %s", outboxItem.LocalRef)
@@ -780,16 +815,12 @@ func pushLocalWatchedRootBackupsOnceLocked(ctx context.Context, store Store, con
 			items[itemIdx].FileTransferAcceptedPath = artifacts[artifactIdx].FileTransferAcceptedPath
 		}
 		if skipBatchUpload {
-			artifacts, _ = store.LoadWatchedRootBackupArtifacts()
-			batches, _ = store.LoadWatchedRootBackupBatches()
-			items, _ = store.LoadWatchedRootBackupItems()
-			outbox, _ = store.LoadWatchedRootBackupOutbox()
 			continue
 		}
-		if err := store.SaveWatchedRootBackupArtifacts(artifacts); err != nil {
+		if err := store.saveBackupQueueSelection(store.watchedRootBackupArtifactsPath(), artifacts); err != nil {
 			return LocalWatchedRootBackupPushRun{}, err
 		}
-		if err := store.SaveWatchedRootBackupItems(items); err != nil {
+		if err := store.saveBackupQueueSelection(store.watchedRootBackupItemsPath(), items); err != nil {
 			return LocalWatchedRootBackupPushRun{}, err
 		}
 		batchItems := make([]LocalWatchedRootBackupItem, 0, len(itemIndexes))
@@ -800,9 +831,23 @@ func pushLocalWatchedRootBackupsOnceLocked(ctx context.Context, store Store, con
 		envelope, err := client.PushWatchedRootBackupBatch(ctx, correlationID, input.IdempotencyKey, input)
 		if err != nil {
 			code := watchedRootBackupRemoteErrorCode(err, watchedroots.FindingBackupBatchUploadFailed)
-			resetWatchedRootPrivateBackupBindings(artifacts, items, itemIndexes)
-			_ = store.markWatchedRootBackupOutboxError(artifacts, batches, items, outbox, outboxItem.LocalOutboxID, batch.LocalBatchID, "", "", code, err.Error())
+			if watchedRootBackupBindingMismatch(err) && !outboxItem.BindingRepairAttempted {
+				resetWatchedRootPrivateBackupBindings(artifacts, items, itemIndexes)
+				for i := range outbox {
+					if outbox[i].LocalOutboxID == outboxItem.LocalOutboxID {
+						outbox[i].BindingRepairAttempted = true
+					}
+				}
+			} else if watchedRootBackupBindingMismatch(err) {
+				code = watchedroots.FindingBackupBatchRejected
+			}
+			if persistErr := store.markWatchedRootBackupOutboxError(artifacts, batches, items, outbox, outboxItem.LocalOutboxID, batch.LocalBatchID, "", "", code, err.Error()); persistErr != nil {
+				return LocalWatchedRootBackupPushRun{}, errors.Join(err, persistErr)
+			}
 			saveWatchedRootBackupQueueFinding(store, batch.RootKey, "", code, err.Error())
+			if code == watchedroots.FindingBackupBatchRejected {
+				continue
+			}
 			return LocalWatchedRootBackupPushRun{}, err
 		}
 		if err := store.applyWatchedRootBackupBatchResultLocked(outboxItem, envelope.Data); err != nil {
@@ -810,10 +855,6 @@ func pushLocalWatchedRootBackupsOnceLocked(ctx context.Context, store Store, con
 		}
 		results = append(results, envelope.Data)
 		submittedItems += len(envelope.Data.Items)
-		artifacts, _ = store.LoadWatchedRootBackupArtifacts()
-		batches, _ = store.LoadWatchedRootBackupBatches()
-		items, _ = store.LoadWatchedRootBackupItems()
-		outbox, _ = store.LoadWatchedRootBackupOutbox()
 	}
 	status, err := store.LocalWatchedRootBackupStatus(config, state, rootKey)
 	if err != nil {
@@ -930,7 +971,11 @@ func stableFileInfo(path string, stabilityWindow string) (os.FileInfo, error) {
 	if delay <= 0 {
 		return before, nil
 	}
-	time.Sleep(delay)
+	// A file that has already been quiet for the window needs no new serial
+	// sleep. Staging still verifies metadata after copying and the expected hash.
+	if remaining := time.Until(before.ModTime().Add(delay)); remaining > 0 {
+		time.Sleep(remaining)
+	}
 	after, err := os.Stat(path)
 	if err != nil {
 		return nil, err
@@ -1053,6 +1098,7 @@ func watchedRootBackupUsesFileTransfer(config Config, artifact LocalWatchedRootB
 }
 
 func uploadWatchedRootBackupArtifactViaTransfer(ctx context.Context, store Store, client Client, config Config, state State, correlationID string, batch LocalWatchedRootBackupBatch, item LocalWatchedRootBackupItem, artifact LocalWatchedRootBackupArtifact) (LocalWatchedRootBackupArtifact, error) {
+	client = client.WithNodeCredential(state.CredentialToken)
 	transport := normalizeBackupTransportConfig(config.BackupTransport)
 	if artifact.FileTransferID == "" {
 		manifest := watchedRootBackupFileTransferManifest(config, state, batch, item, artifact, transport)
@@ -1313,6 +1359,11 @@ func watchedRootBackupItemMetadata(batch LocalWatchedRootBackupBatch, item Local
 			metadata[key] = value
 		}
 	}
+	// Qualify retained legacy queues as well as new short-lived paths without
+	// inventing a hash or mutating their original local record/identity.
+	if item.ItemKind == mainwatchedroots.BackupItemKindDeletionMarker {
+		metadata["prior_content_unavailable"] = item.PreviousHashURI == "" && item.ContentHashURI == ""
+	}
 	return objectJSON(metadata)
 }
 
@@ -1348,7 +1399,7 @@ func (s Store) LoadWatchedRootBackupArtifacts() ([]LocalWatchedRootBackupArtifac
 		return nil, err
 	}
 	var artifacts []LocalWatchedRootBackupArtifact
-	if err := readJSONFile(s.watchedRootBackupArtifactsPath(), &artifacts); err != nil {
+	if err := s.readSyncJSON(s.watchedRootBackupArtifactsPath(), &artifacts); err != nil {
 		return nil, err
 	}
 	return artifacts, nil
@@ -1358,8 +1409,11 @@ func (s Store) SaveWatchedRootBackupArtifacts(artifacts []LocalWatchedRootBackup
 	if err := s.ensureWatchedRootBackupRoot(); err != nil {
 		return err
 	}
-	if err := writeJSONFile(s.watchedRootBackupArtifactsPath(), artifacts, 0o600); err != nil {
+	if err := s.writeSyncJSON(s.watchedRootBackupArtifactsPath(), artifacts); err != nil {
 		return err
+	}
+	if s.syncBatch != nil {
+		return nil
 	}
 	return s.appendWatchedRootBackupQueueEvent("artifacts", countWatchedRootBackupArtifacts(artifacts))
 }
@@ -1369,7 +1423,7 @@ func (s Store) LoadWatchedRootBackupBatches() ([]LocalWatchedRootBackupBatch, er
 		return nil, err
 	}
 	var batches []LocalWatchedRootBackupBatch
-	if err := readJSONFile(s.watchedRootBackupBatchesPath(), &batches); err != nil {
+	if err := s.readSyncJSON(s.watchedRootBackupBatchesPath(), &batches); err != nil {
 		return nil, err
 	}
 	return batches, nil
@@ -1379,8 +1433,11 @@ func (s Store) SaveWatchedRootBackupBatches(batches []LocalWatchedRootBackupBatc
 	if err := s.ensureWatchedRootBackupRoot(); err != nil {
 		return err
 	}
-	if err := writeJSONFile(s.watchedRootBackupBatchesPath(), batches, 0o600); err != nil {
+	if err := s.writeSyncJSON(s.watchedRootBackupBatchesPath(), batches); err != nil {
 		return err
+	}
+	if s.syncBatch != nil {
+		return nil
 	}
 	return s.appendWatchedRootBackupQueueEvent("batches", countWatchedRootBackupBatches(batches))
 }
@@ -1390,7 +1447,7 @@ func (s Store) LoadWatchedRootBackupItems() ([]LocalWatchedRootBackupItem, error
 		return nil, err
 	}
 	var items []LocalWatchedRootBackupItem
-	if err := readJSONFile(s.watchedRootBackupItemsPath(), &items); err != nil {
+	if err := s.readSyncJSON(s.watchedRootBackupItemsPath(), &items); err != nil {
 		return nil, err
 	}
 	return items, nil
@@ -1400,8 +1457,11 @@ func (s Store) SaveWatchedRootBackupItems(items []LocalWatchedRootBackupItem) er
 	if err := s.ensureWatchedRootBackupRoot(); err != nil {
 		return err
 	}
-	if err := writeJSONFile(s.watchedRootBackupItemsPath(), items, 0o600); err != nil {
+	if err := s.writeSyncJSON(s.watchedRootBackupItemsPath(), items); err != nil {
 		return err
+	}
+	if s.syncBatch != nil {
+		return nil
 	}
 	return s.appendWatchedRootBackupQueueEvent("items", countWatchedRootBackupItems(items))
 }
@@ -1411,7 +1471,7 @@ func (s Store) LoadWatchedRootBackupOutbox() ([]LocalWatchedRootBackupOutboxItem
 		return nil, err
 	}
 	var outbox []LocalWatchedRootBackupOutboxItem
-	if err := readJSONFile(s.watchedRootBackupOutboxPath(), &outbox); err != nil {
+	if err := s.readSyncJSON(s.watchedRootBackupOutboxPath(), &outbox); err != nil {
 		return nil, err
 	}
 	return outbox, nil
@@ -1421,15 +1481,23 @@ func (s Store) SaveWatchedRootBackupOutbox(outbox []LocalWatchedRootBackupOutbox
 	if err := s.ensureWatchedRootBackupRoot(); err != nil {
 		return err
 	}
-	if err := writeJSONFile(s.watchedRootBackupOutboxPath(), outbox, 0o600); err != nil {
+	if err := s.writeSyncJSON(s.watchedRootBackupOutboxPath(), outbox); err != nil {
 		return err
+	}
+	if s.syncBatch != nil {
+		return nil
 	}
 	return s.appendWatchedRootBackupQueueEvent("outbox", countWatchedRootBackupOutbox(outbox))
 }
 
 func (s Store) CompactWatchedRootBackupQueues() (LocalWatchedRootBackupQueueCompaction, error) {
+	s, unlock, err := s.lockLocalSync(context.Background())
+	if err != nil {
+		return LocalWatchedRootBackupQueueCompaction{}, err
+	}
+	defer unlock()
 	var result LocalWatchedRootBackupQueueCompaction
-	err := s.withWatchedRootBackupQueueLock(func() error {
+	err = s.withWatchedRootBackupQueueLock(func(s Store) error {
 		var compactErr error
 		result, compactErr = s.compactWatchedRootBackupQueuesLocked()
 		return compactErr
@@ -1471,16 +1539,8 @@ func (s Store) compactWatchedRootBackupQueuesLocked() (LocalWatchedRootBackupQue
 			Compaction: s.watchedRootBackupCompactionPath(),
 		},
 	}
-	for _, write := range []func() error{
-		func() error { return writeJSONFile(s.watchedRootBackupArtifactsPath(), artifacts, 0o600) },
-		func() error { return writeJSONFile(s.watchedRootBackupBatchesPath(), batches, 0o600) },
-		func() error { return writeJSONFile(s.watchedRootBackupItemsPath(), items, 0o600) },
-		func() error { return writeJSONFile(s.watchedRootBackupOutboxPath(), outbox, 0o600) },
-		func() error { return writeJSONFile(s.watchedRootBackupCompactionPath(), result, 0o600) },
-	} {
-		if err := write(); err != nil {
-			return LocalWatchedRootBackupQueueCompaction{}, err
-		}
+	if err := writeJSONFile(s.watchedRootBackupCompactionPath(), result, 0o600); err != nil {
+		return LocalWatchedRootBackupQueueCompaction{}, err
 	}
 	if err := s.replaceWatchedRootBackupQueueEvents(result); err != nil {
 		return LocalWatchedRootBackupQueueCompaction{}, err
@@ -1489,8 +1549,20 @@ func (s Store) compactWatchedRootBackupQueuesLocked() (LocalWatchedRootBackupQue
 }
 
 func (s Store) ApplyWatchedRootBackupBatchResult(outboxItem LocalWatchedRootBackupOutboxItem, result mainwatchedroots.BackupBatchResult) error {
-	err := s.withWatchedRootBackupQueueLock(func() error {
-		return s.applyWatchedRootBackupBatchResultLocked(outboxItem, result)
+	s, unlock, err := s.lockLocalSync(context.Background())
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	err = s.withWatchedRootBackupQueueLock(func(s Store) error {
+		s, commit, err := s.joinSyncBatch()
+		if err != nil {
+			return err
+		}
+		if err := s.applyWatchedRootBackupBatchResultLocked(outboxItem, result); err != nil {
+			return err
+		}
+		return commit()
 	})
 	if compactErr := s.compactWatchedRootBackupQueueEventsIfLarge(); err == nil {
 		err = compactErr
@@ -1502,21 +1574,20 @@ func (s Store) applyWatchedRootBackupBatchResultLocked(outboxItem LocalWatchedRo
 	if err := s.EnsureWatchedRootBackupDataDirs(); err != nil {
 		return err
 	}
-	artifacts, err := s.LoadWatchedRootBackupArtifacts()
+	queue, err := s.loadWatchedRootBackupBatch(outboxItem)
 	if err != nil {
 		return err
 	}
-	batches, err := s.LoadWatchedRootBackupBatches()
-	if err != nil {
-		return err
+	artifacts, batches, items, outbox := queue.artifacts, queue.batches, queue.items, queue.outbox
+	eligible := false
+	for _, item := range outbox {
+		if item.LocalOutboxID == outboxItem.LocalOutboxID && item.LocalRef == outboxItem.LocalRef &&
+			item.Status != localBackupStatusAccepted && item.Status != localBackupStatusDuplicate {
+			eligible = true
+		}
 	}
-	items, err := s.LoadWatchedRootBackupItems()
-	if err != nil {
-		return err
-	}
-	outbox, err := s.LoadWatchedRootBackupOutbox()
-	if err != nil {
-		return err
+	if !eligible {
+		return nil
 	}
 	now := time.Now().UTC()
 	resultItemsByLocalRef := make(map[string]mainwatchedroots.BackupItem, len(result.Items))
@@ -1599,22 +1670,33 @@ func (s Store) applyWatchedRootBackupBatchResultLocked(outboxItem LocalWatchedRo
 		outbox[idx].LastErrorCode = ""
 		outbox[idx].LastErrorMessage = ""
 	}
-	if err := s.SaveWatchedRootBackupArtifacts(artifacts); err != nil {
+	if err := s.saveBackupQueueSelection(s.watchedRootBackupArtifactsPath(), artifacts); err != nil {
 		return err
 	}
-	if err := s.SaveWatchedRootBackupBatches(batches); err != nil {
+	if err := s.saveBackupQueueSelection(s.watchedRootBackupBatchesPath(), batches); err != nil {
 		return err
 	}
-	if err := s.SaveWatchedRootBackupItems(items); err != nil {
+	if err := s.saveBackupQueueSelection(s.watchedRootBackupItemsPath(), items); err != nil {
 		return err
 	}
-	if err := s.SaveWatchedRootBackupOutbox(outbox); err != nil {
+	if err := s.saveBackupQueueSelection(s.watchedRootBackupOutboxPath(), outbox); err != nil {
 		return err
 	}
 	return s.updateWatchedRootStateFromBackupResult(outboxItem.LocalRef, items, result, now)
 }
 
-func (s Store) withWatchedRootBackupQueueLock(fn func() error) error {
+func (s Store) withWatchedRootBackupQueueLock(fn func(Store) error) error {
+	if !s.syncLocked {
+		locked, unlock, err := s.lockLocalSync(context.Background())
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		return locked.withWatchedRootBackupQueueLock(fn)
+	}
+	if s.backupLocked {
+		return fn(s)
+	}
 	if err := s.ensureWatchedRootBackupRoot(); err != nil {
 		return err
 	}
@@ -1630,7 +1712,8 @@ func (s Store) withWatchedRootBackupQueueLock(fn func() error) error {
 	defer func() {
 		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
 	}()
-	return fn()
+	s.backupLocked = true
+	return fn(s)
 }
 
 func (s Store) markWatchedRootBackupOutboxError(artifacts []LocalWatchedRootBackupArtifact, batches []LocalWatchedRootBackupBatch, items []LocalWatchedRootBackupItem, outbox []LocalWatchedRootBackupOutboxItem, outboxID, batchID, itemID, artifactID, code, message string) error {
@@ -1682,20 +1765,19 @@ func (s Store) markWatchedRootBackupOutboxError(artifacts []LocalWatchedRootBack
 		}
 	}
 	s.markWatchedRootBackupPathStateError(items, batchID, itemID, code, message, permanent, now)
-	if err := s.SaveWatchedRootBackupArtifacts(artifacts); err != nil {
+	if err := s.saveBackupQueueSelection(s.watchedRootBackupArtifactsPath(), artifacts); err != nil {
 		return err
 	}
-	if err := s.SaveWatchedRootBackupBatches(batches); err != nil {
+	if err := s.saveBackupQueueSelection(s.watchedRootBackupBatchesPath(), batches); err != nil {
 		return err
 	}
-	if err := s.SaveWatchedRootBackupItems(items); err != nil {
+	if err := s.saveBackupQueueSelection(s.watchedRootBackupItemsPath(), items); err != nil {
 		return err
 	}
-	return s.SaveWatchedRootBackupOutbox(outbox)
+	return s.saveBackupQueueSelection(s.watchedRootBackupOutboxPath(), outbox)
 }
 
 func (s Store) markWatchedRootBackupPathStateError(items []LocalWatchedRootBackupItem, batchID, itemID, code, message string, permanent bool, now time.Time) {
-	watchedStore := watchedroots.NewStore(s.DataDir)
 	for _, item := range items {
 		if itemID == "" {
 			if batchID == "" || item.LocalBatchID != batchID {
@@ -1707,7 +1789,7 @@ func (s Store) markWatchedRootBackupPathStateError(items []LocalWatchedRootBacku
 		if strings.TrimSpace(item.RootKey) == "" || strings.TrimSpace(item.RelativePath) == "" {
 			continue
 		}
-		pathState, err := watchedStore.LoadPathState(item.RootKey, item.RelativePath)
+		pathState, err := s.loadQueuePathState(item.RootKey, item.RelativePath)
 		if err != nil {
 			continue
 		}
@@ -1719,13 +1801,14 @@ func (s Store) markWatchedRootBackupPathStateError(items []LocalWatchedRootBacku
 		pathState.LastBackupErrorCode = code
 		pathState.LastBackupErrorMessage = message
 		pathState.LastOutputAppliedAt = &now
-		_ = watchedStore.SavePathState(pathState)
+		_ = s.saveQueuePathState(pathState)
 	}
 }
 
 func watchedRootBackupPermanentLocalError(code string) bool {
 	switch code {
 	case watchedroots.FindingBackupFileTooLarge,
+		watchedroots.FindingBackupBatchRejected,
 		watchedroots.FindingBackupTransportLimitExceeded,
 		watchedroots.FindingBackupUnsupportedByPolicy,
 		watchedroots.ReasonSkippedPathEscape,
@@ -1741,13 +1824,27 @@ func watchedRootBackupPermanentLocalError(code string) bool {
 
 func watchedRootBackupRemoteErrorCode(err error, fallback string) string {
 	var remoteErr RemoteRequestError
-	if errors.As(err, &remoteErr) && remoteErr.StatusCode == http.StatusRequestEntityTooLarge {
-		return watchedroots.FindingBackupTransportLimitExceeded
+	if errors.As(err, &remoteErr) {
+		if remoteErr.StatusCode == http.StatusRequestEntityTooLarge {
+			return watchedroots.FindingBackupTransportLimitExceeded
+		}
+		if (remoteErr.StatusCode == http.StatusBadRequest || remoteErr.StatusCode == http.StatusUnprocessableEntity) && !watchedRootBackupBindingMismatch(err) {
+			return watchedroots.FindingBackupBatchRejected
+		}
 	}
 	if strings.TrimSpace(fallback) != "" {
 		return fallback
 	}
 	return watchedroots.FindingBackupStageFailed
+}
+
+func watchedRootBackupBindingMismatch(err error) bool {
+	var remoteErr RemoteRequestError
+	if !errors.As(err, &remoteErr) || remoteErr.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	return remoteErr.Envelope.Error.Code == "watched_roots.backup_binding_mismatch" ||
+		(remoteErr.Envelope.Error.Code == "" && strings.TrimSpace(remoteErr.Body) == "identity mismatch")
 }
 
 func watchedRootBackupShouldFallbackToTransfer(err error) bool {
@@ -1768,7 +1865,6 @@ func (s Store) updateWatchedRootStateFromBackupResult(localBatchID string, items
 	for _, item := range result.Items {
 		resultItemsByLocalRef[item.LocalItemRef] = item
 	}
-	watchedStore := watchedroots.NewStore(s.DataDir)
 	for _, item := range items {
 		if item.LocalBatchID != localBatchID {
 			continue
@@ -1780,7 +1876,7 @@ func (s Store) updateWatchedRootStateFromBackupResult(localBatchID string, items
 		if resultItem.Status != mainwatchedroots.BackupItemStatusAccepted && resultItem.Status != mainwatchedroots.BackupItemStatusDuplicate {
 			continue
 		}
-		pathState, err := watchedStore.LoadPathState(item.RootKey, item.RelativePath)
+		pathState, err := s.loadQueuePathState(item.RootKey, item.RelativePath)
 		if err != nil {
 			continue
 		}
@@ -1803,7 +1899,7 @@ func (s Store) updateWatchedRootStateFromBackupResult(localBatchID string, items
 		} else if item.ContentHashURI != "" {
 			pathState.LastBackedUpHashURI = item.ContentHashURI
 		}
-		if err := watchedStore.SavePathState(pathState); err != nil {
+		if err := s.saveQueuePathState(pathState); err != nil {
 			return err
 		}
 	}
@@ -1944,6 +2040,9 @@ func (s Store) replaceWatchedRootBackupQueueEvents(compaction LocalWatchedRootBa
 }
 
 func (s Store) compactWatchedRootBackupQueueEventsIfLarge() error {
+	if s.syncBatch != nil {
+		return nil
+	}
 	info, err := os.Stat(s.watchedRootBackupQueueEventsPath())
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -2036,15 +2135,31 @@ func upsertWatchedRootBackupArtifact(artifacts []LocalWatchedRootBackupArtifact,
 }
 
 func (s Store) saveWatchedRootBackupArtifactProgress(artifact LocalWatchedRootBackupArtifact) error {
+	if s.queueDB != nil {
+		if err := s.saveBackupQueueSelection(s.watchedRootBackupArtifactsPath(), []LocalWatchedRootBackupArtifact{artifact}); err != nil {
+			return err
+		}
+		return s.commitSyncBatch()
+	}
 	artifacts, err := s.LoadWatchedRootBackupArtifacts()
 	if err != nil {
 		return err
 	}
 	artifacts = upsertWatchedRootBackupArtifact(artifacts, artifact)
-	return s.SaveWatchedRootBackupArtifacts(artifacts)
+	if err := s.saveBackupQueueSelection(s.watchedRootBackupArtifactsPath(), artifacts); err != nil {
+		return err
+	}
+	return s.commitSyncBatch()
 }
 
 func refreshWatchedRootBackupArtifactsAfterProgress(store Store, artifacts []LocalWatchedRootBackupArtifact, localArtifactID string, fallbackIdx int) ([]LocalWatchedRootBackupArtifact, int) {
+	if store.queueDB != nil {
+		fresh, err := readBackupRecordSelection[LocalWatchedRootBackupArtifact](store, "backup/artifacts", "", []string{localArtifactID}, 0)
+		if err == nil && len(fresh) == 1 && fallbackIdx >= 0 && fallbackIdx < len(artifacts) {
+			artifacts[fallbackIdx] = fresh[0]
+		}
+		return artifacts, fallbackIdx
+	}
 	fresh, err := store.LoadWatchedRootBackupArtifacts()
 	if err != nil {
 		return artifacts, fallbackIdx

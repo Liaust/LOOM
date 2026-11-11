@@ -401,10 +401,7 @@ func TestApplyProductionVerifierSuccessProceedsOnce(t *testing.T) {
 		},
 		Runner: func(_ context.Context, name string, args ...string) ([]byte, error) {
 			runnerCalls++
-			if name == "loom" {
-				return []byte(`{"ok":true,"data":{"status":"ok"}}`), nil
-			}
-			return []byte("ok"), nil
+			return readinessFixtureRunner(context.Background(), name, args...)
 		},
 		Now: fixedNow,
 	})
@@ -417,8 +414,8 @@ func TestApplyProductionVerifierSuccessProceedsOnce(t *testing.T) {
 	if verifierCalls != 1 {
 		t.Fatalf("verifier calls = %d, want 1", verifierCalls)
 	}
-	if runnerCalls != 2 {
-		t.Fatalf("runner calls = %d, want rebuild and health", runnerCalls)
+	if runnerCalls != 11 {
+		t.Fatalf("runner calls = %d, want target eval, rebuild and bracketed identity/health reads", runnerCalls)
 	}
 	if result.Manifest.BackupPath != backupPath || result.Manifest.BackupRef != backupRef {
 		t.Fatalf("manifest backup binding = (%q, %q)", result.Manifest.BackupPath, result.Manifest.BackupRef)
@@ -603,8 +600,11 @@ func TestApplyFailedHealthCheckWritesFailedManifest(t *testing.T) {
 		SkipBackup:         true,
 		SkipRebuild:        true,
 		Now:                fixedNow,
-		Runner: func(context.Context, string, ...string) ([]byte, error) {
-			return []byte(`{"ok":false,"data":{"status":"unhealthy"}}`), nil
+		Runner: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			if name == "loom" {
+				return []byte(`{"ok":false,"data":{"status":"unhealthy"}}`), nil
+			}
+			return readinessFixtureRunner(ctx, name, args...)
 		},
 	})
 	if err == nil {
@@ -688,8 +688,11 @@ func TestApplyFailureAfterMaintenancePauseMarksResumeRequired(t *testing.T) {
 		MaintenancePolicy:  MaintenancePausePolicy{PauseSchedules: true},
 		Maintenance:        coordinator,
 		Now:                fixedNow,
-		Runner: func(context.Context, string, ...string) ([]byte, error) {
-			return []byte(`{"ok":false,"data":{"status":"unhealthy"}}`), nil
+		Runner: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			if name == "loom" {
+				return []byte(`{"ok":false,"data":{"status":"unhealthy"}}`), nil
+			}
+			return readinessFixtureRunner(ctx, name, args...)
 		},
 	})
 	if err == nil {

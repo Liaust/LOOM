@@ -29,10 +29,11 @@ const workspaceExportMaxBytes = 2 * 1024 * 1024
 
 // This is a source selection, never a walk of a workspace or live profile.
 var workspaceExportSources = []string{
-	".hermes/SOUL.md", "AGENTS.md", "WORKFLOW.md", "OPERATING-POLICY.md", "WORKSPACE-MAP.md", "TOOLING.md",
+	"SOUL.md", "AGENTS.md", "WORKFLOW.md", "OPERATING-POLICY.md", "WORKSPACE-MAP.md", "TOOLING.md",
 	"protocols/README.md", "protocols/BASECAMP.md", "protocols/GITHUB.md", "protocols/CREDENTIALS.md",
 	"protocols/EXTERNAL-MESSAGING.md", "protocols/LOOM-ROUTING.md", "protocols/PROJECT-DELEGATION.md",
 	"protocols/PROVENANCE-AND-MEMORY.md", "protocols/PROVENANCE-RECONCILIATION.md", "protocols/SESSION-RETRIEVAL.md", "protocols/SKILL-CREATION-AND-PROMOTION.md",
+	"protocols/HERMES-RUNTIME.md",
 	"protocols/DEVICE-AND-TOOL-ROUTING.md", "protocols/MAC-COMPUTER-USE.md",
 	"handoffs/HANDOFF-TEMPLATE.md",
 }
@@ -66,7 +67,7 @@ complete history and use the named GitHub protocol before any remote operation.
 
 // An explicit include list also keeps accidental local additions out of Git.
 func workspaceExportIgnore() []byte {
-	lines := []string{"# Defence in depth; the exporter uses a positive allowlist.", "*", "!/.gitignore", "!/README.md", "!/export-manifest.json", "!/.hermes/", "!/protocols/", "!/handoffs/", "!/skins/"}
+	lines := []string{"# Defence in depth; the exporter uses a positive allowlist.", "*", "!/.gitignore", "!/README.md", "!/export-manifest.json", "!/protocols/", "!/handoffs/", "!/skins/"}
 	for _, path := range workspaceExportSources {
 		lines = append(lines, "!/"+path)
 	}
@@ -429,13 +430,13 @@ func PlanWorkspaceExport(options WorkspaceExportOptions) (WorkspaceExportPlan, e
 	declared := map[string]bool{}
 	for _, path := range template.Files {
 		normalized, e := normalizeWorkspaceRelativePath(path)
-		if e != nil || normalized != path || declared[path] || validateMorathustraPath(path, false) != nil {
+		if e != nil || normalized != path || declared[path] || validatePersonaPath("mina", path, false) != nil {
 			return fail(fmt.Errorf("invalid or duplicate MINA source declaration"))
 		}
 		declared[path] = true
 	}
-	// Only the four known scaffold placeholders are outside first publication.
-	for _, path := range append(append([]string{}, workspaceExportSources...), "investigations/README.md", "recovery/README.md", "skills/installed/README.md", "tmp/README.md") {
+	// Only these source-only scaffold placeholders are outside publication.
+	for _, path := range append(append([]string{}, workspaceExportSources...), ".agents/skills/README.md", "investigations/README.md", "recovery/README.md", "skills/installed/README.md", "tmp/README.md") {
 		if !declared[path] {
 			return fail(fmt.Errorf("MINA source declaration changed; review export allowlist"))
 		}
@@ -452,7 +453,7 @@ func PlanWorkspaceExport(options WorkspaceExportOptions) (WorkspaceExportPlan, e
 			return fmt.Errorf("invalid or duplicate export destination")
 		}
 		total += len(payload)
-		if len(payload) > maxWorkspaceFileSize || total > workspaceExportMaxBytes || len(p.payloads) >= 23 {
+		if len(payload) > maxWorkspaceFileSize || total > workspaceExportMaxBytes || len(p.payloads) >= len(workspaceExportSources)+3 {
 			return fmt.Errorf("export payload bound exceeded")
 		}
 		p.payloads[path] = payload
@@ -465,7 +466,7 @@ func PlanWorkspaceExport(options WorkspaceExportOptions) (WorkspaceExportPlan, e
 		if err != nil {
 			return fail(err)
 		}
-		if err = validateMorathustraContent(path, data); err != nil {
+		if err = validatePersonaContent("mina", path, data); err != nil {
 			return fail(err)
 		}
 		sources[source] = data

@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"loom.local/loom/internal/workers"
 )
 
 type HeavyStageObservation struct {
-	EnforcedPolicy json.RawMessage `json:"enforced_policy"`
-	Observed       json.RawMessage `json:"observed"`
+	Admission      *workers.ResourceTurnAdmission `json:"admission,omitempty"`
+	EnforcedPolicy json.RawMessage                `json:"enforced_policy"`
+	Observed       json.RawMessage                `json:"observed"`
 }
 
 const heavyStageMoreUnits = "__pipeline_more_units__"
@@ -52,7 +55,7 @@ func (s *Service) RunHeavyExecutorOnce(ctx context.Context, input HeavyExecutorR
 	return s.ExecuteClaimedHeavyStage(ctx, items[0], input.Policy, input.Handlers)
 }
 
-func (s *Service) ExecuteClaimedHeavyStage(ctx context.Context, item PipelineWorkItem, policy HeavyResourcePolicy, handlers map[string]HeavyStageHandler) (HeavyExecutorRunResult, error) {
+func (s *Service) ExecuteClaimedHeavyStage(ctx context.Context, item PipelineWorkItem, policy HeavyResourcePolicy, handlers map[string]HeavyStageHandler, admission ...*workers.ResourceTurnAdmission) (HeavyExecutorRunResult, error) {
 	result := HeavyExecutorRunResult{Claimed: 1, StageKey: item.Stage.StageKey, PipelineRunID: item.Run.KnowledgePipelineRunID}
 	handler := handlers[item.Stage.StageKey]
 	if handler == nil {
@@ -70,7 +73,16 @@ func (s *Service) ExecuteClaimedHeavyStage(ctx context.Context, item PipelineWor
 		item = selected
 		observation, warnings, err = handler.Execute(bounded, item, policy)
 	}
+	if len(admission) > 0 {
+		observation.Admission = admission[0]
+	}
 	result.Observation = observation
+	// Cancellation must not strand already durable units until lease expiry.
+	if ctx.Err() != nil {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		ctx = cleanup
+	}
 	if err != nil {
 		if failErr := s.FailPipelineStage(ctx, item, err, RetryableKnowledgeError(err)); failErr != nil {
 			return HeavyExecutorRunResult{}, failErr
@@ -129,6 +141,10 @@ func (s *Service) ReleasePipelineClaim(ctx context.Context, item PipelineWorkIte
 	if err = lockPipelineClaimTx(ctx, tx, item); err != nil {
 		return err
 	}
+	if _, err = tx.ExecContext(ctx, `UPDATE knowledge.pipeline_stage_units SET status='ready',attempt_count=GREATEST(attempt_count-1,0),claimed_by_worker_run_id='',claim_generation=0,updated_at=now()
+	 WHERE knowledge_pipeline_stage_run_id=$1 AND status='processing' AND claimed_by_worker_run_id=$2 AND claim_generation=$3`, item.Stage.KnowledgePipelineStageRunID, item.Run.ClaimedByWorkerRunID, item.Run.ClaimGeneration); err != nil {
+		return err
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE knowledge.pipeline_stage_runs SET status='ready',attempt_count=GREATEST(attempt_count-1,0),claimed_by_worker_run_id='',updated_at=now() WHERE knowledge_pipeline_stage_run_id=$1 AND claim_generation=$2 AND claimed_by_worker_run_id=$3 AND status='processing'`, item.Stage.KnowledgePipelineStageRunID, item.Run.ClaimGeneration, item.Run.ClaimedByWorkerRunID)
 	if err != nil {
 		return err
@@ -163,7 +179,7 @@ func (s *Service) storePipelineStageObservation(ctx context.Context, item Pipeli
 	if err = lockPipelineClaimTx(ctx, tx, item); err != nil {
 		return err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE knowledge.pipeline_stage_runs SET resource_usage=$2,updated_at=now() WHERE knowledge_pipeline_stage_run_id=$1 AND claim_generation=$3 AND claimed_by_worker_run_id=$4 AND status='processing'`, item.Stage.KnowledgePipelineStageRunID, payload, item.Run.ClaimGeneration, item.Run.ClaimedByWorkerRunID)
+	result, err := tx.ExecContext(ctx, `UPDATE knowledge.pipeline_stage_runs SET resource_usage=resource_usage||$2::jsonb,updated_at=now() WHERE knowledge_pipeline_stage_run_id=$1 AND claim_generation=$3 AND claimed_by_worker_run_id=$4 AND status='processing'`, item.Stage.KnowledgePipelineStageRunID, payload, item.Run.ClaimGeneration, item.Run.ClaimedByWorkerRunID)
 	if err != nil {
 		return err
 	}

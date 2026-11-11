@@ -1,42 +1,40 @@
-# Roadmap
+# LOOM Roadmap
 
-This is directional, not a release-date commitment. Version 0.9.0 establishes
-the usable-system public beta; the next optimisation cycle can use 0.10.x.
-Internal V1/V2 planning labels are not public semantic-version promises.
+Reviewed November 11, 2026. Direction, not release dates or a support commitment.
+Read [current state](STATE.md) before treating a historical plan as unfinished.
 
-## Current Baseline
+## Current Priorities
 
-Projects/declarations, managed applications, capability schedules, native
-Hermes schedule integration, qualified Provenance, selective Notes processing,
-writable source-backed Notes sync, archive/recovery and agent/node integration
-are implemented. See [current state](STATE.md) for their limits rather than
-treating this list as a guarantee for every configuration.
+1. Make the existing desktop/filesystem workflow easier to install and operate:
+   clear prerequisites, source-matched documentation and useful failure recovery.
+2. Finish signed macOS distribution and observe a real signed update/relaunch.
+   Development packaging is not this acceptance gate.
+3. Refine explicit working-set, cache/on-demand and indexing/enrichment choices.
+   Preserve drafts and pending operations; do not infer permission for a bulk
+   download or model-processing campaign from ordinary file browsing.
+4. Continue agent workflow improvements through actual tasks: precise context,
+   compact tool results, source-grounded decisions and visible ownership of
+   scheduled work. Keep native harness state replaceable and separate from LOOM.
 
-## Next: Optimise What Exists
+## Deliberately Separate Work
 
-- Improve bulk imports so text/indexing/embeddings and asset delivery can make
-  bounded progress concurrently without exhausting Main's compute or disk.
-- Refine retrieval plans, lexical/semantic ranking and source-version lookups
-  against real larger collections; expose useful latency and backlog diagnostics.
-- Reduce unnecessary watcher/polling/full-scan work and client status noise;
-  preserve event-driven ordinary editing and exact conflict/source checks.
-- Make recovery status and service coverage easier to understand without
-  conflating readable archives with application-consistent recovery.
-- Assess better extraction and handwriting/equation quality only where useful;
-  retain selective processing for expensive documents.
+- Standalone iPhone/iPad client and its private Main transport, offline durability
+  and iOS background-operation limits. Desktop source is not a mobile client.
+- Voice, calls and wake-word activation with real device acceptance. Presence of
+  an integration is not a reliability claim.
+- Broader installation targets and service adapters, richer Bases/Canvas/file
+  support and additional archive/history views as concrete workflows require.
+- A rendered documentation site. GitHub documentation and the Observatory guide
+  already have distinct roles and should not become competing source catalogs.
 
-## Simplify Installation And Operation
+## Principles
 
-- Guided CLI installation/configuration over existing primitives: hardware,
-  network, identities, credentials, processing engines and recovery prerequisites.
-- More consistent CLI/API/Portal prerequisite reporting, resumable actions and
-  project forms; ordinary file edits should not require registration ceremony.
-- Repeatable packaging and documented supported platform/dependency combinations,
-  rather than assuming the maintainer's personal host configuration.
-- Clearer agent workspace portability, connector setup and credential rotation.
+Keep ordinary files and project structure understandable without a knowledge
+index. Add metadata and system configuration where an actual owner needs them,
+not an alternate placement contract for every file. Preserve project identity,
+user content and retained history across operations. Use proven database,
+editor, graph, archive and networking engines rather than rebuilding them.
 
-## Deferred
-
-Mobile/iOS desktop control, additional connectors and further installation
-targets remain separate proposals. New features should solve an observed
-workflow problem rather than introduce another control layer by default.
+Contributions should simplify a real workflow. No replica deployment, benchmark
+platform or broad test matrix is required for every patch. State which focused
+checks ran and which installation/device/protection claims remain unverified.

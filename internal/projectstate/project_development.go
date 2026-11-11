@@ -86,7 +86,7 @@ func ReadProjectDevelopment(ctx context.Context, input ProjectDevelopmentInput) 
 	root := yamlDocumentMapping(node)
 	project := yamlMappingValue(root, "project")
 	schema := yamlScalarValue(root, "schema_version")
-	validSchema := schema == projects.ProjectRepositoryProjectSchemaV03 || schema == projects.ProjectRepositoryProjectSchemaV04 || schema == projects.ProjectRepositoryProjectSchemaV05
+	validSchema := schema == projects.ProjectRepositoryProjectSchemaV03 || schema == projects.ProjectRepositoryProjectSchemaV04 || schema == projects.ProjectRepositoryProjectSchemaV05 || schema == projects.ProjectRepositoryProjectSchemaV06
 	if err != nil || !validSchema || yamlScalarValue(root, "kind") != "loom.project" || ids.Validate(ids.ProjectPrefix, yamlScalarValue(project, "id")) != nil || yamlScalarValue(project, "owner_node") == "" {
 		r.malformed(identity, "identity_malformed")
 		return r.finish(ProjectDevelopmentInvalid, "identity_malformed")
@@ -115,6 +115,10 @@ func ReadProjectDevelopment(ctx context.Context, input ProjectDevelopmentInput) 
 			payload, doc = r.capture(".project/PROJECT.md")
 		}
 		r.summarize(payload, doc)
+	}
+	// A missing optional index consumes no capture slot and adds no obligation.
+	if _, err := r.safeStat(".project/CONVERSATIONS.md"); !errors.Is(err, os.ErrNotExist) {
+		r.capture(".project/CONVERSATIONS.md")
 	}
 	for _, name := range r.selectMetadata() {
 		payload, doc := r.capture(name)
@@ -146,6 +150,21 @@ func ReadProjectDevelopment(ctx context.Context, input ProjectDevelopmentInput) 
 			posture, reason = ProjectDevelopmentPartial, "source_limits_exceeded"
 		} else if present == 0 {
 			posture, reason = ProjectDevelopmentMissing, "development_documents_missing"
+		}
+	}
+	if input.VerifiedArchive && posture == ProjectDevelopmentReady {
+		present := map[string]bool{}
+		for _, doc := range r.state.Documents {
+			present[doc.Path] = doc.Posture == "present"
+		}
+		if !present[".project/STATE.md"] {
+			r.state.MissingDocuments = append(r.state.MissingDocuments, ".project/STATE.md")
+		}
+		if !present[".project/OVERVIEW.md"] && !present[".project/PROJECT.md"] {
+			r.state.MissingDocuments = append(r.state.MissingDocuments, ".project/OVERVIEW.md")
+		}
+		if len(r.state.MissingDocuments) > 0 {
+			posture, reason = ProjectDevelopmentPartial, "archived_development_documents_missing"
 		}
 	}
 	r.state.Complete = posture == ProjectDevelopmentReady

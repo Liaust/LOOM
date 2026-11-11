@@ -20,6 +20,23 @@ func receivePath(t *testing.T, s Service, id, kind, destination string, base Rea
 	}
 	return op
 }
+
+func TestMoveIntoNewDirectoriesThenDeletePreservesRecovery(t *testing.T) {
+	s, _, r := fixture(t)
+	write(t, filepath.Join(r.root, "a.md"), "draft")
+	b := readBase(t, s, "a.md")
+	receivePath(t, s, "move", KindRename, "new/nested/a.md", b)
+	apply(t, s, "move", Accepted)
+	contents(t, filepath.Join(r.root, "new/nested/a.md"), "draft")
+	b = readBase(t, s, "new/nested/a.md")
+	receivePath(t, s, "delete", KindDelete, "", b)
+	op := apply(t, s, "delete", Accepted)
+	if _, err := os.Stat(filepath.Join(r.root, "new/nested/a.md")); !os.IsNotExist(err) {
+		t.Fatal("deleted file remains", err)
+	}
+	contents(t, filepath.Join(r.root, "new/nested", op.Journal, "displaced"), "draft")
+	apply(t, s, "delete", Accepted)
+}
 func TestRenameKeepsIdentityAndRejectsOldPathVersions(t *testing.T) {
 	s, m, r := fixture(t)
 	old := filepath.Join(r.root, "note.md")

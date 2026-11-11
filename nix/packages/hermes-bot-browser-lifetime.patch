@@ -1,0 +1,31 @@
+diff --git a/tools/browser_tool_session.py b/tools/browser_tool_session.py
+--- a/tools/browser_tool_session.py
++++ b/tools/browser_tool_session.py
+@@ -837,7 +837,16 @@
+-def _bot_desktop_attach_port(session_info: dict[str, Any]) -> Optional[int]:
+-    """DevTools port of a human-started Chromium on the Bot Desktop's shared profile, else ``None``."""
++def _bot_desktop_attach_port(session_info: dict[str, Any], *, start: bool = False) -> Optional[int]:
++    """Attach to the desktop-owned browser; cleanup must never start one."""
++    shared_headed = (start and _cloud._is_headed_mode()
++                     and not (session_info.get("features") or {}).get("lightpanda")
++                     and not _bt._is_camofox_mode())
++    if shared_headed:
++        _ensure_screen_for_headed_chromium()
+     if not _shares_bot_desktop_browser(session_info):
+         return None
++    if shared_headed:
++        from tools.bot_desktop.shared_browser import ensure_started
++        return ensure_started(exclude_session=session_info["session_name"],
++                              env=_bt._build_browser_env())
+     from tools.bot_desktop import browser as _bd_browser
+     return _bd_browser.running_instance_cdp_port(str(_bd_browser.profile_dir()),
+                                                  exclude_session=session_info["session_name"])
+@@ -862,7 +871,7 @@ def _dispatch_browser_command(
+     if session_info.get("cdp_url"):
+         backend_args += ["--cdp", session_info["cdp_url"]]
+     else:
+-        if (bd_port := _bot_desktop_attach_port(session_info)) is not None:
++        if (bd_port := _bot_desktop_attach_port(session_info, start=command != "close")) is not None:
+             # A Chromium already runs on the Bot Desktop's shared profile (the human clicked the dock's
+             # Browser first): a launch would be forwarded into it by Chromium's singleton and die without
+             # a DevTools endpoint, so the session's daemon attaches to the port it advertises instead.

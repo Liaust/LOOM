@@ -2,6 +2,7 @@ package runtimes
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -157,7 +158,44 @@ func (r AutomationSchedulerRuntime) RunOnce(ctx context.Context, run workers.Run
 		summary.LastInvocationID = runResult.InvocationIDs[len(runResult.InvocationIDs)-1]
 	}
 
-	return automationSchedulerWorkerResult(summary, nextAutomationWorkerRunAfter(now, config.IdleTickIntervalSeconds, config.ActiveTickIntervalSeconds, summary.MoreWork)), nil
+	return automationSchedulerWorkerResult(summary, nextAutomationSchedulerRunAfter(now, config, runResult.NextDueAt)), nil
+}
+
+func nextAutomationSchedulerRunAfter(now time.Time, config automationSchedulerConfig, nextDueAt *time.Time) *time.Time {
+	next := nextAutomationWorkerRunAfter(now, config.IdleTickIntervalSeconds, config.ActiveTickIntervalSeconds, nextDueAt != nil && !nextDueAt.After(now))
+	// Only overdue work uses the active backoff; a future occurrence keeps its
+	// exact deadline, bounded by the idle fallback when a wake is lost.
+	if nextDueAt != nil && nextDueAt.After(now) && nextDueAt.Before(*next) {
+		due := nextDueAt.UTC()
+		return &due
+	}
+	return next
+}
+
+func (r AutomationSchedulerRuntime) NextSchedulerWakeDeadline(ctx context.Context, tx *sql.Tx, instance workers.WorkerInstance, now time.Time) (*time.Time, error) {
+	config, err := parseAutomationSchedulerConfig(instance.ConfigJSON)
+	if err != nil {
+		return nil, err
+	}
+	due, err := r.Automation.NextSchedulerDueAtTx(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	return nextAutomationSchedulerWakeAfter(now, config, due, instance.LastSuccessAt), nil
+}
+
+func nextAutomationSchedulerWakeAfter(now time.Time, config automationSchedulerConfig, due, lastSuccessAt *time.Time) *time.Time {
+	if due == nil || due.After(now) {
+		return nextAutomationSchedulerRunAfter(now, config, due)
+	}
+	next := now.UTC()
+	if lastSuccessAt != nil {
+		floor := lastSuccessAt.Add(time.Duration(config.ActiveTickIntervalSeconds) * time.Second)
+		if floor.After(next) {
+			next = floor
+		}
+	}
+	return &next
 }
 
 func parseAutomationSchedulerConfig(raw json.RawMessage) (automationSchedulerConfig, error) {

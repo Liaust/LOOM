@@ -25,12 +25,12 @@ func TestDirectArchiveV2EmptyBoxRootsPreserveLegacyValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	input := directArchiveV2TestInput(root, operational, fixture.schemaHead)
-	for _, name := range []string{"box_topics", "box_library", "application_data", "box_notes", "box_projects", "canonical"} {
+	for _, name := range []string{"box_topics", "box_library", "application_data", "storage_projects", "storage_library", "storage_records", "storage_location_evidence", "box_company_source", "box_company_state", "box_company_archive", "box_notes", "box_projects", "canonical"} {
 		t.Run(name, func(t *testing.T) {
 			request := input.Request
 			request.Roots = []DirectArchiveRoot{{Name: name, Path: root}}
 			_, err := normalizeDirectArchiveRequestV2(request)
-			allowEmpty := name == "box_topics" || name == "box_library" || name == "application_data"
+			allowEmpty := DirectArchiveRootAllowsEmpty(name)
 			if (err == nil) != allowEmpty {
 				t.Fatalf("v2 empty root %s: %v", name, err)
 			}

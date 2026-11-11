@@ -25,7 +25,7 @@ const (
 	MaximumSearchQueryBytes           = 512
 	MaximumSearchCursorBytes          = 1024
 	MaximumSearchMatchExplanation     = 280
-	MaximumSearchCompactResult        = 800
+	MaximumSearchCompactResult        = 1600
 	MaximumSearchCompactResponse      = 6000
 	MaximumSearchSourceReferences     = 2
 	MaximumSearchFilterBytes          = 256
@@ -165,6 +165,7 @@ type normalizedSearchRequest struct {
 	Limit          int
 	Cursor         searchQueryCursor
 	Digest         string
+	BoxDigest      string
 }
 
 type encodedSearchCursor struct {
@@ -189,6 +190,11 @@ func (api *FoundationAPI) Search(ctx context.Context, request SearchRequest) (Se
 	if api == nil || api.store == nil || api.service == nil {
 		return SearchResponse{}, errors.New("provenance search runtime is not ready")
 	}
+	var err error
+	ctx, err = api.store.boxSelectionContext(ctx)
+	if err != nil {
+		return SearchResponse{}, err
+	}
 	request.Project = strings.TrimSpace(request.Project)
 	if request.Project != "" && ids.Validate(ids.ProjectPrefix, request.Project) != nil {
 		// Bind names to the current projected identity before binding the cursor.
@@ -204,7 +210,7 @@ func (api *FoundationAPI) Search(ctx context.Context, request SearchRequest) (Se
 		}
 		request.Project = project
 	}
-	normalized, err := normalizeSearchRequest(request)
+	normalized, err := normalizeSearchRequestContext(ctx, request)
 	if err != nil {
 		return SearchResponse{}, &FoundationValidationError{Err: err}
 	}
@@ -247,7 +253,10 @@ func (api *FoundationAPI) Search(ctx context.Context, request SearchRequest) (Se
 		}
 		materialized = append(materialized, item)
 	}
+	return fitSearchResponse(normalized, materialized, moreByCollection)
+}
 
+func fitSearchResponse(normalized normalizedSearchRequest, materialized []materializedSearchResult, moreByCollection map[SearchCollection]bool) (SearchResponse, error) {
 	for {
 		response := buildSearchResponse(normalized.Query, materialized, moreByCollection)
 		hasMore := false
@@ -255,10 +264,11 @@ func (api *FoundationAPI) Search(ctx context.Context, request SearchRequest) (Se
 			hasMore = hasMore || value
 		}
 		if hasMore && len(materialized) > 0 {
-			response.NextCursor, err = encodeSearchCursor(normalized.Digest, materialized[len(materialized)-1].row)
+			cursor, err := encodeSearchCursor(normalized.Digest, materialized[len(materialized)-1].row)
 			if err != nil {
 				return SearchResponse{}, err
 			}
+			response.NextCursor = cursor
 		}
 		response.Truncated = hasMore
 		if searchResponseRuneCount(response) <= MaximumSearchCompactResponse {
@@ -281,7 +291,7 @@ func (api *FoundationAPI) materializeSearchResult(ctx context.Context, terms []s
 			return materializedSearchResult{}, fmt.Errorf("project state %s is missing its captured projection", row.ID)
 		}
 		project := *row.ProjectContext
-		match := newSearchCompactMatch(terms, projectSearchFields(project), row.SearchableSummary,
+		match := newSearchCompactMatch(terms, projectSearchFields(project), projectSearchPreview(project),
 			"project_state_projection", []SemanticID{}, projectSearchSourceTruncated(project),
 			"source_declared", projectSearchCurrentness(project), row.SortTime, row.ObservedAt,
 			nil, nil, []string{project.ProjectID}, []string{})
@@ -300,7 +310,7 @@ func (api *FoundationAPI) materializeSearchResult(ctx context.Context, terms []s
 		}
 		card := *row.RepositoryCard
 		fields := repositorySearchFields(card)
-		match := newSearchCompactMatch(terms, fields, row.SearchableSummary,
+		match := newSearchCompactMatch(terms, fields, repositorySearchPreview(card),
 			"repository_state_projection", []SemanticID{}, false,
 			"deterministic_rebuildable_projection", repositorySearchCurrentness(card),
 			row.SortTime, card.Freshness.ObservedAt, nil, nil,
@@ -447,6 +457,10 @@ func (api *FoundationAPI) caseSearchAnchors(ctx context.Context, members []CaseM
 }
 
 func normalizeSearchRequest(request SearchRequest) (normalizedSearchRequest, error) {
+	return normalizeSearchRequestContext(context.Background(), request)
+}
+
+func normalizeSearchRequestContext(ctx context.Context, request SearchRequest) (normalizedSearchRequest, error) {
 	query := strings.TrimSpace(request.Query)
 	if query == "" {
 		return normalizedSearchRequest{}, errors.New("provenance search query is required")
@@ -507,6 +521,7 @@ func normalizeSearchRequest(request SearchRequest) (normalizedSearchRequest, err
 		Query: query, Terms: terms, Project: project, Repository: repository,
 		Collections: collections, IncludePending: includePending, Limit: limit,
 	}
+	normalized.BoxDigest = selectionDigest(ctx)
 	normalized.Digest = searchRequestDigest(normalized)
 	if cursor := strings.TrimSpace(request.Cursor); cursor != "" {
 		decoded, err := decodeSearchCursor(cursor, normalized.Digest, normalized.Collections)
@@ -589,7 +604,8 @@ func searchRequestDigest(request normalizedSearchRequest) string {
 		Repository     string             `json:"repository"`
 		Collections    []SearchCollection `json:"collections"`
 		IncludePending bool               `json:"include_pending"`
-	}{request.Terms, request.Project, request.Repository, request.Collections, request.IncludePending})
+		BoxDigest      string             `json:"box_digest,omitempty"`
+	}{request.Terms, request.Project, request.Repository, request.Collections, request.IncludePending, request.BoxDigest})
 	digest := sha256.Sum256(payload)
 	return hex.EncodeToString(digest[:])
 }
@@ -754,6 +770,33 @@ func repositorySearchCurrentness(card RepositoryCard) string {
 	return "projected"
 }
 
+// Preview text is separate from the indexed summary: changing presentation must
+// not change matching, ranking, or require rebuilding captured projections.
+func projectSearchPreview(project ProjectContextProjection) string {
+	values := []string{project.Name}
+	if development := project.Development; development != nil {
+		values = append(values, development.Purpose, development.CurrentFocus)
+	}
+	return readableSearchPreview(values, "Project context")
+}
+
+func repositorySearchPreview(card RepositoryCard) string {
+	return readableSearchPreview(append([]string{card.Name, card.Purpose}, card.ActiveFocus...), "Repository context")
+}
+
+func readableSearchPreview(values []string, fallback string) string {
+	var parts []string
+	for _, value := range values {
+		if value = strings.Join(strings.Fields(value), " "); value != "" {
+			parts = append(parts, value)
+		}
+	}
+	if len(parts) == 0 {
+		return fallback + " (readable name/purpose unavailable)"
+	}
+	return strings.Join(parts, ": ")
+}
+
 type searchField struct {
 	name  string
 	value string
@@ -767,7 +810,7 @@ func newSearchCompactMatch(terms []string, fields []searchField, summary, source
 		boundedSourceIDs = boundedSourceIDs[:MaximumSearchSourceReferences]
 		sourceTruncated = true
 	}
-	return SearchCompactMatch{
+	match := SearchCompactMatch{
 		Summary:          boundedSearchText(summary, searchInitialSummaryRunes),
 		MatchExplanation: boundedSearchText(explanation, searchInitialExplanationRunes),
 		MatchedFields:    append([]string(nil), matchedFields...), MatchedTerms: append([]string(nil), matchedTerms...),
@@ -776,6 +819,8 @@ func newSearchCompactMatch(terms []string, fields []searchField, summary, source
 		AssertionPosture: assertionPosture,
 		ProjectIDs:       appendUniqueBounded(nil, projects, 4), RepositoryIDs: appendUniqueBounded(nil, repositories, 4),
 	}
+	match.CompactTruncated = match.Summary.Truncated || match.MatchExplanation.Truncated || sourceTruncated || len(projects) > len(match.ProjectIDs) || len(repositories) > len(match.RepositoryIDs)
+	return match
 }
 
 func explainSearchMatch(terms []string, fields []searchField) ([]string, []string) {
@@ -804,35 +849,22 @@ func fitSearchCompactResult(match *SearchCompactMatch, value func() any) error {
 		}
 		match.CompactTruncated = true
 		switch {
-		case utf8.RuneCountInString(match.Summary.Text) > 80:
-			match.Summary = boundedSearchText(match.Summary.Text, utf8.RuneCountInString(match.Summary.Text)-16)
-			match.Summary.Truncated = true
-		case utf8.RuneCountInString(match.MatchExplanation.Text) > 96:
-			match.MatchExplanation = boundedSearchText(match.MatchExplanation.Text, utf8.RuneCountInString(match.MatchExplanation.Text)-16)
+		case utf8.RuneCountInString(match.MatchExplanation.Text) > 0:
+			match.MatchExplanation = boundedSearchText(match.MatchExplanation.Text, max(0, utf8.RuneCountInString(match.MatchExplanation.Text)-32))
 			match.MatchExplanation.Truncated = true
-		case match.Source.Kind == "accepted_record" && utf8.RuneCountInString(match.Freshness.Currentness) > 96:
-			match.Freshness.Currentness = boundedSearchText(match.Freshness.Currentness, max(96, utf8.RuneCountInString(match.Freshness.Currentness)-16)).Text
-			match.Freshness.CurrentnessTruncated = true
-		case len(match.Source.SourceReferenceIDs) > 0:
-			match.Source.SourceReferenceIDs = match.Source.SourceReferenceIDs[:len(match.Source.SourceReferenceIDs)-1]
-			match.Source.Truncated = true
 		case len(match.MatchedTerms) > 0:
 			match.MatchedTerms = match.MatchedTerms[:len(match.MatchedTerms)-1]
 		case len(match.MatchedFields) > 0:
 			match.MatchedFields = match.MatchedFields[:len(match.MatchedFields)-1]
-		case len(match.ProjectIDs) > 0:
-			match.ProjectIDs = match.ProjectIDs[:len(match.ProjectIDs)-1]
-		case len(match.RepositoryIDs) > 0:
-			match.RepositoryIDs = match.RepositoryIDs[:len(match.RepositoryIDs)-1]
-		case match.Source.Kind == "accepted_record" && utf8.RuneCountInString(match.Freshness.Currentness) > 32:
-			match.Freshness.Currentness = boundedSearchText(match.Freshness.Currentness, max(32, utf8.RuneCountInString(match.Freshness.Currentness)-16)).Text
+		case len(match.Source.SourceReferenceIDs) > 1:
+			match.Source.SourceReferenceIDs = match.Source.SourceReferenceIDs[:len(match.Source.SourceReferenceIDs)-1]
+			match.Source.Truncated = true
+		case utf8.RuneCountInString(match.Freshness.Currentness) > 96:
+			match.Freshness.Currentness = boundedSearchText(match.Freshness.Currentness, max(96, utf8.RuneCountInString(match.Freshness.Currentness)-32)).Text
 			match.Freshness.CurrentnessTruncated = true
-		case utf8.RuneCountInString(match.Summary.Text) > 0:
-			match.Summary = boundedSearchText(match.Summary.Text, utf8.RuneCountInString(match.Summary.Text)-1)
+		case utf8.RuneCountInString(match.Summary.Text) > 80:
+			match.Summary = boundedSearchText(match.Summary.Text, max(80, utf8.RuneCountInString(match.Summary.Text)-16))
 			match.Summary.Truncated = true
-		case utf8.RuneCountInString(match.MatchExplanation.Text) > 0:
-			match.MatchExplanation = boundedSearchText(match.MatchExplanation.Text, utf8.RuneCountInString(match.MatchExplanation.Text)-1)
-			match.MatchExplanation.Truncated = true
 		default:
 			return fmt.Errorf("typed search result requires %d code points after bounded truncation; maximum is %d", encodedRunes, MaximumSearchCompactResult)
 		}

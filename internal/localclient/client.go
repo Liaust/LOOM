@@ -41,6 +41,7 @@ import (
 	"loom.local/loom/internal/minidashboard"
 	"loom.local/loom/internal/modules"
 	"loom.local/loom/internal/nodes"
+	"loom.local/loom/internal/notesworkspacesync"
 	"loom.local/loom/internal/objects"
 	"loom.local/loom/internal/policy"
 	"loom.local/loom/internal/projectcontracts"
@@ -72,12 +73,16 @@ type Client struct {
 	BaseURL        string
 	client         *http.Client
 	idempotencyKey string
+	boxContext     string
+	allBoxes       bool
 }
 
 type CloudSnapshotStatusReport struct {
-	Cloud     cloudstorage.StatusReport         `json:"cloud"`
-	Snapshots *cloudstorage.SnapshotListResult  `json:"snapshots,omitempty"`
-	Producer  maintenance.CloudProtectionStatus `json:"producer"`
+	Cloud              cloudstorage.StatusReport         `json:"cloud"`
+	Snapshots          *cloudstorage.SnapshotListResult  `json:"snapshots,omitempty"`
+	Producer           maintenance.CloudProtectionStatus `json:"producer"`
+	InventoryStatus    string                            `json:"inventory_status,omitempty"`
+	InventoryErrorCode string                            `json:"inventory_error_code,omitempty"`
 }
 
 func New(socketPath string) Client {
@@ -120,6 +125,22 @@ func NewHTTP(baseURL string) (Client, error) {
 func (c Client) WithIdempotencyKey(key string) Client {
 	c.idempotencyKey = strings.TrimSpace(key)
 	return c
+}
+
+func (c Client) WithBoxContext(ref string, all bool) Client {
+	c.boxContext, c.allBoxes = ref, all
+	return c
+}
+
+func (c Client) applyBoxContext(req *http.Request) {
+	if c.boxContext != "" {
+		req.Header.Set("X-Loom-Box", c.boxContext)
+	}
+	if c.allBoxes {
+		query := req.URL.Query()
+		query.Set("all_boxes", "true")
+		req.URL.RawQuery = query.Encode()
+	}
 }
 
 func (c Client) Health(ctx context.Context, correlationID string) (response.Envelope[health.Report], error) {
@@ -203,6 +224,14 @@ func (c Client) CloudSnapshotBackendInitLive(ctx context.Context, correlationID 
 
 func (c Client) BackupCoverage(ctx context.Context, correlationID string) (response.Envelope[backupcoverage.Report], error) {
 	return doJSON[backupcoverage.Report](c, ctx, http.MethodGet, "/v1/backup/coverage", correlationID, nil)
+}
+
+func (c Client) NotesRecoveryInventory(ctx context.Context, correlationID string, refresh bool) (response.Envelope[notesworkspacesync.EnrollmentInventory], error) {
+	method := http.MethodGet
+	if refresh {
+		method = http.MethodPost
+	}
+	return doJSON[notesworkspacesync.EnrollmentInventory](c, ctx, method, "/v1/backup/notes-inventory", correlationID, nil)
 }
 
 func (c Client) ListBackupContracts(ctx context.Context, correlationID string) (response.Envelope[backupcontracts.ListResult], error) {
@@ -609,6 +638,7 @@ func (c Client) ExportProject(ctx context.Context, correlationID string, input p
 		return projectexport.Summary{}, err
 	}
 	req.Header.Set(correlation.Header, correlation.Normalize(correlationID))
+	c.applyBoxContext(req)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -1219,6 +1249,10 @@ func (c Client) GetSchedule(ctx context.Context, correlationID, ref string) (res
 	return doJSON[automation.ScheduleDetail](c, ctx, http.MethodGet, "/v1/schedules/"+url.PathEscape(ref), correlationID, nil)
 }
 
+func (c Client) UpdateScheduleTiming(ctx context.Context, correlationID, ref string, input automation.ScheduleTimingInput) (response.Envelope[automation.ScheduleDetail], error) {
+	return doJSON[automation.ScheduleDetail](c, ctx, http.MethodPost, "/v1/schedules/"+url.PathEscape(ref)+"/timing", correlationID, input)
+}
+
 func (c Client) FireScheduleNow(ctx context.Context, correlationID, ref string, input automation.FireScheduleInput) (response.Envelope[automation.FireScheduleResult], error) {
 	return doJSON[automation.FireScheduleResult](c, ctx, http.MethodPost, "/v1/schedules/"+url.PathEscape(ref)+"/fire", correlationID, input)
 }
@@ -1742,6 +1776,15 @@ func (c Client) ListArtifacts(ctx context.Context, correlationID string, filter 
 
 func (c Client) GetArtifact(ctx context.Context, correlationID, ref string) (response.Envelope[artifacts.ArtifactDetail], error) {
 	return doJSON[artifacts.ArtifactDetail](c, ctx, http.MethodGet, "/v1/artifacts/"+url.PathEscape(ref), correlationID, nil)
+}
+
+func (c Client) ReadArtifact(ctx context.Context, correlationID, ref string, maxBytes int, download bool) (response.Envelope[artifacts.ReadResult], error) {
+	values := url.Values{}
+	values.Set("max_bytes", strconv.Itoa(maxBytes))
+	if download {
+		values.Set("download", "true")
+	}
+	return doJSON[artifacts.ReadResult](c, ctx, http.MethodGet, "/v1/artifacts/"+url.PathEscape(ref)+"/content?"+values.Encode(), correlationID, nil)
 }
 
 func (c Client) ListProviderAdvertisements(ctx context.Context, correlationID string, filter capabilities.ProviderAdvertisementFilter) (response.Envelope[[]capabilities.ProviderAdvertisement], error) {
@@ -2709,6 +2752,7 @@ func doJSON[T any](c Client, ctx context.Context, method, path, correlationID st
 	if err != nil {
 		return response.Envelope[T]{}, err
 	}
+	c.applyBoxContext(req)
 	req.Header.Set(correlation.Header, correlation.Normalize(correlationID))
 	if c.idempotencyKey != "" {
 		req.Header.Set(idempotency.Header, c.idempotencyKey)

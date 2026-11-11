@@ -18,6 +18,7 @@ import (
 	loomerrors "loom.local/loom/internal/errors"
 	"loom.local/loom/internal/ids"
 	"loom.local/loom/internal/localclient"
+	"loom.local/loom/internal/maintenance"
 	"loom.local/loom/internal/response"
 	"loom.local/loom/internal/restoreauthority"
 	"loom.local/loom/internal/workers"
@@ -541,14 +542,9 @@ func newCloudSnapshotStatusCommand(opts *options) *cobra.Command {
 					return nil
 				}
 				renderCloudStatus(cmd, envelope.Data.Cloud)
-				fmt.Fprintf(cmd.OutOrStdout(), "Producer: %s verification=%s available=%t last_success=%s\n",
-					envelope.Data.Producer.WorkerState,
-					envelope.Data.Producer.Verification,
-					envelope.Data.Producer.Available,
-					timePtrOrDash(envelope.Data.Producer.LastSuccessAt),
-				)
+				renderCloudProducerEvidence(cmd, envelope.Data.Producer)
 				if envelope.Data.Snapshots != nil {
-					renderCloudSnapshotList(cmd, *envelope.Data.Snapshots)
+					renderCloudSnapshotSummary(cmd, *envelope.Data.Snapshots)
 				} else if envelope.Data.Cloud.Config.Enabled {
 					fmt.Fprintln(cmd.OutOrStdout(), "Snapshot inventory: live cloud status did not return remote snapshots.")
 				}
@@ -588,7 +584,7 @@ func newCloudSnapshotStatusCommand(opts *options) *cobra.Command {
 			}
 			renderCloudStatus(cmd, status)
 			if report.Snapshots != nil {
-				renderCloudSnapshotList(cmd, *report.Snapshots)
+				renderCloudSnapshotSummary(cmd, *report.Snapshots)
 			} else if cloudConfig.Enabled && !opts.plainOutput {
 				fmt.Fprintln(cmd.OutOrStdout(), "Snapshot inventory: cached status only; run `loom cloud snapshot status --live` to list remote snapshots.")
 			}
@@ -699,7 +695,7 @@ func cloudSnapshotPushCommandContext(parent context.Context) (context.Context, c
 	if parent == nil {
 		parent = context.Background()
 	}
-	return context.WithTimeout(parent, 3*time.Hour)
+	return context.WithTimeout(parent, 3*time.Hour+3*time.Minute)
 }
 
 func newCloudSnapshotListCommand(opts *options) *cobra.Command {
@@ -774,6 +770,7 @@ func newCloudSnapshotVerifyCommand(opts *options) *cobra.Command {
 	var profile string
 	var maxDuration time.Duration
 	var local bool
+	var rootEvidence bool
 	cmd := &cobra.Command{
 		Use:   "verify [cloud-snapshot-ref]",
 		Short: "Run an explicit cloud snapshot assurance profile",
@@ -790,6 +787,7 @@ func newCloudSnapshotVerifyCommand(opts *options) *cobra.Command {
 			options, err := cloudstorage.NormalizeSnapshotVerifyOptions(ref, cloudstorage.SnapshotVerifyOptions{
 				Profile:            cloudstorage.SnapshotVerifyProfile(profile),
 				MaxDurationSeconds: int64(maxDuration / time.Second),
+				RootEvidence:       rootEvidence,
 			})
 			if err != nil {
 				return renderError(cmd, opts, correlationID, err)
@@ -862,6 +860,7 @@ func newCloudSnapshotVerifyCommand(opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&profile, "profile", string(cloudstorage.SnapshotVerifyProfileMetadata), "assurance profile: metadata, rolling_repository, or archive_data")
 	cmd.Flags().DurationVar(&maxDuration, "max-duration", 0, "positive rolling_repository time budget, for example 30m")
 	cmd.Flags().BoolVar(&local, "local", false, "verify cloud snapshots in this CLI process instead of delegating to loomd")
+	cmd.Flags().BoolVar(&rootEvidence, "root-evidence", false, "include authenticated frozen root, package and recovery identities without fetching file payloads (metadata profile only)")
 	return cmd
 }
 
@@ -1458,6 +1457,85 @@ func snapshotMetricsAny(metrics cloudstorage.SnapshotMetrics) bool {
 		metrics.BorgCheckDurationMS > 0
 }
 
+func renderCloudProducerEvidence(cmd *cobra.Command, producer maintenance.CloudProtectionStatus) {
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "Producer: %s upload_result=%s available=%t last_success=%s\n", declarationDisplay(producer.WorkerState), declarationDisplay(producer.Verification), producer.Available, timePtrOrDash(producer.LastSuccessAt))
+	observed := "unknown"
+	if !producer.ObservedAt.IsZero() {
+		observed = producer.ObservedAt.UTC().Format(time.RFC3339Nano)
+	}
+	fmt.Fprintf(out, "Producer evidence: %s; current protection=%s; restore/per-project inclusion=unknown; observed=%s\n", firstNonEmptyCLI(producer.EvidenceBasis, "unknown"), firstNonEmptyCLI(producer.CurrentProtection, "unknown"), observed)
+	if upload := producer.LatestUpload; upload != nil {
+		captured := "unknown"
+		if upload.CapturedAt != nil {
+			captured = upload.CapturedAt.UTC().Format(time.RFC3339Nano)
+		}
+		fmt.Fprintf(out, "Latest upload: operation=%s result=%s finished=%s payload_captured=%s archive=%s class=%s\n", declarationDisplay(upload.OperationID), declarationDisplay(upload.Result), timePtrOrDash(upload.FinishedAt), captured, declarationDisplay(upload.ArchiveRef), declarationDisplay(upload.ArchiveClass))
+		fmt.Fprintf(out, "Packages: backup_operation=%s operational=%s provenance=%s\n", declarationDisplay(upload.BackupOperationID), declarationDisplay(upload.OperationalPackageID), declarationDisplay(upload.ProvenancePackageID))
+	}
+	fmt.Fprintf(out, "Producer findings: open=%d warnings=%d critical=%d; last_failure=%s\n", producer.OpenFindingCount, producer.WarningFindings, producer.CriticalFindings, timePtrOrDash(producer.LastFailureAt))
+}
+
+func renderCloudSnapshotSummary(cmd *cobra.Command, result cloudstorage.SnapshotListResult) {
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "Cloud snapshots: %s; count=%d; backend=%s; cached=%t cache_age_seconds=%d\n", declarationDisplay(result.Status), len(result.Snapshots), declarationDisplay(result.Backend), result.Cached, result.CacheAgeSeconds)
+	counts := map[string]int{}
+	for _, item := range result.Snapshots {
+		class := "unknown"
+		switch item.ArchiveClass {
+		case "user_data", "acceptance", "milestone":
+			class = item.ArchiveClass
+		}
+		counts[class]++
+	}
+	classes := []string{}
+	for _, class := range []string{"user_data", "acceptance", "milestone", "unknown"} {
+		if counts[class] > 0 {
+			classes = append(classes, fmt.Sprintf("%s=%d", class, counts[class]))
+		}
+	}
+	if len(classes) > 0 {
+		fmt.Fprintf(out, "Archive classes: %s\n", strings.Join(classes, ", "))
+	}
+	if latest := result.Latest; latest != nil {
+		label := "discovered_at"
+		if latest.Backend == cloudstorage.SnapshotBackendBorg {
+			label = "archive_time"
+		}
+		class, captured := "unknown", "unknown"
+		switch latest.ArchiveClass {
+		case "user_data", "acceptance", "milestone":
+			class = latest.ArchiveClass
+		}
+		if !latest.DiscoveredAt.IsZero() {
+			captured = latest.DiscoveredAt.UTC().Format(time.RFC3339Nano)
+		}
+		fmt.Fprintf(out, "Latest: %s; status=%s class=%s %s=%s\n", declarationDisplay(latest.Ref), declarationDisplay(latest.Status), class, label, captured)
+	} else {
+		fmt.Fprintln(out, "Latest: unknown (not reported)")
+	}
+	fmt.Fprintln(out, "Evidence: remote discovery; current protection/restore=unknown; inventory observation time not reported. Archive time is not this read's observation time.")
+	if result.Code != "" {
+		fmt.Fprintf(out, "Code: %s\n", declarationDisplay(result.Code))
+	}
+	if result.Error != "" {
+		fmt.Fprintf(out, "Error: %s\n", declarationDisplay(result.Error))
+	}
+	if result.RepairHint != "" {
+		fmt.Fprintf(out, "Repair: %s\n", declarationDisplay(result.RepairHint))
+	}
+	command := "loom cloud snapshot list"
+	for _, name := range []string{"cloud-config", "node", "local"} {
+		if flag := cmd.Flags().Lookup(name); flag != nil && flag.Changed {
+			command += " --" + name + "=" + quoteDeclarationArg(flag.Value.String())
+		}
+	}
+	if !declarationSafeCommand(command) {
+		command = "loom cloud snapshot list --help"
+	}
+	fmt.Fprintf(out, "Inventory detail: %s; full status: --json\n", command)
+}
+
 func renderCloudSnapshotList(cmd *cobra.Command, result cloudstorage.SnapshotListResult) {
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "Cloud snapshots: %s\n", result.Status)
@@ -1510,6 +1588,13 @@ func renderCloudSnapshotVerify(cmd *cobra.Command, result cloudstorage.SnapshotV
 	fmt.Fprintf(out, "Remote: %s\n", result.RemoteURI)
 	if result.ManifestPath != "" {
 		fmt.Fprintf(out, "Manifest: %s\n", result.ManifestPath)
+	}
+	if result.SourceManifestSHA256 != "" {
+		fmt.Fprintf(out, "Authenticated source manifest: %s\n", result.SourceManifestSHA256)
+		for _, root := range result.RootCoverage {
+			fmt.Fprintf(out, "Retained root: %s (path sha256:%s; snapshot %s)\n", root.Name, root.PathSHA256, root.SnapshotAt.Format(time.RFC3339))
+		}
+		fmt.Fprintln(out, "Frozen root history, not current-file equality or application-consistent recovery.")
 	}
 	renderStringMap(cmd, "Checks", result.Checks)
 	for _, err := range result.Errors {

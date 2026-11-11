@@ -1,7 +1,7 @@
-# LOOM ORCA agent shell. Managed by nix/modules/loom-orca.nix.
+# Shared LOOM agent shell. Managed by nix/modules/loom-agents.nix.
 
 # The Codex installer uses this account-local directory.
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="$HOME/.local/bin:/etc/profiles/per-user/agents/bin:$PATH"
 
 # Proton Pass sessions use the account-owned filesystem key provider because
 # the headless agents account has no persistent desktop keyring. Secret values
@@ -183,7 +183,7 @@ unset -f __loom_install_prompt_command
 
 if [[ -z ${LOOM_SHELL_WELCOMED:-} ]]; then
   export LOOM_SHELL_WELCOMED=1
-  printf '%sLOOM MAIN%s  %sORCA agent workspace%s\n' \
+  printf '%sLOOM MAIN%s  %sShared agent workspace%s\n' \
     "$VIRA_TEAL" "$VIRA_RESET" "$VIRA_MUTED" "$VIRA_RESET"
 fi
 

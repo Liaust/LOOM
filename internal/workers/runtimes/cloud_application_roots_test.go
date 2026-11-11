@@ -55,10 +55,17 @@ func TestCloudSnapshotApplicationDataRoot(t *testing.T) {
 			if (kind == "empty" && count != 1) || (kind == "disabled" && count != 0) {
 				t.Fatal("pool enrollment wrong", roots)
 			}
+			holds := 0
 			for _, exclusion := range exclusions {
-				if exclusion.Root == "application_data" {
+				if exclusion.Root == "application_data" && exclusion.RelativePath != "notes-recovery-held" {
 					t.Fatal("application data excluded")
 				}
+				if exclusion.Root == "application_data" {
+					holds++
+				}
+			}
+			if kind == "empty" && holds != 1 || kind == "disabled" && holds != 0 {
+				t.Fatal("reviewed hold boundary changed", exclusions)
 			}
 		})
 	}

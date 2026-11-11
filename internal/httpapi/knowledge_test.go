@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -24,6 +25,98 @@ import (
 	"loom.local/loom/internal/knowledge"
 	"loom.local/loom/internal/response"
 )
+
+func TestKnowledgeServicePreservesConfiguredSearchBackend(t *testing.T) {
+	// A closed connection distinguishes BM25's required extension check from the
+	// native backend without connecting to PostgreSQL or building an index.
+	db, err := sql.Open("pgx", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, backend := range []string{"", knowledge.NotesSearchBackendNative, knowledge.NotesSearchBackendBM25} {
+		t.Run(backend, func(t *testing.T) {
+			server := NewServer(Services{DB: db, RuntimeConfig: config.Config{NotesSearchBackend: backend}}, slog.Default())
+			err := server.knowledgeService().PrepareNotesSearchBackend(t.Context())
+			if backend == knowledge.NotesSearchBackendBM25 {
+				if err == nil || !strings.Contains(err.Error(), "Notes BM25 extension unavailable:") {
+					t.Fatalf("HTTP service lost configured BM25 backend: %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("native backend unexpectedly required an extension: %v", err)
+			}
+		})
+	}
+}
+
+func TestNotesSearchFailureClassification(t *testing.T) {
+	for _, fallback := range []string{"knowledge.notes_search_failed", "knowledge.files_search_failed"} {
+		for _, tc := range []struct {
+			err    error
+			status int
+			code   string
+		}{
+			{fmt.Errorf("query-private: %w", context.DeadlineExceeded), http.StatusGatewayTimeout, "knowledge.notes_search_timeout"},
+			{fmt.Errorf("query-private: %w", context.Canceled), http.StatusRequestTimeout, "knowledge.notes_search_canceled"},
+			{errors.New("query-private"), http.StatusBadRequest, fallback},
+		} {
+			status, code, summary := notesSearchFailure(tc.err, fallback)
+			if status != tc.status || code != tc.code || strings.Contains(summary, "query-private") {
+				t.Fatalf("unsafe or incorrect classification: %d %s %s", status, code, summary)
+			}
+		}
+	}
+}
+
+func TestKnowledgeFileReadFailureClassification(t *testing.T) {
+	for _, tc := range []struct {
+		err    error
+		status int
+		code   string
+	}{
+		{&knowledge.FileAdmissionError{Reason: "source_root_blocked"}, http.StatusConflict, "knowledge.file_source_root_blocked"},
+		{&knowledge.FileAdmissionError{Reason: "source_root_disabled"}, http.StatusNotFound, "knowledge.file_source_root_disabled"},
+		{&knowledge.FileAdmissionError{Reason: "source_authority_unavailable"}, http.StatusServiceUnavailable, "knowledge.file_source_authority_unavailable"},
+		{&knowledge.FileAdmissionError{Reason: "source_not_published"}, http.StatusNotFound, "knowledge.file_source_not_published"},
+		{&knowledge.FileAdmissionError{Reason: "custody_projection_pending"}, http.StatusServiceUnavailable, "knowledge.file_custody_pending"},
+		{&knowledge.FileAdmissionError{Reason: "query-private"}, http.StatusNotFound, "knowledge.file_not_found"},
+		{sql.ErrNoRows, http.StatusNotFound, "knowledge.file_not_found"},
+		{context.DeadlineExceeded, http.StatusGatewayTimeout, "knowledge.file_read_timeout"},
+		{context.Canceled, http.StatusRequestTimeout, "knowledge.file_read_canceled"},
+		{errors.Join(&knowledge.FileAdmissionError{Reason: "source_root_blocked"}, context.DeadlineExceeded), http.StatusGatewayTimeout, "knowledge.file_read_timeout"},
+		{knowledge.ErrFileSourceUnavailable, http.StatusServiceUnavailable, "knowledge.file_source_unavailable"},
+		{knowledge.ErrFileSourceMissing, http.StatusNotFound, "knowledge.file_source_missing"},
+		{knowledge.ErrFileSourceNotRegular, http.StatusConflict, "knowledge.file_source_not_regular"},
+		{knowledge.ErrFileSourceChanged, http.StatusConflict, "knowledge.file_source_changed"},
+		{knowledge.ErrInvalid, http.StatusBadRequest, "knowledge.invalid_file_read"},
+		{errors.New("query-private"), http.StatusInternalServerError, "knowledge.file_read_failed"},
+	} {
+		status, code, summary := knowledgeFileReadFailure(fmt.Errorf("query-private: %w", tc.err))
+		if status != tc.status || code != tc.code || strings.Contains(summary, "query-private") {
+			t.Fatalf("unsafe or incorrect classification: %d %s %s", status, code, summary)
+		}
+	}
+}
+
+func TestKnowledgeFileReadFailureTarget(t *testing.T) {
+	rootID := ids.NewNotesSourceRootID()
+	known := &knowledge.FileAdmissionError{Reason: "source_root_blocked", SourceRootID: rootID}
+	if target := knowledgeFileReadFailureTarget(fmt.Errorf("wrapped: %w", known), "object_known"); target != rootID {
+		t.Fatal("authorized managed root reference was lost", target)
+	}
+	for _, err := range []error{
+		sql.ErrNoRows,
+		&knowledge.FileAdmissionError{Reason: "unknown", SourceRootID: rootID},
+		&knowledge.FileAdmissionError{Reason: "source_root_blocked", SourceRootID: "private-source\n"},
+		errors.Join(known, context.DeadlineExceeded),
+	} {
+		if target := knowledgeFileReadFailureTarget(err, "object_known"); target != "object_known" {
+			t.Fatal("untrusted or irrelevant root reference exposed", target)
+		}
+	}
+}
 
 // The PostgreSQL exact-followup gate also exercises the actual search handler
 // through TestKnowledgeBoxSourceSurfaceHelper; this freezes its additive wire.
@@ -262,5 +355,14 @@ func TestNotesEnrichmentRejectsInvalidRequestsBeforeDatabase(t *testing.T) {
 		if out.Code != tc.status {
 			t.Errorf("%s %s got %d: %s", tc.method, tc.path, out.Code, out.Body.String())
 		}
+	}
+}
+
+func TestKnowledgeNotesPipelineStatusRejectsInvalidInspection(t *testing.T) {
+	server := NewServer(Services{}, slog.Default()).Handler()
+	res := httptest.NewRecorder()
+	server.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/v1/knowledge/notes/pipelines/status?inspect_integrity=maybe", nil))
+	if res.Code != http.StatusBadRequest || !strings.Contains(res.Body.String(), "inspect_integrity must be a boolean") {
+		t.Fatalf("inspection validation = %d %s", res.Code, res.Body.String())
 	}
 }

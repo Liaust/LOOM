@@ -363,7 +363,7 @@ func validateProjectArchiveRepositoryBinding(project Project, registration Proje
 		return fmt.Errorf("%w: repository snapshot does not match current project identity", ErrProjectArchiveInvalidBinding)
 	}
 	if repository.Source == nil {
-		if len(repository.Members) != 0 || registration.ContractSchemaVersion == ProjectRepositoryProjectSchemaV05 {
+		if len(repository.Members) != 0 || isDeclarationSchemaVersion(registration.ContractSchemaVersion) {
 			return fmt.Errorf("%w: repository members exist without source", ErrProjectArchiveInvalidBinding)
 		}
 		return nil
@@ -485,6 +485,9 @@ func IsProjectRuntimeArchived(err error) bool {
 }
 
 func EnsureProjectMutable(project Project, resourceKind, resourceRef string) error {
+	if err := filesystemOperationGuard(project.Metadata); err != nil {
+		return err
+	}
 	if state, ok := ParseProjectPhysicalArchiveState(project.ArchiveState); ok && state.Restore != nil && state.Restore.Reactivation == nil {
 		return ProjectRestoreBlockedError{ProjectID: project.ProjectID, OperationID: state.Restore.OperationID, Phase: state.Restore.Phase}
 	}
@@ -557,7 +560,7 @@ func normalizeRuntimeRef(ref RuntimeRef) RuntimeRef {
 
 func ensureRuntimeProjectActive(ctx context.Context, q RuntimeStatusQuerier, projectRef string, runtimeRef RuntimeRef) error {
 	status, err := scanRuntimeStatus(q.QueryRowContext(ctx, `
-		SELECT p.project_id, p.slug, p.status, s.scope_id, s.status, p.archive_state
+		SELECT p.project_id, p.slug, p.status, s.scope_id, s.status, p.archive_state, p.metadata
 		FROM projects.projects p
 		JOIN scopes.scopes s ON s.scope_id = p.project_scope_id
 		WHERE p.project_id = $1 OR p.slug = $1
@@ -575,7 +578,7 @@ func ensureRuntimeProjectActive(ctx context.Context, q RuntimeStatusQuerier, pro
 
 func ensureRuntimeScopeActive(ctx context.Context, q RuntimeStatusQuerier, scopeRef string, runtimeRef RuntimeRef) error {
 	status, err := scanRuntimeStatus(q.QueryRowContext(ctx, `
-		SELECT p.project_id, p.slug, COALESCE(p.status, ''), s.scope_id, s.status, COALESCE(p.archive_state, '{}'::jsonb)
+		SELECT p.project_id, p.slug, COALESCE(p.status, ''), s.scope_id, s.status, COALESCE(p.archive_state, '{}'::jsonb), COALESCE(p.metadata,'{}'::jsonb)
 		FROM scopes.scopes s
 		LEFT JOIN projects.projects p ON p.project_scope_id = s.scope_id
 		WHERE s.scope_id = $1 OR s.scope_key = $1 OR s.slug = $1
@@ -601,13 +604,14 @@ type runtimeStatus struct {
 	ScopeID       string
 	ScopeStatus   string
 	ArchiveState  json.RawMessage
+	Metadata      json.RawMessage
 }
 
 func scanRuntimeStatus(row *sql.Row) (runtimeStatus, error) {
 	var status runtimeStatus
 	var projectID, slug, projectStatus sql.NullString
 	var archiveState []byte
-	if err := row.Scan(&projectID, &slug, &projectStatus, &status.ScopeID, &status.ScopeStatus, &archiveState); err != nil {
+	if err := row.Scan(&projectID, &slug, &projectStatus, &status.ScopeID, &status.ScopeStatus, &archiveState, &status.Metadata); err != nil {
 		return runtimeStatus{}, err
 	}
 	status.ProjectID = projectID.String
@@ -618,6 +622,9 @@ func scanRuntimeStatus(row *sql.Row) (runtimeStatus, error) {
 }
 
 func (s runtimeStatus) archivedError(ref RuntimeRef) error {
+	if err := filesystemOperationGuard(s.Metadata); err != nil {
+		return err
+	}
 	if state, ok := ParseProjectPhysicalArchiveState(s.ArchiveState); ok && state.Restore != nil && state.Restore.Reactivation == nil {
 		return ProjectRestoreBlockedError{ProjectID: s.ProjectID, OperationID: state.Restore.OperationID, Phase: state.Restore.Phase}
 	}

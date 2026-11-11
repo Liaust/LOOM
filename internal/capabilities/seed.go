@@ -21,6 +21,7 @@ type SeedResult struct {
 }
 
 const (
+	HermesEventCapability                  = "main@system.hermes.event"
 	ProvenanceHealthReadCapability         = "main@provenance.health.read"
 	ProvenanceFoundationReadCapability     = "main@provenance.foundation.read"
 	ProvenanceRegisterCapability           = "main@provenance.candidate.register"
@@ -205,6 +206,7 @@ func SeedMainNodeRegistry(ctx context.Context, req requestctx.Context, service S
 
 	classByName := map[string]CapabilityClass{}
 	classInputs := []RegisterCapabilityClassInput{
+		classInput("system", "hermes.event", "Native Hermes Event Admission", CapabilityFormCommand, RiskLevelMedium),
 		classInput("system", "health.read", "System Health Read", CapabilityFormQuery, RiskLevelLow),
 		classInput("system", "status.read", "System Status Read", CapabilityFormQuery, RiskLevelLow),
 		classInput("object", "object.inspect", "Object Inspect", CapabilityFormQuery, RiskLevelLow),
@@ -240,6 +242,7 @@ func SeedMainNodeRegistry(ctx context.Context, req requestctx.Context, service S
 
 	endpointByAddress := map[string]CapabilityEndpoint{}
 	endpointInputs := []RegisterCapabilityEndpointInput{
+		endpointInput(system, classByName["system.hermes.event"], "hermes.event", CapabilityFormCommand, RiskLevelMedium, 3),
 		endpointInput(system, classByName["system.health.read"], "health.read", CapabilityFormQuery, RiskLevelLow, 1),
 		endpointInput(system, classByName["system.status.read"], "status.read", CapabilityFormQuery, RiskLevelLow, 1),
 		endpointInput(objectStore, classByName["object.object.inspect"], "object.inspect", CapabilityFormQuery, RiskLevelLow, 1),
@@ -560,6 +563,8 @@ Project setup, script artifact capture, note import, and module backup workflows
 `
 }
 
+const scriptRunUsageExample = `{"script_ref":"hello_world","input":{},"execution_mode":"enqueue_only"}`
+
 func scriptRunUsageDocumentBody() string {
 	return `
 ## Purpose
@@ -567,6 +572,28 @@ Use main@script-runner.script.run when an approved script package should execute
 
 ## Direct Usage
 Pass a registered script reference and the required script inputs, commonly a source object or project reference. The capability creates a job, runs the active script version on the provider machine, captures stdout, stderr, runner logs, outputs, artifacts, and emits job and script-run events.
+
+## Input Shape
+The installed script-runner adapter accepts this typed request, not arbitrary endpoint fields:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| script_ref | string, required | Existing registered script ID or slug; its active version executes. |
+| object_ref | string, optional | Existing source object for scripts requiring an object. |
+| project_ref | string, optional | Existing project scope. |
+| scope_ref | string, optional | Existing explicit scope reference. |
+| input | JSON object, optional | Inputs required by the selected script's manifest. |
+| execution_mode | string, optional | enqueue_only, wait_until_started, or wait_for_completion (default). |
+| wait_timeout_seconds | integer, optional | Wait budget; omitted/nonpositive uses 120 seconds, capped at 86400. Not the script execution timeout. |
+| credential_bindings | array of binding objects, optional | Approved reference bindings (ref, kind, expose_as, source); never secret values. |
+
+## Concrete Example
+For the bundled hello_world package after it is registered with an active version, this request queues one run with no object or credentials. This example does not assert that hello_world is registered on every node or grant permission to run it.
+` + "\n```json\n" + scriptRunUsageExample + "\n```\n" + `
+Use loom capability call main@script-runner.script.run --input-file <reviewed-input.json> with that JSON. The existing route, policy and actor authorization still apply. The returned job ID navigates to loom job inspect <job-id> and loom job logs <job-id> --stream runner --tail 40.
+
+## Tool Boundary
+This address is a managed LOOM capability: LOOM routes, authorizes and records its execution on the provider. An independently installed account CLI, SSH connection or device tool does not become this capability merely by being available to an agent. Its presence does not imply a registered LOOM route or additional permission.
 
 ## Workflow Usage
 Workflows should call this for single-node actions such as processing an object, generating an artifact, running a scraper, checking a node-local condition, or invoking a local application wrapper. If a workflow needs work on another machine, it should request that machine's registered capability through main-node routing instead of moving the script elsewhere.

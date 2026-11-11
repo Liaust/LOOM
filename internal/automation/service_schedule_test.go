@@ -16,6 +16,21 @@ func TestNormalizeInitialScheduleStatusDefaultsToActive(t *testing.T) {
 	}
 }
 
+func TestArchiveFilterRejectsUnsupportedColumns(t *testing.T) {
+	for _, build := range []func(string) string{archivedProjectByProjectColumnSQL, archivedProjectByAutomationColumnSQL} {
+		for _, column := range []string{"", "project_id", "automation_id", "arbitrary.project_id", "schedules.project_id; SELECT 1"} {
+			func() {
+				defer func() {
+					if recover() == nil {
+						t.Errorf("accepted unsupported column %q", column)
+					}
+				}()
+				build(column)
+			}()
+		}
+	}
+}
+
 func TestNormalizeInitialScheduleStatusAcceptsLifecycleStates(t *testing.T) {
 	for _, status := range []string{ScheduleStatusActive, ScheduleStatusPaused, ScheduleStatusDisabled} {
 		got, err := normalizeInitialScheduleStatus(" " + status + " ")

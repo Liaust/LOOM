@@ -37,6 +37,7 @@ func BuildProjectionEntries(root string, sources []SourceObject, now time.Time) 
 		}
 		projectedPath = deduplicateProjectedPath(projectedPath, source.KnowledgeObjectID, used)
 		entry := ProjectionEntry{
+			RootRelativePath:  source.RootRelativePath,
 			SourceCategory:    source.SourceCategory,
 			SourcePosture:     source.SourcePosture,
 			Declaration:       source.Declaration,
@@ -334,7 +335,11 @@ func projectedPathForSource(source SourceObject) (string, error) {
 		project := firstNonEmpty(source.ProjectSlug, ptrValue(source.ProjectID), "unknown-project")
 		return path.Join("projects", storageview.SanitizeLabel(project), "notes", relativePath), nil
 	case RootKindBoxTopics, RootKindBoxLibrary, RootKindProjectMaterial:
-		rootPath, err := storageview.SanitizeRelativePath(source.RootRelativePath)
+		rootPath := ""
+		// A project may declare its actual root; this is not an empty file path.
+		if source.RootKind != RootKindProjectMaterial || source.RootRelativePath != "." {
+			rootPath, err = storageview.SanitizeRelativePath(source.RootRelativePath)
+		}
 		if err != nil {
 			return "", fmt.Errorf("invalid declared root path: %w", err)
 		}

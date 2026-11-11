@@ -3,6 +3,7 @@ package loomcli
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -49,7 +50,7 @@ func TestNotesPipelineInspectSourcePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Source policy:", `"embeddings":true`, "Effective processing:", "embeddings=false", "2026-09-25T12:01:00Z", "disabled_by_host"} {
+	for _, want := range []string{"Saved status:", "Saved source policy:", `"embeddings":true`, "Saved effective processing:", "embeddings=false", "2026-09-25T12:01:00Z", "disabled_by_host"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q: %s", want, out)
 		}
@@ -531,5 +532,69 @@ func TestNotesCommandsExposeUnifiedPipelineAndWorkerSurface(t *testing.T) {
 		if err != nil || command == nil || command.Name() != path[len(path)-1] {
 			t.Fatalf("command %v not found: %v", path, err)
 		}
+	}
+}
+
+func TestNotesPipelineProgressJSONIsOneResultAndIntegrityOptIn(t *testing.T) {
+	for _, mode := range []string{"default", "--details", "--inspect-integrity"} {
+		t.Run(mode, func(t *testing.T) {
+			worker := notesPipelineWorkerReceiptFixture()
+			status := knowledge.PipelineOverallStatus{Counts: map[string]int{}, Current: []knowledge.PipelineRun{}, Progress: &knowledge.PipelineProgress{
+				SchemaVersion: "knowledge.pipeline_progress.v1", Unknown: map[string]string{"eta": "no stable denominator"}, PartialErrors: []string{"policy_unavailable"},
+				Workers: []knowledge.PipelineWorkerProgress{worker, {WorkerKey: "main.knowledge_heavy", RunID: "worker_run_OLD", Status: "succeeded"}}}}
+			socket, stop := startStorageCommandServer(t, func(w http.ResponseWriter, req *http.Request) {
+				want := "/v1/knowledge/notes/pipelines/status"
+				if mode == "--inspect-integrity" {
+					want += "?inspect_integrity=true"
+				}
+				if req.Method != http.MethodGet || req.URL.RequestURI() != want {
+					t.Errorf("unexpected status request: %s %s", req.Method, req.URL.RequestURI())
+				}
+				response.WriteJSON(w, http.StatusOK, response.Success("progress", status))
+			})
+			defer stop()
+			args := []string{"--json", "--socket", socket, "notes", "pipelines", "status"}
+			if mode != "default" {
+				args = append(args, mode)
+			}
+			out, _, err := executeRootCommand(args...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoder := json.NewDecoder(strings.NewReader(out))
+			var decoded knowledge.PipelineOverallStatus
+			if err = decoder.Decode(&decoded); err != nil || decoded.Progress == nil || len(decoded.Progress.PartialErrors) != 1 {
+				t.Fatalf("partial JSON lost: %s %v", out, err)
+			}
+			if err = decoder.Decode(new(any)); err != io.EOF {
+				t.Fatalf("more than one JSON result: %s %v", out, err)
+			}
+			if len(decoded.Progress.Workers) != 2 {
+				t.Fatalf("worker receipts missing: %s", out)
+			}
+			got := decoded.Progress.Workers[0]
+			if got.RunID != worker.RunID || got.CurrentRunID != worker.CurrentRunID || got.Status != "succeeded" ||
+				got.StartedAt == nil || !got.StartedAt.Equal(*worker.StartedAt) || got.FinishedAt == nil || !got.FinishedAt.Equal(*worker.FinishedAt) ||
+				got.AdmissionTimedOut == nil || !*got.AdmissionTimedOut || got.AdmissionWarning == nil || *got.AdmissionWarning != *worker.AdmissionWarning || got.Counters["completed"] != 3 ||
+				decoded.Progress.Workers[1].AdmissionTimedOut != nil || !strings.Contains(out, `"admission_timed_out":null`) {
+				t.Fatalf("worker receipt changed in JSON: %s", out)
+			}
+		})
+	}
+}
+
+func TestNotesPipelineProgressTextDoesNotPrintUnknownAsZero(t *testing.T) {
+	status := knowledge.PipelineOverallStatus{Progress: &knowledge.PipelineProgress{Limit: 100, Unknown: map[string]string{"protected_generation": "no exact receipt", "eta": "unknown"}, PartialErrors: []string{"policy_unavailable"}}, NativePublication: json.RawMessage(`{"selection_scope":"last_committed_worker_checkpoint","inventory":[{"collection":"c","generation":"g","counters_known":false,"totals_known":false}]}`)}
+	var out bytes.Buffer
+	cmd := newNotesPipelineStatusCommand(&options{})
+	cmd.SetOut(&out)
+	renderPipelineProgress(cmd, status)
+	for _, want := range []string{"Policy: unknown", "totals: unknown", "counters_known=false", "Unknown protected_generation", "Partial: policy_unavailable"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing %q: %s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "Native pending: text=0") {
+		t.Fatal("uninitialized inventory presented as zero")
 	}
 }

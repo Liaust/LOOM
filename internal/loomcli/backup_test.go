@@ -8,12 +8,53 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/spf13/cobra"
 
 	"loom.local/loom/internal/backupcontracts"
 	"loom.local/loom/internal/backupcoverage"
 	"loom.local/loom/internal/box"
+	"loom.local/loom/internal/maintenance"
 	"loom.local/loom/internal/response"
 )
+
+func TestBackupVerifyProductionDirectoryUsesRecoveryOwner(t *testing.T) {
+	t.Setenv("LOOM_ENV", "production")
+	directory := t.TempDir()
+	requests := 0
+	socket, stop := startStorageCommandServer(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/maintenance/backup/verify" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var input maintenance.BackupVerifyInput
+		if json.NewDecoder(r.Body).Decode(&input) != nil || input.BackupRef != directory {
+			t.Fatal("exact package path lost")
+		}
+		response.WriteJSON(w, http.StatusOK, response.Success("corr_test", maintenance.BackupVerification{Status: maintenance.VerificationSucceeded, ManifestSchema: maintenance.OperationalBackupManifestSchema}))
+	})
+	defer stop()
+	stdout, stderr, err := executeRootCommand("--socket", socket, "--json", "backup", "verify", directory)
+	if err != nil || requests != 1 || !strings.Contains(stdout, maintenance.OperationalBackupManifestSchema) {
+		t.Fatalf("production verification bypassed recovery owner: %v %s %s", err, stdout, stderr)
+	}
+}
+
+func TestBackupEvidenceRenderingQualifiesOldInclusionAndContract(t *testing.T) {
+	captured := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	report := backupcoverage.Report{Mode: backupcoverage.ModeLocal, GeneratedAt: captured.Add(44 * 24 * time.Hour), LatestManifestPath: "/local/main/manifest.json", ManifestCapturedAt: &captured, ManifestClass: "local_main_backup", Status: "critical", CriticalMissing: []string{"missing"}, Entries: []backupcoverage.Entry{{Evidence: backupcoverage.Evidence{EvidenceBasis: "source_readability", RequirementBasis: "recovery_assurance", CurrentProtection: "unknown"}, Label: "readable source", Status: "covered"}, {Evidence: backupcoverage.Evidence{EvidenceBasis: "manifest_declaration", EvidenceCapturedAt: &captured, EvidenceRef: "/local/main/manifest.json", CurrentProtection: "unknown"}, Category: "latest_backup", Label: "dated inclusion", Status: "covered"}}}
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	renderBackupCoverage(cmd, report)
+	renderBackupContractPlan(cmd, backupcoverage.PlanContractsFromReport(report))
+	for _, want := range []string{"2026-08-30", "2026-10-13", "local_main_backup", "source_readability", "manifest_declaration", "current-file protection: unknown", "recovery_assurance", "needs_attention", "Critical missing: missing"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing %q: %s", want, out.String())
+		}
+	}
+}
 
 func TestBackupCreateDryRunDoesNotRequireDaemon(t *testing.T) {
 	cmd := NewRootCommand()
@@ -102,7 +143,7 @@ func TestBackupContractsPlanUsesMainBackedCoverage(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &envelope); err != nil {
 		t.Fatalf("contracts output was not JSON: %v output=%q", err, stdout)
 	}
-	if envelope.Data.Mode != backupcoverage.ModeMainBacked || envelope.Data.Summary.Satisfied != 1 {
+	if envelope.Data.Mode != backupcoverage.ModeMainBacked || envelope.Data.Summary.Satisfied != 0 || envelope.Data.Summary.NeedsAttention != 1 || envelope.Data.Contracts[0].CurrentProtection != "unknown" {
 		t.Fatalf("unexpected contract plan: %#v", envelope.Data)
 	}
 }

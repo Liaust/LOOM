@@ -118,6 +118,10 @@ func PlanProject(ctx context.Context, projectRoot string, options PlanOptions) (
 			return nil
 		}
 		if entry.Kind == "file" {
+			gitPath := "/" + relative
+			if filepath.Base(relative) == ".git" || entry.Size > 0 && (strings.HasSuffix(gitPath, "/.git/commondir") || strings.HasSuffix(gitPath, "/.git/objects/info/alternates")) {
+				return fmt.Errorf("project export %q uses external Git metadata; export a self-contained checkout or use Git clone instead", relative)
+			}
 			entry.ContentHash, err = hashProjectFile(pathValue)
 			if err != nil {
 				return fmt.Errorf("hash export entry %q: %w", relative, err)

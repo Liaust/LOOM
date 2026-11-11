@@ -1,0 +1,55 @@
+{
+  "name": "loom-files",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/main.mjs",
+  "engines": { "node": ">=24.0.0" },
+  "scripts": {
+    "build:helper": "go build -trimpath -o ../../.loom-acceptance/workspace-desktop-v1/loom-workspace-fs ../../cmd/loom-workspace-fs",
+    "build": "node scripts/build-renderer.mjs",
+    "prestart": "npm run build:helper && npm run build",
+    "start": "electron .",
+    "pretest": "npm run build:helper",
+    "test": "node --test test/*.test.mjs",
+    "prepackage:mac": "npm run build",
+    "package:mac": "node scripts/package-mac.mjs",
+    "check": "node --check src/main.mjs && node --check renderer/app.js"
+  },
+  "dependencies": {
+    "@codemirror/autocomplete": "6.20.4",
+    "@codemirror/commands": "6.11.1",
+    "@codemirror/lang-markdown": "6.5.2",
+    "@codemirror/language": "6.13.1",
+    "@codemirror/language-data": "6.5.2",
+    "@codemirror/search": "6.7.2",
+    "@codemirror/state": "6.7.6",
+    "@codemirror/theme-one-dark": "6.1.3",
+    "@codemirror/view": "6.43.15",
+    "@lezer/highlight": "1.2.5",
+    "@lezer/markdown": "1.8.1",
+    "chart.js": "4.5.1",
+    "diff": "9.0.0",
+    "dompurify": "3.4.17",
+    "graphology": "0.26.0",
+    "graphology-layout": "0.6.1",
+    "interactjs": "1.10.28",
+    "jsep": "1.6.0",
+    "katex": "0.19.1",
+    "lucide": "1.66.0",
+    "marked": "18.1.2",
+    "papaparse": "5.7.0",
+    "pdfjs-dist": "6.5.438",
+    "sigma": "4.0.4",
+    "yaml": "2.9.1"
+  },
+  "devDependencies": {
+    "@electron/packager": "20.3.0",
+    "electron": "45.2.1",
+    "esbuild": "0.28.2"
+  },
+  "overrides": {
+    "glob": "14.0.3",
+    "minimatch": "11.0.3"
+  }
+}

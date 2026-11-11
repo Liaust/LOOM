@@ -55,6 +55,81 @@ func realOwnerFixture(t *testing.T, count int) (*Service, *LocalResolver, Princi
 func realApplyRequest(plan pc.DeclarationPlan, root string) pc.DeclarationApplyRequest {
 	return pc.DeclarationApplyRequest{SchemaVersion: pc.DeclarationRequestSchemaV05, ProjectRef: root, PlanID: plan.PlanID, Effects: []pc.DeclarationEffect{pc.DeclarationReconcile}, IdempotencyKey: "real-owner"}
 }
+
+func TestCreatedFilesystemProjectRegistrationPostgres(t *testing.T) {
+	s, resolver, p, root, database := realOwnerFixture(t, 0)
+	created, err := pc.ScaffoldProject(pc.ScaffoldOptions{Name: "Created", Slug: "created", OwnerNode: "main", Directory: filepath.Dir(root), Mode: pc.ScaffoldModeDeclaration})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.ConnectCreatedProject(t.Context(), p, created.ProjectID, created.ProjectRoot, "main")
+	if err != nil || result.State != pc.DeclarationOperationSucceeded {
+		t.Fatalf("default constructor: %+v %v", result, err)
+	}
+	restarted := NewService(database, resolver, NewCurrentAuthority(database), map[pc.DeclarationOwner]Owner{pc.DeclarationOwnerProjects: ProjectsOwner{Resolver: resolver, Projects: projects.NewService(database)}})
+	replay, err := restarted.ConnectCreatedProject(t.Context(), p, created.ProjectID, created.ProjectRoot, "main")
+	if err != nil || replay.OperationID != result.OperationID || replay.State != pc.DeclarationOperationSucceeded {
+		t.Fatalf("constructor replay: %+v %v", replay, err)
+	}
+	var watches int
+	if err := database.QueryRow(`SELECT count(*) FROM projects.project_watched_root_registrations WHERE project_id=$1`, created.ProjectID).Scan(&watches); err != nil || watches != 0 {
+		t.Fatalf("construction activated resources: %d %v", watches, err)
+	}
+}
+
+func TestRegistrationOwnerJSONBRepresentationPostgres(t *testing.T) {
+	s, _, p, root, database := realOwnerFixture(t, 1)
+	plan, err := s.Plan(t.Context(), p, pc.DeclarationPlanRequest{SchemaVersion: pc.DeclarationRequestSchemaV05, ProjectRef: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.owners[pc.DeclarationOwnerProjects] = realOwnerIntercept{Owner: s.owners[pc.DeclarationOwnerProjects], before: func(call ActionCall) ActionCall {
+		if err := database.QueryRow(`SELECT $1::jsonb`, string(call.Payload)).Scan(&call.Payload); err != nil {
+			t.Fatal(err)
+		}
+		return call
+	}}
+	result, err := s.Apply(t.Context(), p, realApplyRequest(plan, root))
+	if err != nil || result.State != pc.DeclarationOperationSucceeded {
+		t.Fatalf("JSONB formatting invalidated unchanged source: %+v %v", result, err)
+	}
+}
+
+func TestDeclarationArchivedStatusWithoutLiveRootPostgres(t *testing.T) {
+	s, _, p, root, db := realOwnerFixture(t, 0)
+	request := pc.DeclarationPlanRequest{SchemaVersion: pc.DeclarationRequestSchemaV05, ProjectRef: root}
+	plan, err := s.Plan(t.Context(), p, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Apply(t.Context(), p, realApplyRequest(plan, root)); err != nil {
+		t.Fatal(err)
+	}
+	id := plan.Basis.Target.ProjectID
+	if _, err := db.Exec(`UPDATE projects.projects SET status='archived',metadata=metadata || '{"work_state":"passive"}'::jsonb WHERE project_id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(root, root+"-retained"); err != nil {
+		t.Fatal(err)
+	}
+	request.ProjectRef = id
+	status, err := s.Status(t.Context(), p, request)
+	if err != nil || status.Lifecycle != "archived" || status.WorkState != "passive" || status.Target.ProjectID != id || status.Target.ProjectRoot != "" || status.Revision != "" {
+		t.Fatalf("historical identity required retired source: %+v %v", status, err)
+	}
+	if _, err := s.Plan(t.Context(), p, request); err == nil {
+		t.Fatal("historical status widened mutable resolver")
+	}
+	request.NodeRef = "other-node"
+	_, err = s.Status(t.Context(), p, request)
+	requireCode(t, err, pc.DeclarationTargetUnavailable)
+	request.NodeRef = ""
+	if _, err := db.Exec(`UPDATE projects.project_memberships SET expires_at=now()-interval '1 minute' WHERE project_id=$1 AND actor_id=$2`, id, p.ActorID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Status(t.Context(), p, request)
+	requireCode(t, err, pc.DeclarationUnauthorized)
+}
 func TestDeclarationRealRegistrationOwnerPostgres(t *testing.T) {
 	for _, count := range []int{0, 1, 2} {
 		t.Run(fmt.Sprintf("%d_idless", count), func(t *testing.T) {

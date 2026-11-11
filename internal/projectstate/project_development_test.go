@@ -22,8 +22,24 @@ func projectDevelopmentFixture(t *testing.T) ProjectDevelopmentInput {
 	return input
 }
 
+func TestProjectDevelopmentConversationIndexIsOptionalAndCaptured(t *testing.T) {
+	input := projectDevelopmentFixture(t)
+	before := ReadProjectDevelopment(t.Context(), input)
+	if before.Posture != ProjectDevelopmentReady {
+		t.Fatal("missing optional index blocked context")
+	}
+	body := "# Conversations\n\nCoding | Codex 00000000-0000-4000-8000-000000000003 | main | repos/flow-report | ordinary\n"
+	writeProjectDevelopmentFile(t, input, ".project/CONVERSATIONS.md", body)
+	got := ReadProjectDevelopment(t.Context(), input)
+	doc := projectDevelopmentDocument(t, got, ".project/CONVERSATIONS.md")
+	if got.Posture != ProjectDevelopmentReady || doc.Excerpt != body || doc.Hash == "" || doc.Truncated || got.SourceDigest == before.SourceDigest {
+		t.Fatalf("index not captured from actual source: %+v", doc)
+	}
+}
+
 func TestProjectDevelopmentVerifiedArchiveRetainsContextAndPosture(t *testing.T) {
 	input := projectDevelopmentFixture(t)
+	writeProjectDevelopmentFile(t, input, ".project/STATE.md", "# State\n\n## Current State\nRetained research.\n")
 	input.Lifecycle = "archived"
 	if got := ReadProjectDevelopment(t.Context(), input); len(got.Documents) != 0 {
 		t.Fatal("unverified archive read documents")
@@ -36,6 +52,23 @@ func TestProjectDevelopmentVerifiedArchiveRetainsContextAndPosture(t *testing.T)
 	input.OwnerNode = "other"
 	if got := ReadProjectDevelopment(t.Context(), input); got.CapturedBytes != 0 {
 		t.Fatal("verified archive flag bypassed local ownership")
+	}
+}
+
+func TestProjectDevelopmentArchiveMissingDocumentsAreExplicit(t *testing.T) {
+	input := projectDevelopmentFixture(t)
+	input.Lifecycle, input.VerifiedArchive = "archived", true
+	got := ReadProjectDevelopment(t.Context(), input)
+	if got.Posture != ProjectDevelopmentPartial || got.ReasonCode != "archived_development_documents_missing" || !reflect.DeepEqual(got.MissingDocuments, []string{".project/STATE.md"}) || got.Complete || got.Git != nil {
+		t.Fatalf("missing historical state was synthesized: %+v", got)
+	}
+	if err := os.Remove(filepath.Join(input.ProjectRoot, ".project/OVERVIEW.md")); err != nil {
+		t.Fatal(err)
+	}
+	writeProjectDevelopmentFile(t, input, ".project/STATE.md", "# State\n## Current State\nRetained research.\n")
+	got = ReadProjectDevelopment(t.Context(), input)
+	if !reflect.DeepEqual(got.MissingDocuments, []string{".project/OVERVIEW.md"}) || got.Purpose != "" {
+		t.Fatalf("missing overview was synthesized: %+v", got)
 	}
 }
 

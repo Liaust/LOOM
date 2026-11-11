@@ -3,6 +3,8 @@ package maintenance
 import (
 	"encoding/json"
 	"time"
+
+	"loom.local/loom/internal/backupstrategy"
 )
 
 const (
@@ -333,23 +335,53 @@ type BackupOperation struct {
 }
 
 type BackupStatus struct {
-	Status           string           `json:"status"`
-	Worker           *WorkerStatus    `json:"worker,omitempty"`
-	LatestSuccessful *BackupOperation `json:"latest_successful,omitempty"`
-	LatestFailed     *BackupOperation `json:"latest_failed,omitempty"`
-	OpenFindings     FindingSummary   `json:"open_findings"`
+	Status                 string                                   `json:"status"`
+	Worker                 *WorkerStatus                            `json:"worker,omitempty"`
+	LatestSuccessful       *BackupOperation                         `json:"latest_successful,omitempty"`
+	LatestFailed           *BackupOperation                         `json:"latest_failed,omitempty"`
+	OpenFindings           FindingSummary                           `json:"open_findings"`
+	LatestRun              *BackupRunObservation                    `json:"latest_run,omitempty"`
+	EarlierFailure         bool                                     `json:"latest_failure_before_success"`
+	RecoveryInventory      *backupstrategy.RecoveryInventorySummary `json:"recovery_inventory,omitempty"`
+	RecoveryInventoryState string                                   `json:"recovery_inventory_state"`
+}
+
+// Run outcome is separate from unresolved findings and cloud protection.
+type BackupRunObservation struct {
+	OperationID        string    `json:"operation_id"`
+	Status             string    `json:"status"`
+	VerificationStatus string    `json:"verification_status"`
+	StartedAt          time.Time `json:"started_at"`
 }
 
 type CloudProtectionStatus struct {
-	Available        bool       `json:"available"`
-	WorkerState      string     `json:"worker_state"`
-	LastSuccessAt    *time.Time `json:"last_success_at,omitempty"`
-	LastFailureAt    *time.Time `json:"last_failure_at,omitempty"`
-	Verification     string     `json:"verification_state"`
-	OpenFindingCount int        `json:"open_finding_count"`
-	WarningFindings  int        `json:"warning_findings"`
-	CriticalFindings int        `json:"critical_findings"`
-	UpdatedAt        time.Time  `json:"updated_at"`
+	ObservedAt        time.Time            `json:"observed_at"`
+	EvidenceBasis     string               `json:"evidence_basis"`
+	CurrentProtection string               `json:"current_protection"`
+	LatestUpload      *CloudUploadEvidence `json:"latest_upload,omitempty"`
+	Available         bool                 `json:"available"`
+	WorkerState       string               `json:"worker_state"`
+	LastSuccessAt     *time.Time           `json:"last_success_at,omitempty"`
+	LastFailureAt     *time.Time           `json:"last_failure_at,omitempty"`
+	Verification      string               `json:"verification_state"`
+	OpenFindingCount  int                  `json:"open_finding_count"`
+	WarningFindings   int                  `json:"warning_findings"`
+	CriticalFindings  int                  `json:"critical_findings"`
+	UpdatedAt         time.Time            `json:"updated_at"`
+}
+
+// A bounded display projection of an upload receipt, not proof of restore or
+// every project's inclusion. Paths, config, errors and root inventories stay out.
+type CloudUploadEvidence struct {
+	OperationID          string     `json:"operation_id"`
+	Result               string     `json:"result"`
+	FinishedAt           *time.Time `json:"finished_at,omitempty"`
+	CapturedAt           *time.Time `json:"captured_at,omitempty"`
+	ArchiveRef           string     `json:"archive_ref,omitempty"`
+	ArchiveClass         string     `json:"archive_class"`
+	BackupOperationID    string     `json:"backup_operation_id,omitempty"`
+	OperationalPackageID string     `json:"operational_package_id,omitempty"`
+	ProvenancePackageID  string     `json:"provenance_package_id,omitempty"`
 }
 
 type BackupVerification struct {

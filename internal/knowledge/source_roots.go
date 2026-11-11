@@ -63,6 +63,7 @@ type BoxWatchRootRegistration struct {
 }
 
 type ProjectWatchedRootRegistration struct {
+	HomeBoxID                        string          `json:"home_box_id,omitempty"`
 	ProjectWatchedRootRegistrationID string          `json:"project_watched_root_registration_id"`
 	ProjectContractRegistrationID    string          `json:"project_contract_registration_id"`
 	ProjectID                        string          `json:"project_id"`
@@ -279,6 +280,7 @@ func (s *Service) projectSourceRootCandidate(registration ProjectWatchedRootRegi
 		AuthorizationMetadata:            sourceRootAuthorizationMetadata(kind),
 		Metadata: sourceRootMetadata(registration.Metadata, map[string]any{
 			"origin":                           SourceRootOriginProjectWatchedRootRegistration,
+			"box_id":                           registration.HomeBoxID,
 			"project_contract_registration_id": registration.ProjectContractRegistrationID,
 			"local_root_key":                   registration.LocalRootKey,
 			"activation_status":                registration.ActivationStatus,
@@ -306,7 +308,7 @@ func expandedSourceStatus(activation string, metadata json.RawMessage, kind, rel
 	if activation == "disabled" || activation == "stale" || activation == "blocked" {
 		return sourceRootStatusFromActivation(activation)
 	}
-	if relativePath == "" || relativePath == "." || filepath.IsAbs(relativePath) || strings.Contains(relativePath, "\\") || filepath.ToSlash(filepath.Clean(relativePath)) != relativePath || relativePath == ".." || strings.HasPrefix(relativePath, "../") {
+	if relativePath == "" || filepath.IsAbs(relativePath) || strings.Contains(relativePath, "\\") || filepath.ToSlash(filepath.Clean(relativePath)) != relativePath || relativePath == ".." || strings.HasPrefix(relativePath, "../") {
 		return SourceRootStatusBlocked
 	}
 	// New categories require a compiled policy and the owner's applied report.
@@ -316,9 +318,15 @@ func expandedSourceStatus(activation string, metadata json.RawMessage, kind, rel
 		return SourceRootStatusBlocked
 	}
 	if _, versioned := declaration["schema_version"]; versioned {
+		if relativePath == "." && declaration["schema_version"] != projectcontracts.ProjectSchemaV06 {
+			return SourceRootStatusBlocked
+		}
 		if _, valid := declarationKnowledgeMetadata(metadata); valid && kind == RootKindProjectMaterial {
 			return SourceRootStatusActive
 		}
+		return SourceRootStatusBlocked
+	}
+	if relativePath == "." {
 		return SourceRootStatusBlocked
 	}
 	category := strings.TrimPrefix(kind, "box_")
@@ -378,8 +386,14 @@ func sourceRootMetadata(registrationMetadata json.RawMessage, values map[string]
 	metadata := map[string]any{}
 	if existing := jsonObject(registrationMetadata); existing != nil {
 		metadata["registration_metadata"] = existing
+		if boxID := stringMapValue(existing, "box_id"); boxID != "" {
+			metadata["box_id"] = boxID
+		}
 	}
 	for key, value := range values {
+		if key == "box_id" && value == "" {
+			continue
+		}
 		metadata[key] = value
 	}
 	payload, err := json.Marshal(metadata)
@@ -504,7 +518,8 @@ func declarationKnowledgeMetadata(metadata json.RawMessage) (map[string]any, boo
 		return nil, false
 	}
 	source, ok := outer["knowledge_source"].(map[string]any)
-	if !ok || source["schema_version"] != "project.contract.v0.5" {
+	version, _ := source["schema_version"].(string)
+	if !ok || !projectcontracts.IsDeclarationSchemaVersion(version) {
 		return nil, false
 	}
 	allowed := []string{"schema_version", "root_kind", "category", "declaration", "enabled", "root_relative_path", "include", "exclude", "project_id", "project_root", "owner_node", "resource_key", "local_root_key", "backend_root_key", "source_ref", "source_hash", "config_hash"}
@@ -537,9 +552,9 @@ func declarationKnowledgeMetadata(metadata json.RawMessage) (map[string]any, boo
 			return nil, false
 		}
 		seen[snapshot.Ref] = true
-		if snapshot.Ref == source["source_ref"] && snapshot.Hash == source["source_hash"] && snapshot.SchemaVersion == projectcontracts.ProjectSchemaV05 {
+		if snapshot.Ref == source["source_ref"] && snapshot.Hash == source["source_hash"] && snapshot.SchemaVersion == version {
 			d, err := projectcontracts.ParseProjectDeclaration(snapshot.Raw)
-			if err != nil {
+			if err != nil || d.SchemaVersion != version {
 				return nil, false
 			}
 			document = &d
@@ -574,7 +589,7 @@ func declarationKnowledgeMetadata(metadata json.RawMessage) (map[string]any, boo
 			return nil, false
 		}
 	}
-	policy, err := projectcontracts.NormalizeKnowledgeSourcePolicy(*resource)
+	policy, err := projectcontracts.DeclarationKnowledgePolicy(*document, projectcontracts.ResourceKey(key))
 	if err != nil {
 		return nil, false
 	}
@@ -596,6 +611,33 @@ func declarationKnowledgeMetadata(metadata json.RawMessage) (map[string]any, boo
 		}
 		for _, value := range values {
 			if _, ok := value.(string); !ok {
+				return nil, false
+			}
+		}
+		if version == projectcontracts.ProjectSchemaV06 {
+			expected := resource.Include
+			if field == "exclude" {
+				expected = resource.Exclude
+				if expected == nil {
+					expected = projectcontracts.DefaultDeviceFileExcludes()
+				}
+			} else if len(expected) == 0 {
+				expected = []string{"**/*"}
+			}
+			// Match the compiler's normalized index selector, not its broader
+			// observation envelope or independent backup/workspace selections.
+			index := 0
+			for _, pattern := range expected {
+				pattern = strings.TrimSpace(filepath.ToSlash(pattern))
+				if pattern == "" {
+					continue
+				}
+				if index >= len(values) || values[index] != pattern {
+					return nil, false
+				}
+				index++
+			}
+			if index != len(values) {
 				return nil, false
 			}
 		}

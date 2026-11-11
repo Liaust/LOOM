@@ -1,6 +1,7 @@
 package projectcontracts
 
 import (
+	"loom.local/loom/internal/hermesschedules"
 	"strings"
 	"testing"
 )
@@ -13,7 +14,7 @@ func TestHermesScheduleDeclaration(t *testing.T) {
 	}
 	for name, change := range map[string]func(*HermesScheduleDeclaration){
 		"ambient_profile": func(s *HermesScheduleDeclaration) { s.Profile = "" },
-		"other_profile":   func(s *HermesScheduleDeclaration) { s.Profile = "morathustra" },
+		"unsafe_profile":  func(s *HermesScheduleDeclaration) { s.Profile = "../other" },
 		"double_timer":    func(s *HermesScheduleDeclaration) { s.Cron = "* * * * *" },
 		"relative_once":   func(s *HermesScheduleDeclaration) { s.EveryMinutes = 0; s.At = "now" },
 		"unsafe_skill":    func(s *HermesScheduleDeclaration) { s.Skills = []string{"../../private"} },
@@ -35,5 +36,14 @@ func TestHermesScheduleDeclaration(t *testing.T) {
 	raw = strings.Replace(raw, "profile: mina", "profile: mina\n      target: main@system.health.read", 1)
 	if a := Analyze(declarationTestRoot(t, []byte(raw))); a.Report.OK {
 		t.Fatal("accepted capability timer in Hermes resource")
+	}
+	s.Target = "codex"
+	s.Codex = &hermesschedules.CodexProjectSpec{Model: "gpt-6-astra", TimeoutSeconds: 120, Sandbox: "read-only"}
+	if _, err := HermesScheduleInput(s, "/project"); err != nil {
+		t.Fatal(err)
+	}
+	s.Skills = []string{"github"}
+	if _, err := HermesScheduleInput(s, "/project"); err == nil {
+		t.Fatal("Codex schedule accepted Hermes skills")
 	}
 }

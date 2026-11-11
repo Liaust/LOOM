@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"loom.local/loom/internal/communication"
+	"loom.local/loom/internal/filepolicy"
 	"loom.local/loom/internal/ids"
 	"loom.local/loom/internal/requestctx"
 )
@@ -39,6 +40,7 @@ type declarationDocument struct {
 	SchemaVersion   string                       `json:"schema_version"`
 	Project         ProjectContractProjectInput  `json:"project"`
 	LegacyContracts *declarationLegacyReferences `json:"legacy_contracts,omitempty"`
+	Files           *filepolicy.FolderPolicy     `json:"files,omitempty"`
 	Resources       map[string]struct {
 		Kind       string `json:"kind"`
 		Repository *struct {
@@ -49,6 +51,31 @@ type declarationDocument struct {
 		} `json:"repository"`
 	} `json:"resources"`
 }
+
+func (d *declarationDocument) UnmarshalJSON(raw []byte) error {
+	type document declarationDocument
+	var decoded document
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return err
+	}
+	if files, present := fields["files"]; present {
+		if decoded.SchemaVersion != ProjectRepositoryProjectSchemaV06 {
+			return fmt.Errorf("files requires %s", ProjectRepositoryProjectSchemaV06)
+		}
+		policy, err := filepolicy.DecodeFolderPolicy(files)
+		if err != nil {
+			return err
+		}
+		decoded.Files = &policy
+	}
+	*d = declarationDocument(decoded)
+	return nil
+}
+
 type declarationCompilation struct {
 	Document     json.RawMessage                    `json:"document"`
 	Repositories []projectRepositoryValidatorMember `json:"repositories"`
@@ -94,12 +121,12 @@ func buildDeclarationRepositoryEvidence(input RegisterProjectContractInput, proj
 	if input.RepositorySource == nil || input.Project.ID != projectID || len(input.Facets) != 0 {
 		return invalid("identity or legacy facets")
 	}
-	if input.RepositorySource.ContractSchemaVersion != ProjectRepositoryProjectSchemaV05 || input.RepositorySource.ContractPath != input.ContractPath || input.RepositorySource.ContractHash != input.ContractHash || input.ContractPath != filepath.Join(input.ProjectRoot, ".loom", "project.yaml") {
+	if !isDeclarationSchemaVersion(input.ContractSchemaVersion) || input.RepositorySource.ContractSchemaVersion != input.ContractSchemaVersion || input.RepositorySource.ContractPath != input.ContractPath || input.RepositorySource.ContractHash != input.ContractHash || input.ContractPath != filepath.Join(input.ProjectRoot, ".loom", "project.yaml") {
 		return invalid("single source coordinates")
 	}
 	var d declarationDocument
 	var report, plan declarationEvidence
-	if !declarationDecode(input.Contract, &d) || d.Kind != "loom.project" || d.SchemaVersion != ProjectRepositoryProjectSchemaV05 || d.Resources == nil || !declarationDecode(input.ValidationReport, &report) || !declarationDecode(input.RegistrationPlan, &plan) {
+	if !declarationDecode(input.Contract, &d) || d.Kind != "loom.project" || d.SchemaVersion != input.ContractSchemaVersion || d.Resources == nil || !declarationDecode(input.ValidationReport, &report) || !declarationDecode(input.RegistrationPlan, &plan) {
 		return invalid("evidence JSON")
 	}
 	if !report.OK || report.SchemaVersion != projectRepositoryValidationReportSchemaV03 || plan.SchemaVersion != projectRepositoryRegistrationPlanSchemaV03 || report.Declaration == nil || plan.Declaration == nil {
@@ -123,7 +150,7 @@ func buildDeclarationRepositoryEvidence(input RegisterProjectContractInput, proj
 		}
 		seen[source.Ref] = true
 		if source.Ref == ".loom/project.yaml" {
-			rootBound = source.Hash == input.ContractHash && source.SchemaVersion == ProjectRepositoryProjectSchemaV05
+			rootBound = source.Hash == input.ContractHash && source.SchemaVersion == d.SchemaVersion
 		}
 	}
 	if !rootBound {
@@ -146,13 +173,17 @@ func buildDeclarationRepositoryEvidence(input RegisterProjectContractInput, proj
 		if repo == nil {
 			return invalid("repository payload missing")
 		}
+		if d.SchemaVersion == ProjectRepositoryProjectSchemaV06 && repo.Path == "." {
+			return invalid("root repository path is not supported")
+		}
 		expectedMembers = append(expectedMembers, projectRepositoryValidatorMember{RepositoryID: repo.ID, Key: key, Path: repo.Path, Role: repo.Role, StateRoot: repo.StateRoot})
 		members = append(members, ProjectRepositoryValidatedMember{RepositoryID: repo.ID, Key: key, Path: repo.Path, Role: ProjectRepositoryRole(repo.Role), StateRoot: repo.StateRoot})
 	}
 	if !reflect.DeepEqual(expectedMembers, report.Declaration.Repositories) {
 		return invalid("repository set differs from source")
 	}
-	return ProjectRepositoryValidatedSourceInput{ProjectID: projectID, ProjectRoot: input.ProjectRoot, ProjectContractPath: input.ContractPath, ReposContractPath: input.ContractPath, OwnerNode: input.Project.OwnerNode, Versions: projectRepositorySourceV05V05, ProjectContractDigest: input.ContractHash, ReposContractDigest: input.ContractHash, RegistrationPlan: append(json.RawMessage(nil), input.RegistrationPlan...), Members: members}, nil
+	versions := ProjectRepositorySourceVersions{ProjectContract: d.SchemaVersion, ReposContract: d.SchemaVersion}
+	return ProjectRepositoryValidatedSourceInput{ProjectID: projectID, ProjectRoot: input.ProjectRoot, ProjectContractPath: input.ContractPath, ReposContractPath: input.ContractPath, OwnerNode: input.Project.OwnerNode, Versions: versions, ProjectContractDigest: input.ContractHash, ReposContractDigest: input.ContractHash, RegistrationPlan: append(json.RawMessage(nil), input.RegistrationPlan...), Members: members}, nil
 }
 func declarationDecode(raw []byte, target any) bool {
 	_, err := canonicalStoredRegistrationPlan(raw)
@@ -573,6 +604,7 @@ func (s Service) ObserveDeclarationRegistration(ctx context.Context, req request
 // RegisterDeclaration commits the existing project/whole repository-set
 // transaction and exact owner dedup evidence together. It exposes no SQL hook.
 func (s Service) RegisterDeclaration(ctx context.Context, req requestctx.Context, input RegisterProjectContractInput, call DeclarationOwnerRequest, fence DeclarationCommitFence) (*DeclarationOwnerResult, error) {
+	ctx = s.boxRegistrationContext(ctx)
 	if call.ActionID != "register_project:project" {
 		return nil, fmt.Errorf("atomic project registration action required")
 	}
@@ -1086,12 +1118,12 @@ func (s Service) CommitDeclarationWatchIntent(ctx context.Context, req requestct
 	if err != nil {
 		return nil, err
 	}
-	if registration.ProjectRoot != group.ProjectRoot || registration.ContractSchemaVersion != ProjectRepositoryProjectSchemaV05 {
+	if registration.ProjectRoot != group.ProjectRoot || !isDeclarationSchemaVersion(registration.ContractSchemaVersion) {
 		return nil, fmt.Errorf("watch intent registered source conflict")
 	}
 	rootBound := false
 	for _, source := range group.Sources {
-		if source.Ref == ".loom/project.yaml" && source.Hash == registration.ContractHash && source.SchemaVersion == ProjectRepositoryProjectSchemaV05 {
+		if source.Ref == ".loom/project.yaml" && source.Hash == registration.ContractHash && source.SchemaVersion == registration.ContractSchemaVersion {
 			rootBound = true
 		}
 	}
@@ -1618,7 +1650,7 @@ func legacyDeclarationInput(input RegisterProjectContractInput) (RegisterProject
 	var d declarationDocument
 	var report, plan declarationEvidence
 	var source ProjectRepositoryValidatedSourceInput
-	if !declarationDecode(input.Contract, &d) || d.LegacyContracts == nil || input.ContractSchemaVersion != ProjectRepositoryProjectSchemaV05 || !declarationDecode(input.ValidationReport, &report) || !declarationDecode(input.RegistrationPlan, &plan) || report.Registerable || plan.Registerable {
+	if !declarationDecode(input.Contract, &d) || d.LegacyContracts == nil || !isDeclarationSchemaVersion(input.ContractSchemaVersion) || !declarationDecode(input.ValidationReport, &report) || !declarationDecode(input.RegistrationPlan, &plan) || report.Registerable || plan.Registerable {
 		return input, source, d, fmt.Errorf("legacy declaration intent evidence required")
 	}
 	input, err := normalizeRegisterProjectContractFields(input)

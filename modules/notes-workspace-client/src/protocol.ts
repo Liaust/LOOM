@@ -2,10 +2,17 @@ export const VERSION = 1;
 export const PREFIX = "LOOM-Control-v1/";
 export const STRUCTURE_PREFIX = PREFIX + "payload/structure/";
 export const LAYOUT_PREFIX = PREFIX + "payload/layout/";
+export const SOURCE_MOVE_PREFIX = PREFIX + "payload/source-move/";
 export const MAX_BYTES = 8 * 1024 * 1024;
 export const MAX_CONTROL_BYTES = 1024 * 1024;
 export const MAX_REFERENCE_BYTES = 2 * 1024 * 1024 * 1024;
 export const MAX_INLINE_REFERENCE_BYTES = 64 * 1024 * 1024;
+export function nativeText(path: string, content: string | ArrayBuffer): string | null {
+    if (typeof content === "string") return content;
+    if (!/\.(canvas|base)$/i.test(path) || content.byteLength > MAX_BYTES) return null;
+    try { return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(content); }
+    catch { return null; }
+}
 export function referenceBytes(content: string | ArrayBuffer): Uint8Array<ArrayBuffer> | null {
     // Native references can be text (Canvas/SVG/CSV) or binary. Preserve exact
     // UTF-8 bytes; the binding's hash remains the authority for either format.
@@ -70,6 +77,7 @@ export type Layout = {
     id: string;
     previous: Binding;
     binding: Binding;
+    sourceMove?: true;
 };
 export const sameFile = (a: Binding, b: Binding) => a.workspace === b.workspace &&
     a.collection === b.collection && a.fileId === b.fileId;
@@ -114,7 +122,7 @@ export const revision = (v: unknown): v is string =>
     typeof v === "string" && /^[1-9][0-9]*-[a-zA-Z0-9]+$/.test(v);
 export const digestPattern = /^sha256:[0-9a-f]{64}$/;
 export function relativePath(v: unknown): v is string {
-    return workspacePath(v) && /\.(md|markdown|txt|canvas)$/i.test(v);
+    return workspacePath(v) && /\.(md|markdown|txt|canvas|base)$/i.test(v);
 }
 export function referencePath(v: unknown): v is string {
     return workspacePath(v) && /\.(pdf|png|jpe?g|gif|webp|wav|svg|csv|xlsx|dat|json)$/i.test(v);
@@ -142,12 +150,13 @@ export function collectionRoot(v: unknown): v is string {
     return typeof v === "string" && relativePath(v + "/placeholder.md");
 }
 export function controlPath(record: Control): string {
-    const prefix = record.kind === "layout" || record.kind === "binding" && record.id.startsWith("layout_") ? LAYOUT_PREFIX :
+    const prefix = record.kind === "layout" && record.id.startsWith("layout_source_move_") ? SOURCE_MOVE_PREFIX :
+        record.kind === "layout" || record.kind === "binding" && record.id.startsWith("layout_") ? LAYOUT_PREFIX :
         record.kind === "scope" || record.id.startsWith("dir_") || record.id.startsWith("canvas_") ? STRUCTURE_PREFIX : PREFIX;
     return `${prefix}${record.kind}/${record.id}.md`;
 }
 export const isControlPath = (path: string) => reserved(path) &&
-    (!path.startsWith(PREFIX + "payload/") || path.startsWith(STRUCTURE_PREFIX) || path.startsWith(LAYOUT_PREFIX));
+    (!path.startsWith(PREFIX + "payload/") || path.startsWith(STRUCTURE_PREFIX) || path.startsWith(LAYOUT_PREFIX) || path.startsWith(SOURCE_MOVE_PREFIX));
 export const reserved = (path: string) => path === PREFIX.slice(0, -1) || path.startsWith(PREFIX);
 export async function digest(text: string | Uint8Array<ArrayBuffer>): Promise<string> {
     const bytes = typeof text === "string" ? new TextEncoder().encode(text) : text;
@@ -178,17 +187,23 @@ export function validate(value: unknown): Control {
     const v = value;
     switch (v.kind) {
         case "layout": {
-            fields(v, ["previous", "binding"]);
+            fields(v, ["previous", "binding", "sourceMove"]);
             const a = validate(v.previous), b = validate(v.binding);
+            const sourceMove = v.sourceMove === true;
             if (typeof v.id !== "string" || !v.id.startsWith("layout_") || !token(v.id.slice(7)) ||
-                a.kind !== "binding" || b.kind !== "binding" || !sameFile(a, b) ||
-                a.id === b.id || a.collectionRoot === b.collectionRoot ||
-                a.path.slice(a.collectionRoot.length) !== b.path.slice(b.collectionRoot.length) ||
-                a.entryKind !== b.entryKind || a.sha256 !== b.sha256 ||
-                (a.writable && b.writable &&
+                a.kind !== "binding" || b.kind !== "binding" ||
+                (v.sourceMove !== undefined && !sourceMove) ||
+                (sourceMove ? a.workspace !== b.workspace || !!a.entryKind || !!b.entryKind ||
+                    !(a.writable && b.writable && relativePath(a.path) && relativePath(b.path) ||
+                        !a.writable && !b.writable && referencePath(a.path) && referencePath(b.path) && a.sha256 === b.sha256) :
+                    !sameFile(a, b) || a.collectionRoot === b.collectionRoot ||
+                    a.path.slice(a.collectionRoot.length) !== b.path.slice(b.collectionRoot.length)) ||
+                a.id === b.id || a.path === b.path ||
+                a.entryKind !== b.entryKind || !sourceMove && a.sha256 !== b.sha256 ||
+                (!sourceMove && a.writable && b.writable &&
                     (a.generation !== b.generation || a.sourceBase !== b.sourceBase || a.writable !== b.writable)) ||
                 a.deleted || b.deleted || (a.previousPath !== undefined && a.entryKind !== "directory") || b.previousPath !== undefined ||
-                !b.sourceSequence || b.sourceSequence <= (a.sourceSequence ?? 0))
+                !b.sourceSequence || !sourceMove && b.sourceSequence <= (a.sourceSequence ?? 0))
                 throw Error("invalid_layout");
             break;
         }

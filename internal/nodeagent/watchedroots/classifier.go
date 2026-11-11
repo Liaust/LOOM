@@ -2,6 +2,7 @@ package watchedroots
 
 import (
 	"fmt"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -10,7 +11,7 @@ import (
 )
 
 func ClassifyPath(obs PathObservation, root ValidatedRoot) Classification {
-	policies := EffectivePolicies(root.Config, obs.RelativePath)
+	policies, policyErr := effectivePolicies(root.Config, obs.RelativePath)
 	classification := Classification{
 		Hidden:   obs.Hidden,
 		Symlink:  obs.Symlink,
@@ -19,6 +20,9 @@ func ClassifyPath(obs PathObservation, root ValidatedRoot) Classification {
 	}
 	if !obs.Safe {
 		return classification.with(false, ReasonSkippedPathEscape, "path is outside the watched root or safe root")
+	}
+	if IsNotesRecoveryPath(obs.RelativePath) {
+		return classification.with(false, ReasonExcludedFilePolicy, "owned Notes recovery journals are retained outside ordinary file synchronization")
 	}
 	if obs.ErrorCode == ReasonSkippedPermissionDenied {
 		return classification.with(false, ReasonSkippedPermissionDenied, "path could not be inspected due to permissions")
@@ -63,6 +67,11 @@ func ClassifyPath(obs PathObservation, root ValidatedRoot) Classification {
 	if obs.Kind == PathKindDirectory {
 		return classification.with(false, ReasonExcludedDirectoryMetadata, "directories are traversed but not content-managed in this slice")
 	}
+	// Consumer-rule conflicts must not prune directory observation and turn
+	// otherwise observable descendants into apparent source deletions.
+	if policyErr != nil {
+		return classification.with(false, ReasonExcludedFilePolicy, "file policy could not be resolved: "+policyErr.Error())
+	}
 	if obs.Kind == PathKindFile && obs.SizeBytes > root.Config.Scan.MaxHashFileBytes {
 		return classification.with(false, ReasonSkippedTooLarge, "file exceeds watched-root hash size limit")
 	}
@@ -90,19 +99,57 @@ func isHiddenAcceptancePath(relativePath string) bool {
 }
 
 func EffectivePolicies(config RootConfig, relativePath string) Policies {
+	policies, _ := effectivePolicies(config, relativePath)
+	return policies
+}
+
+func effectivePolicies(config RootConfig, relativePath string) (Policies, error) {
 	policies := Policies{
 		Backup: config.BackupPolicy.Mode,
 		Sync:   config.SyncPolicy.Mode,
 		Index:  config.IndexPolicy.Mode,
 		Delete: config.DeletePolicy.Mode,
 	}
-	if config.IndexPolicy.Mode == IndexModeMarkdownText && !MarkdownTextCandidate(relativePath) {
+	independent := config.SchemaVersion == IndependentConfigSchemaVersion
+	if independent {
+		if selections := config.ConsumerSelections; selections != nil {
+			if !consumerSelects(selections.Backup, relativePath) {
+				policies.Backup = BackupModeNone
+			}
+			if !consumerSelects(selections.Sync, relativePath) {
+				policies.Sync = SyncModeNone
+			}
+			if !consumerSelects(selections.Index, relativePath) {
+				policies.Index = IndexModeNone
+			}
+		}
+		if config.Files != nil {
+			decision, err := config.Files.Resolve(path.Join(config.RootRelativePath, relativePath))
+			if err != nil {
+				return Policies{Backup: BackupModeNone, Sync: SyncModeNone, Index: IndexModeNone, Delete: DeleteModeIgnore}, err
+			}
+			if policies.Backup != BackupModeNone && decision.Protect != nil && !*decision.Protect {
+				policies.Backup = BackupModeNone
+			}
+			if policies.Index != IndexModeNone {
+				switch decision.Search {
+				case "none":
+					policies.Index = IndexModeNone
+				case "metadata":
+					policies.Index = IndexModeMetadataOnly
+				case "text":
+					policies.Index = IndexModeMarkdownText
+				}
+			}
+		}
+	}
+	if policies.Index == IndexModeMarkdownText && !MarkdownTextCandidate(relativePath) {
 		policies.Index = IndexModeMetadataOnly
-		if policies.Sync == SyncModeSelectedFiles && policies.Backup != BackupModeNone {
+		if !independent && policies.Sync == SyncModeSelectedFiles && policies.Backup != BackupModeNone {
 			policies.Sync = SyncModeNone
 		}
 	}
-	return policies
+	return policies, nil
 }
 
 func MarkdownTextCandidate(relativePath string) bool {

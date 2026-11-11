@@ -1188,11 +1188,11 @@ func assertDirectArchiveEvidenceTimestamp(t *testing.T, root string, want int64)
 func TestBorgDirectArchiveV2DisposableRepositoryIncrementalCreateRepeatChangeAndPendingResume(t *testing.T) {
 	binary := strings.TrimSpace(os.Getenv("LOOM_TEST_BORG_BINARY"))
 	if binary == "" {
-		t.Skip("set LOOM_TEST_BORG_BINARY to run the disposable Borg 1.4.3 end-to-end")
+		t.Skip("set LOOM_TEST_BORG_BINARY to run the disposable Borg 1.4.x end-to-end")
 	}
 	version, err := exec.Command(binary, "--version").CombinedOutput()
-	if err != nil || strings.TrimSpace(string(version)) != "borg 1.4.3" {
-		t.Fatalf("isolated gate requires Borg 1.4.3, got %q err=%v", strings.TrimSpace(string(version)), err)
+	if got := strings.TrimSpace(string(version)); err != nil || (got != "borg 1.4.3" && got != "borg 1.4.5") {
+		t.Fatalf("requires reviewed Borg 1.4.3 or deployed 1.4.5, got %q err=%v", strings.TrimSpace(string(version)), err)
 	}
 	fixture := newDirectArchiveCloudFixture(t)
 	fixture.cfg.Snapshots.Borg.Binary = binary
@@ -1206,12 +1206,20 @@ func TestBorgDirectArchiveV2DisposableRepositoryIncrementalCreateRepeatChangeAnd
 
 	firstRequest := directArchiveV2Request(fixture)
 	firstRequest.ArchiveRef = "history-v2-first"
-	first, err := backend.ArchiveCanonicalRoots(context.Background(), DirectArchiveInput{Config: fixture.cfg, RequestV2: &firstRequest})
+	var phases []string
+	first, err := ArchiveCanonicalRoots(context.Background(), DirectArchiveInput{Config: fixture.cfg, RequestV2: &firstRequest, Progress: func(p DirectArchiveProgress) { phases = append(phases, p.Phase) }})
 	if err != nil || !first.Committed || first.BorgCommandCounts["create"] != 1 || first.BorgCommandCounts["rename"] != 1 || first.PackedBytes <= 0 || first.DeduplicatedBytes < 0 {
 		t.Fatalf("first disposable v2 archive = %#v err=%v", first, err)
 	}
 	if first.BorgCommandCounts["export-tar"] != 0 || first.BorgCommandCounts["delete"] != 0 || first.BorgCommandCounts["prune"] != 0 || first.BorgCommandCounts["compact"] != 0 {
 		t.Fatalf("first disposable v2 forbidden commands = %#v", first.BorgCommandCounts)
+	}
+	if len(phases) == 0 || phases[len(phases)-1] != "committed" || !strings.Contains(strings.Join(phases, " "), "borg.create") {
+		t.Fatal("real archive progress missing", phases)
+	}
+	// A tiny archive can finish between Borg's periodic counter updates.
+	if first.BorgProgress == nil || !first.BorgProgress.Finished {
+		t.Fatalf("real archive finished progress missing: %#v", first.BorgProgress)
 	}
 
 	replay, err := backend.ArchiveCanonicalRoots(context.Background(), DirectArchiveInput{Config: fixture.cfg, RequestV2: &firstRequest})
@@ -2558,10 +2566,14 @@ func countDirectArchiveContentStreams(calls []string) int {
 
 func createDirectOperationalPackage(t *testing.T) (backupstrategy.OperationalPackageCreateResult, int64) {
 	t.Helper()
+	return createDirectOperationalPackageAt(t, filepath.Join(t.TempDir(), "packages"), "operational-direct")
+}
+
+func createDirectOperationalPackageAt(t *testing.T, packages, id string) (backupstrategy.OperationalPackageCreateResult, int64) {
+	t.Helper()
 	root := t.TempDir()
-	packages := filepath.Join(root, "packages")
 	sources := filepath.Join(root, "sources")
-	if err := os.Mkdir(packages, 0o700); err != nil {
+	if err := os.MkdirAll(packages, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(sources, 0o700); err != nil {
@@ -2583,7 +2595,7 @@ func createDirectOperationalPackage(t *testing.T) (backupstrategy.OperationalPac
 		t.Fatal(err)
 	}
 	input := backupstrategy.OperationalPackageCreateInput{
-		PackagesRoot: packages, PackageID: "operational-direct", CreatedAt: time.Date(2026, 8, 29, 8, 0, 0, 0, time.UTC), SchemaHead: schemaHead,
+		PackagesRoot: packages, PackageID: id, CreatedAt: time.Date(2026, 8, 29, 8, 0, 0, 0, time.UTC), SchemaHead: schemaHead,
 		PostgresDump: func(_ context.Context, destination string) error {
 			return os.WriteFile(destination, []byte("PGDMP\x01disposable"), 0o600)
 		},

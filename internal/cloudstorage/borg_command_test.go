@@ -3,13 +3,76 @@ package cloudstorage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestBorgCancellationHelper(t *testing.T) {
+	if os.Getenv("LOOM_TEST_BORG_CANCEL_HELPER") != "1" {
+		return
+	}
+	interrupt := make(chan os.Signal, 1)
+	signal.Notify(interrupt, os.Interrupt)
+	if err := os.WriteFile(os.Getenv("LOOM_TEST_BORG_READY"), []byte("ready"), 0o600); err != nil {
+		os.Exit(3)
+	}
+	<-interrupt
+	if os.Getenv("LOOM_TEST_BORG_DELAYED_CLEANUP") == "1" {
+		time.Sleep(200 * time.Millisecond)
+	}
+	if err := os.WriteFile(os.Getenv("LOOM_TEST_BORG_RELEASED"), []byte("released"), 0o600); err != nil {
+		os.Exit(4)
+	}
+	os.Exit(0)
+}
+
+func TestDefaultBorgCancellationAllowsLockCleanup(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprint("stream=", stream), func(t *testing.T) {
+			dir := t.TempDir()
+			ready, released := filepath.Join(dir, "ready"), filepath.Join(dir, "released")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			env := []string{"LOOM_TEST_BORG_CANCEL_HELPER=1", "LOOM_TEST_BORG_DELAYED_CLEANUP=1", "LOOM_TEST_BORG_READY=" + ready, "LOOM_TEST_BORG_RELEASED=" + released}
+			if got := borgProcess(ctx, os.Args[0]).WaitDelay; got != 60*time.Second {
+				t.Fatal("shutdown cleanup allowance changed", got)
+			}
+			done := make(chan error, 1)
+			go func() {
+				command := BorgCommand{Args: []string{"-test.run=^TestBorgCancellationHelper$"}}
+				if stream {
+					done <- defaultBorgStreamExec(ctx, os.Args[0], command, env, io.Discard)
+				} else {
+					_, err := defaultBorgExec(ctx, os.Args[0], command, env)
+					done <- err
+				}
+			}()
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				if _, err := os.Stat(ready); err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("helper did not become ready")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			cancel()
+			if err := <-done; !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancellation error = %v", err)
+			}
+			if _, err := os.Stat(released); err != nil {
+				t.Fatal("Borg was killed before releasing its lock")
+			}
+		})
+	}
+}
 
 func TestDefaultBorgExecReturnsStdoutOnlyOnSuccess(t *testing.T) {
 	t.Parallel()

@@ -3,18 +3,22 @@ package hermesschedules
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 )
 
 // HelperBinding comes only from the immutable file linked into the installed
 // helper. It is not accepted on stdin, from argv, or from the environment.
 type HelperBinding struct {
-	Source Source `json:"source"`
-	Home   string `json:"home"`
-	Caller string `json:"caller"`
+	Source    Source `json:"source"`
+	Home      string `json:"home"`
+	Caller    string `json:"caller"`
+	BoxesFile string `json:"boxes_file,omitempty"`
 }
 
 // RunFixedHelper emits one sanitized observation, including native failures.
@@ -60,12 +64,20 @@ func loadBinding(bindingPath string) (HelperBinding, error) {
 	if decodeStrict(raw, &binding) != nil || binding.Source.Host == "" || (binding.Source.Profile != "mina" && binding.Source.Profile != "morathustra") || !filepath.IsAbs(binding.Home) || filepath.Clean(binding.Home) != binding.Home || binding.Home == "/" {
 		return HelperBinding{}, ErrSource
 	}
+	if binding.BoxesFile != "" && (!filepath.IsAbs(binding.BoxesFile) || filepath.Clean(binding.BoxesFile) != binding.BoxesFile) {
+		return HelperBinding{}, ErrSource
+	}
 	return binding, nil
 }
 
 func runFixedBinding(ctx context.Context, binding HelperBinding, out io.Writer) error {
 	observer := Observer{Source: binding.Source, Read: FileReader(binding.Home)}
 	observation, _ := observer.Observe(ctx)
+	if binding.Source.Revision == PlatformRevision && observation.Availability == Available {
+		if err := appendProfileObservations(ctx, binding, &observation); err != nil {
+			observation.Availability, observation.Jobs, observation.ObservedAt, observation.StoreUpdatedAt = Unavailable, nil, nil, nil
+		}
+	}
 	// Buffer before writing so oversized projections cannot expose a partial
 	// inventory. Native input never leaves this process.
 	buf := &boundedOutput{limit: MaxBytes}
@@ -77,6 +89,108 @@ func runFixedBinding(ctx context.Context, binding HelperBinding, out io.Writer) 
 		return io.ErrShortWrite
 	}
 	return err
+}
+
+var declaredProfile = regexp.MustCompile(`^loom-[0-9a-f]{32}$`)
+
+func appendProfileObservations(ctx context.Context, binding HelperBinding, out *Observation) error {
+	root := filepath.Join(binding.Home, "profiles")
+	entries, err := os.ReadDir(root)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil || len(entries) > 256 {
+		return ErrUnavailable
+	}
+	if info, err := os.Lstat(root); err != nil || info.Mode()&os.ModeSymlink != 0 {
+		return ErrUnavailable
+	}
+	for _, entry := range entries {
+		if !declaredProfile.MatchString(entry.Name()) && !projectKey.MatchString(entry.Name()) {
+			continue
+		}
+		home := filepath.Join(root, entry.Name())
+		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			return ErrMalformed
+		}
+		var boxOwner *BoxOwnership
+		boxMarker := filepath.Join(home, "loom-box-owner.json")
+		if info, err := os.Lstat(boxMarker); err == nil {
+			if !info.Mode().IsRegular() || info.Size() > 65536 {
+				return ErrMalformed
+			}
+			raw, readErr := os.ReadFile(boxMarker)
+			var value struct {
+				BoxOwnership
+				SchemaVersion string `json:"schema_version"`
+				BoxKey        string `json:"box_key"`
+			}
+			if readErr != nil || len(raw) > 65536 || json.Unmarshal(raw, &value) != nil || value.SchemaVersion != "loom.box_agent.v1" || !validBoxOwnership(&value.BoxOwnership, entry.Name()) {
+				return ErrMalformed
+			}
+			if validateBoxCatalog(binding.BoxesFile, value.BoxKey, &value.BoxOwnership) != nil {
+				return ErrUnavailable
+			}
+			boxOwner = &value.BoxOwnership
+		} else if !os.IsNotExist(err) {
+			return ErrUnavailable
+		}
+		if boxOwner == nil && !declaredProfile.MatchString(entry.Name()) {
+			continue
+		}
+		// Only profiles carrying a project owner marker are part of this view.
+		markerPath := filepath.Join(home, "loom-project-owner.json")
+		info, err := os.Lstat(markerPath)
+		if os.IsNotExist(err) && boxOwner == nil {
+			continue
+		}
+		if boxOwner != nil && err == nil {
+			return ErrMalformed
+		}
+		if boxOwner == nil {
+			if err != nil || !info.Mode().IsRegular() || info.Size() > 65536 {
+				return ErrUnavailable
+			}
+			raw, err := os.ReadFile(markerPath)
+			var owner struct {
+				ProjectID string `json:"project_id"`
+				Resource  string `json:"resource"`
+			}
+			if err != nil || json.Unmarshal(raw, &owner) != nil || !projectID.MatchString(owner.ProjectID) || !projectKey.MatchString(owner.Resource) {
+				return ErrMalformed
+			}
+			sum := sha256.Sum256([]byte(owner.ProjectID + "/" + owner.Resource))
+			if entry.Name() != fmt.Sprintf("loom-%x", sum[:16]) {
+				return ErrMalformed
+			}
+		}
+		source := binding.Source
+		source.Profile = entry.Name()
+		reader := FileReader(home)
+		if _, err := os.Stat(filepath.Join(home, "cron", "jobs.json")); os.IsNotExist(err) {
+			continue
+		}
+		local, err := (Observer{Source: source, Read: reader}).Observe(ctx)
+		if err != nil {
+			return err
+		}
+		if boxOwner != nil {
+			for i := range local.Jobs {
+				b := local.Jobs[i].Box
+				if b != nil && (b.BoxID != boxOwner.BoxID || b.Profile != boxOwner.Profile || b.Workdir != boxOwner.Workdir || b.ContextRevision != boxOwner.ContextRevision) {
+					return ErrMalformed
+				}
+				if b == nil {
+					value := *boxOwner
+					b = &value
+				}
+				b.Retired = b.Retired || boxOwner.Retired
+				local.Jobs[i].Box = b
+			}
+		}
+		out.Jobs = append(out.Jobs, local.Jobs...)
+	}
+	return nil
 }
 
 func decodeStrict(raw []byte, target any) error {
@@ -112,13 +226,24 @@ func decodeObservation(raw []byte, source Source) (Observation, error) {
 	}
 	seen := map[string]bool{}
 	for _, job := range out.Jobs {
-		if !identifier.MatchString(job.ID) || seen[job.ID] {
+		profile := job.Profile
+		if profile == "" {
+			profile = source.Profile
+		}
+		if profile != source.Profile && (source.Revision != PlatformRevision || (!declaredProfile.MatchString(profile) && !validBoxOwnership(job.Box, profile))) {
 			return Observation{}, ErrMalformed
 		}
-		if job.Project != nil && (!projectID.MatchString(job.Project.ProjectID) || !projectKey.MatchString(job.Project.Resource) || job.Project.Profile != source.Profile) {
+		if job.Box != nil && !validBoxOwnership(job.Box, profile) {
 			return Observation{}, ErrMalformed
 		}
-		seen[job.ID] = true
+		identity := profile + "/" + job.ID
+		if !identifier.MatchString(job.ID) || seen[identity] {
+			return Observation{}, ErrMalformed
+		}
+		if job.Project != nil && (!projectID.MatchString(job.Project.ProjectID) || !projectKey.MatchString(job.Project.Resource) || job.Project.Profile != profile) {
+			return Observation{}, ErrMalformed
+		}
+		seen[identity] = true
 		switch job.NativeState {
 		case StateUnknown, Scheduled, Paused, Completed, StateError:
 		default:

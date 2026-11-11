@@ -103,6 +103,11 @@ func (r AutomationDispatcherRuntime) ValidateConfig(ctx context.Context, config 
 	return err
 }
 
+func (r AutomationDispatcherRuntime) AutomaticReady(ctx context.Context, _ workers.WorkerInstance, now time.Time) (bool, *time.Time, error) {
+	next, err := r.Automation.NextInvocationAt(ctx, now)
+	return err == nil && next != nil && !next.After(now), next, err
+}
+
 func (r AutomationDispatcherRuntime) RunOnce(ctx context.Context, run workers.RunContext) (workers.RunResult, error) {
 	if r.Automation.DB == nil {
 		return workers.RunResult{}, fmt.Errorf("automation dispatcher service is not configured")

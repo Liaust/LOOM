@@ -20,6 +20,76 @@ import (
 	"loom.local/loom/internal/response"
 )
 
+func TestProjectPlanNamedActionsBounded(t *testing.T) {
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	actions := []pc.DeclarationAction{{ID: "register-project", Kind: pc.DeclarationRegisterProject}, {ID: "notes-enrollment", Kind: pc.DeclarationEnrollKnowledge, Resource: "knowledge"}, {ID: "unsafe\ncommand", Kind: pc.DeclarationRegisterProject}}
+	input := pc.DeclarationPlanRequest{ProjectRef: "project", NodeRef: "main", Effects: []pc.DeclarationEffect{pc.DeclarationWatches}}
+	renderDeclarationPlanActions(cmd, actions, input)
+	for _, want := range []string{"register-project (register_project)", "notes-enrollment (enroll_knowledge)", "Review actions omitted: 1", "loom project plan 'project' --json --node 'main' --watches-only"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing %q: %s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "unsafe\ncommand") {
+		t.Fatal("unsafe review item rendered")
+	}
+}
+
+func TestWatchSelectionFailureReviewsNormalPlanWithoutReusingApply(t *testing.T) {
+	input := pc.DeclarationApplyRequest{ProjectRef: "project", NodeRef: "main", Effects: []pc.DeclarationEffect{pc.DeclarationWatches}, PlanID: "old", IdempotencyKey: "original"}
+	result := pc.DeclarationResult{State: pc.DeclarationOperationFailed, Errors: []pc.DeclarationError{{Code: pc.DeclarationPlanStale, CauseCode: "watch_configuration_binding_changed"}}}
+	a := declarationResultNextAction(result, &input)
+	if a.Kind != "replan" || strings.Contains(a.Command, "--watches-only") || strings.Contains(a.Command, " apply ") || !strings.Contains(a.Command, "loom project plan 'project'") || !strings.Contains(a.Command, "--node 'main'") {
+		t.Fatalf("incorrect broader-plan guidance: %+v", a)
+	}
+	if input.Effects[0] != pc.DeclarationWatches || input.PlanID != "old" {
+		t.Fatal("original reviewed request was mutated")
+	}
+	a = declarationResultNextAction(result, nil)
+	if !strings.Contains(a.Reason, "without --watches-only") {
+		t.Fatalf("missing no-request guidance: %+v", a)
+	}
+}
+
+func TestProjectDeclarationWatchesOnlyCLIAndNextCommands(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request pc.DeclarationPlanRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(request.Effects, []pc.DeclarationEffect{pc.DeclarationWatches}) {
+			t.Errorf("watch-only scope lost: %+v", request)
+		}
+		if r.URL.Path == "/v1/project-declaration-plans" {
+			response.WriteJSON(w, 200, response.Success("plan", pc.DeclarationPlan{SchemaVersion: pc.DeclarationPlanSchemaV05, PlanID: "reviewed", Basis: pc.DeclarationPlanBasis{Target: contextFixture().Target}}))
+		} else if r.URL.Path == "/v1/project-declaration-operations" {
+			response.WriteJSON(w, 200, response.Success("apply", pc.DeclarationResult{SchemaVersion: pc.DeclarationResultSchemaV05, State: pc.DeclarationOperationSucceeded}))
+		} else {
+			t.Errorf("wrong route: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	cfg := writeProjectBackendInstallManifest(t, server.URL)
+	for _, args := range [][]string{
+		{"plan", "fixture", "--node", "main", "--watches-only"},
+		{"apply", "fixture", "--node", "main", "--watches-only", "--plan-id", "reviewed", "--idempotency-key", "original", "--resume", "durable"},
+	} {
+		_, stderr, err := executeRootCommand(append([]string{"--config", cfg, "--json", "project"}, args...)...)
+		if err != nil {
+			t.Fatal(stderr, err)
+		}
+	}
+	input := pc.DeclarationApplyRequest{ProjectRef: "fixture", NodeRef: "main", PlanID: "reviewed", IdempotencyKey: "original", Effects: []pc.DeclarationEffect{pc.DeclarationWatches}}
+	if !declarationRequestCustody(input) || !strings.Contains(declarationApplyCommand(input), "--watches-only") || !strings.Contains(declarationReplanAction(input, contextFixture().Target, "").Command, "--watches-only") {
+		t.Fatal("rendered continuation lost watch-only scope")
+	}
+	if _, _, err := executeRootCommand("project", "plan", "fixture", "--watches-only", "--refresh-projections"); err == nil {
+		t.Fatal("mixed effects accepted")
+	}
+}
+
 func TestProjectDeclarationNextActionCauseMatrix(t *testing.T) {
 	input := pc.DeclarationApplyRequest{ProjectRef: "/owner/quote's project", NodeRef: "selected", PlanID: "reviewed", IdempotencyKey: "original", Effects: []pc.DeclarationEffect{pc.DeclarationReconcile, pc.DeclarationProjections}, ApprovalRefs: []string{"exact'approval"}}
 	for _, tt := range []struct {
@@ -34,6 +104,7 @@ func TestProjectDeclarationNextActionCauseMatrix(t *testing.T) {
 		{"running", pc.DeclarationOperationRunning, "", "", false, true, " --resume 'durable'", ""},
 		{"uncertain", pc.DeclarationOperationPartial, pc.DeclarationOwnerFailed, "observation_uncertain", false, true, " --resume 'durable'", ""},
 		{"pending", pc.DeclarationOperationPartial, pc.DeclarationOwnerFailed, "owner_pending", false, true, " --resume 'durable'", ""},
+		{"accepted_pending", pc.DeclarationOperationPartial, pc.DeclarationOwnerPending, "owner_pending", false, true, "Accepted; waiting", ""},
 		{"retryable", pc.DeclarationOperationFailed, pc.DeclarationOwnerFailed, "transient", true, true, " --resume 'durable'", ""},
 		{"denied", pc.DeclarationOperationFailed, pc.DeclarationUnauthorized, "permission_revoked", false, true, "permission", " --resume "},
 		{"approval", pc.DeclarationOperationPartial, pc.DeclarationApprovalRequired, "approval_missing", false, true, "approval", " --resume "},
@@ -88,6 +159,133 @@ func TestProjectDeclarationNextActionCauseMatrix(t *testing.T) {
 		if strings.Contains(out.String(), "loom project apply") || !strings.Contains(out.String(), "Inspect") {
 			t.Fatalf("unsafe advice: %s", out.String())
 		}
+	}
+}
+
+func TestProjectDeclarationStatusAdviceUsesCurrentBlockersAndPartialState(t *testing.T) {
+	for _, tt := range []struct {
+		name                  string
+		change                func(*pc.DeclarationStatus)
+		kind, command, reason string
+	}{
+		{"historical_success", func(*pc.DeclarationStatus) {}, "none", "", "independently"},
+		{"no_history", func(s *pc.DeclarationStatus) { s.Operation = nil }, "none", "", "independently"},
+		{"current_owner_blocker", func(s *pc.DeclarationStatus) {
+			r := s.Resources["webdav"]
+			r.Errors = []pc.DeclarationError{{Code: pc.DeclarationUnauthorized, CauseCode: "permission_revoked"}}
+			s.Resources["webdav"] = r
+		}, "inspect", "loom project status", "permission"},
+		{"current_partial_resource", func(s *pc.DeclarationStatus) {
+			r := s.Resources["webdav"]
+			r.Readiness.Applied.State = pc.DeclarationPending
+			s.Resources["webdav"] = r
+		}, "inspect", "loom project status", "resource blockers"},
+		{"current_publication_blocker", func(s *pc.DeclarationStatus) { s.Resources["webdav"].Readiness.Endpoint.TLS = "pending" }, "inspect", "loom project status", "publication"},
+		{"unfinished_operation", func(s *pc.DeclarationStatus) {
+			s.Operation.State = pc.DeclarationOperationPartial
+			s.Operation.Errors = []pc.DeclarationError{{Code: pc.DeclarationOwnerFailed, CompletedEffects: []string{"retained-effect"}}}
+		}, "inspect", "loom project operation", "original request"},
+		{"recovery_completed", func(s *pc.DeclarationStatus) {
+			s.Errors = []pc.DeclarationError{{Code: pc.DeclarationTargetUnavailable, CauseCode: "project_restored_inactive", Retryable: true, CompletedEffects: []string{"restored-files"}}}
+		}, "inspect", "loom project status", "Recovery completed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := webDAVContextFixture()
+			tt.change(&s)
+			a := declarationStatusNextAction(s)
+			if a.Kind != tt.kind || !strings.Contains(a.Command, tt.command) || !strings.Contains(a.Reason, tt.reason) || strings.Contains(a.Command, "loom project apply") || strings.Contains(a.Command, "--resume") || (tt.kind == "none" && a.Command != "") {
+				t.Fatalf("wrong current advice: %+v", a)
+			}
+			if tt.name == "unfinished_operation" {
+				view := newProjectContext(s)
+				if view.HistoricalOperation == nil || !reflect.DeepEqual(view.HistoricalOperation.CompletedEffects, []string{"retained-effect"}) {
+					t.Fatalf("completed effects lost: %+v", view)
+				}
+			}
+		})
+	}
+}
+
+func TestProjectDeclarationRecoveryCompletedIsNotRetryableAdvice(t *testing.T) {
+	input := pc.DeclarationApplyRequest{ProjectRef: "project", NodeRef: "owner", PlanID: "plan", IdempotencyKey: "key", Effects: []pc.DeclarationEffect{pc.DeclarationReconcile}}
+	result := pc.DeclarationResult{OperationID: "recovery", State: pc.DeclarationOperationPartial, Errors: []pc.DeclarationError{{Code: pc.DeclarationTargetUnavailable, CauseCode: "project_restored_inactive", Retryable: true, CompletedEffects: []string{"restored-files"}}}, Actions: []pc.DeclarationActionResult{{EffectRef: "restored-files"}, {EffectRef: "retained-installation"}}}
+	a := declarationResultNextAction(result, &input)
+	if a.Kind != "inspect" || strings.Contains(a.Command, "apply") || !strings.Contains(a.Reason, "Recovery completed") || !reflect.DeepEqual(declarationCompletedEffects(result), []string{"restored-files", "retained-installation"}) {
+		t.Fatalf("recovery retry/effects: %+v", a)
+	}
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := renderDeclarationResult(cmd, &options{}, result, &input); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Completed effect: restored-files") || !strings.Contains(out.String(), "No automatic") && !strings.Contains(out.String(), "do not retry completed effects") {
+		t.Fatalf("recovery output: %s", out.String())
+	}
+}
+
+func TestProjectDeclarationMissingSelectorHint(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		code   pc.DeclarationErrorCode
+		cause  string
+		lookup bool
+	}{
+		{"confirmed_missing", pc.DeclarationReferenceMissing, "project_missing", true},
+		{"unavailable_location", pc.DeclarationTargetUnavailable, "registered_project_location_required", false},
+		{"wrong_owner", pc.DeclarationTargetUnavailable, "remote_source_owner_required", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			detail := pc.DeclarationError{Code: tt.code, CauseCode: tt.cause, CompletedEffects: []string{}}
+			envelope := response.ErrorEnvelope{Error: response.ErrorBody{Code: string(tt.code), Target: "declaration", Summary: "Declaration lookup refused", Hint: "Server hint", CorrelationID: "server-correlation"}, Meta: response.Meta{CorrelationID: "server-correlation"}}
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				response.WriteJSON(w, 404, struct {
+					response.ErrorEnvelope
+					Detail pc.DeclarationError `json:"declaration_error"`
+				}{envelope, detail})
+			}))
+			defer server.Close()
+			cfg := writeProjectBackendInstallManifest(t, server.URL)
+			for _, command := range [][]string{
+				{"context", "missing-selector", "--node", "selected-owner"},
+				{"status", "missing-selector", "--node", "selected-owner"},
+				{"plan", "missing-selector", "--node", "selected-owner"},
+				{"apply", "missing-selector", "--node", "selected-owner", "--plan-id", "reviewed", "--idempotency-key", "original"},
+			} {
+				for _, jsonMode := range []bool{false, true} {
+					args := append([]string{"--config", cfg, "project"}, command...)
+					if jsonMode {
+						args = append(args, "--json")
+					}
+					before := calls
+					out, stderr, err := executeRootCommand(args...)
+					if err == nil || calls != before+1 || strings.Contains(out, "loom project list") != tt.lookup {
+						t.Fatalf("hint/fanout: err=%v %s %s", err, out, stderr)
+					}
+					if tt.lookup && !strings.Contains(out, "missing-selector") {
+						t.Fatalf("submitted selector hidden: %s", out)
+					}
+					if jsonMode {
+						var got struct {
+							response.ErrorEnvelope
+							Detail   pc.DeclarationError    `json:"declaration_error"`
+							Selector string                 `json:"requested_selector"`
+							Next     *declarationNextAction `json:"next_action"`
+						}
+						d := json.NewDecoder(strings.NewReader(out))
+						if e := d.Decode(&got); e != nil {
+							t.Fatal(e)
+						}
+						var extra any
+						if d.Decode(&extra) != io.EOF || !reflect.DeepEqual(got.ErrorEnvelope, envelope) || !reflect.DeepEqual(got.Detail, detail) || (got.Next != nil) != tt.lookup {
+							t.Fatalf("envelope altered: %s", out)
+						}
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -187,6 +385,29 @@ func TestProjectDeclarationNextActionAdversarialCustody(t *testing.T) {
 		}
 		if len(result.Errors) != 0 {
 			t.Fatal("partial wire result mutated")
+		}
+	}
+}
+
+func TestProjectDeclarationPendingJSONIncludesExactContinuation(t *testing.T) {
+	input := pc.DeclarationApplyRequest{ProjectRef: "/chosen/project", NodeRef: "main", PlanID: "reviewed", IdempotencyKey: "original", Effects: []pc.DeclarationEffect{pc.DeclarationWatches}}
+	result := pc.DeclarationResult{OperationID: "durable", State: pc.DeclarationOperationPartial, Errors: []pc.DeclarationError{{Code: pc.DeclarationOwnerPending, CauseCode: "owner_pending"}}}
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := renderDeclarationResult(cmd, &options{jsonOutput: true}, result, &input); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Activity string                `json:"activity"`
+		Next     declarationNextAction `json:"next_action"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil || got.Activity != "waiting_for_owner" {
+		t.Fatalf("result=%s error=%v", out.String(), err)
+	}
+	for _, part := range []string{"--resume 'durable'", "--idempotency-key 'original'", "--plan-id 'reviewed'", "--watches-only"} {
+		if !strings.Contains(got.Next.Command, part) {
+			t.Fatalf("continuation lost %s: %+v", part, got.Next)
 		}
 	}
 }
@@ -295,6 +516,74 @@ func TestProjectDeclarationCLIEndpointStatus(t *testing.T) {
 		if !strings.Contains(out.String(), want) {
 			t.Fatal("endpoint detail missing", out.String())
 		}
+	}
+}
+
+func TestProjectDeclarationStatusResourceFirstWithoutNewReadsOrJSON(t *testing.T) {
+	status := webDAVContextFixture()
+	status.Operation.Effects = []pc.DeclarationEffect{pc.DeclarationWatches}
+	status.Operation.Readiness.Protected = pc.DeclarationFact{State: pc.DeclarationFailed, Revision: "stale-operation-evidence"}
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != "GET" || r.RequestURI != "/v1/projects/caller/declaration-status?node_ref=selected" {
+			t.Errorf("unexpected read/mutation: %s %s", r.Method, r.RequestURI)
+		}
+		response.WriteJSON(w, 200, response.Success("status", status))
+	}))
+	defer server.Close()
+	cfg := writeProjectBackendInstallManifest(t, server.URL)
+	for _, jsonMode := range []bool{false, true} {
+		calls = 0
+		args := []string{"--config", cfg, "project", "status", "caller", "--node", "selected"}
+		if jsonMode {
+			args = append(args, "--json")
+		}
+		out, stderr, err := executeRootCommand(args...)
+		if err != nil || calls != 1 {
+			t.Fatalf("status reads=%d err=%v %s", calls, err, stderr)
+		}
+		if jsonMode {
+			var got, want map[string]any
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := json.Marshal(status)
+			_ = json.Unmarshal(raw, &want)
+			want["readiness_note"] = declarationReadinessNote
+			if !reflect.DeepEqual(got, want) {
+				t.Fatal("status JSON contract changed", out)
+			}
+			continue
+		}
+		for _, want := range []string{
+			"Resource: webdav (application); applied=satisfied@installation-revision; healthy=satisfied@generation-revision; protected=satisfied@backup-manifest-revision; verified=unknown",
+			"Resource detail: loom project status 'verified-project' --node 'verified-owner' --json",
+			"Current whole-declaration evidence:", "Healthy: unknown | Protected: unknown | Verified: unknown",
+			"Last operation: old-operation (succeeded); revision old-revision", "Operation evidence: watch_configuration_only",
+			"No current deployment action is established.", declarationReadinessNote,
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("missing %q: %s", want, out)
+			}
+		}
+		if strings.Index(out, "Resource: webdav") > strings.Index(out, "Resource: files") || strings.Index(out, "Resource detail:") > strings.Index(out, "Current whole-declaration evidence:") || strings.Contains(out, "stale-operation-evidence") {
+			t.Fatal("resource priority or historical separation lost", out)
+		}
+	}
+
+	failed := status.Resources["webdav"]
+	failed.Readiness.Healthy = pc.DeclarationFact{State: pc.DeclarationFailed, Revision: "failed-generation"}
+	status.Resources["broken-app"] = failed
+	status.Resources["zz-omitted-error"] = pc.DeclarationResourceStatus{Errors: []pc.DeclarationError{{Code: pc.DeclarationOwnerFailed, CauseCode: "exact_current_owner_failure"}}}
+	out, stderr, err := executeRootCommand("--config", cfg, "project", "status", "caller", "--node", "selected")
+	for _, want := range []string{"Resource: broken-app", "healthy=failed@failed-generation", "Resource: webdav", "Omitted: resources=1", "Cause: exact_current_owner_failure (declaration.owner_failed)", "Next: Inspect the request"} {
+		if err != nil || !strings.Contains(out, want) {
+			t.Fatalf("mixed/omitted failure hidden, want %q: %v %s %s", want, err, out, stderr)
+		}
+	}
+	if strings.Contains(out, "Resource: zz-omitted-error") {
+		t.Fatal("fixture did not exercise an omitted resource's cause", out)
 	}
 }
 

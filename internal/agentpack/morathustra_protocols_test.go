@@ -1,8 +1,6 @@
 package agentpack
 
 import (
-	"crypto/sha256"
-	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -54,21 +52,20 @@ func TestMorathustraPersonalityDoesNotReplaceOperatingAuthority(t *testing.T) {
 		}
 	}
 
-	// Public baseline fingerprints preserve the operating rules after replacing
-	// the private operator's name with generic operator wording.
-	for name, want := range map[string]string{
-		"OPERATING-POLICY.md":                       "4066ac84a48b2e36aee46d0ea008fef05d9bc0fe2a1528f68d658a4e2abd193a",
-		"WORKSPACE-MAP.md":                          "c19f1ebb7068027b62bc5354a5b75fdb6317f6042919467449482964e6e7d690",
-		"protocols/CREDENTIALS.md":                  "a5fa7fe12aa4f9ec064347c92268377371ec6de424a4f4fd3662c4743a69ac4d",
-		"protocols/EXTERNAL-MESSAGING.md":           "d121fdc8e735baf6a71019a7e749f9a2b218ffa94931cec82cf6a99a9f100d79",
-		"protocols/LOOM-ROUTING.md":                 "7fc3db17d326259f02aabc5829e89c535b8bbf67d0af07aa4572bc1f8852e6c6",
-		"protocols/PROJECT-DELEGATION.md":           "6ad5e0932f53da45c51b054dd950372353f715f39b979bf9aad93a95b8547268",
-		"protocols/PROVENANCE-AND-MEMORY.md":        "4e66df1906a8c46c48a67af1739709dbb28820a4956e99843585aa144d8094bb",
-		"protocols/SESSION-RETRIEVAL.md":            "ae6c1ded645b8e153d72fdf2a8ebc445ca829b558a611f981bbe75ec744b896d",
-		"protocols/SKILL-CREATION-AND-PROMOTION.md": "05f19c7764f51fcb800b735cc037776903f11e13d6074ad034575cc1c8957de6",
+	// Check portable boundaries, not hashes tied to a private acceptance receipt.
+	for name, required := range map[string][]string{
+		"OPERATING-POLICY.md":                       {"Require explicit authorization", "Preserve user edits", "Keep values out"},
+		"WORKSPACE-MAP.md":                          {"preserved on scaffold replay", "does not initialize Hermes", "does not transfer ownership"},
+		"protocols/CREDENTIALS.md":                  {"approved non-secret reference contract", "Missing access stops that operation", "never fall back to another identity"},
+		"protocols/EXTERNAL-MESSAGING.md":           {"separately approved platform", "allowlist", "Do not create accounts, incur seats, publish or contact others"},
+		"protocols/LOOM-ROUTING.md":                 {"Source documents and repository contracts", "Never read database tables", "ORCA is retired"},
+		"protocols/PROJECT-DELEGATION.md":           {"Do not give the worker Morathustra's SOUL", "not an external commitment"},
+		"protocols/PROVENANCE-AND-MEMORY.md":        {"Candidates are clues, not facts or permission", "Current sources and explicit instructions remain authoritative"},
+		"protocols/SESSION-RETRIEVAL.md":            {"source visibility", "Never query a session database directly", "Do not change retention"},
+		"protocols/SKILL-CREATION-AND-PROMOTION.md": {"Never approve your own pending changes", "Category alone does not transfer curator ownership", "no private inventory or live count"},
 	} {
-		if got := fmt.Sprintf("%x", sha256.Sum256(payloads[name])); got != want {
-			t.Errorf("accepted operating boundary changed: %s", name)
+		if failures := instructionBoundaryFailures(string(payloads[name]), required, nil); len(failures) != 0 {
+			t.Errorf("%s: %v", name, failures)
 		}
 	}
 }
@@ -82,11 +79,11 @@ func TestMorathustraNamedBasecampProtocolFailsClosed(t *testing.T) {
 		"loom-morathustra-basecamp --profile morathustra skill --agent",
 		"prints the native skill without installing it",
 		"normal Hermes skill discovery", "Missing installed skill or tooling stops task use",
-		"operator binding documented in release-matched ORCA Main Operations", "shared agents UID is not per-agent OS isolation",
+		"Missing binding holds account work", "shared agents UID is not per-agent OS isolation",
 		"no automatic named-account environment", "never creates or repairs the store",
 		"Do not rely on the default profile, set `BASECAMP_PROFILE`, change the shared default",
 		"no authenticated identity binding", "after successful OAuth", "Capture and freeze",
-		"global `identity.id`", "example-operator `accounts[].id`", "account-scoped recording actor ID",
+		"global `identity.id`", "configured `accounts[].id`", "account-scoped recording actor ID",
 		"Do not guess IDs, reuse Codex's IDs", "Require exactly one current account",
 		"Missing, incomplete or ambiguous binding means stop", "parse failure means stop",
 		"Do not continue to task commands after a failed preflight",
@@ -180,32 +177,55 @@ func TestBasecampSharedOrganizationAndCodexBootstrap(t *testing.T) {
 	for _, required := range []string{
 		"identity-neutral coding tasks", "explicitly bootstrapped named agent",
 		"does not change an ordinary task's actor", "installed official `basecamp` skill",
-		"`BASECAMP-ORGANIZATION.md` in the active `CODEX_HOME`",
-		"$HOME/.codex/BASECAMP-ORGANIZATION.md", "literal `basecamp --profile codex`",
-		"Never change the shared default", "`BASECAMP_PROFILE`",
-		"basecamp --profile codex me --agent", "`identity.id` exactly `<CODEX_IDENTITY_ID>`",
-		"exactly one current account", "`<BASECAMP_ACCOUNT_ID>`", "`<CODEX_PERSON_ID>`", "<CODEX_EMAIL>",
-		"before installing it", "Unconfigured placeholders authorize no Basecamp access",
-		"stop before task reads or writes", "Do not rebind expected IDs",
+		"Only Personal policy loads", "`BASECAMP-ORGANIZATION.md`", "Codex is the execution harness",
+		"loom box context --json", "every Company Basecamp write needs the operator's approval",
+		"trusted workspace `AGENTS.md`", "personality, signature and account protocols",
+		"`CODEX-IDENTITY.md` in the active `CODEX_HOME` once per session",
+		"$HOME/.codex/CODEX-IDENTITY.md", "do not load it into a named session",
+		"Never change the shared default", "`BASECAMP_PROFILE`", "current actor's own account protocol",
 		"no new action authority", "profiles are not per-agent OS isolation",
-		"Follow the project's own `AGENTS.md`, `.loom/`, `.project/` and any legacy `.repo/`",
+		"Follow the project's own `AGENTS.md`, `.loom/` and `.project/` contracts",
+		"opted-in legacy `.repo/`", "project instructions govern the work",
 		"For analysis-only work",
-		"*Written by Codex*", "Archivist's specialized operating scope remains narrower",
+		"current actor's local authorship rule", "Archivist's specialized operating scope remains narrower",
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("Codex bootstrap lost rule %q", required)
 		}
 	}
-	if !strings.Contains(text, "its original creator does not identify the current updater") {
-		t.Error("Codex bootstrap confuses original creator with updater")
-	}
-	for _, forbidden := range []string{"--profile morathustra", "--profile apollo", "--profile personal", "SOUL.md", "GH_CONFIG_DIR"} {
+	for _, forbidden := range []string{"--profile codex", "--profile morathustra", "--profile apollo", "--profile personal", "SOUL.md", "GH_CONFIG_DIR", "Written by Codex", "200003", "400003"} {
 		if strings.Contains(text, forbidden) {
 			t.Errorf("Codex bootstrap inherited named-account instructions: %q", forbidden)
 		}
 	}
 	if strings.Contains(string(bootstrap), "<!-- BEGIN LOOM SHARED BASECAMP ORGANIZATION -->") {
 		t.Error("bootstrap must reference the source-derived companion, not duplicate its source")
+	}
+
+	identity, err := os.ReadFile(filepath.Join(root, "host-instructions/codex/CODEX-IDENTITY.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text = strings.Join(strings.Fields(string(identity)), " ")
+	for _, required := range []string{
+		"fallback for identity-neutral coding tasks", "Named agents use their workspace's identity protocol instead",
+		"Never change the shared default", "`BASECAMP_PROFILE`",
+		"selected Box's operating policy", "Missing Company access", "*Written by Codex*",
+		"Do not borrow a named agent's signature", "grants no action authority",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("ordinary Codex identity lost rule %q", required)
+		}
+	}
+	for _, forbidden := range []string{"--profile codex", "300001", "200003", "BASECAMP-ORGANIZATION.md"} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("global identity contains Personal account policy %q", forbidden)
+		}
+	}
+	for _, forbidden := range []string{"MINA", "Morathustra", "Apollo", "--profile mina", "SOUL.md", "loom-mina-"} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("ordinary identity inherited named instructions: %q", forbidden)
+		}
 	}
 }
 
@@ -217,7 +237,7 @@ func TestMorathustraGitHubSeparatesActorTransportAndPrivateProjection(t *testing
 		"Never copy or reuse existing Mac/shared tokens", "shared CLI login, credential helpers, SSH keys or SSH agents",
 		"Codex's, Apollo's or another agent's credentials", "Do not switch the shared CLI account or change global Git configuration",
 		"outside the live workspace and its projection", "Bind `GH_CONFIG_DIR`",
-		"loom-morathustra-gh api user", "operator binding documented in release-matched ORCA Main Operations",
+		"loom-morathustra-gh api user", "operator binding in the configured deployment's operations documentation",
 		"shared agents UID is not per-agent OS isolation", "no automatic named-account environment",
 		"API authentication does not prove Git fetch/push transport",
 		"it must contain only the operator's verified personal identity under this fresh grant",
@@ -226,15 +246,14 @@ func TestMorathustraGitHubSeparatesActorTransportAndPrivateProjection(t *testing
 		"`GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` and `GITHUB_ENTERPRISE_TOKEN` must be absent",
 		"Git's actual fetch/push transport must use the same verified personal actor and isolated grant",
 		"no inherited credential or transport fallback", "stop before any fetch or push",
-		"the operator's complete account, repositories and organisations as their actual granted permissions and SSO policies permit",
-		"Do not impose a example-operator-only or private-only access limit",
-		"one destination, not the boundary of account access", "Verify the permissions needed for the exact repository and task",
+		"Configured access is limited by actual granted permissions, SSO policies and the authorized task",
+		"not a grant of account-wide authority", "Verify the permissions needed for the exact repository and task",
 		"Account access does not grant blanket action authority", "Use only approved scopes needed for the operator's authorized work",
 		"do not automatically request every admin OAuth scope or change organisation policies to obtain access",
 		"does not establish repository creation, publication or organization-owner authority",
 		"never widen access to make a command succeed",
-		"non-Git ORCA folder project", "Never initialize Git there",
-		"private `example-operator/morathustra-workspace`", "before every push",
+		"non-Git native agent workspace", "Never initialize Git there",
+		"private `OWNER/morathustra-workspace`", "this template does not create it", "before every push",
 		"verified personal actor's permission before creation and before every push",
 		"No public fallback or force push", "explicit reviewed file allowlist and source hashes",
 		"Exclude every unlisted file", "every commit reachable from the proposed push",
@@ -246,8 +265,7 @@ func TestMorathustraGitHubSeparatesActorTransportAndPrivateProjection(t *testing
 			t.Errorf("GitHub protocol lost isolation rule %q", required)
 		}
 	}
-	// the operator's Phase 9C amendment supersedes the dedicated GitHub actor only;
-	// fresh grant isolation and the private projection remain separate contracts.
+	// Actor selection, grant isolation and private projection are separate contracts.
 	for _, superseded := range []string{"one dedicated Morathustra GitHub actor", "Never reuse the operator's", "same verified dedicated actor", "dedicated actor's permission"} {
 		if strings.Contains(content, superseded) {
 			t.Errorf("GitHub protocol retains superseded identity restriction %q", superseded)

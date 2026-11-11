@@ -62,7 +62,7 @@ func Validate(pack *Pack) ValidationReport {
 	if pack.Manifest.HashPolicy.Algorithm != "sha256" {
 		add(IssueError, "manifest.hash_algorithm", "manifest.yaml", "hash policy algorithm must be sha256")
 	}
-	for _, harness := range []string{"codex", "orca"} {
+	for _, harness := range []string{"codex"} {
 		spec, exists := pack.Manifest.Harnesses[harness]
 		if !exists || strings.TrimSpace(spec.Mechanism) == "" {
 			add(IssueError, "manifest.harness", "manifest.yaml", fmt.Sprintf("harness %q must declare its native deployment mechanism", harness))

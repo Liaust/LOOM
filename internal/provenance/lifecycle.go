@@ -92,7 +92,10 @@ func (service *Service) GetCandidateLifecycle(ctx context.Context, id SemanticID
 		projection.SourceReferenceIDs = projection.SourceReferenceIDs[:limit]
 		projection.Truncated = true
 	}
-	rows, err = service.store.q.query(ctx, `SELECT derived_from_candidate_id::text FROM provenance.candidate_lineage WHERE candidate_id=$1 ORDER BY registered_at,id LIMIT $2`, string(id), limit+1)
+	rows, err = service.store.q.query(ctx, `SELECT lineage.derived_from_candidate_id::text FROM provenance.candidate_lineage lineage
+	 JOIN provenance.candidates parent ON parent.id=lineage.derived_from_candidate_id
+	 WHERE lineage.candidate_id=$1 AND `+anchorsBoxSQL("parent.submitted_json->'anchors'", "$3")+`
+	 ORDER BY lineage.registered_at,lineage.id LIMIT $2`, string(id), limit+1, selectedBoxes(ctx))
 	if err != nil {
 		return CandidateLifecycleProjection{}, false, fmt.Errorf("load candidate lifecycle lineage: %w", err)
 	}

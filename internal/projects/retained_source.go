@@ -156,10 +156,13 @@ func retainedRepositoryPath(pair ProjectRepositorySourceVersions, memberPath str
 	if _, err := objectstore.PackageSelection([]string{memberPath}); err != nil {
 		return "", err
 	}
+	if pair == projectRepositorySourceV06V06 && memberPath == "." {
+		return "", fmt.Errorf("%w: v0.6 does not support root repositories", ErrInvalidProjectRepositorySourceInput)
+	}
 	switch pair {
 	case projectRepositorySourceV03V03, projectRepositorySourceV03V04, projectRepositorySourceV04V03, projectRepositorySourceV04V04:
 		return filepath.ToSlash(filepath.Join("repos", filepath.FromSlash(memberPath))), nil
-	case projectRepositorySourceV05V05:
+	case projectRepositorySourceV05V05, projectRepositorySourceV06V06:
 		return memberPath, nil
 	default:
 		return "", fmt.Errorf("%w: retained source path requires a known schema pair", ErrUnsupportedProjectRepositorySourceVersions)

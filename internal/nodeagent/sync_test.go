@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -94,6 +96,9 @@ func TestPushLocalSyncContinuesAfterIndependentObjectUploadFailure(t *testing.T)
 	}
 	if run.SubmittedItems != 1 || len(run.ObjectUploads) != 1 || run.ObjectUploads[0].ObjectID != "knowledge_object_valid" {
 		t.Fatalf("successful progress not reported: %#v", run)
+	}
+	if run.Persistence.SnapshotWrites != 2 || run.Persistence.CommitPages != 1 {
+		t.Fatalf("mixed acknowledgements rewrote state per result: %+v", run.Persistence)
 	}
 	outbox, err := store.LoadSyncOutbox()
 	if err != nil {
@@ -248,3 +253,121 @@ func (f fakeFileInfo) Mode() os.FileMode  { return 0o600 }
 func (f fakeFileInfo) ModTime() time.Time { return f.modTime }
 func (f fakeFileInfo) IsDir() bool        { return false }
 func (f fakeFileInfo) Sys() any           { return nil }
+
+func TestSyncQueueBatchAckLockPreservesConcurrentTerminalResult(t *testing.T) {
+	store, config, state, dir := localSyncObjectTestStore(t)
+	path := filepath.Join(dir, "note.md")
+	if err := os.WriteFile(path, []byte("exact source version"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	object, err := store.CreateLocalSyncObject(config, state, LocalSyncObjectCreateInput{Path: path, ScopeRef: "box-notes"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := make(chan loomsync.SyncedObjectInput, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input loomsync.SyncedObjectInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Error(err)
+			return
+		}
+		requests <- input
+		<-release
+		_ = json.NewEncoder(w).Encode(response.Success("fixture", loomsync.SyncedObjectResult{
+			Item:     loomsync.SyncItemResult{LocalRef: input.LocalObjectRef, ItemKind: loomsync.ItemKindObjectBlob, Status: loomsync.ItemStatusAccepted, Metadata: input.Metadata},
+			ObjectID: "main-exact", VersionID: "version-exact", HashURI: input.HashURI,
+		}))
+	}))
+	defer server.Close()
+	defer releaseOnce.Do(func() { close(release) })
+	config.MainURL = server.URL
+	pushDone := make(chan error, 1)
+	go func() {
+		_, err := pushLocalSyncOnce(context.Background(), store, config, state, "fixture", 1, false)
+		pushDone <- err
+	}()
+	var input loomsync.SyncedObjectInput
+	select {
+	case input = <-requests:
+	case <-time.After(5 * time.Second):
+		t.Fatal("delivery did not start")
+	}
+	ackDone := make(chan error, 1)
+	go func() {
+		ackDone <- store.ApplySyncedObjectResult(loomsync.SyncedObjectResult{Item: loomsync.SyncItemResult{
+			LocalRef: object.LocalObjectID, ItemKind: loomsync.ItemKindObjectBlob, Status: loomsync.ItemStatusFailed,
+			ErrorCode: "stale-delivery-failure", Metadata: input.Metadata,
+		}})
+	}()
+	select {
+	case err := <-ackDone:
+		t.Fatalf("ack bypassed held delivery lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	releaseOnce.Do(func() { close(release) })
+	if err := <-pushDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-ackDone; err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.ResolveLocalSyncObject(object.LocalObjectID)
+	if err != nil || got.SyncStatus != loomsync.ItemStatusAccepted || got.MainVersionID != "version-exact" {
+		t.Fatalf("concurrent stale acknowledgement erased receipt: %+v %v", got, err)
+	}
+	beforeObjects, _ := os.Stat(store.syncObjectsPath())
+	beforeOutbox, _ := os.Stat(store.syncOutboxPath())
+	if err := store.ApplySyncedObjectResult(loomsync.SyncedObjectResult{Item: loomsync.SyncItemResult{
+		LocalRef: object.LocalObjectID, ItemKind: loomsync.ItemKindObjectBlob, Status: loomsync.ItemStatusAccepted, Metadata: input.Metadata,
+	}, ObjectID: "main-exact", VersionID: "version-exact"}); err != nil {
+		t.Fatal(err)
+	}
+	afterObjects, _ := os.Stat(store.syncObjectsPath())
+	afterOutbox, _ := os.Stat(store.syncOutboxPath())
+	if !os.SameFile(beforeObjects, afterObjects) || !os.SameFile(beforeOutbox, afterOutbox) {
+		t.Fatal("repeated terminal ack rewrote snapshots")
+	}
+}
+
+func TestSyncQueueBatchBoundsDeliveryTurn(t *testing.T) {
+	store, config, state, _ := localSyncObjectTestStore(t)
+	events := make([]LocalSyncEvent, localQueueCommitPageSize+1)
+	outbox := make([]LocalSyncOutboxItem, len(events))
+	for i := range events {
+		ref := fmt.Sprintf("event-%d", i)
+		events[i] = LocalSyncEvent{LocalEventID: ref, StreamName: loomsync.StreamEvents, LocalSequence: int64(i + 1), SyncStatus: localSyncStatusPending, PayloadJSON: json.RawMessage(`{}`)}
+		outbox[i] = LocalSyncOutboxItem{LocalOutboxID: "outbox-" + ref, LocalRef: ref, ItemKind: loomsync.ItemKindEvent, StreamName: loomsync.StreamEvents, LocalSequence: int64(i + 1), Status: localSyncStatusPending, PayloadJSON: json.RawMessage(`{}`)}
+	}
+	if err := store.SaveSyncEvents(events); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSyncOutbox(outbox); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input loomsync.PushBatchInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Error(err)
+			return
+		}
+		if len(input.Items) != localQueueCommitPageSize {
+			t.Errorf("unbounded delivery: %d", len(input.Items))
+		}
+		result := loomsync.PushBatchResult{}
+		for _, item := range input.Items {
+			result.Items = append(result.Items, loomsync.SyncItemResult{LocalRef: item.LocalRef, Status: loomsync.ItemStatusAccepted, GlobalRef: "main-" + item.LocalRef, Metadata: item.Metadata})
+		}
+		_ = json.NewEncoder(w).Encode(response.Success("fixture", result))
+	}))
+	defer server.Close()
+	config.MainURL = server.URL
+	run, err := pushLocalSyncOnce(context.Background(), store, config, state, "fixture", 100, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.SubmittedItems != localQueueCommitPageSize || run.LocalStatus.Counts.Pending != 1 || run.Persistence.CommitPages != 1 || run.Persistence.SnapshotWrites != 2 {
+		t.Fatalf("bounded turn lost pending work: %+v", run)
+	}
+}

@@ -74,6 +74,7 @@ type workspaceRestoreIntentMarker struct {
 type workspaceRestoreGuard struct {
 	sourceChain      *heldDirectoryChain
 	destinationChain *heldDirectoryChain
+	metadataChain    *heldDirectoryChain
 	marker           *heldBoundedFile
 }
 
@@ -93,9 +94,16 @@ func (guard *workspaceRestoreGuard) Close() {
 		guard.sourceChain.Close()
 		guard.sourceChain = nil
 	}
+	if guard.metadataChain != nil {
+		guard.metadataChain.Close()
+		guard.metadataChain = nil
+	}
 }
 
 func (guard *workspaceRestoreGuard) containerFD() int {
+	if guard.metadataChain != nil {
+		return guard.metadataChain.ParentFD()
+	}
 	return guard.sourceChain.ParentFD()
 }
 
@@ -108,6 +116,11 @@ func (guard *workspaceRestoreGuard) verify() error {
 	}
 	if err := guard.destinationChain.verifyNamed(); err != nil {
 		return err
+	}
+	if guard.metadataChain != nil {
+		if err := guard.metadataChain.verifyNamed(); err != nil {
+			return err
+		}
 	}
 	if err := verifyNamedHeldFile(guard.containerFD(), workspaceRestoreIntentMarkerName, guard.marker); err != nil {
 		return fmt.Errorf("restore intent marker was substituted while locked: %w", err)
@@ -139,6 +152,9 @@ func (s WorkspaceMoveService) PlanRestore(ctx context.Context, input WorkspaceRe
 	if err != nil {
 		return WorkspaceArchivePlan{}, err
 	}
+	if archivePlan.Placement != nil || (s.NamedPlacement && archivePlan.Kind == WorkspaceKindProject) {
+		return s.planPlacementRestore(ctx, input, archivePlan, archiveOperation, archivedManifest, true)
+	}
 	paths, err := ResolveWorkspacePaths(s.Roots, archivePlan.Kind, archivePlan.Slug)
 	if err != nil {
 		return WorkspaceArchivePlan{}, err
@@ -155,6 +171,7 @@ func (s WorkspaceMoveService) PlanRestore(ctx context.Context, input WorkspaceRe
 		return WorkspaceArchivePlan{}, err
 	}
 	plan := WorkspaceArchivePlan{
+		BoxID:                 archivePlan.BoxID,
 		SchemaVersion:         WorkspaceArchivePlanSchemaVersion,
 		EvidenceKind:          PhysicalWorkspaceMoveEvidence,
 		OperationID:           input.OperationID,
@@ -652,6 +669,9 @@ func (s WorkspaceMoveService) inspectRestoreJournal(ctx context.Context, record 
 }
 
 func (s WorkspaceMoveService) validateExecutableRestorePlan(plan WorkspaceArchivePlan) error {
+	if plan.Placement != nil {
+		return s.validatePlacementExecution(plan)
+	}
 	if plan.OperationKind != WorkspaceOperationRestore {
 		return fmt.Errorf("restore executor accepts restore plans only")
 	}
@@ -703,6 +723,16 @@ func (s WorkspaceMoveService) compareLiveRestorePlanEvidence(ctx context.Context
 	if err != nil {
 		return nil, err
 	}
+	if plan.Placement != nil {
+		observed, e := s.planPlacementRestore(ctx, WorkspaceRestorePlanInput{OperationID: plan.OperationID, ArchiveOperationID: plan.ArchiveOperationID, ActorID: plan.ActorID, Reason: plan.Reason, PlannedAt: plan.PlannedAt}, archivePlan, archiveOperation, archivedManifest, false)
+		if e != nil {
+			return nil, e
+		}
+		if !reflect.DeepEqual(observed, plan) {
+			return []WorkspaceArchiveFinding{newWorkspaceFinding(plan.OperationID, FindingSourceDrift, PhaseRestorePlanned, "payload, metadata, relocation revision or catalog changed after review", true)}, nil
+		}
+		return nil, nil
+	}
 	paths, err := ResolveWorkspacePaths(s.Roots, plan.Kind, plan.Slug)
 	if err != nil {
 		return nil, err
@@ -715,10 +745,10 @@ func (s WorkspaceMoveService) compareLiveRestorePlanEvidence(ctx context.Context
 	if archiveOperation.OperationID != plan.ArchiveOperationID || archiveOperation.Phase != PhaseArchiveComplete || manifestDigest != plan.ArchiveManifestDigest {
 		findings = append(findings, newWorkspaceFinding(plan.OperationID, FindingInvalidBinding, PhaseRestorePlanned, "authenticated archive operation or manifest changed after restore review", false))
 	}
-	if !reflect.DeepEqual(sourceAncestors, plan.SourceAncestors) || !reflect.DeepEqual(inventory, plan.Inventory) {
+	if !sameStableAncestorEvidence(sourceAncestors, plan.SourceAncestors) || !reflect.DeepEqual(inventory, plan.Inventory) {
 		findings = append(findings, newWorkspaceFinding(plan.OperationID, FindingSourceDrift, PhaseRestorePlanned, "archived payload evidence changed after restore review", true))
 	}
-	if !reflect.DeepEqual(destinationAncestors, plan.DestinationAncestors) {
+	if !sameStableAncestorEvidence(destinationAncestors, plan.DestinationAncestors) {
 		findings = append(findings, newWorkspaceFinding(plan.OperationID, FindingDestinationSubstitution, PhaseRestorePlanned, "active destination ancestor evidence changed after restore review", true))
 	}
 	currentCatalog, err := s.planCatalogRebinds(ctx, paths.ArchivePayload, paths.Active)
@@ -875,6 +905,9 @@ func (s WorkspaceMoveService) validateCurrentArchiveManifestEvidence(ctx context
 }
 
 func (s WorkspaceMoveService) inspectRestoreCustody(ctx context.Context, plan, archivePlan WorkspaceArchivePlan, archiveOperation WorkspaceArchiveOperation, archivedManifest WorkspaceArchiveManifest, restoreOperation WorkspaceArchiveOperation) (WorkspaceCustodyState, *WorkspaceArchiveManifest, *WorkspaceArchiveFinding, error) {
+	if plan.Placement != nil {
+		return s.inspectPlacementRestore(ctx, plan, archivePlan, archiveOperation, archivedManifest, restoreOperation)
+	}
 	paths, err := ResolveWorkspacePaths(s.Roots, plan.Kind, plan.Slug)
 	if err != nil {
 		return CustodyAmbiguous, nil, nil, err
@@ -972,6 +1005,9 @@ func (s WorkspaceMoveService) inspectRestoreCustody(ctx context.Context, plan, a
 }
 
 func (s WorkspaceMoveService) acquireRestoreGuard(ctx context.Context, plan, archivePlan WorkspaceArchivePlan, archivedManifest WorkspaceArchiveManifest) (*workspaceRestoreGuard, error) {
+	if plan.Placement != nil {
+		return s.acquirePlacementRestoreGuard(ctx, plan, archivePlan, archivedManifest, false)
+	}
 	paths, err := ResolveWorkspacePaths(s.Roots, plan.Kind, plan.Slug)
 	if err != nil {
 		return nil, err
@@ -1040,6 +1076,9 @@ func (s WorkspaceMoveService) acquireRestoreGuard(ctx context.Context, plan, arc
 }
 
 func (s WorkspaceMoveService) acquireExistingRestoreGuard(ctx context.Context, plan WorkspaceArchivePlan) (*workspaceRestoreGuard, error) {
+	if plan.Placement != nil {
+		return s.acquirePlacementRestoreGuard(ctx, plan, WorkspaceArchivePlan{}, WorkspaceArchiveManifest{}, true)
+	}
 	paths, err := ResolveWorkspacePaths(s.Roots, plan.Kind, plan.Slug)
 	if err != nil {
 		return nil, err
@@ -1113,13 +1152,13 @@ func (s WorkspaceMoveService) moveRestorePayload(ctx context.Context, plan Works
 	if err := guard.verify(); err != nil {
 		return err
 	}
-	paths, err := ResolveWorkspacePaths(s.Roots, plan.Kind, plan.Slug)
+	paths, err := ResolveWorkspacePlanPaths(s.Roots, plan)
 	if err != nil {
 		return err
 	}
 	payloadName := path.Base(paths.Mapping.ArchivePayloadPath)
 	activeName := path.Base(paths.Mapping.ActiveRelativePath)
-	if err := verifyNamedDirectoryIdentity(guard.containerFD(), payloadName, plan.Source.Identity); err != nil {
+	if err := verifyNamedDirectoryIdentity(guard.sourceChain.ParentFD(), payloadName, plan.Source.Identity); err != nil {
 		return fmt.Errorf("archived source changed before restore rename: %w", err)
 	}
 	present, err := namePresentNoFollow(guard.destinationChain.ParentFD(), activeName)
@@ -1129,7 +1168,7 @@ func (s WorkspaceMoveService) moveRestorePayload(ctx context.Context, plan Works
 	if present {
 		return fmt.Errorf("active restore destination exists; refusing overwrite")
 	}
-	inventory, err := InventoryMappedSource(ctx, s.Roots, WorkspaceOperationRestore, plan.Kind, plan.Slug)
+	inventory, err := inventoryRetainedSchema(ctx, s.Roots, plan.Source.Path, NoFollowInventorySchemaVersion)
 	if err != nil || !reflect.DeepEqual(inventory, plan.Inventory) {
 		if err != nil {
 			return fmt.Errorf("recheck archived restore inventory: %w", err)
@@ -1137,6 +1176,9 @@ func (s WorkspaceMoveService) moveRestorePayload(ctx context.Context, plan Works
 		return fmt.Errorf("archived restore inventory changed after durable intent")
 	}
 	catalog, err := s.planCatalogRebinds(ctx, paths.ArchivePayload, paths.Active)
+	if plan.Placement != nil {
+		catalog, err = s.planPlacementCatalog(ctx, paths.ArchivePayload, paths.Active)
+	}
 	if err != nil {
 		return err
 	}
@@ -1149,7 +1191,7 @@ func (s WorkspaceMoveService) moveRestorePayload(ctx context.Context, plan Works
 	if err := guard.verify(); err != nil {
 		return err
 	}
-	if err := verifyNamedDirectoryIdentity(guard.containerFD(), payloadName, plan.Source.Identity); err != nil {
+	if err := verifyNamedDirectoryIdentity(guard.sourceChain.ParentFD(), payloadName, plan.Source.Identity); err != nil {
 		return fmt.Errorf("archived source changed immediately before restore rename: %w", err)
 	}
 	if present, err := namePresentNoFollow(guard.destinationChain.ParentFD(), activeName); err != nil || present {
@@ -1158,13 +1200,13 @@ func (s WorkspaceMoveService) moveRestorePayload(ctx context.Context, plan Works
 		}
 		return fmt.Errorf("active restore destination appeared before rename; refusing overwrite")
 	}
-	if err := verifyWorkspaceRenameMounts(guard.containerFD(), payloadName, guard.destinationChain.ParentFD()); err != nil {
+	if err := verifyWorkspaceRenameMounts(guard.sourceChain.ParentFD(), payloadName, guard.destinationChain.ParentFD()); err != nil {
 		return err
 	}
-	if err := renameNoReplaceAt(guard.containerFD(), payloadName, guard.destinationChain.ParentFD(), activeName); err != nil {
+	if err := renameNoReplaceAt(guard.sourceChain.ParentFD(), payloadName, guard.destinationChain.ParentFD(), activeName); err != nil {
 		return fmt.Errorf("atomic same-filesystem restore rename: %w", err)
 	}
-	if err := unix.Fsync(guard.containerFD()); err != nil {
+	if err := unix.Fsync(guard.sourceChain.ParentFD()); err != nil {
 		return fmt.Errorf("sync archive container after restore rename: %w", err)
 	}
 	if err := unix.Fsync(guard.destinationChain.ParentFD()); err != nil {
@@ -1181,6 +1223,11 @@ func (s WorkspaceMoveService) buildRestoredManifest(ctx context.Context, archive
 		return WorkspaceArchiveManifest{}, fmt.Errorf("restored manifest requires durable payload-moved time")
 	}
 	manifest := archived
+	if plan.Placement != nil {
+		manifest.SchemaVersion = WorkspaceArchiveManifestSchemaForPlan(plan)
+		ref := plan.Source.Path
+		manifest.RestoredFromPath = &ref
+	}
 	manifest.LifecycleState = WorkspaceLifecycleActive
 	manifest.RestoreOperationID = restoreOperation.OperationID
 	manifest.RestorePlanDigest = restoreOperation.PlanDigest
@@ -1201,6 +1248,9 @@ func (s WorkspaceMoveService) buildRestoredManifest(ctx context.Context, archive
 }
 
 func (s WorkspaceMoveService) publishRestoredManifest(ctx context.Context, plan, archivePlan WorkspaceArchivePlan, archived, restored WorkspaceArchiveManifest, guard *workspaceRestoreGuard) error {
+	if plan.Placement != nil {
+		return s.publishPlacementRestore(ctx, plan, archivePlan, archived, restored, guard)
+	}
 	if err := guard.verify(); err != nil {
 		return err
 	}
@@ -1353,6 +1403,7 @@ func journalRestoreProjectionInput(plan WorkspaceArchivePlan, archived, restored
 		}
 	}
 	return storagecatalog.WorkspaceRestoreProjectionInput{
+		Observations:              catalogObservationInput(plan),
 		ArchiveOperationID:        plan.ArchiveOperationID,
 		OperationID:               plan.OperationID,
 		PlanDigest:                plan.PlanDigest,
@@ -1388,7 +1439,8 @@ func journalRestoreProjectionInput(plan WorkspaceArchivePlan, archived, restored
 
 func eventForRestore(operation WorkspaceArchiveOperation, at time.Time) WorkspaceLifecycleEvent {
 	return WorkspaceLifecycleEvent{
-		SchemaVersion:   WorkspaceLifecycleEventSchemaVersion,
+		BoxID:           operation.BoxID,
+		SchemaVersion:   workspaceEventSchema(operation),
 		EventID:         deterministicArchiveEventID(operation.OperationID),
 		EventKind:       WorkspaceLifecycleEventKind,
 		OperationID:     operation.OperationID,

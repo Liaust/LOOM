@@ -252,6 +252,7 @@ func scanScheduleFire(scanner rowScanner) (ScheduleFire, error) {
 	out.CompletedAt = timePtr(completedAt)
 	out.FailedAt = timePtr(failedAt)
 	out.MetadataJSON = jsonOrDefault(metadata)
+	out.LatenessNote = out.LatenessDescription()
 	return out, nil
 }
 

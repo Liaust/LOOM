@@ -78,6 +78,26 @@ func newProjectRestoreApplyEnvironment(t *testing.T) (projectArchivePlanEnvironm
 	return env, plan, planner
 }
 
+func TestProjectPhysicalRestoreV2ReceiptCompletesProjectState(t *testing.T) {
+	env, archived, planner := newProjectRestorePlanEnvironment(t)
+	planner.NamedPlacement = true
+	plan, err := env.service.PlanProjectPhysicalRestore(context.Background(), projectRestorePlanRequest(), archived, projectRestorePlanInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.service.Now = planner.Now
+	result, err := env.service.ApplyProjectPhysicalRestore(context.Background(), plan.Request, plan, plan.PlanDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State == nil || result.State.Phase != projects.ProjectRestorePhaseComplete || result.Workspace == nil || result.Workspace.Manifest.SchemaVersion != WorkspaceArchiveManifestSchemaVersionV2 || result.Workspace.Manifest.RestoredFromPath == nil {
+		t.Fatal("v2 receipt did not complete the project restore")
+	}
+	if _, err = env.service.ApplyProjectPhysicalRestore(context.Background(), plan.Request, plan, plan.PlanDigest); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProjectPhysicalRestoreApplyAndReplay(t *testing.T) {
 	env, plan, _ := newProjectRestoreApplyEnvironment(t)
 	before := snapshotWorkspacePayload(t, plan.Workspace.Source.Path.AbsolutePath)

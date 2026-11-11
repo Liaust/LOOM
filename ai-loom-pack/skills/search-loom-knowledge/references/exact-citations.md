@@ -1,5 +1,10 @@
 # Exact Citation Recovery
 
+This reference is only for existing exact citations, historical evidence and
+recovery. For a known current file read its actual source directly, or use
+`loom notes read <file-id-or-exact-path>`; search only when discovery is needed.
+No passage tuple or Obsidian binding is required for that ordinary read.
+
 ## Notes version custody
 
 Use the complete search hit's `passage_followup` when present. Copy its object,
@@ -71,9 +76,16 @@ Source expansion has separate completeness: `sources_truncated=true` means the
 linked set was bounded; `incomplete_items>0` means some returned entries could
 not disclose a full receipt. An unavailable item preserves its explicit reason,
 not fabricated source detail. Complete disclosure requires both false/zero,
-regardless of the parent's own truncation. CLI default/maximum is 16 source items;
+regardless of the parent's own truncation. Full expansion's CLI default/maximum is 16 source items;
 encoded limits are 16 KiB per item and 256 KiB per expansion. Original getter
 without `--sources` remains available when receipts are unnecessary.
+
+Routine receipt views retain locators, attribution and qualification, show at
+most four items and explicitly mark shortened fields. Stored receipts currently
+contain no excerpts; their absence is not a failed fresh source fetch.
+Add `--details --json --sources` for the full stored expansion when
+the task needs it; full detail still respects the same access and encoded limits.
+Neither output mode verifies that a live source still matches the stored receipt.
 
 Stored locator, version and receipt text may contain private information.
 Disclose only the detail needed to support the answer. Missing or unauthorized

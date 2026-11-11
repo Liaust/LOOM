@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -100,6 +101,9 @@ func TestNotesAdmissionUnequalInventorySweepPostgres(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
+					if result.SourceGeneration == "" || result.MoreWork != (result.InventoryMoreWork || result.PriorityMoreWork) || result.PriorityApplied > result.Applied {
+						t.Fatalf("admission work classification: %+v", result)
+					}
 					if cursor.StorageDone && result.CatalogObserved != 0 || cursor.SyncedDone && result.SyncedObserved != 0 {
 						t.Fatal("finished inventory restarted before sweep completion")
 					}
@@ -108,7 +112,7 @@ func TestNotesAdmissionUnequalInventorySweepPostgres(t *testing.T) {
 					// next query; replay still preserves the full inventory position.
 					replayCursor, resultCursor := replay.Cursor, result.Cursor
 					replayCursor.PriorityAfter, resultCursor.PriorityAfter = [3]string{}, [3]string{}
-					if err != nil || replayCursor != resultCursor {
+					if err != nil || !reflect.DeepEqual(replayCursor, resultCursor) {
 						t.Fatalf("page replay changed checkpoint: %+v %v", replay, err)
 					}
 					catalogSeen += result.CatalogObserved
@@ -129,11 +133,393 @@ func TestNotesAdmissionUnequalInventorySweepPostgres(t *testing.T) {
 						t.Fatal("admission never returned to idle")
 					}
 				}
-				if catalogSeen != catalogCount || syncedSeen != 3 || pages != max(catalogCount, 3) || cursor != (AdmissionCursor{}) {
+				if catalogSeen != catalogCount || syncedSeen != 3 || pages != max(catalogCount, 3) || !reflect.DeepEqual(cursor, AdmissionCursor{}) {
 					t.Fatalf("incorrect sweep: catalog=%d synced=%d pages=%d cursor=%+v", catalogSeen, syncedSeen, pages, cursor)
 				}
 			}
 		})
+	}
+}
+
+func TestNotesScopedAdmissionAndCatalogPreferencePostgres(t *testing.T) {
+	s, roots := boxSyncedFixture(t)
+	root := roots[0]
+	size := int64(1)
+	var liveID string
+	for _, state := range []string{storagecatalog.AvailabilityStateAvailable, storagecatalog.AvailabilityStateArchived} {
+		entry, err := storagecatalog.NewService(s.store.db).RegisterEntry(t.Context(), storagecatalog.RegisterEntryInput{
+			StorageClass: storagecatalog.StorageClassObjectBlob, SourceArea: storagecatalog.SourceAreaNotes,
+			OriginNodeID: *root.NodeID, OriginNodeKey: root.NodeKey, WatchedRootKey: root.BackendRootKey,
+			LogicalPath: "catalog.md", OriginalSourcePath: "catalog.md", SizeBytes: &size,
+			FileClass: "markdown", MimeType: "text/markdown", ChecksumAlgorithm: "sha256",
+			ChecksumHex: strings.TrimPrefix(hashArtifactValue(state), "sha256:"), AvailabilityState: state,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state == storagecatalog.AvailabilityStateAvailable {
+			liveID = entry.StorageEntryID
+		}
+	}
+	after := ""
+	for page := range 2 {
+		entries, next, _, err := s.store.notesCatalogRootPage(t.Context(), root, after, 1)
+		if err != nil || next <= after {
+			t.Fatalf("scoped physical cursor lost current preference: %+v %q %v", entries, next, err)
+		}
+		if page == 0 && (len(entries) != 1 || entries[0].StorageEntryID != liveID) || page == 1 && len(entries) != 0 {
+			t.Fatalf("preferred identity must be admitted once, not replayed for historical IDs: %+v", entries)
+		}
+		after = next
+	}
+	cursor := AdmissionCursor{Incremental: true}
+	var done AdmissionResult
+	for range 12 {
+		result, err := s.AdmitRegisteredNotesOnce(t.Context(), cursor, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cursor, done = result.Cursor, result
+		if !result.InventoryMoreWork {
+			break
+		}
+	}
+	if done.InventoryMoreWork || len(cursor.RootCursors) != 3 {
+		t.Fatalf("scoped admission never completed: %+v", cursor)
+	}
+	idle, err := s.AdmitRegisteredNotesOnce(t.Context(), cursor, 1)
+	if err != nil || idle.CatalogObserved != 0 || idle.SyncedObserved != 0 || idle.InventoryMoreWork {
+		t.Fatalf("unchanged roots restarted inventory: %+v %v", idle, err)
+	}
+	before := root.UpdatedAt
+	replayed, err := s.store.UpsertSourceRoot(t.Context(), root)
+	if err != nil || !replayed.UpdatedAt.Equal(before) {
+		t.Fatalf("unchanged source root was rewritten: %+v %v", replayed, err)
+	}
+}
+
+func TestNotesInteractiveAdmissionYieldsToReadyPipelinePostgres(t *testing.T) {
+	s, _ := boxSyncedFixture(t)
+	result, err := s.AdmitRegisteredNotesInteractiveOnce(t.Context(), AdmissionCursor{Incremental: true}, 1)
+	if err != nil || !result.InventoryDeferred || result.CatalogObserved != 0 || result.SyncedObserved != 0 || result.PriorityApplied != 1 {
+		t.Fatalf("ready new text waited for broad inventory: %+v %v", result, err)
+	}
+	now := time.Now().UTC()
+	next, err := s.NextPipelineWorkAt(t.Context(), PipelineExecutionCoordinator, now)
+	if err != nil || next == nil || next.After(now) {
+		t.Fatalf("admitted text lost durable readiness: %v %v", next, err)
+	}
+}
+
+func TestNotesInteractiveInventoryUsesAdaptiveBatchPostgres(t *testing.T) {
+	s, roots := boxSyncedFixture(t)
+	ctx := t.Context()
+	for i := range roots {
+		roots[i].Metadata = mustJSON(t, map[string]any{"box_id": "sync-fixture", "registration_metadata": map[string]any{"knowledge_source": map[string]any{"include": []string{"unselected.md"}}}})
+		if _, err := s.store.UpsertSourceRoot(ctx, roots[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	size := int64(1)
+	for i := range 40 {
+		name := fmt.Sprintf("excluded-%02d.md", i)
+		if _, err := storagecatalog.NewService(s.store.db).RegisterEntry(ctx, storagecatalog.RegisterEntryInput{
+			StorageClass: storagecatalog.StorageClassObjectBlob, SourceArea: storagecatalog.SourceAreaNotes,
+			OriginNodeID: *roots[0].NodeID, OriginNodeKey: roots[0].NodeKey, WatchedRootKey: roots[0].BackendRootKey,
+			LogicalPath: name, OriginalSourcePath: name, FileClass: "markdown", MimeType: "text/markdown", SizeBytes: &size,
+			ChecksumAlgorithm: "sha256", ChecksumHex: strings.TrimPrefix(hashArtifactValue(name), "sha256:"),
+			AvailabilityState: storagecatalog.AvailabilityStateAvailable,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	boundary, err := s.AdmitRegisteredNotesInteractiveOnce(ctx, AdmissionCursor{Incremental: true}, 25)
+	if err != nil || boundary.InventoryDeferred {
+		t.Fatalf("excluded priority boundary: %+v %v", boundary, err)
+	}
+	page, err := s.AdmitRegisteredNotesInteractiveOnce(ctx, boundary.Cursor, 25)
+	if err != nil || page.CatalogObserved != 25 || page.Applied != 0 || !page.InventoryMoreWork {
+		t.Fatalf("adaptive inventory batch was throttled or bypassed policy: %+v %v", page, err)
+	}
+	cursor := page.Cursor
+	for range 6 {
+		page, err = s.AdmitRegisteredNotesInteractiveOnce(ctx, cursor, 25)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cursor = page.Cursor
+		if !page.InventoryMoreWork {
+			break
+		}
+	}
+	if page.InventoryMoreWork {
+		t.Fatal("bounded inventory did not finish")
+	}
+	idle, err := s.AdmitRegisteredNotesInteractiveOnce(ctx, cursor, 25)
+	if err != nil || idle.MoreWork || idle.CatalogObserved != 0 || idle.SyncedObserved != 0 {
+		t.Fatalf("completed inventory did not rest: %+v %v", idle, err)
+	}
+}
+
+func TestNotesSyncedOwnerIndexedCandidatesPreserveFallbacksPostgres(t *testing.T) {
+	s, roots := boxSyncedFixture(t)
+	root := roots[0]
+	entries, err := s.store.listSyncedNotesPage(t.Context(), root.NotesSourceRootID, [3]string{}, 10)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("fixture: %+v %v", entries, err)
+	}
+	entry := entries[0]
+	object := KnowledgeObject{NotesSourceRootID: root.NotesSourceRootID, RelativePath: "source.md",
+		SourceNodeID: root.NodeID, SourceNodeKey: root.NodeKey}
+	uri := "watched-root://" + root.BackendRootKey + "/source.md"
+	for _, variant := range []string{"version", "padded", "file", "metadata", "mismatch"} {
+		t.Run(variant, func(t *testing.T) {
+			tx, err := s.store.db.BeginTx(t.Context(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			var versionPath any = uri
+			var filePath any = uri
+			switch variant {
+			case "padded":
+				versionPath = "  " + uri + "  "
+			case "file":
+				versionPath = nil
+			case "metadata":
+				versionPath, filePath = nil, nil
+			case "mismatch":
+				versionPath = "watched-root://other/source.md"
+			}
+			if _, err := tx.ExecContext(t.Context(), `UPDATE objects.object_versions SET source_path=$2 WHERE object_version_id=$1`, entry.ObjectVersionID, versionPath); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tx.ExecContext(t.Context(), `UPDATE files.file_metadata SET source_path=$2 WHERE object_id=$1`, entry.ObjectID, filePath); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tx.ExecContext(t.Context(), `UPDATE objects.objects SET metadata=jsonb_set(metadata,'{source_path}',to_jsonb($2::text)) WHERE object_id=$1`, entry.ObjectID, uri); err != nil {
+				t.Fatal(err)
+			}
+			owned, err := notesSourceHasSyncedOwner(t.Context(), tx, object)
+			if err != nil || owned != (variant != "mismatch") {
+				t.Fatalf("ownership changed for %s: %t %v", variant, owned, err)
+			}
+		})
+	}
+}
+
+func TestNotesInteractiveAdmissionRecentArrivalBypassesParkedPriorityPostgres(t *testing.T) {
+	s, roots := boxSyncedFixture(t)
+	ctx := t.Context()
+	for i := range 2 {
+		roots[i].Metadata = mustJSON(t, map[string]any{"box_id": "sync-fixture", "registration_metadata": map[string]any{"knowledge_source": map[string]any{"include": []string{"other.md"}}}})
+		if _, err := s.store.UpsertSourceRoot(ctx, roots[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.store.db.Exec(`UPDATE objects.object_versions SET created_at='2020-01-01'
+	 WHERE source_path<>$1`, "watched-root://"+roots[2].BackendRootKey+"/source.md"); err != nil {
+		t.Fatal(err)
+	}
+	cursor := AdmissionCursor{Incremental: true, PriorityAfter: [3]string{"zzzz", "", ""}}
+	result, err := s.AdmitRegisteredNotesInteractiveOnce(ctx, cursor, 1)
+	if err != nil || !result.InventoryDeferred || result.PriorityApplied != 1 || result.Cursor.PriorityAfter != cursor.PriorityAfter {
+		t.Fatalf("fresh arrival waited behind historical cursor: %+v %v", result, err)
+	}
+	objects, err := s.store.ListKnowledgeObjects(ctx, KnowledgeObjectFilter{})
+	if err != nil || len(objects) != 1 || objects[0].NotesSourceRootID != roots[2].NotesSourceRootID {
+		t.Fatalf("recent admission bypassed source policy: %+v %v", objects, err)
+	}
+}
+
+func TestNotesInteractiveAdmissionCheckpointsExcludedHeadBeforeScopedInventoryPostgres(t *testing.T) {
+	s, roots := boxSyncedFixture(t)
+	ctx := t.Context()
+	root := roots[0]
+	entries, err := s.store.listSyncedNotesPage(ctx, root.NotesSourceRootID, [3]string{}, 10)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("fixture: %+v %v", entries, err)
+	}
+	old := entries[0]
+	root.Metadata = mustJSON(t, map[string]any{"box_id": "sync-fixture", "registration_metadata": map[string]any{"knowledge_source": map[string]any{"include": []string{"other.md"}}}})
+	if _, err := s.store.UpsertSourceRoot(ctx, root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.store.db.Exec(`UPDATE objects.object_versions SET created_at='2020-01-01'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.store.db.Exec(`UPDATE objects.object_versions SET created_at='2021-01-01' WHERE object_version_id=$1`, old.ObjectVersionID); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 7 {
+		objectID, versionID := ids.NewObjectID(), ids.NewObjectVersionID()
+		sourcePath := fmt.Sprintf("watched-root://%s/excluded-%d.md", root.BackendRootKey, i)
+		statements := []struct {
+			query string
+			args  []any
+		}{
+			{`INSERT INTO objects.objects(object_id,object_type,name,home_scope_id,state_class,status)
+			 SELECT $1,object_type,name,home_scope_id,state_class,status FROM objects.objects WHERE object_id=$2`, []any{objectID, old.ObjectID}},
+			{`INSERT INTO objects.object_versions(object_version_id,object_id,version_number,blob_id,content_hash,source_node_id,source_path,size_bytes,mime_type,status,metadata,created_at)
+			 SELECT $1,$2,1,blob_id,content_hash,source_node_id,$3,size_bytes,mime_type,status,metadata,'2021-01-01'
+			 FROM objects.object_versions WHERE object_version_id=$4`, []any{versionID, objectID, sourcePath, old.ObjectVersionID}},
+			{`INSERT INTO files.file_metadata(object_id,logical_name,mime_type,source_node_id,source_path,latest_version_id,index_policy)
+			 SELECT $1,logical_name,mime_type,source_node_id,$2,$3,index_policy FROM files.file_metadata WHERE object_id=$4`, []any{objectID, sourcePath, versionID, old.ObjectID}},
+			{`INSERT INTO objects.object_scope_links(object_scope_link_id,object_id,scope_id,relationship_type)
+			 SELECT $1,$2,home_scope_id,'primary' FROM objects.objects WHERE object_id=$2`, []any{ids.NewObjectScopeLinkID(), objectID}},
+			{`INSERT INTO sync.replicas(replica_id,replicated_kind,replicated_id,source_node_id,replica_node_id,replica_mode,freshness_state,storage_ref)
+			 SELECT $1,replicated_kind,$2,source_node_id,replica_node_id,replica_mode,freshness_state,storage_ref
+			 FROM sync.replicas WHERE replica_id=$3`, []any{ids.NewReplicaID(), versionID, old.ReplicaID}},
+		}
+		for _, statement := range statements {
+			if _, err := s.store.db.Exec(statement.query, statement.args...); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	cursor := AdmissionCursor{Incremental: true, PriorityAfter: [3]string{"zzzz", "", ""}}
+	boundary, err := s.AdmitRegisteredNotesInteractiveOnce(ctx, cursor, 25)
+	if err != nil || boundary.PrioritySyncedObserved != 8 || boundary.Skipped != 8 || boundary.Applied != 0 ||
+		boundary.CatalogObserved != 0 || boundary.SyncedObserved != 0 || boundary.InventoryDeferred || !boundary.InventoryMoreWork || !boundary.MoreWork {
+		t.Fatalf("configuration/head phase did not yield before inventory: %+v %v", boundary, err)
+	}
+	if boundary.Cursor.RootConfigRevision == "" || boundary.Cursor.NextRootReconcileAt.IsZero() || boundary.Cursor.PriorityAfter != cursor.PriorityAfter {
+		t.Fatal("phase boundary lost authority or changed fair cursor", boundary.Cursor)
+	}
+	for _, state := range boundary.Cursor.RootCursors {
+		if state.StorageAfter != "" || state.SyncedAfter != [3]string{} || state.StorageDone || state.SyncedDone {
+			t.Fatal("phase boundary acknowledged unobserved inventory", state)
+		}
+	}
+	for _, key := range []string{"recent_priority_selection", "recent_priority_reconciliation"} {
+		if elapsed, ok := boundary.ElapsedMS[key]; !ok || elapsed < 0 {
+			t.Fatal("successful head phase lacks timing", boundary.ElapsedMS)
+		}
+	}
+	if _, ok := boundary.ElapsedMS["priority_selection"]; ok {
+		t.Fatal("configuration phase also ran fair-priority selection")
+	}
+	admitted := false
+	for range len(roots) + 1 {
+		raw, err := json.Marshal(boundary.Cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cursor = AdmissionCursor{}
+		if err := json.Unmarshal(raw, &cursor); err != nil {
+			t.Fatal(err)
+		}
+		boundary, err = s.AdmitRegisteredNotesInteractiveOnce(ctx, cursor, 25)
+		if err != nil || boundary.PrioritySyncedObserved != 0 || boundary.Cursor.RootConfigRevision != cursor.RootConfigRevision {
+			t.Fatalf("scoped continuation replayed the head or lost authority: %+v %v", boundary, err)
+		}
+		if _, ok := boundary.ElapsedMS["recent_priority_selection"]; ok {
+			t.Fatal("unchanged authority selected the recent head again")
+		}
+		if boundary.Applied > 0 {
+			admitted = true
+			break
+		}
+	}
+	objects, err := s.store.ListKnowledgeObjects(ctx, KnowledgeObjectFilter{})
+	if err != nil || !admitted || len(objects) == 0 {
+		t.Fatalf("older eligible source did not receive scoped service: %+v %v", boundary, err)
+	}
+	for _, object := range objects {
+		if object.NotesSourceRootID == root.NotesSourceRootID {
+			t.Fatal("excluded head was admitted", object.KnowledgeObjectID)
+		}
+	}
+}
+
+func TestNotesAdmissionSourceGeneration(t *testing.T) {
+	node, project := "node", "project"
+	root := SourceRoot{NotesSourceRootID: "root", RootKind: RootKindProjectMaterial, NodeID: &node,
+		NodeKey: "main", ProjectID: &project, BackendRootKey: "backend", SourcePath: "/source",
+		RootRelativePath: "notes", Status: SourceRootStatusActive,
+		Metadata: json.RawMessage(`{"registration_metadata":{"knowledge_source":{"include":["**/*.md"],"enabled":true}}}`)}
+	other := root
+	other.NotesSourceRootID = "other"
+	want, err := admissionSourceGeneration([]SourceRoot{root, other})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root.CreatedAt, root.UpdatedAt, root.DisplayName = time.Now(), time.Now(), "new label"
+	root.LifecycleCounts = &NotesLifecycleCounts{}
+	root.Metadata = json.RawMessage(`{"observation":"changed","registration_metadata":{"report_id":"new","knowledge_source":{"enabled":true,"include":["**/*.md"]}}}`)
+	got, err := admissionSourceGeneration([]SourceRoot{other, root})
+	if err != nil || got != want {
+		t.Fatal("observations/order changed import generation", got, want, err)
+	}
+	for _, mutate := range []func(*SourceRoot){
+		func(r *SourceRoot) { r.SourcePath = "/moved" },
+		func(r *SourceRoot) { r.Status = SourceRootStatusDisabled },
+		func(r *SourceRoot) { r.BackendRootKey = "new" },
+		func(r *SourceRoot) { r.NodeKey = "other" },
+		func(r *SourceRoot) { r.ProjectID = nil },
+		func(r *SourceRoot) {
+			r.Metadata = json.RawMessage(`{"registration_metadata":{"knowledge_source":{"include":["**/*.pdf"]}}}`)
+		},
+	} {
+		changed := root
+		mutate(&changed)
+		got, err := admissionSourceGeneration([]SourceRoot{changed, other})
+		if err != nil || got == want {
+			t.Fatal("configuration change did not start an import", got, err)
+		}
+	}
+	got, err = admissionSourceGeneration([]SourceRoot{root})
+	if err != nil || got == want {
+		t.Fatal("source set change did not start an import", got, err)
+	}
+}
+
+func TestNotesAdmissionPriorityDetectsMetadataDriftPostgres(t *testing.T) {
+	s, roots := boxSyncedFixture(t)
+	entries, err := s.store.listSyncedNotesPage(t.Context(), "", [3]string{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.ReconcileKnowledgeObjects(t.Context(), KnowledgeObjectReconcileInput{SourceRoots: roots, SyncedObjects: entries}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.store.db.Exec(`UPDATE knowledge.notes_source_roots SET metadata=jsonb_set(metadata,
+	 '{registration_metadata,knowledge_source,source_hash}',to_jsonb('audit-successor'::text)) WHERE notes_source_root_id=$1`, roots[0].NotesSourceRootID); err != nil {
+		t.Fatal(err)
+	}
+	priority, err := s.store.listSyncedNotesPageFiltered(t.Context(), "", [3]string{}, 10, true)
+	if err != nil || len(priority) != 1 || priority[0].NotesSourceRootID != roots[0].NotesSourceRootID {
+		t.Fatalf("unchanged file metadata drift was not priority: %+v %v", priority, err)
+	}
+}
+
+func TestNotesAdmissionPriorityNormalizesAbsentDeclarationPostgres(t *testing.T) {
+	s, roots := boxSyncedFixture(t)
+	ctx := t.Context()
+	roots[0].Metadata = mustJSON(t, map[string]any{"box_id": "sync-fixture"})
+	roots[1].Metadata = mustJSON(t, map[string]any{"box_id": "sync-fixture", "registration_metadata": map[string]any{"knowledge_source": nil}})
+	for i := range 2 {
+		root, err := s.store.UpsertSourceRoot(ctx, roots[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		roots[i] = root
+	}
+	entries, err := s.store.listSyncedNotesPage(ctx, "", [3]string{}, 10)
+	if err != nil || len(entries) != 3 {
+		t.Fatalf("fixture: %+v %v", entries, err)
+	}
+	if _, err := s.ReconcileKnowledgeObjects(ctx, KnowledgeObjectReconcileInput{SourceRoots: roots, SyncedObjects: entries}); err != nil {
+		t.Fatal(err)
+	}
+	// Earlier metadata may omit the member; current writers encode JSON null.
+	if _, err := s.store.db.Exec(`UPDATE knowledge.knowledge_objects
+	 SET metadata=metadata #- '{source_root,knowledge_source}' WHERE notes_source_root_id=$1`, roots[1].NotesSourceRootID); err != nil {
+		t.Fatal(err)
+	}
+	priority, err := s.store.listSyncedNotesPageFiltered(ctx, "", [3]string{}, 10, true)
+	if err != nil || len(priority) != 0 {
+		t.Fatalf("unchanged absent/null declarations remained priority work: %+v %v", priority, err)
 	}
 }
 
@@ -455,6 +841,10 @@ func TestBoxSyncedCurrentSourceSelectionPostgres(t *testing.T) {
 		if want == 1 && (selected[0].ObjectID != newObject || selected[0].ObjectVersionID != newVersion) {
 			t.Fatal("retained older source displaced current version")
 		}
+		exact, err := s.store.listSyncedNotesVersions(ctx, roots[0].NotesSourceRootID, [3]string{}, 0, false, false, []string{old.ObjectVersionID, newVersion})
+		if err != nil || len(exact) != want || want == 1 && exact[0].ObjectVersionID != newVersion {
+			t.Fatalf("exact admission changed current/private source selection: %+v %v", exact, err)
+		}
 	}
 	assertSelection(1)
 	var preferredReplica string
@@ -508,6 +898,34 @@ func TestBoxSyncedCurrentSourceSelectionPostgres(t *testing.T) {
 			assertSelection(1)
 		})
 	}
+	t.Run("null-source-node-identity", func(t *testing.T) {
+		query := `SELECT ` + notesSyncedCurrentSourceSQL("scope", "object", "version", "file") + `
+		 FROM objects.objects object JOIN files.file_metadata file USING(object_id)
+		 JOIN objects.object_versions version ON version.object_version_id=file.latest_version_id
+		 JOIN scopes.scopes scope ON scope.scope_id=object.home_scope_id WHERE object.object_id=$1`
+		check := func(want bool) {
+			t.Helper()
+			var allowed bool
+			if err := db.QueryRow(query, old.ObjectID).Scan(&allowed); err != nil || allowed != want {
+				t.Fatalf("null-safe source identity allowed=%t want=%t: %v", allowed, want, err)
+			}
+		}
+		if _, err := db.Exec(`UPDATE objects.object_versions SET source_node_id=NULL WHERE object_version_id=$1`, newVersion); err != nil {
+			t.Fatal(err)
+		}
+		check(false) // File metadata still proves the same newer source owner.
+		if _, err := db.Exec(`UPDATE files.file_metadata SET source_node_id=NULL WHERE object_id=$1`, newObject); err != nil {
+			t.Fatal(err)
+		}
+		check(true) // Two unknown fields do not identify this known source owner.
+		if _, err := db.Exec(`UPDATE files.file_metadata SET source_node_id=$2 WHERE object_id=$1`, newObject, old.SourceNodeID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE objects.object_versions SET source_node_id=$2 WHERE object_version_id=$1`, newVersion, old.SourceNodeID); err != nil {
+			t.Fatal(err)
+		}
+		assertSelection(1)
+	})
 	var visible bool
 	if err := db.QueryRow(`SELECT `+notesKnowledgeVisibilitySQL("o", false)+` FROM knowledge.knowledge_objects o WHERE knowledge_object_id=$1`, oldKnowledge.KnowledgeObjectID).Scan(&visible); err != nil || visible {
 		t.Fatalf("superseded source remains readable before admission: %t %v", visible, err)

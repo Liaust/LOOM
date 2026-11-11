@@ -16,7 +16,8 @@ import (
 )
 
 const (
-	ConfigSchemaVersion = "watched_root.config.v0.2"
+	ConfigSchemaVersion            = "watched_root.config.v0.2"
+	IndependentConfigSchemaVersion = "watched_root.config.v0.3"
 
 	WatchBackendNone = "none"
 	WatchBackendAuto = "auto"
@@ -91,21 +92,23 @@ var defaultExcludePatterns = append(filepolicy.DefaultExcludePatterns(),
 )
 
 type RootConfig struct {
-	SchemaVersion    string         `json:"schema_version"`
-	RootKey          string         `json:"root_key"`
-	DisplayName      string         `json:"display_name"`
-	SafeRootKey      string         `json:"safe_root_key"`
-	RootRelativePath string         `json:"root_relative_path"`
-	Include          []string       `json:"include"`
-	Exclude          []string       `json:"exclude"`
-	IgnorePolicy     IgnorePolicy   `json:"ignore_policy,omitempty"`
-	Watch            WatchConfig    `json:"watch"`
-	Scan             ScanConfig     `json:"scan"`
-	BackupPolicy     BackupPolicy   `json:"backup_policy"`
-	SyncPolicy       SyncPolicy     `json:"sync_policy"`
-	IndexPolicy      IndexPolicy    `json:"index_policy"`
-	DeletePolicy     DeletePolicy   `json:"delete_policy"`
-	FidelityPolicy   FidelityPolicy `json:"fidelity_policy"`
+	SchemaVersion      string                   `json:"schema_version"`
+	RootKey            string                   `json:"root_key"`
+	DisplayName        string                   `json:"display_name"`
+	SafeRootKey        string                   `json:"safe_root_key"`
+	RootRelativePath   string                   `json:"root_relative_path"`
+	Include            []string                 `json:"include"`
+	Exclude            []string                 `json:"exclude"`
+	IgnorePolicy       IgnorePolicy             `json:"ignore_policy,omitempty"`
+	Watch              WatchConfig              `json:"watch"`
+	Scan               ScanConfig               `json:"scan"`
+	BackupPolicy       BackupPolicy             `json:"backup_policy"`
+	SyncPolicy         SyncPolicy               `json:"sync_policy"`
+	IndexPolicy        IndexPolicy              `json:"index_policy"`
+	DeletePolicy       DeletePolicy             `json:"delete_policy"`
+	FidelityPolicy     FidelityPolicy           `json:"fidelity_policy"`
+	ConsumerSelections *ConsumerSelections      `json:"consumer_selections,omitempty"`
+	Files              *filepolicy.FolderPolicy `json:"files,omitempty"`
 }
 
 type IgnorePolicy struct {
@@ -176,14 +179,15 @@ type FidelityPolicy struct {
 }
 
 type ValidatedRoot struct {
-	Config           RootConfig                   `json:"config"`
-	SafeRoot         filesystemconnector.SafeRoot `json:"safe_root"`
-	SafeRootPath     string                       `json:"safe_root_path"`
-	RootPath         string                       `json:"root_path"`
-	RootRelativePath string                       `json:"root_relative_path"`
-	RootReachable    bool                         `json:"root_reachable"`
-	ConfigHash       string                       `json:"config_hash"`
-	PolicyResolver   *filepolicy.Resolver         `json:"-"`
+	Config                RootConfig                   `json:"config"`
+	SafeRoot              filesystemconnector.SafeRoot `json:"safe_root"`
+	SafeRootPath          string                       `json:"safe_root_path"`
+	RootPath              string                       `json:"root_path"`
+	RootRelativePath      string                       `json:"root_relative_path"`
+	RootReachable         bool                         `json:"root_reachable"`
+	ConfigHash            string                       `json:"config_hash"`
+	ObservationConfigHash string                       `json:"-"`
+	PolicyResolver        *filepolicy.Resolver         `json:"-"`
 }
 
 func NormalizeRootConfig(config RootConfig) RootConfig {
@@ -309,22 +313,28 @@ func NormalizeRootConfig(config RootConfig) RootConfig {
 	if config.DeletePolicy.MassDeleteThresholdPercent <= 0 {
 		config.DeletePolicy.MassDeleteThresholdPercent = defaultMassDeletePercent
 	}
+	config.ConsumerSelections = normalizeConsumerSelections(config.ConsumerSelections)
+	if config.Files != nil {
+		if policy, err := filepolicy.NormalizeFolderPolicy(*config.Files); err == nil {
+			config.Files = &policy
+		}
+	}
 	return config
 }
 
 func ValidateRootConfig(config RootConfig, fsConfig filesystemconnector.Config) (ValidatedRoot, error) {
-	return validateRootConfig(config, fsConfig, true)
+	return validateRootConfig(config, fsConfig, true, true)
 }
 
 func ValidateRootConfigForRun(config RootConfig, fsConfig filesystemconnector.Config) (ValidatedRoot, error) {
-	return validateRootConfig(config, fsConfig, false)
+	return validateRootConfig(config, fsConfig, false, true)
 }
 
 func ValidatePortableRootConfig(config RootConfig) (RootConfig, error) {
 	rawConfig := config
 	config = NormalizeRootConfig(config)
-	if config.SchemaVersion != ConfigSchemaVersion {
-		return RootConfig{}, fmt.Errorf("unsupported watched-root config schema %q", config.SchemaVersion)
+	if err := validateConsumerConfig(config); err != nil {
+		return RootConfig{}, err
 	}
 	if config.RootKey == "" {
 		return RootConfig{}, errors.New("watched root root_key is required")
@@ -364,11 +374,11 @@ func ValidatePortableRootConfig(config RootConfig) (RootConfig, error) {
 	return config, nil
 }
 
-func validateRootConfig(config RootConfig, fsConfig filesystemconnector.Config, requireReachable bool) (ValidatedRoot, error) {
+func validateRootConfig(config RootConfig, fsConfig filesystemconnector.Config, requireReachable, discoverPolicy bool) (ValidatedRoot, error) {
 	rawConfig := config
 	config = NormalizeRootConfig(config)
-	if config.SchemaVersion != ConfigSchemaVersion {
-		return ValidatedRoot{}, fmt.Errorf("unsupported watched-root config schema %q", config.SchemaVersion)
+	if err := validateConsumerConfig(config); err != nil {
+		return ValidatedRoot{}, err
 	}
 	if config.RootKey == "" {
 		return ValidatedRoot{}, errors.New("watched root root_key is required")
@@ -452,7 +462,7 @@ func validateRootConfig(config RootConfig, fsConfig filesystemconnector.Config, 
 	}
 
 	var policyResolver *filepolicy.Resolver
-	if rootReachable && config.IgnorePolicy.Profile != "" {
+	if discoverPolicy && rootReachable && config.IgnorePolicy.Profile != "" {
 		profile, err := filepolicy.ParseProfile(config.IgnorePolicy.Profile)
 		if err != nil {
 			return ValidatedRoot{}, err

@@ -32,6 +32,29 @@ func TestJSONLCancellationPoisonsStream(t *testing.T) {
 		t.Fatal("cancelled stream reused")
 	}
 }
+
+func TestJSONLOperationRefusalPreservesStream(t *testing.T) {
+	var input strings.Builder
+	c := &JSONLClient{Input: &input, Output: strings.NewReader("{\"id\":1,\"result\":{\"status\":\"error\",\"code\":\"invalid_path\"}}\n{\"id\":2,\"result\":{\"status\":\"idle\"}}\n")}
+	var out struct{ Status string }
+	if err := c.Call(t.Context(), map[string]any{"method": "read.path"}, &out); err == nil || c.poisoned {
+		t.Fatal("operation refusal poisoned a matched reply stream", err)
+	}
+	if err := c.Call(t.Context(), map[string]any{"method": "changes.wait"}, &out); err != nil || out.Status != "idle" {
+		t.Fatal("following reply was not usable", out, err)
+	}
+}
+
+func TestJSONLInvalidReplyPoisonsStream(t *testing.T) {
+	for _, reply := range []string{"{\"id\":9,\"result\":{\"status\":\"error\"}}\n", "invalid\n"} {
+		var input strings.Builder
+		c := &JSONLClient{Input: &input, Output: strings.NewReader(reply)}
+		var out struct{ Status string }
+		if err := c.Call(t.Context(), map[string]any{"method": "status"}, &out); err == nil || !c.poisoned {
+			t.Fatal("invalid reply did not poison stream", err)
+		}
+	}
+}
 func TestNativeIPCBridgeToActualSource(t *testing.T) {
 	upstream := os.Getenv("LOOM_SYNC_UPSTREAM")
 	if upstream == "" {

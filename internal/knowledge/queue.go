@@ -65,6 +65,7 @@ type KnowledgeWorkFailure struct {
 }
 
 type KnowledgeIndexerRunInput struct {
+	PreferredRunID        string        `json:"preferred_run_id,omitempty"`
 	WorkerRunID           string        `json:"worker_run_id,omitempty"`
 	Limit                 int           `json:"limit,omitempty"`
 	LeaseDuration         time.Duration `json:"-"`
@@ -78,27 +79,28 @@ type KnowledgeIndexerRunInput struct {
 }
 
 type KnowledgeIndexerRunResult struct {
-	SchemaVersion         string `json:"schema_version"`
-	Status                string `json:"status"`
-	ReleasedExpired       int64  `json:"released_expired"`
-	Claimed               int64  `json:"claimed"`
-	Processed             int64  `json:"processed"`
-	SkippedUnsupported    int64  `json:"skipped_unsupported"`
-	Extracted             int64  `json:"extracted"`
-	MetadataOnly          int64  `json:"metadata_only"`
-	TooLarge              int64  `json:"too_large"`
-	PasswordRequired      int64  `json:"password_required"`
-	NoEmbeddedText        int64  `json:"no_embedded_text"`
-	SourceUnavailable     int64  `json:"source_unavailable"`
-	RetryScheduled        int64  `json:"retry_scheduled"`
-	FailedTerminal        int64  `json:"failed_terminal"`
-	TextBytesRead         int64  `json:"text_bytes_read"`
-	ChunksCreated         int64  `json:"chunks_created"`
-	LinksCreated          int64  `json:"links_created"`
-	StatusesWritten       int64  `json:"statuses_written"`
-	MoreWork              bool   `json:"more_work"`
-	LastPipelineStatusID  string `json:"last_pipeline_status_id,omitempty"`
-	LastKnowledgeObjectID string `json:"last_knowledge_object_id,omitempty"`
+	ElapsedMS             map[string]int64 `json:"elapsed_ms,omitempty"`
+	SchemaVersion         string           `json:"schema_version"`
+	Status                string           `json:"status"`
+	ReleasedExpired       int64            `json:"released_expired"`
+	Claimed               int64            `json:"claimed"`
+	Processed             int64            `json:"processed"`
+	SkippedUnsupported    int64            `json:"skipped_unsupported"`
+	Extracted             int64            `json:"extracted"`
+	MetadataOnly          int64            `json:"metadata_only"`
+	TooLarge              int64            `json:"too_large"`
+	PasswordRequired      int64            `json:"password_required"`
+	NoEmbeddedText        int64            `json:"no_embedded_text"`
+	SourceUnavailable     int64            `json:"source_unavailable"`
+	RetryScheduled        int64            `json:"retry_scheduled"`
+	FailedTerminal        int64            `json:"failed_terminal"`
+	TextBytesRead         int64            `json:"text_bytes_read"`
+	ChunksCreated         int64            `json:"chunks_created"`
+	LinksCreated          int64            `json:"links_created"`
+	StatusesWritten       int64            `json:"statuses_written"`
+	MoreWork              bool             `json:"more_work"`
+	LastPipelineStatusID  string           `json:"last_pipeline_status_id,omitempty"`
+	LastKnowledgeObjectID string           `json:"last_knowledge_object_id,omitempty"`
 }
 
 func (s *Service) RunKnowledgeIndexerOnce(ctx context.Context, input KnowledgeIndexerRunInput) (KnowledgeIndexerRunResult, error) {
@@ -108,7 +110,8 @@ func (s *Service) RunKnowledgeIndexerOnce(ctx context.Context, input KnowledgeIn
 		now = s.currentTime()
 	}
 	coordinated, err := s.RunPipelineCoordinatorOnce(ctx, PipelineCoordinatorRunInput{
-		WorkerRunID: input.WorkerRunID, Limit: input.Limit, LeaseDuration: input.LeaseDuration,
+		PreferredRunID: input.PreferredRunID,
+		WorkerRunID:    input.WorkerRunID, Limit: input.Limit, LeaseDuration: input.LeaseDuration,
 		MaxTextBytesPerObject: input.MaxTextBytesPerObject, MaxExtractedTextBytes: input.MaxExtractedTextBytes,
 		MaxChunksPerObject: input.MaxChunksPerObject, Now: now,
 	})
@@ -116,6 +119,7 @@ func (s *Service) RunKnowledgeIndexerOnce(ctx context.Context, input KnowledgeIn
 		return KnowledgeIndexerRunResult{}, err
 	}
 	result := KnowledgeIndexerRunResult{
+		ElapsedMS:             coordinated.ElapsedMS,
 		SchemaVersion:         "knowledge_indexer.result.v1",
 		Status:                "ok",
 		ReleasedExpired:       coordinated.ReleasedExpired,

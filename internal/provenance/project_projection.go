@@ -53,6 +53,7 @@ const (
 )
 
 type RepositoryOwningProject struct {
+	HomeBoxID     string `json:"home_box_id,omitempty"`
 	ProjectID     string `json:"project_id"`
 	Name          string `json:"name"`
 	Slug          string `json:"slug,omitempty"`
@@ -124,6 +125,8 @@ type RepositoryProjectionList struct {
 }
 
 type ProjectProjectionSyncInput struct {
+	// HomeBoxID is verified registration membership, not inferred from text.
+	HomeBoxID    string
 	Project      projectstate.ProjectProjection
 	Repositories []repostate.ProvenanceProjection
 	// ContextOnly carries forward captured repository cards only when the
@@ -164,6 +167,7 @@ type ProjectionTransport interface {
 // ProjectContextProjection is captured project context. Development is absent
 // in legacy identity-only snapshots, not reconstructed from current files.
 type ProjectContextProjection struct {
+	HomeBoxID           string                                `json:"home_box_id,omitempty"`
 	SchemaVersion       string                                `json:"schema_version"`
 	ProjectID           string                                `json:"project_id"`
 	Name                string                                `json:"name"`
@@ -213,6 +217,9 @@ type repositorySnapshot struct {
 func (api *FoundationAPI) SyncProjectProjection(ctx context.Context, input ProjectProjectionSyncInput) (ProjectProjectionSyncReceipt, error) {
 	if api == nil || api.store == nil || api.service == nil {
 		return ProjectProjectionSyncReceipt{}, errors.New("provenance projection runtime is not ready")
+	}
+	if err := checkHomeBox(ctx, input.HomeBoxID); err != nil {
+		return ProjectProjectionSyncReceipt{}, err
 	}
 	project, repositories, err := prepareProjectProjectionSync(input, api.service.clock().UTC())
 	if err != nil {
@@ -301,6 +308,7 @@ func prepareProjectProjectionSync(input ProjectProjectionSyncInput, createdAt ti
 		return projectSnapshot{}, nil, errors.New("context-only project sync cannot supply new repository observations")
 	}
 	contextProjection := ProjectContextProjection{
+		HomeBoxID:     input.HomeBoxID,
 		SchemaVersion: ProjectProjectionSchemaVersion,
 		ProjectID:     projection.Project.ProjectID, Name: boundedProjectionText(projection.Project.Name, maximumProjectionTextRunes),
 		Slug: projection.Project.Slug, Lifecycle: projection.Project.Lifecycle,
@@ -494,7 +502,7 @@ func buildRepositoryCard(project ProjectContextProjection, projection repostate.
 		SchemaVersion: RepositoryCardSchemaVersion,
 		RepositoryID:  source.RepositoryID, Name: boundedProjectionText(source.Key, maximumProjectionTextRunes),
 		Aliases:       []string{},
-		OwningProject: RepositoryOwningProject{ProjectID: project.ProjectID, Name: project.Name, Slug: project.Slug, Lifecycle: project.Lifecycle, NavigationRef: project.NavigationRef},
+		OwningProject: RepositoryOwningProject{HomeBoxID: project.HomeBoxID, ProjectID: project.ProjectID, Name: project.Name, Slug: project.Slug, Lifecycle: project.Lifecycle, NavigationRef: project.NavigationRef},
 		Role:          string(source.Role), Purpose: "", Topics: []string{},
 		CurrentState: string(source.RepositoryLifecycle), ActiveFocus: []string{}, RecentOutcomes: []string{}, NextPriorities: []string{}, Blockers: []string{},
 		AcceptedContext:       []RepositoryAcceptedContext{},
@@ -938,6 +946,7 @@ func (api *FoundationAPI) ListRepositoryProjections(ctx context.Context, request
 			FROM unnest($2::text[]) AS query_term(value)
 			WHERE position(query_term.value IN lower(searchable_summary)) > 0
 		) >= $3::integer)
+		  AND `+projectBoxSQL("latest.project_id", "$9")+`
 		  AND ($4::text = '' OR project_id = $4::text OR lower(card_json->'owning_project'->>'slug') = lower($4::text))
 		  AND ($5::text = '' OR coalesce(card_json->'topics', '[]'::jsonb) ? lower($5::text))
 		  AND ($6::text = '' OR lower(card_json->>'role') = lower($6::text))
@@ -945,7 +954,7 @@ func (api *FoundationAPI) ListRepositoryProjections(ctx context.Context, request
 		ORDER BY repository_id
 		LIMIT $8::integer
 	`, normalized.Query == "", queryTerms, requiredQueryMatches, normalized.Project,
-		normalized.Topic, normalized.Role, normalized.TrackingStatus, normalized.Limit+1)
+		normalized.Topic, normalized.Role, normalized.TrackingStatus, normalized.Limit+1, selectedBoxes(ctx))
 	if err != nil {
 		return RepositoryProjectionList{}, fmt.Errorf("list repository projections: %w", err)
 	}
@@ -1066,6 +1075,9 @@ func (api *FoundationAPI) GetRepositoryProjection(ctx context.Context, repositor
 	if err := json.Unmarshal(payload, &card); err != nil {
 		return RepositoryCard{}, fmt.Errorf("decode repository projection: %w", err)
 	}
+	if err := api.store.checkProject(ctx, card.OwningProject.ProjectID); err != nil {
+		return RepositoryCard{}, err
+	}
 	card.AcceptedContext, err = api.store.acceptedRepositoryContext(ctx, card.OwningProject.ProjectID, card.RepositoryID)
 	if err != nil {
 		return RepositoryCard{}, err
@@ -1118,6 +1130,7 @@ func (store *Store) acceptedRepositoryContext(ctx context.Context, projectID, re
 			coalesce(record.anchors_json->'entities', '[]'::jsonb) ? $1::text OR
 			coalesce(record.anchors_json->'projects', '[]'::jsonb) ? $2::text
 		)
+		AND `+anchorsBoxSQL("record.anchors_json", "$4")+`
 		AND NOT EXISTS (
 			SELECT 1 FROM provenance.relationships AS relationship
 			WHERE relationship.to_record_id = record.id
@@ -1142,7 +1155,7 @@ func (store *Store) acceptedRepositoryContext(ctx context.Context, projectID, re
 			CASE WHEN coalesce(record.anchors_json->'entities', '[]'::jsonb) ? $1::text THEN 0 ELSE 1 END,
 			record.created_at DESC, record.id
 		LIMIT $3::integer
-	`, repositoryID, projectID, MaximumRepositoryAcceptedContext)
+	`, repositoryID, projectID, MaximumRepositoryAcceptedContext, selectedBoxes(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("read accepted repository context: %w", err)
 	}

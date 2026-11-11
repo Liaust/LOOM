@@ -262,6 +262,17 @@ func planFromWatchInput(resolved Resolved, provided *WatchPlan) (WatchPlan, erro
 	if strings.TrimSpace(plan.BoxID) == "" {
 		return plan, fmt.Errorf("box watch plan box_id is required")
 	}
+	if resolved.BoxID != "" && (plan.BoxID != resolved.BoxID || plan.RootPath != resolved.RootPath || plan.ProjectRoot != resolved.RootPath) {
+		return plan, fmt.Errorf("Box watch plan does not match selected Box binding")
+	}
+	if resolved.RootRef != "" && resolved.RootRef != "box" {
+		prefix := WatchSafeRootKey(resolved.BoxID, resolved.RootRef)
+		for _, item := range plan.WatchedRoots {
+			if !strings.HasPrefix(item.BackendRootKey, prefix+"__") || item.SafeRootKey != prefix && !strings.HasPrefix(item.SafeRootKey, prefix+"__") {
+				return plan, fmt.Errorf("Box watch plan contains a foreign root identity")
+			}
+		}
+	}
 	if strings.TrimSpace(plan.OwnerNode) == "" {
 		return plan, fmt.Errorf("box watch plan owner_node is required")
 	}

@@ -30,6 +30,16 @@ func (adapter ProvenanceAdapter) ProjectForProvenance(ctx context.Context, sourc
 	if !source.Available || !source.Owned {
 		return result
 	}
+	if source.Projection.Archive != nil && source.ValidateRead == nil {
+		result.Available = false
+		result.ReasonCode = "archive_source_unverified"
+		return result
+	}
+	if source.ValidateRead != nil && source.ValidateRead(ctx) != nil {
+		result.Available = false
+		result.ReasonCode = "archive_source_changed"
+		return result
+	}
 	if !validProjectRelativeNavigation(source.NavigationPath) || !validProjectRelativeNavigation(source.MembershipSourcePath) || source.SourceVersion <= 0 {
 		result.Available = false
 		result.ReasonCode = "repository_source_binding_invalid"
@@ -51,5 +61,14 @@ func (adapter ProvenanceAdapter) ProjectForProvenance(ctx context.Context, sourc
 		RepositoryRoot: source.RepositoryRoot,
 		Membership:     membership,
 	})
+	if source.ValidateRead != nil && source.ValidateRead(ctx) != nil {
+		result.Available = false
+		result.ReasonCode = "archive_source_changed"
+		result.Extraction = Extraction{}
+		return result
+	}
+	if source.Projection.Archive != nil {
+		result.Extraction.Freshness.Reasons = append(result.Extraction.Freshness.Reasons, "archived_snapshot")
+	}
 	return result
 }

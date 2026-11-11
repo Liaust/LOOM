@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -17,6 +18,10 @@ import (
 )
 
 func declarationRegistrationInput(t *testing.T, root, id string, count int) projects.RegisterProjectContractInput {
+	return declarationRegistrationInputVersion(t, root, id, count, pc.ProjectSchemaV05)
+}
+
+func declarationRegistrationInputVersion(t *testing.T, root, id string, count int, version string) projects.RegisterProjectContractInput {
 	t.Helper()
 	resources := map[string]any{}
 	for i := 0; i < count; i++ {
@@ -26,7 +31,7 @@ func declarationRegistrationInput(t *testing.T, root, id string, count int) proj
 		}
 		resources[key] = map[string]any{"kind": "repository", "repository": map[string]any{"path": key, "role": "component"}}
 	}
-	raw, err := json.Marshal(map[string]any{"kind": "loom.project", "schema_version": pc.ProjectSchemaV05, "project": map[string]any{"id": id, "slug": "declaration-" + strings.ToLower(id[8:]), "name": "Declaration", "owner_node": "main", "status": "active"}, "resources": resources})
+	raw, err := json.Marshal(map[string]any{"kind": "loom.project", "schema_version": version, "project": map[string]any{"id": id, "slug": "declaration-" + strings.ToLower(id[8:]), "name": "Declaration", "owner_node": "main", "status": "active"}, "resources": resources})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,49 +107,154 @@ func TestDeclarationCompatibilityOwnerStateEvidence(t *testing.T) {
 	}
 }
 
+func workStateRegistrationInput(t *testing.T, root string, state string) projects.RegisterProjectContractInput {
+	t.Helper()
+	file := filepath.Join(root, ".loom/project.yaml")
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var d pc.ProjectDeclaration
+	if err := json.Unmarshal(raw, &d); err != nil {
+		t.Fatal(err)
+	}
+	d.Project.WorkState = state
+	raw, err = json.Marshal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(file, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	input, err := projectregistration.BuildInput(pc.Analyze(root), "work-state-owner-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return input
+}
+
+func TestDeclarationWorkStateOwnerEvidence(t *testing.T) {
+	root, id := t.TempDir(), ids.NewProjectID()
+	_ = declarationRegistrationInput(t, root, id, 0)
+	for _, state := range []string{"passive", "working", ""} {
+		input := workStateRegistrationInput(t, root, state)
+		payload, err := projects.BuildDeclarationRegistrationPayload(input)
+		if err != nil || payload.Project.WorkState != state || payload.Project.Status != "active" {
+			t.Fatalf("payload=%+v err=%v", payload, err)
+		}
+		for _, target := range []string{"input", "report", "plan", "contract"} {
+			changed := input
+			other := "working"
+			if state == other {
+				other = "passive"
+			}
+			if target == "input" {
+				changed.Project.WorkState = other
+			} else {
+				field := &changed.Contract
+				if target == "report" {
+					field = &changed.ValidationReport
+				} else if target == "plan" {
+					field = &changed.RegistrationPlan
+				}
+				var doc map[string]any
+				if err := json.Unmarshal(*field, &doc); err != nil {
+					t.Fatal(err)
+				}
+				doc["project"].(map[string]any)["work_state"] = other
+				*field, _ = json.Marshal(doc)
+			}
+			if _, err := projects.BuildDeclarationRegistrationPayload(changed); err == nil {
+				t.Fatal("substituted classification accepted", target)
+			}
+		}
+	}
+}
+
+func TestDeclarationWorkStateRegistrationPreservesNotesRootPostgres(t *testing.T) {
+	database, req := projectRepositoryTransactionDatabase(t)
+	service := projects.NewService(database)
+	root, id := t.TempDir(), ids.NewProjectID()
+	first, err := service.RegisterProjectContract(t.Context(), req, declarationRegistrationInput(t, root, id, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.UpsertProjectWatchedRootRegistration(t.Context(), req, projects.UpsertProjectWatchedRootRegistrationInput{
+		ProjectContractRegistrationID: first.Detail.Registration.ProjectContractRegistrationID, ProjectID: id,
+		NodeID: *first.Detail.Project.Project.HomeNodeID, OwnerNodeKey: "main", LocalRootKey: "notes", BackendRootKey: "notes-" + strings.ToLower(id[8:]),
+		WorkerKey: "notes-worker", SourceKinds: json.RawMessage(`["notes"]`), SafeRootKey: "project", RootRelativePath: "material", DisplayName: "Notes",
+		SyncMode: "enabled", BackupMode: "disabled", IndexMode: "enabled", DeleteMode: "disabled", ConfigHash: "sha256:" + strings.Repeat("a", 64),
+		ConfigJSON: json.RawMessage(`{"stable":"notes-config"}`), CommandJSON: json.RawMessage(`[]`), ActivationStatus: "applied", Metadata: json.RawMessage(`{"knowledge_source":{"source_hash":"retained-generation"}}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := service.ListProjectWatchedRootRegistrations(t.Context(), id)
+	if err != nil || len(before) != 1 {
+		t.Fatal(before, err)
+	}
+	for _, state := range []string{"passive", "working", "working", ""} {
+		input := workStateRegistrationInput(t, root, state)
+		registered, err := service.RegisterProjectContract(t.Context(), req, input)
+		if err != nil || projects.ProjectWorkState(registered.Detail.Project.Project.Metadata) != state || registered.Detail.Project.Project.Status != "active" {
+			t.Fatalf("registration: %+v %v", registered, err)
+		}
+		after, err := service.ListProjectWatchedRootRegistrations(t.Context(), id)
+		if err != nil || !reflect.DeepEqual(before, after) {
+			t.Fatal("metadata registration rewrote Notes root/generation", after, err)
+		}
+		replay, err := service.RegisterProjectContract(t.Context(), req, input)
+		if err != nil || !replay.Unchanged || len(replay.EventIDs) != 0 {
+			t.Fatalf("classification replay: %+v %v", replay, err)
+		}
+	}
+}
+
 func TestDeclarationRegistrationWholeSetPostgres(t *testing.T) {
 	database, req := projectRepositoryTransactionDatabase(t)
 	service := projects.NewService(database)
 	ctx := context.Background()
-	for count := 0; count <= 2; count++ {
-		t.Run(fmt.Sprintf("%d_idless", count), func(t *testing.T) {
-			root, id := t.TempDir(), ids.NewProjectID()
-			input := declarationRegistrationInput(t, root, id, count)
-			first, err := service.RegisterProjectContract(ctx, req, input)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if first.RepositorySource == nil || first.RepositorySource.MemberCount != count || first.RepositorySource.SourceRevision != 1 {
-				t.Fatalf("first=%+v", first)
-			}
-			var before string
-			if err = database.QueryRow(`SELECT source_snapshot_json::text FROM projects.project_repository_sources WHERE project_id=$1`, id).Scan(&before); err != nil {
-				t.Fatal(err)
-			}
-			second, err := service.RegisterProjectContract(ctx, req, input)
-			if err != nil || !second.Unchanged || len(second.EventIDs) != 0 {
-				t.Fatalf("replay=%+v err=%v", second, err)
-			}
-			var after string
-			if err = database.QueryRow(`SELECT source_snapshot_json::text FROM projects.project_repository_sources WHERE project_id=$1`, id).Scan(&after); err != nil || before != after {
-				t.Fatalf("identity changed: %v", err)
-			}
-			var versions, paths bool
-			if err = database.QueryRow(`SELECT project_contract_schema_version='project.contract.v0.5' AND repos_contract_schema_version=project_contract_schema_version, project_contract_path=repos_contract_path AND project_contract_digest=repos_contract_digest FROM projects.project_repository_sources WHERE project_id=$1`, id).Scan(&versions, &paths); err != nil || !versions || !paths {
-				t.Fatalf("single source: %v", err)
-			}
-			if count > 0 {
-				if _, err = service.RegisterProjectContract(ctx, req, declarationRegistrationInput(t, root, id, 0)); err != nil {
+	for _, version := range []string{pc.ProjectSchemaV05, pc.ProjectSchemaV06} {
+		for count := 0; count <= 2; count++ {
+			t.Run(fmt.Sprintf("%s/%d_idless", version, count), func(t *testing.T) {
+				root, id := t.TempDir(), ids.NewProjectID()
+				input := declarationRegistrationInputVersion(t, root, id, count, version)
+				first, err := service.RegisterProjectContract(ctx, req, input)
+				if err != nil {
 					t.Fatal(err)
 				}
-				if _, err = service.RegisterProjectContract(ctx, req, input); err != nil {
+				if first.RepositorySource == nil || first.RepositorySource.MemberCount != count || first.RepositorySource.SourceRevision != 1 {
+					t.Fatalf("first=%+v", first)
+				}
+				var before string
+				if err = database.QueryRow(`SELECT source_snapshot_json::text FROM projects.project_repository_sources WHERE project_id=$1`, id).Scan(&before); err != nil {
 					t.Fatal(err)
 				}
+				second, err := service.RegisterProjectContract(ctx, req, input)
+				if err != nil || !second.Unchanged || len(second.EventIDs) != 0 {
+					t.Fatalf("replay=%+v err=%v", second, err)
+				}
+				var after string
 				if err = database.QueryRow(`SELECT source_snapshot_json::text FROM projects.project_repository_sources WHERE project_id=$1`, id).Scan(&after); err != nil || before != after {
-					t.Fatalf("retired key identity changed: %v", err)
+					t.Fatalf("identity changed: %v", err)
 				}
-			}
-		})
+				var versions, paths bool
+				if err = database.QueryRow(`SELECT project_contract_schema_version=$2 AND repos_contract_schema_version=project_contract_schema_version, project_contract_path=repos_contract_path AND project_contract_digest=repos_contract_digest FROM projects.project_repository_sources WHERE project_id=$1`, id, version).Scan(&versions, &paths); err != nil || !versions || !paths {
+					t.Fatalf("single source: %v", err)
+				}
+				if count > 0 {
+					if _, err = service.RegisterProjectContract(ctx, req, declarationRegistrationInputVersion(t, root, id, 0, version)); err != nil {
+						t.Fatal(err)
+					}
+					if _, err = service.RegisterProjectContract(ctx, req, input); err != nil {
+						t.Fatal(err)
+					}
+					if err = database.QueryRow(`SELECT source_snapshot_json::text FROM projects.project_repository_sources WHERE project_id=$1`, id).Scan(&after); err != nil || before != after {
+						t.Fatalf("retired key identity changed: %v", err)
+					}
+				}
+			})
+		}
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 )
 
 const ProjectPhysicalArchivePlanSchemaVersion = "storage.project_physical_archive_plan.v1"
+const ProjectPhysicalArchivePlanSchemaVersionV2 = "storage.project_physical_archive_plan.v2"
 
 type ProjectRuntimeRepositoryStateService interface {
 	ReadProjectRepositoryState(context.Context, string) (projects.ProjectRepositoryReadModel, error)
@@ -25,6 +26,10 @@ type ProjectRuntimeRepositoryStateService interface {
 
 type ProjectWorkspaceArchivePlanner interface {
 	PlanArchive(context.Context, WorkspaceArchivePlanInput) (WorkspaceArchivePlan, error)
+}
+
+type ProjectWorkspaceActiveLocationResolver interface {
+	ResolveActiveProjectLocation(context.Context, string) (*WorkspaceActiveLocation, error)
 }
 
 type ProjectPhysicalArchivePlanInput struct {
@@ -64,6 +69,7 @@ type ProjectPhysicalArchivePlan struct {
 	Deactivations             []ProjectArchiveDeactivationPlan      `json:"deactivations"`
 	Workspace                 WorkspaceArchivePlan                  `json:"workspace"`
 	PlanDigest                string                                `json:"plan_digest"`
+	ActiveLocation            *WorkspaceActiveLocation              `json:"active_location,omitempty"`
 }
 
 func (s ProjectRuntimeService) PlanProjectPhysicalArchive(ctx context.Context, req requestctx.Context, projectRef string, input ProjectPhysicalArchivePlanInput) (ProjectPhysicalArchivePlan, error) {
@@ -102,8 +108,25 @@ func (s ProjectRuntimeService) PlanProjectPhysicalArchive(ctx context.Context, r
 	if err != nil {
 		return ProjectPhysicalArchivePlan{}, err
 	}
+	var activeLocation *WorkspaceActiveLocation
+	if owner, ok := s.WorkspaceMove.(ProjectWorkspaceActiveLocationResolver); ok {
+		activeLocation, err = owner.ResolveActiveProjectLocation(ctx, detail.Project.Project.ProjectID)
+		if err != nil {
+			return ProjectPhysicalArchivePlan{}, err
+		}
+		if activeLocation != nil {
+			if err := ValidateWorkspaceActiveLocation(*activeLocation, s.WorkspaceRoots); err != nil {
+				return ProjectPhysicalArchivePlan{}, err
+			}
+			activeLocation = cloneWorkspaceActiveLocation(activeLocation)
+			paths.Active = activeLocation.Path
+		}
+	}
 	custody, err := projects.BuildProjectArchiveCustodyBinding(detail, repository, paths.Active.AbsolutePath)
 	if err != nil {
+		return ProjectPhysicalArchivePlan{}, err
+	}
+	if err := validateProjectActiveLocationSnapshot(activeLocation, custody, detail, repository); err != nil {
 		return ProjectPhysicalArchivePlan{}, err
 	}
 
@@ -122,6 +145,9 @@ func (s ProjectRuntimeService) PlanProjectPhysicalArchive(ctx context.Context, r
 	})
 	if err != nil {
 		return ProjectPhysicalArchivePlan{}, err
+	}
+	if !sameWorkspaceActiveLocation(activeLocation, workspace.ActiveLocation) {
+		return ProjectPhysicalArchivePlan{}, fmt.Errorf("workspace archive changed the accepted project location")
 	}
 	workspaceRequest := ProjectArchiveWorkspaceRequest{OperationID: input.OperationID, Reason: reason}
 	if !input.PlannedAt.IsZero() {
@@ -143,7 +169,7 @@ func (s ProjectRuntimeService) PlanProjectPhysicalArchive(ctx context.Context, r
 		return ProjectPhysicalArchivePlan{}, err
 	}
 	deactivations := make([]ProjectArchiveDeactivationPlan, 0)
-	inspectServices := canonicalDetail.Registration != nil && canonicalDetail.Registration.ContractSchemaVersion == projectcontracts.ProjectSchemaV05
+	inspectServices := canonicalDetail.Registration != nil && projectcontracts.IsDeclarationSchemaVersion(canonicalDetail.Registration.ContractSchemaVersion)
 	for _, facet := range physicalArchiveDeactivationFacets(canonicalDetail, inspectServices) {
 		deactivationInput := projects.DeactivateProjectInput{
 			Facet:       facet,
@@ -200,6 +226,13 @@ func (s ProjectRuntimeService) PlanProjectPhysicalArchive(ctx context.Context, r
 		Repository:                canonicalRepository,
 		Deactivations:             deactivations,
 		Workspace:                 workspace,
+		ActiveLocation:            cloneWorkspaceActiveLocation(activeLocation),
+	}
+	if workspace.Placement != nil {
+		plan.SchemaVersion = ProjectPhysicalArchivePlanSchemaVersionV2
+	}
+	if workspace.SchemaVersion == WorkspaceArchivePlanSchemaVersionV3 {
+		plan.SchemaVersion = ProjectPhysicalArchivePlanSchemaVersionV3
 	}
 	if err := SealProjectPhysicalArchivePlan(&plan); err != nil {
 		return ProjectPhysicalArchivePlan{}, err
@@ -226,7 +259,14 @@ func physicalArchiveDeactivationFacets(detail projects.ProjectRegistrationDetail
 }
 
 func ValidateProjectPhysicalArchivePlanEnvelope(plan ProjectPhysicalArchivePlan, roots TrustedWorkspaceRoots) error {
-	if plan.SchemaVersion != ProjectPhysicalArchivePlanSchemaVersion {
+	if plan.Workspace.SchemaVersion == WorkspaceArchivePlanSchemaVersionV3 {
+		if plan.SchemaVersion != ProjectPhysicalArchivePlanSchemaVersionV3 || !sameWorkspaceActiveLocation(plan.ActiveLocation, plan.Workspace.ActiveLocation) {
+			return fmt.Errorf("v3 project archive requires the exact workspace active location proof")
+		}
+		if err := validateProjectActiveLocationSnapshot(plan.ActiveLocation, plan.Custody, plan.Registration, plan.Repository); err != nil {
+			return err
+		}
+	} else if plan.ActiveLocation != nil || (plan.Workspace.Placement == nil && plan.SchemaVersion != ProjectPhysicalArchivePlanSchemaVersion) || (plan.Workspace.Placement != nil && plan.SchemaVersion != ProjectPhysicalArchivePlanSchemaVersionV2) {
 		return fmt.Errorf("unsupported project physical archive plan schema %q", plan.SchemaVersion)
 	}
 	if err := ValidateWorkspaceArchivePlan(plan.Workspace, roots); err != nil {

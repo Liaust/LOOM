@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
+	"loom.local/loom/internal/projects"
 	"loom.local/loom/internal/provenance"
 	"loom.local/loom/internal/workers"
 )
@@ -31,8 +33,9 @@ func (f *contextSourcesFixture) ListProjectContextSources(_ context.Context, own
 }
 
 type contextRefreshFixture struct {
-	seen     []string
-	failures map[string]bool
+	seen      []string
+	failures  map[string]bool
+	onRefresh func()
 }
 
 func (f *contextRefreshFixture) RefreshProject(_ context.Context, id string, only bool) (provenance.ProjectProjectionSyncReceipt, error) {
@@ -40,10 +43,88 @@ func (f *contextRefreshFixture) RefreshProject(_ context.Context, id string, onl
 		return provenance.ProjectProjectionSyncReceipt{}, errors.New("full observation invoked")
 	}
 	f.seen = append(f.seen, id)
+	if f.onRefresh != nil {
+		f.onRefresh()
+	}
 	if f.failures[id] {
 		return provenance.ProjectProjectionSyncReceipt{}, errors.New("unavailable local source")
 	}
 	return provenance.ProjectProjectionSyncReceipt{ProjectSnapshotID: "33333333-3333-4333-8333-333333333333"}, nil
+}
+
+type contextChangesFixture struct {
+	ids        []string
+	generation string
+}
+
+func (f *contextChangesFixture) Pending(_ context.Context, observed map[string]projects.ProjectContextObservation, _ time.Time, force bool) ([]projects.ProjectContextChange, *time.Time, error) {
+	result := []projects.ProjectContextChange{}
+	for _, id := range f.ids {
+		if force || observed[id].Generation != f.generation {
+			result = append(result, projects.ProjectContextChange{ProjectID: id, Generation: f.generation, Reason: "source_or_file_changed"})
+		}
+	}
+	return result, nil, nil
+}
+
+func TestProjectContextRefreshReadinessFairPageAndIdle(t *testing.T) {
+	sources := &contextSourcesFixture{}
+	for i := 0; i < 23; i++ {
+		sources.ids = append(sources.ids, fmt.Sprintf("project_01ARZ3NDEKTSV4RRFFQ69G5F%02d", i))
+	}
+	changes := &contextChangesFixture{ids: sources.ids, generation: "first"}
+	refresh := &contextRefreshFixture{}
+	var saved json.RawMessage
+	r := ProjectContextRefreshRuntime{Sources: sources, Refresh: refresh, LocalNode: "main", Changes: changes,
+		LoadCheckpoint: func(context.Context, string) (json.RawMessage, error) { return saved, nil }}
+	run := workers.RunContext{Instance: workers.WorkerInstance{TickPolicyJSON: r.Describe().DefaultTickPolicyJSON}, Run: workers.WorkerRun{TriggerKind: workers.TriggerSupervisorTick}, Checkpoints: map[string]workers.WorkerCheckpoint{}}
+	for _, want := range []int64{20, 3} {
+		ready, _, err := r.AutomaticReady(t.Context(), run.Instance, time.Now())
+		if err != nil || !ready {
+			t.Fatal("pending page not ready", ready, err)
+		}
+		result, err := r.RunOnce(t.Context(), run)
+		if err != nil || result.Counters["attempted"] != want {
+			t.Fatal(result, err)
+		}
+		saved = result.CheckpointUpdates[0].Value
+		run.Checkpoints["default"] = workers.WorkerCheckpoint{CheckpointJSON: saved}
+	}
+	ready, _, err := r.AutomaticReady(t.Context(), run.Instance, time.Now())
+	if err != nil || ready || len(refresh.seen) != 23 {
+		t.Fatal("unchanged generation created another automatic refresh", ready, err, refresh.seen)
+	}
+	// Explicit runs still observe sources even when automatic readiness is idle.
+	run.Run.TriggerKind = workers.TriggerManual
+	result, err := r.RunOnce(t.Context(), run)
+	if err != nil || result.Counters["attempted"] != 20 {
+		t.Fatal("manual refresh was suppressed", result, err)
+	}
+}
+
+func TestProjectContextRefreshGenerationDuringReadAndCancellation(t *testing.T) {
+	id := "project_01ARZ3NDEKTSV4RRFFQ69G5FAX"
+	changes := &contextChangesFixture{ids: []string{id}, generation: "selected"}
+	refresh := &contextRefreshFixture{onRefresh: func() { changes.generation = "newer" }}
+	r := ProjectContextRefreshRuntime{Sources: &contextSourcesFixture{ids: []string{id}}, Refresh: refresh, LocalNode: "main", Changes: changes}
+	run := workers.RunContext{Instance: workers.WorkerInstance{TickPolicyJSON: r.Describe().DefaultTickPolicyJSON}, Run: workers.WorkerRun{TriggerKind: workers.TriggerSupervisorTick}}
+	result, err := r.RunOnce(t.Context(), run)
+	if err != nil || result.Counters["dirty"] != 1 {
+		t.Fatal("concurrent edit was acknowledged", result, err)
+	}
+	checkpoint, err := readProjectContextCheckpoint(result.CheckpointUpdates[0].Value)
+	if err != nil || checkpoint.Observations[id].Generation != "selected" {
+		t.Fatal("acknowledgement advanced beyond selected generation", checkpoint, err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	refresh.onRefresh = cancel
+	result, err = r.RunOnce(ctx, run)
+	if !errors.Is(err, context.Canceled) || len(result.CheckpointUpdates) != 0 {
+		t.Fatal("cancelled refresh published acknowledgement", result, err)
+	}
+	if _, err := readProjectContextCheckpoint(json.RawMessage(`{"after_project_id":""}`)); err != nil {
+		t.Fatal("legacy checkpoint rejected", err)
+	}
 }
 func TestProjectContextRefreshFairCursorAndNoAgent(t *testing.T) {
 	sources := &contextSourcesFixture{}

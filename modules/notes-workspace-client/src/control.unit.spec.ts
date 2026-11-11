@@ -2,7 +2,9 @@ import { describe, it, expect, vi } from "vitest";
 import { makeDevice, makeFile } from "./nativeFixture";
 import { ControlTransport, nativeChunk, nativeMetadataChange } from "./control";
 import { layoutPolicyPaths } from "./layout";
-import { controlPath, decode, encode, digest, pair, validate, newerSource, referenceBytes, MAX_REFERENCE_BYTES, type Binding, type Intent, reserved, STRUCTURE_PREFIX, isControlPath } from "./protocol";
+import { IntentClient, type ClientIO } from "./client";
+import { Journal, type State } from "./journal";
+import { controlPath, decode, encode, digest, pair, validate, newerSource, referenceBytes, nativeText, MAX_REFERENCE_BYTES, type Binding, type Intent, reserved, STRUCTURE_PREFIX, isControlPath } from "./protocol";
 import { getConfiguredFunctionsForEncryption } from "../../node_modules/@vrtmrz/livesync-commonlib/dist/pouchdb/encryption";
 import type { MetaEntry } from "@vrtmrz/livesync-commonlib/compat/common/types";
 export const binding: Binding = {
@@ -21,6 +23,14 @@ export const binding: Binding = {
     writable: true,
 };
 describe("encrypted native controls", () => {
+    it("decodes legacy binary Canvas as exact UTF-8 without accepting binary notes",()=>{
+        const text='\ufeff{"nodes":[{"text":"caf\u00e9"}]}\r\n',bytes=new TextEncoder().encode(text);
+        expect(nativeText("Notes/a.canvas",bytes.buffer)).toBe(text);
+        expect(nativeText("Notes/a.base",bytes.buffer)).toBe(text);
+        expect(nativeText("Notes/a.base",new Uint8Array([255]).buffer)).toBeNull();
+        expect(nativeText("Notes/a.canvas",new Uint8Array([255]).buffer)).toBeNull();
+        expect(nativeText("Notes/a.md",bytes.buffer)).toBeNull();
+    });
     it("places structural controls where older clients already suppress payload reflection",()=>{
         const scope={version:1 as const,kind:"scope" as const,id:"scope",workspace:"w",collection:"c",generation:"g",
             collectionRoot:"Topics",sourceSequence:1,writable:true};
@@ -59,6 +69,7 @@ describe("encrypted native controls", () => {
         expect(validate(intent)).toEqual(intent);
         expect(() => validate({ ...intent, length: 8 * 1024 * 1024 + 1 })).toThrow();
         expect(validate({ ...binding, path: "Notes/board.canvas", writable: true }).kind).toBe("binding");
+        expect(validate({ ...binding, path: "Notes/People.base", writable: true }).kind).toBe("binding");
         for (const extension of ["wav", "svg", "csv", "xlsx", "dat", "json"]) {
             const reference = { ...binding, path: `Notes/attachment.${extension}`, writable: false };
             expect(validate(reference)).toEqual(reference);
@@ -97,6 +108,20 @@ describe("encrypted native controls", () => {
             await d.db.destroy();
         }
     });
+    it("requests bounded native repair for a stranded control without treating partial content as valid",async()=>{
+        const d=await makeDevice("control-repair-"+crypto.randomUUID(),true);
+        const clock=vi.spyOn(Date,"now");let now=100000;clock.mockImplementation(()=>now);
+        try {
+            const c=new ControlTransport(d.access,async()=>false),rev=await c.put(binding),read=vi.spyOn(d.access,"fetchEntry");
+            await expect(c.get(controlPath(binding),rev)).rejects.toThrow("control_pending_chunks");
+            expect(read).not.toHaveBeenCalled();
+            now+=11000;
+            await expect(c.get(controlPath(binding),rev)).rejects.toThrow("control_pending_chunks");
+            expect(read).toHaveBeenCalledWith(controlPath(binding),rev,false,true,false);
+            await expect(c.get(controlPath(binding),rev)).rejects.toThrow("control_pending_chunks");
+            expect(read).toHaveBeenCalledTimes(1);
+        } finally {clock.mockRestore();await d.db.destroy();}
+    });
     it("replays exact file metadata without loading chunk bodies", async () => {
         const read = vi.fn(async (id: string, rev: string) => ({ path: "Notes/n.md", _rev: rev }));
         for (const id of ["h:plain", "h:+encrypted"])
@@ -130,6 +155,49 @@ describe("encrypted native controls", () => {
         } finally {
             await d.db.destroy();
         }
+    });
+    it.each(["Projects", "Projects/_Passive"])("does not recreate excluded Goodnotes PDFs from retained native history after restart at %s", async prefix => {
+        const d = await makeDevice("goodnotes-replay-" + crypto.randomUUID());
+        try {
+            const root = prefix + "/Goodnotes Intake/Notebooks", path = root + "/Uni/Part 4.pdf";
+            const rev = await d.access.storeIndependentRevision(makeFile("retained PDF replica", 1000000, path as never), true);
+            if (!rev) throw Error("native_seed_failed");
+            const entry = await d.access.fetchEntryMeta(path as never, rev, true);
+            if (!entry) throw Error("native_metadata_missing");
+            d.settings.syncIgnoreRegEx = "^Projects/Goodnotes\\x20Intake/Notebooks(?:/|$)" as typeof d.settings.syncIgnoreRegEx;
+            let saved: State | undefined;
+            const persistence = { load: async () => saved, save: async (s: State) => { saved = structuredClone(s); } };
+            const journal = new Journal(persistence); await journal.ready;
+            const retained: Binding = { ...binding, collectionRoot: root, path, nativeRevision: rev,
+                sha256: await digest("retained PDF replica"), writable: false };
+            await journal.update(s => {
+                s.bindings[path] = retained; s.candidates[retained.id] = retained; s.reflecting[path] = retained;
+            });
+            const before = structuredClone(saved);
+            const io: ClientIO = {
+                read: vi.fn(async () => null), readRevision: vi.fn(async () => null),
+                readReference: vi.fn(async () => { throw Error("excluded_payload_must_not_be_read"); }),
+                readControl: async () => retained, descends: async () => false,
+                referenceAllowed: async p => layoutPolicyPaths(saved, p).every(x => d.localDatabase.isTargetFile(x as never)),
+                reflect: vi.fn(async () => { await (d.handler as any).applyDatabaseEntryToStorage(entry, undefined, true); }),
+                changed: vi.fn(),
+            };
+            const reads = vi.spyOn(d.access, "fetchEntry"), directories = vi.spyOn(d.storageAccess, "ensureDir");
+            for (let restart = 0; restart < 2; restart++) {
+                const c = new IntentClient(new Journal(persistence), io); c.onReflect = vi.fn(); await c.ready;
+                (d.handler as any).loomIntent = c;
+                await c.mutation({ kind: "store", info: path as never });
+                await c.reflectCandidate({ ...retained, id: "replayed" });
+                await (d.handler as any).applyDatabaseEntryToStorage(entry, undefined, true);
+                await c.afterReflect(entry, true);
+                expect(saved).toEqual(before);
+            }
+            expect(io.readReference).not.toHaveBeenCalled(); expect(io.reflect).not.toHaveBeenCalled();
+            expect(reads).not.toHaveBeenCalled();
+            expect(directories).not.toHaveBeenCalled();
+            expect(d.storageAccess.writeFileAuto).not.toHaveBeenCalled();
+            expect(d.localDatabase.isTargetFile("Projects/_Passive/Goodnotes Intake/Notes/README.md" as never)).toBe(true);
+        } finally { await d.db.destroy(); }
     });
     it("keeps hookless native selection and reflection unchanged", async () => {
         const d = await makeDevice("optional-hooks-" + crypto.randomUUID(), true);

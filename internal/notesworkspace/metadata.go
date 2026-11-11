@@ -112,15 +112,30 @@ func preserveReplacementMetadata(journal *os.File) error {
 	}
 	if existing.UID != wanted.UID || existing.GID != wanted.GID {
 		if err := unix.Fchown(dst, int(wanted.UID), int(wanted.GID)); err != nil {
-			if !errors.Is(err, unix.EPERM) || existing.UID != uint32(os.Geteuid()) || existing.UID == wanted.UID {
+			if !errors.Is(err, unix.EPERM) || existing.UID != uint32(os.Geteuid()) {
 				return fmt.Errorf("preserve ownership: %w", err)
 			}
-			wanted, err = writerOwnedMetadata(wanted, existing.UID)
+			// Retain the real group when permitted; otherwise translate both
+			// identities, without assigning the old group to the writer.
+			if existing.GID != wanted.GID {
+				if err := unix.Fchown(dst, -1, int(wanted.GID)); err != nil && !errors.Is(err, unix.EPERM) {
+					return fmt.Errorf("preserve group: %w", err)
+				}
+			}
+			current, err := metadataAt(dst)
+			if err != nil {
+				return fmt.Errorf("inspect replacement ownership: %w", err)
+			}
+			if current.UID != uint32(os.Geteuid()) {
+				return fmt.Errorf("replacement owner changed during metadata preservation")
+			}
+			groups, err := os.Getgroups()
+			if err != nil {
+				return fmt.Errorf("inspect writer groups: %w", err)
+			}
+			wanted, err = writerOwnedMetadata(wanted, current.UID, current.GID, append(groups, os.Getegid()))
 			if err != nil {
 				return err
-			}
-			if err := unix.Fchown(dst, -1, int(wanted.GID)); err != nil {
-				return fmt.Errorf("preserve group: %w", err)
 			}
 		}
 	}

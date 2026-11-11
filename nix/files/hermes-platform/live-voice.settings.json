@@ -1,0 +1,5 @@
+{
+  "delegation": "client",
+  "subscriptionOnly": true,
+  "managedAuth": true
+}

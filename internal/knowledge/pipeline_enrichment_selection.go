@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"time"
 )
 
 const MaxEnrichmentSelection = 100
@@ -22,6 +23,7 @@ type EnrichmentSelection struct {
 	SourceHash     string           `json:"source_hash,omitempty"`
 }
 type EnrichmentPreviewEntry struct {
+	Reuse           *EnrichmentReuse      `json:"reuse,omitempty"`
 	Binding         EnrichmentBinding     `json:"binding"`
 	SourcePath      string                `json:"source_path"`
 	NodeKey         string                `json:"node_key"`
@@ -30,7 +32,39 @@ type EnrichmentPreviewEntry struct {
 	Supported       EnrichmentStages      `json:"supported"`
 	BlockedReason   string                `json:"blocked_reason,omitempty"`
 	EffectivePlan   *CompiledPipelinePlan `json:"effective_plan,omitempty"`
+	NextEligibleAt  *time.Time            `json:"next_eligible_at,omitempty"`
+	WaitReason      string                `json:"wait_reason,omitempty"`
 }
+
+type EnrichmentReuse struct {
+	Mode        string   `json:"mode"`
+	SourceRunID string   `json:"source_run_id"`
+	RunStatus   string   `json:"run_status"`
+	Stages      []string `json:"stages"`
+}
+
+func enrichmentReuse(plan CompiledPipelinePlan, retry *pipelineRetrySpec, replay *PipelineRun) *EnrichmentReuse {
+	if retry == nil && replay == nil {
+		return nil
+	}
+	r := &EnrichmentReuse{Mode: "existing_run", Stages: []string{}}
+	if replay != nil {
+		r.SourceRunID, r.RunStatus = replay.KnowledgePipelineRunID, replay.Status
+	} else {
+		r.Mode, r.SourceRunID, r.RunStatus = "compatible_prefix", retry.Source.Run.KnowledgePipelineRunID, retry.Source.Run.Status
+	}
+	beforeTarget := true
+	for _, stage := range plan.Stages {
+		if retry != nil && stage.StageKey == retry.TargetStage {
+			beforeTarget = false
+		}
+		if stage.Selected && (replay != nil || beforeTarget || retry.ReuseStages[stage.StageKey]) {
+			r.Stages = append(r.Stages, stage.StageKey)
+		}
+	}
+	return r
+}
+
 type EnrichmentPreview struct {
 	HostPolicy PipelinePolicy           `json:"host_policy"`
 	Selection  EnrichmentSelection      `json:"selection"`
@@ -91,17 +125,31 @@ func (s *Service) PreviewEnrichment(ctx context.Context, input EnrichmentSelecti
 	if err != nil {
 		return EnrichmentPreview{}, err
 	}
+	cursor, err := decodeEnrichmentCursor(ctx, input)
+	if err != nil {
+		return EnrichmentPreview{}, err
+	}
 	result := EnrichmentPreview{Selection: input, Entries: []EnrichmentPreviewEntry{}, Inventory: "Admitted Notes database entries only; not a filesystem inventory. Later arrivals are never included by apply."}
+	tx, err := s.store.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
+	if err != nil {
+		return result, err
+	}
+	defer tx.Rollback()
+	if err := validateEnrichmentCursor(ctx, tx, cursor); err != nil {
+		return result, err
+	}
 	predicate := `(($6='object' AND o.knowledge_object_id=$1) OR ($6='file' AND o.source_path=$1) OR
  ($6='folder' AND left(o.source_path,length($1)+1)=$1 || '/' AND ($3 OR position('/' in substring(o.source_path from length($1)+2))=0)))`
 	limit := input.Limit + 1
 	if input.Kind != "folder" {
 		limit = 2
 	}
-	rows, err := s.store.db.QueryContext(ctx, `SELECT `+knowledgeObjectColumns()+` FROM knowledge.knowledge_objects o WHERE `+predicate+`
+	args := []any{input.Ref, input.NodeKey, input.Recursive, cursor.ObjectID, limit, input.Kind}
+	selection := notesSelectedObjectSQL(ctx, "o", &args)
+	rows, err := tx.QueryContext(ctx, `SELECT `+knowledgeObjectColumns()+` FROM knowledge.knowledge_objects o WHERE `+predicate+`
  AND ($2='' OR o.source_node_key=$2) AND o.knowledge_object_id>$4
  AND o.deleted_at IS NULL AND `+visibleNotesKnowledgeObjectSQL("o")+` AND `+notesCustodyWriteAllowedSQL("o")+`
- ORDER BY o.knowledge_object_id LIMIT $5`, input.Ref, input.NodeKey, input.Recursive, input.After, limit, input.Kind)
+	 AND `+selection+` ORDER BY o.knowledge_object_id LIMIT $5`, args...)
 	if err != nil {
 		return result, err
 	}
@@ -128,14 +176,21 @@ func (s *Service) PreviewEnrichment(ctx context.Context, input EnrichmentSelecti
 	if len(objects) > input.Limit {
 		result.Truncated = true
 		objects = objects[:input.Limit]
-		result.NextAfter = objects[len(objects)-1].KnowledgeObjectID
 	}
-	policy, err := s.GetPipelinePolicy(ctx)
+	settings, err := scanEmbeddingSettings(tx.QueryRowContext(ctx, `SELECT `+embeddingSettingsColumns()+`
+        FROM knowledge.embedding_settings WHERE embedding_settings_id=$1`, EmbeddingSettingsID))
+	if err == sql.ErrNoRows {
+		settings, err = defaultEmbeddingSettings(time.Time{}), nil
+	}
 	if err != nil {
 		return result, err
 	}
-	result.HostPolicy = policy.Policy
+	hostPolicy := pipelinePolicyFromSettings(settings)
+	result.HostPolicy = hostPolicy
 	for _, o := range objects {
+		if err = bindObjectBoxMembership(ctx, tx, &o); err != nil {
+			return result, err
+		}
 		entry := EnrichmentPreviewEntry{SourcePath: o.SourcePath, NodeKey: o.SourceNodeKey, FileFamily: pipelineFileFamily(o)}
 		entry.Binding, err = enrichmentBinding(o)
 		if err != nil {
@@ -145,7 +200,7 @@ func (s *Service) PreviewEnrichment(ctx context.Context, input EnrichmentSelecti
 		if e != nil {
 			return result, e
 		}
-		entry.AutomaticPolicy = effectiveSourcePipelinePolicy(policy.Policy, source)
+		entry.AutomaticPolicy = effectiveSourcePipelinePolicy(hostPolicy, source)
 		if o.SourceRevision == "" || o.SourceHash == "" {
 			entry.BlockedReason = "source has no stable revision/hash; wait for admission"
 		}
@@ -157,17 +212,31 @@ func (s *Service) PreviewEnrichment(ctx context.Context, input EnrichmentSelecti
 			entry.BlockedReason = "stale requested source version"
 		}
 		if input.Stages.any() && entry.BlockedReason == "" {
-			intent := PipelineEnrichment{Binding: entry.Binding, Requested: input.Stages, HostPolicy: policy.Policy, AutomaticPolicy: entry.AutomaticPolicy}
-			plan, e := compileEnrichmentPlan(o, policy.Policy, intent)
+			intent := PipelineEnrichment{Binding: entry.Binding, Requested: input.Stages, HostPolicy: hostPolicy, AutomaticPolicy: entry.AutomaticPolicy}
+			plan, retry, replay, e := assessEnrichmentTx(ctx, tx, o, hostPolicy, intent, settings.QuietWindowSeconds, false)
 			if e != nil {
 				entry.BlockedReason = e.Error()
 			} else {
 				entry.EffectivePlan = &plan
+				entry.Reuse = enrichmentReuse(plan, retry, replay)
+				if replay == nil || !isRetryablePipelineRunStatus(replay.Status) {
+					setEnrichmentPreviewWait(&entry, o, plan, time.Now().UTC())
+				}
 			}
 		}
 		result.Entries = append(result.Entries, entry)
 	}
+	if result.Truncated {
+		result.NextAfter = encodeEnrichmentCursor(ctx, input, result.Entries[len(result.Entries)-1].Binding)
+	}
 	return result, nil
+}
+
+func setEnrichmentPreviewWait(entry *EnrichmentPreviewEntry, object KnowledgeObject, plan CompiledPipelinePlan, now time.Time) {
+	if eligible, quiet := pipelineQuietWindowEligibleAt(object, plan, now); quiet && eligible.After(now) {
+		entry.NextEligibleAt = &eligible
+		entry.WaitReason = "source_quiet_window"
+	}
 }
 
 func ValidateEnrichmentApply(input EnrichmentApplyInput) error {

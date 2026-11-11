@@ -11,6 +11,7 @@ import (
 	"loom.local/loom/internal/knowledge"
 	"loom.local/loom/internal/loomcli/actions"
 	"loom.local/loom/internal/loomcli/ui"
+	"loom.local/loom/internal/response"
 )
 
 type PortalSearchResult struct {
@@ -933,6 +934,19 @@ func notesSearchCmd(client Client, correlationID, raw string) tea.Cmd {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
+		if files, ok := client.(interface {
+			SearchKnowledgeFiles(context.Context, string, knowledge.NotesSearchInput) (response.Envelope[knowledge.FileSearchResultSet], error)
+		}); ok {
+			envelope, err := files.SearchKnowledgeFiles(ctx, correlationID, input)
+			if err != nil {
+				return notesSearchLoadedMsg{Query: strings.TrimSpace(raw), Input: input, Err: err, LoadedAt: time.Now().UTC()}
+			}
+			set := knowledge.NotesSearchResultSet{Query: envelope.Data.Query, Mode: envelope.Data.Mode, ResultCount: len(envelope.Data.Results), SourceLifecycle: input.SourceLifecycle, Results: []knowledge.NotesSearchResult{}}
+			for _, f := range envelope.Data.Results {
+				set.Results = append(set.Results, knowledge.NotesSearchResult{FileID: f.FileID, Title: f.Title, SourcePath: f.Path, SourceNodeKey: f.Node, ProjectName: f.Project, Snippet: f.Excerpt, MetadataOnly: f.Content == "metadata_only", SourceContext: knowledge.SourceContext{SourceCategory: f.Category}, NotesCustodyContext: knowledge.NotesCustodyContext{SourceLifecycle: knowledge.SourceLifecycle(f.Lifecycle), CanonicalPath: f.Path}})
+			}
+			return notesSearchLoadedMsg{Query: strings.TrimSpace(raw), Input: input, ResultSet: set, LoadedAt: time.Now().UTC()}
+		}
 		envelope, err := client.SearchKnowledgeNotes(ctx, correlationID, input)
 		if err != nil {
 			return notesSearchLoadedMsg{Query: strings.TrimSpace(raw), Input: input, Err: err, LoadedAt: time.Now().UTC()}

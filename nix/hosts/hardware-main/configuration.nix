@@ -8,6 +8,10 @@
     ./hardware-configuration.nix
     ../../profiles/main-hardware-desktop.nix
     ../../modules/loom-project-applications.nix
+    ../../modules/loom-codex-jobs.nix
+    ../../modules/loom-codex-runtime.nix
+    ../../modules/loom-hermes-platform.nix
+    ../../modules/loom-agent-desktop.nix
     ./wireguard-main-production.nix
   ];
 
@@ -58,19 +62,26 @@
   systemd.services = lib.genAttrs ([
     "loomd" "loom-node-agent" "loom-box-layout-preflight"
     "loom-project-applications-restore"
-    "orca-serve"
-    "loom-mini-dashboard" "samba-smbd" "samba-nmbd" "samba-winbindd"
+    "samba-smbd" "samba-nmbd" "samba-winbindd"
     "systemd-tmpfiles-setup" "systemd-tmpfiles-resetup"
-  ] ++ lib.optional config.loom.mina.enable "loom-mina"
-    ++ lib.optional config.loom.mina.recoveryEnabled "loom-mina-recovery-publish") (_: {
+  ] ++ lib.optional config.loom.orca.enable "orca-serve"
+    ++ lib.optional config.loom.miniDashboard.enable "loom-mini-dashboard"
+    ++ lib.optional config.loom.mina.enable "loom-mina"
+    ++ lib.optional config.loom.mina.recoveryEnabled "loom-mina-recovery-publish"
+    ++ lib.optionals config.loom.hermesPlatform.enable [ "loom-hermes-platform" "loom-hermes-scheduler" ]
+    ++ lib.optional config.loom.codexRuntime.recoveryEnable "loom-codex-recovery") (_: {
     requires = lib.mkAfter [ "srv-loom.mount" ];
     after = lib.mkAfter [ "srv-loom.mount" ];
     bindsTo = [ "srv-loom.mount" ];
   });
 
   # Example runtime options; authentication and recovery keys are not included.
+  loom.codexRuntime.enable = true;
+  loom.codexJobs.enable = true;
+  loom.hermesPlatform.enable = true;
   loom.mina = {
-    enable = true;
+    selected = true;
+    enable = false;
     externalAccountsEnabled = true;
     externalAccountBinding = {
       githubLogin = "example-operator";
@@ -83,7 +94,7 @@
     browserEnabled = true;
     macComputerUseEnabled = true;
     macComputerUseBindingSHA256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    recoveryEnabled = true;
+    recoveryEnabled = false;
     recoveryPublicKey = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     retainedMorathustra = [];
     model = "gpt-6-astra";
@@ -91,8 +102,8 @@
   };
 
   loom.miniDashboard = {
-    enable = true;
-    kiosk.enable = true;
+    enable = false;
+    kiosk.enable = false;
   };
 
   boot.loader.systemd-boot.enable = lib.mkDefault true;

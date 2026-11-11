@@ -26,6 +26,8 @@ const (
 	ProjectStatusActive       = "active"
 	ProjectStatusPaused       = "paused"
 	ProjectStatusArchived     = "archived"
+	ProjectWorkStateWorking   = "working"
+	ProjectWorkStatePassive   = "passive"
 	ScriptExposureKind        = "loom.script_exposure"
 	ScriptExposureSchemaV03   = "script.exposure.v0.3"
 	WorkflowContractKind      = "loom.workflow"
@@ -80,6 +82,7 @@ type ProjectSpec struct {
 	Description string `json:"description,omitempty" yaml:"description"`
 	OwnerNode   string `json:"owner_node" yaml:"owner_node"`
 	Status      string `json:"status,omitempty" yaml:"status"`
+	WorkState   string `json:"work_state,omitempty" yaml:"work_state,omitempty"`
 }
 
 type ProviderDefaults struct {
@@ -205,6 +208,7 @@ type PlanProject struct {
 	Description string `json:"description,omitempty"`
 	OwnerNode   string `json:"owner_node"`
 	Status      string `json:"status"`
+	WorkState   string `json:"work_state,omitempty"`
 }
 
 type PlanProvider struct {

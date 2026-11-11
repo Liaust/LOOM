@@ -7,15 +7,32 @@ import (
 	"loom.local/loom/internal/projectstate"
 )
 
-type refreshSourceFixture struct{ full, metadata int }
+type refreshSourceFixture struct {
+	full, metadata int
+	projection     projectstate.ProjectProjection
+}
 
 func (s *refreshSourceFixture) ObserveProjectForProvenance(context.Context, string) (projectstate.ProvenanceProjectSource, error) {
 	s.full++
-	return projectstate.ProvenanceProjectSource{}, nil
+	return projectstate.ProvenanceProjectSource{Projection: s.projection}, nil
 }
 func (s *refreshSourceFixture) ObserveProjectContextForProvenance(context.Context, string) (projectstate.ProvenanceProjectSource, error) {
 	s.metadata++
-	return projectstate.ProvenanceProjectSource{}, nil
+	return projectstate.ProvenanceProjectSource{Projection: s.projection}, nil
+}
+
+func TestBoxProjectRefreshCarriesVerifiedHomeMembership(t *testing.T) {
+	source := &refreshSourceFixture{projection: projectstate.ProjectProjection{Project: projectstate.ProjectIdentityProjection{ProjectID: projectionTestProjectID}}}
+	projection := &refreshProjectionFixture{}
+	refresh := ProjectRefreshService{Source: source, Projection: projection, HomeBoxID: func(_ context.Context, projectID string) (string, error) {
+		if projectID != projectionTestProjectID {
+			t.Fatal(projectID)
+		}
+		return "box_company", nil
+	}}
+	if _, err := refresh.RefreshProject(boxContext("box_company"), projectionTestProjectID, true); err != nil || projection.input.HomeBoxID != "box_company" {
+		t.Fatal(projection.input.HomeBoxID, err)
+	}
 }
 
 type refreshProjectionFixture struct{ input ProjectProjectionSyncInput }

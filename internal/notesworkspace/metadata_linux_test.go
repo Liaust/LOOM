@@ -77,12 +77,12 @@ func TestNewNoteInheritsSourceDefaultACL(t *testing.T) {
 func TestWriterOwnedReplacementKeepsAccess(t *testing.T) {
 	for _, extended := range []bool{false, true} {
 		t.Run(fmtBool(extended), func(t *testing.T) {
-			original := replacementMetadata{UID: 12345, GID: uint32(os.Getegid()), Mode: 0640, Xattrs: map[string][]byte{"user.notes_workspace_test": []byte("retained")}}
+			original := replacementMetadata{UID: 12345, GID: uint32(os.Getegid()), Mode: 0760, Xattrs: map[string][]byte{"user.notes_workspace_test": []byte("retained")}}
 			if extended {
-				// Masked write bits must not spring to life when the owner's rw
+				// Masked execute bits must not spring to life when the owner's rwx
 				// entry requires a wider mask. Include an existing owner entry.
 				raw := new(bytes.Buffer)
-				for _, value := range []any{uint32(2), uint16(1), uint16(6), uint32(0xffffffff), uint16(2), uint16(0), uint32(12345), uint16(2), uint16(6), uint32(12346), uint16(4), uint16(6), uint32(0xffffffff), uint16(8), uint16(7), uint32(12347), uint16(16), uint16(4), uint32(0xffffffff), uint16(32), uint16(0), uint32(0xffffffff)} {
+				for _, value := range []any{uint32(2), uint16(1), uint16(7), uint32(0xffffffff), uint16(2), uint16(0), uint32(12345), uint16(2), uint16(7), uint32(12346), uint16(4), uint16(7), uint32(0xffffffff), uint16(8), uint16(7), uint32(12347), uint16(16), uint16(6), uint32(0xffffffff), uint16(32), uint16(0), uint32(0xffffffff)} {
 					if err := binary.Write(raw, binary.LittleEndian, value); err != nil {
 						t.Fatal(err)
 					}
@@ -90,11 +90,11 @@ func TestWriterOwnedReplacementKeepsAccess(t *testing.T) {
 				original.Xattrs[accessACL] = raw.Bytes()
 			}
 			before := append([]byte(nil), original.Xattrs[accessACL]...)
-			got, err := writerOwnedMetadata(original, uint32(os.Geteuid()))
+			got, err := writerOwnedMetadata(original, uint32(os.Geteuid()), uint32(os.Getegid()), []int{os.Getegid()})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.UID != uint32(os.Geteuid()) || got.GID != original.GID || got.Mode != 0660 || !bytes.Equal(original.Xattrs[accessACL], before) {
+			if got.UID != uint32(os.Geteuid()) || got.GID != original.GID || got.Mode != 0670 || !bytes.Equal(original.Xattrs[accessACL], before) {
 				t.Fatalf("unexpected metadata or mutated original: %+v %v", got, err)
 			}
 			acl := got.Xattrs[accessACL]
@@ -103,11 +103,11 @@ func TestWriterOwnedReplacementKeepsAccess(t *testing.T) {
 				tag, perm, id := binary.LittleEndian.Uint16(acl[offset:]), binary.LittleEndian.Uint16(acl[offset+2:]), binary.LittleEndian.Uint32(acl[offset+4:])
 				if tag == 2 && id == original.UID {
 					ownerEntries++
-					if perm != 6 {
+					if perm != 7 {
 						t.Fatal("original owner lost access")
 					}
 				} else if tag == 2 || tag == 4 || tag == 8 {
-					if perm != 4 {
+					if perm != 6 {
 						t.Fatalf("masked permissions expanded: %d %d", tag, perm)
 					}
 				}
@@ -146,9 +146,48 @@ func fmtBool(value bool) string {
 
 func TestWriterOwnedReplacementRejectsMalformedACL(t *testing.T) {
 	for _, raw := range [][]byte{{}, {2, 0, 0, 0}, make([]byte, 28)} {
-		_, err := writerOwnedMetadata(replacementMetadata{UID: 12345, Mode: 0644, Xattrs: map[string][]byte{accessACL: raw}}, 1000)
+		_, err := writerOwnedMetadata(replacementMetadata{UID: 12345, Mode: 0644, Xattrs: map[string][]byte{accessACL: raw}}, 1000, 100, []int{100})
 		if err == nil {
 			t.Fatal("accepted malformed access ACL")
 		}
+	}
+}
+
+func TestWriterOwnedReplacementChangesLegacyGroupWithoutGrantingWriterGroup(t *testing.T) {
+	writer, group := uint32(os.Geteuid()), uint32(os.Getegid())
+	oldOwner, oldGroup := uint32(1000), uint32(100)
+	if writer == oldOwner {
+		oldOwner++
+	}
+	if group == oldGroup {
+		oldGroup++
+	}
+	original := replacementMetadata{UID: oldOwner, GID: oldGroup, Mode: 0674, Xattrs: map[string][]byte{
+		"user.notes_workspace_test": []byte("retained"),
+		accessACL:                   aclBytes(accessEntry{1, 6, aclUndefined}, accessEntry{2, 6, writer}, accessEntry{4, 7, aclUndefined}, accessEntry{16, 7, aclUndefined}, accessEntry{32, 4, aclUndefined}),
+	}}
+	got, err := writerOwnedMetadata(original, writer, group, []int{int(group)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.CreateTemp(t.TempDir(), "legacy-group-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := unix.Fchmod(int(f.Fd()), got.Mode); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range got.Xattrs {
+		if err := unix.Fsetxattr(int(f.Fd()), name, value, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	actual, err := metadataAt(int(f.Fd()))
+	if err != nil || !reflect.DeepEqual(got, actual) {
+		t.Fatalf("kernel legacy group metadata mismatch: %+v %v", actual, err)
+	}
+	if aclAllows(t, actual, oldOwner+10000, []int{int(group)}, 2) || !aclAllows(t, actual, oldOwner+10000, []int{int(oldGroup)}, 7) {
+		t.Fatal("writer group gained write or original group lost access")
 	}
 }

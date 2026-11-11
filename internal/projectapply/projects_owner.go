@@ -3,16 +3,62 @@ package projectapply
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 
+	"loom.local/loom/internal/boxregistry"
 	pc "loom.local/loom/internal/projectcontracts"
 	"loom.local/loom/internal/projects"
 )
 
 type ProjectsOwner struct {
-	Resolver *LocalResolver
-	Projects projects.Service
+	Resolver        *LocalResolver
+	Projects        projects.Service
+	CurrentProjects func() (projects.Service, error)
+}
+
+func (o ProjectsOwner) projectService(ctx context.Context, call ActionCall) (projects.Service, error) {
+	service := o.Projects
+	if o.CurrentProjects != nil {
+		var err error
+		service, err = o.CurrentProjects()
+		if err != nil {
+			return service, err
+		}
+	}
+	selection, scoped := boxregistry.FromContext(ctx)
+	if !scoped {
+		return service, nil
+	}
+	var payload projects.DeclarationRegistrationPayload
+	if err := strictOwnerPayload(call.Payload, &payload); err != nil {
+		return service, err
+	}
+	if payload.Project.ID != call.Target.ProjectID || payload.ProjectRoot != call.Target.ProjectRoot || !filepath.IsAbs(payload.ProjectRoot) || filepath.Clean(payload.ProjectRoot) != payload.ProjectRoot {
+		return service, fail(pc.DeclarationIdentityConflict, "registration_target_changed")
+	}
+	if o.Resolver == nil || o.Resolver.Config == nil {
+		return service, fail(pc.DeclarationTargetUnavailable, "local_config_unavailable")
+	}
+	cfg, err := o.Resolver.Config()
+	if err != nil {
+		return service, fail(pc.DeclarationTargetUnavailable, "local_config_unavailable")
+	}
+	catalog, err := cfg.BoxCatalog()
+	if err != nil {
+		return service, fail(pc.DeclarationTargetUnavailable, "configured_box_unavailable")
+	}
+	physical, err := filepath.EvalSymlinks(payload.ProjectRoot)
+	if err != nil || physical != payload.ProjectRoot {
+		return service, fail(pc.DeclarationUnauthorized, "source_outside_configured_box")
+	}
+	binding, err := catalog.ForPath(payload.ProjectRoot)
+	if err != nil || !selection.Contains(binding.ID) {
+		return service, fail(pc.DeclarationUnauthorized, "project_outside_selected_box")
+	}
+	return service.WithBoxCatalog(catalog), nil
 }
 
 func (o ProjectsOwner) Validate(ctx context.Context, a pc.DeclarationAction, raw json.RawMessage) error {
@@ -52,6 +98,7 @@ func strictOwnerPayload(raw []byte, target any) error {
 		return err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return fail(pc.DeclarationInvalid, "unknown_owner_payload_field")
@@ -103,7 +150,18 @@ func (o ProjectsOwner) Observe(ctx context.Context, call ActionCall) (Observatio
 	if err := o.Validate(ctx, call.Action, call.Payload); err != nil {
 		return Observation{}, err
 	}
-	found, err := o.Projects.ObserveDeclarationRegistration(ctx, declarationRequest(call.Principal), call.Target.ProjectID, projectCall(call))
+	service, err := o.projectService(ctx, call)
+	if err != nil {
+		return Observation{}, err
+	}
+	if _, scoped := boxregistry.FromContext(ctx); scoped {
+		if _, err := service.ResolveProjectRef(ctx, call.Target.ProjectID); err == sql.ErrNoRows {
+			return Observation{State: Absent}, nil
+		} else if err != nil {
+			return Observation{}, err
+		}
+	}
+	found, err := service.ObserveDeclarationRegistration(ctx, declarationRequest(call.Principal), call.Target.ProjectID, projectCall(call))
 	if err != nil {
 		return Observation{}, err
 	}
@@ -117,11 +175,19 @@ func (o ProjectsOwner) Apply(ctx context.Context, call ActionCall) (Observation,
 	if err := o.Validate(ctx, call.Action, call.Payload); err != nil {
 		return Observation{}, err
 	}
+	service, err := o.projectService(ctx, call)
+	if err != nil {
+		return Observation{}, err
+	}
 	x, err := o.Resolver.load(ctx, call.Principal, call.Target.ProjectRoot, call.Target.OwnerNodeID)
 	if err != nil {
 		return Observation{}, err
 	}
-	if !same(localPrerequisitesFor(call.Principal, x, call.Expected.Bindings), call.Expected) {
+	current, err := o.Resolver.currentPrerequisitesFor(ctx, call.Principal, x, call.Expected)
+	if err != nil {
+		return Observation{}, err
+	}
+	if !same(current, call.Expected) {
 		return Observation{}, fail(pc.DeclarationPlanStale, "registration_prerequisite_changed")
 	}
 	var frozen projects.DeclarationRegistrationPayload
@@ -141,7 +207,8 @@ func (o ProjectsOwner) Apply(ctx context.Context, call ActionCall) (Observation,
 		return Observation{}, err
 	}
 	raw, err := canonicalValue(desired)
-	if err != nil || !bytes.Equal(raw, call.Payload) {
+	frozenRaw, frozenErr := CanonicalJSON(call.Payload)
+	if err != nil || frozenErr != nil || !bytes.Equal(raw, frozenRaw) {
 		return Observation{}, fail(pc.DeclarationPlanStale, "registration_source_changed")
 	}
 	// Pass the actual full current domain membership vector, including removed
@@ -149,7 +216,7 @@ func (o ProjectsOwner) Apply(ctx context.Context, call ActionCall) (Observation,
 	domainCall := projectCall(call)
 	domainCall.Expected = x.State
 	domainCall.Predecessor = frozen.Predecessor
-	result, err := o.Projects.RegisterDeclaration(ctx, declarationRequest(call.Principal), x.Input, domainCall, declarationSourceFence{Call: call, Resolver: o.Resolver})
+	result, err := service.RegisterDeclaration(ctx, declarationRequest(call.Principal), x.Input, domainCall, declarationSourceFence{Call: call, Resolver: o.Resolver})
 	if err != nil {
 		return Observation{}, err
 	}
@@ -175,7 +242,10 @@ func (f declarationSourceFence) Check(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	current := localPrerequisites(f.Call.Principal, x)
+	current, err := f.Resolver.currentPrerequisitesFor(ctx, f.Call.Principal, x, f.Call.Expected)
+	if err != nil {
+		return err
+	}
 	if !same(current.Sources, f.Call.Expected.Sources) || current.Target != f.Call.Target {
 		return fail(pc.DeclarationPlanStale, "source_changed_before_registration_commit")
 	}

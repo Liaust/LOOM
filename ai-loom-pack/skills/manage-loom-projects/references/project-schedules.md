@@ -47,14 +47,11 @@ to reactivate. Removing the resource and applying disables future runs, retainin
 ID, fires and invocations. It does not cancel dispatched work or delete history.
 Returning the same key reuses ownership. Project restore leaves runtime inactive.
 
-## MINA / Hermes schedules
+## Hermes Agentic Schedules
 
-For MINA's context-rich reviews, use the installed native Hermes adapter rather
-than wrapping MINA in a LOOM capability. Personal cross-project jobs can be
-created directly through Hermes; they need no dummy project. Observe both native
-and project-owned jobs with `loom schedules hermes --json` (also in Portal).
-
-A project can declare a MINA job in the same `.loom/project.yaml`:
+Main's native Hermes owns agentic timing. MINA's personal cross-project jobs
+can be created through Hermes without a fabricated project. Project routines
+can use the same declaration plan/apply/status path:
 
 ```yaml
 resources:
@@ -74,8 +71,8 @@ Optional `skills` lists installed skill names. The workdir is the registered
 project, not an arbitrary prompt-provided path. Status defaults to `paused`;
 explicit `active` requests activation. Use normal project plan/apply/status.
 Hermes owns the native job, clock, session and history: LOOM does not create a
-second timer. On Main, the gateway uses Europe/Amsterdam; the read-only inventory
-does not certify timezone or scheduler liveness.
+second timer. Configure and verify the gateway's timezone; the read-only
+inventory does not certify timezone or scheduler liveness.
 
 Reapply preserves an existing pause. Native edits can require reconciliation;
 do not overwrite drift blindly. Archive/withdrawal pauses only marked project
@@ -84,7 +81,102 @@ one-shot is not rearmed by reapply. Pausing prevents future triggers, not an
 already-running session. Stored `ok` is a native result, not independent proof
 of task effects or successful message delivery.
 
-For a general project coding task instead, declare a script capability invoking
-`codex exec` with explicit project context, then target it with the LOOM
-`schedule` resource above. LOOM owns that job and its bounded completion; MINA's
-profile and memories are not implicitly inherited.
+An operator-configured weekly Provenance routine uses Hermes as its sole clock.
+Its script-only occurrence can invoke the supported conditional LOOM/Codex
+executor. An empty eligible queue launches no agent. This example supplies no
+live job ID, timezone, activation receipt or standing reconciliation authority.
+Discover the actual job and verify its profile, workdir and authorized scope.
+Preserve existing pauses and retired jobs. Inspect the native occurrence and
+linked LOOM/Codex result; never resume a second clock.
+
+## Optional Project Profile
+
+Add an `agent` resource only when the project needs a persistent Hermes identity:
+
+```yaml
+resources:
+  researcher:
+    kind: agent
+    agent:
+      instructions_ref: notes/researcher.md
+      model: gpt-6-astra
+      provider: openai-codex
+  research_review:
+    kind: hermes_schedule
+    hermes_schedule:
+      profile: researcher
+      every_minutes: 60
+      status: paused
+      prompt: Read this project's notes and summarize any new questions.
+```
+
+Instructions are a project-relative Markdown source captured in the plan.
+Optional `workdir` is project-relative; it defaults to the project root.
+The owner creates a fresh stable native profile without cloning MINA's memory,
+credentials, channels or jobs. Model/provider selection is explicit; a missing
+native login or endpoint is not permission to start OAuth or choose a fallback.
+Native profiles are not OS security boundaries. Mutable memory/history/skills
+stay native. Managed instructions/config edits surface as drift; review them
+instead of overwriting. Resource withdrawal retains the profile and pauses its
+project-owned triggers. Restore leaves those triggers paused.
+
+## Standalone Codex From Hermes Timing
+
+Use `target: codex` when the task needs a normal project Codex run, not a
+Hermes conversation or another persistent persona:
+
+```yaml
+resources:
+  coding_review:
+    kind: hermes_schedule
+    hermes_schedule:
+      profile: mina
+      target: codex
+      codex:
+        model: gpt-6-astra
+        timeout_seconds: 120
+        sandbox: read-only
+      every_minutes: 60
+      status: paused
+      prompt: Read this project's AGENTS.md and report current blockers. Do not edit.
+```
+
+Here `profile` selects the native timer store, not a supervisor model. A native
+script-only occurrence calls the existing authorized Main job owner; no Hermes
+inference turn launches Codex and the Mac is unnecessary. Codex receives the
+registered project root, its project instructions and explicit execution settings,
+not MINA's personality. `skills` is omitted for this target. Timeout is 1-1800
+seconds; native script timeout must cover dispatch plus execution. Inspect actual
+native occurrence and linked LOOM call/job/thread/outcome, not merely enqueue
+acceptance. `needs_input` or unknown outcome requires attention, not blind replay.
+
+`loom schedules hermes --json` includes selected project profiles and sanitized
+native state. Ordinary LOOM system/service/backup schedules remain with LOOM.
+
+## Optional Internal Job Notifications
+
+A project can opt in to native diagnostic calls for `job.failed` and
+`job.timed_out`. Reuse its explicit integration identity and registered project
+ID; the CLI builds the internal-only mapping:
+
+```sh
+loom direct-event endpoints create --slug project-job-alerts \
+  --integration <integration-key> --project <project-id> \
+  --hermes-profile reader --internal-event job.failed --internal-event job.timed_out
+```
+
+Use `mina` or that project's declared agent resource key. No HTTP auth profile
+or public listener is created; external ingestion into this subscription is
+refused. Existing endpoints without this opt-in remain unchanged. Pause/resume
+through `loom direct-event endpoint`; archive pauses project-owned native work,
+and restored projects/routines need explicit reactivation rather than catch-up.
+
+LOOM commits source identity to its existing queue, then calls the fixed
+`main@system.hermes.event` capability. The backend checks the real event/job and
+holds the project's archive fence through native admission. Up to 16 pending
+events coalesce without resetting the first due time. Native cadence can add
+roughly a minute; this is not instantaneous delivery. Full batches and unknown
+outcomes require attention, not silent loss or automatic side-effect retries.
+Queued/coalesced/duplicate receipts contain a native job ID, not proof the agent
+finished. Use native execution/output history for that. Events are observations,
+not new human authority; diagnostics do not automatically repair/retry jobs.

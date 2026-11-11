@@ -1,6 +1,11 @@
 package projectcontracts
 
-import "time"
+import (
+	"strings"
+	"time"
+
+	"loom.local/loom/internal/filepolicy"
+)
 
 // D0 freezes DTOs only. Nothing here enables v0.5 in LoadProject, validates a
 // declaration, computes a production plan, dispatches an owner or grants access.
@@ -8,6 +13,7 @@ import "time"
 // contract.md. In particular, ordinary json/yaml unmarshalling is NOT validation.
 const (
 	ProjectSchemaV05            = "project.contract.v0.5"
+	ProjectSchemaV06            = "project.contract.v0.6"
 	DeclarationPlanSchemaV05    = "project.declaration_plan.v0.5"
 	DeclarationRequestSchemaV05 = "project.declaration_request.v0.5"
 	DeclarationResultSchemaV05  = "project.declaration_result.v0.5"
@@ -26,6 +32,7 @@ const (
 	DeclarationApplication    DeclarationResourceKind = "application"
 	DeclarationSchedule       DeclarationResourceKind = "schedule"
 	DeclarationHermesSchedule DeclarationResourceKind = "hermes_schedule"
+	DeclarationAgent          DeclarationResourceKind = "agent"
 )
 
 // ProjectDeclaration is the future .loom/project.yaml source document.
@@ -37,6 +44,11 @@ type ProjectDeclaration struct {
 	Project         ProjectSpec                         `json:"project" yaml:"project"`
 	Resources       map[ResourceKey]ResourceDeclaration `json:"resources" yaml:"resources"`
 	LegacyContracts *LegacyContractsDeclaration         `json:"legacy_contracts,omitempty" yaml:"legacy_contracts,omitempty"`
+	Files           *filepolicy.FolderPolicy            `json:"files,omitempty" yaml:"files,omitempty"`
+}
+
+func IsDeclarationSchemaVersion(version string) bool {
+	return version == ProjectSchemaV05 || version == ProjectSchemaV06
 }
 
 // LegacyContractsDeclaration retains selected old source semantics for migration
@@ -61,6 +73,7 @@ type LegacyWatchReference struct {
 
 // ResourceDeclaration is a closed union: exactly the payload named by Kind.
 type ResourceDeclaration struct {
+	Agent          *AgentDeclaration          `json:"agent,omitempty" yaml:"agent,omitempty"`
 	HermesSchedule *HermesScheduleDeclaration `json:"hermes_schedule,omitempty" yaml:"hermes_schedule,omitempty"`
 	Kind           DeclarationResourceKind    `json:"kind" yaml:"kind"`
 	Repository     *RepositoryDeclaration     `json:"repository,omitempty" yaml:"repository,omitempty"`
@@ -108,6 +121,7 @@ type KnowledgeDeclaration struct {
 	Category        KnowledgeCategory            `json:"category" yaml:"category"`
 	Include         []string                     `json:"include,omitempty" yaml:"include,omitempty"`
 	Exclude         []string                     `json:"exclude,omitempty" yaml:"exclude,omitempty"`
+	Workspace       *KnowledgeWorkspacePolicy    `json:"workspace,omitempty" yaml:"workspace,omitempty"`
 	Protection      ResourceKey                  `json:"protection,omitempty" yaml:"protection,omitempty"`
 	Refresh         *KnowledgeRefreshDeclaration `json:"refresh,omitempty" yaml:"refresh,omitempty"`
 	Processing      *KnowledgeProcessingPolicy   `json:"processing,omitempty" yaml:"processing,omitempty"`
@@ -144,8 +158,18 @@ type KnowledgeProcessingPolicy struct {
 // KnowledgeSourcePolicy is the normalized policy captured in enrollment evidence.
 // A nil policy preserves the encoding of declarations predating these options.
 type KnowledgeSourcePolicy struct {
+	Files      *filepolicy.FolderPolicy   `json:"files,omitempty"`
 	Refresh    *KnowledgeRefreshPolicy    `json:"refresh,omitempty"`
 	Processing *KnowledgeProcessingPolicy `json:"processing,omitempty"`
+	Workspace  *KnowledgeWorkspacePolicy  `json:"workspace,omitempty"`
+}
+
+// Workspace selection is independent of indexing only when explicitly declared.
+// Omission retains the existing include/exclude admission on both surfaces.
+type KnowledgeWorkspacePolicy struct {
+	Path    string   `json:"path,omitempty" yaml:"path,omitempty"`
+	Include []string `json:"include,omitempty" yaml:"include,omitempty"`
+	Exclude []string `json:"exclude,omitempty" yaml:"exclude,omitempty"`
 }
 
 type KnowledgeRefreshPolicy struct {
@@ -166,6 +190,11 @@ type ProtectionDeclaration struct {
 // ApplicationDeclaration is only the shared composition envelope. E1 owns the
 // referenced manifest's artifact/config/process/readiness schema and compiler.
 type ApplicationDeclaration struct {
+	Source             *ApplicationSource              `json:"source,omitempty" yaml:"source,omitempty"`
+	Run                *ApplicationRun                 `json:"run,omitempty" yaml:"run,omitempty"`
+	Config             *ApplicationSourceConfig        `json:"config,omitempty" yaml:"config,omitempty"`
+	Network            string                          `json:"network,omitempty" yaml:"network,omitempty"`
+	Actions            map[string]ApplicationAction    `json:"actions,omitempty" yaml:"actions,omitempty"`
 	CredentialSources  map[string]string               `json:"credential_sources,omitempty" yaml:"credential_sources,omitempty"`
 	ArtifactDescriptor string                          `json:"artifact_descriptor,omitempty" yaml:"artifact_descriptor,omitempty"`
 	Repository         ResourceKey                     `json:"repository" yaml:"repository"`
@@ -179,11 +208,25 @@ type ApplicationDeclaration struct {
 // Exactly one of Path (project-relative) and BindingRef (future E1/E2 allocation
 // prerequisite, not an existing named resolver). No approval is implied.
 type ApplicationData struct {
-	Backup     string               `json:"backup,omitempty" yaml:"backup,omitempty"`
-	Path       string               `json:"path,omitempty" yaml:"path,omitempty"`
-	BindingRef string               `json:"binding_ref,omitempty" yaml:"binding_ref,omitempty"`
-	Capacity   *ApplicationCapacity `json:"capacity,omitempty" yaml:"capacity,omitempty"`
-	Protection ResourceKey          `json:"protection,omitempty" yaml:"protection,omitempty"`
+	Browse     *ApplicationDataBrowse `json:"browse,omitempty" yaml:"browse,omitempty"`
+	Backup     string                 `json:"backup,omitempty" yaml:"backup,omitempty"`
+	Path       string                 `json:"path,omitempty" yaml:"path,omitempty"`
+	BindingRef string                 `json:"binding_ref,omitempty" yaml:"binding_ref,omitempty"`
+	Capacity   *ApplicationCapacity   `json:"capacity,omitempty" yaml:"capacity,omitempty"`
+	Protection ResourceKey            `json:"protection,omitempty" yaml:"protection,omitempty"`
+}
+
+// ApplicationDataBrowse exposes existing content read-only; omission is private.
+type ApplicationDataBrowse struct {
+	Label   string `json:"label,omitempty" yaml:"label,omitempty"`
+	Subpath string `json:"subpath,omitempty" yaml:"subpath,omitempty"`
+	Format  string `json:"format,omitempty" yaml:"format,omitempty"`
+}
+
+func (b ApplicationDataBrowse) Valid() bool {
+	return len(b.Label) <= 80 && !strings.ContainsAny(b.Label, "\x00\r\n") &&
+		(b.Subpath == "" || declarationPath(b.Subpath, false)) &&
+		(b.Format == "" || b.Format == "files" || b.Format == "zotero-webdav")
 }
 
 // ApplicationCapacity is a planning request in bytes. It is neither a quota nor
@@ -240,6 +283,7 @@ type DeclarationEffect string
 const (
 	DeclarationReconcile   DeclarationEffect = "reconcile"
 	DeclarationProjections DeclarationEffect = "refresh_projections"
+	DeclarationWatches     DeclarationEffect = "reconcile_watches"
 )
 
 type DeclarationActionKind string
@@ -252,6 +296,7 @@ const (
 	DeclarationApplyApplication        DeclarationActionKind = "apply_application"
 	DeclarationReconcileSchedule       DeclarationActionKind = "reconcile_schedule"
 	DeclarationReconcileHermesSchedule DeclarationActionKind = "reconcile_hermes_schedule"
+	DeclarationReconcileAgent          DeclarationActionKind = "reconcile_agent"
 	DeclarationRefreshProjection       DeclarationActionKind = "refresh_projection"
 	DeclarationRetireResource          DeclarationActionKind = "retire_resource"
 )
@@ -308,12 +353,27 @@ type DeclarationPlanBasis struct {
 }
 
 type DeclarationPlan struct {
-	SchemaVersion string               `json:"schema_version"`
-	PlanID        string               `json:"plan_id"`
-	Basis         DeclarationPlanBasis `json:"basis"`
-	Readiness     DeclarationReadiness `json:"readiness"`
-	Errors        []DeclarationError   `json:"errors"`
-	GeneratedAt   string               `json:"generated_at"`
+	SchemaVersion  string                      `json:"schema_version"`
+	PlanID         string                      `json:"plan_id"`
+	Basis          DeclarationPlanBasis        `json:"basis"`
+	Readiness      DeclarationReadiness        `json:"readiness"`
+	Errors         []DeclarationError          `json:"errors"`
+	GeneratedAt    string                      `json:"generated_at"`
+	NotesWorkspace []DeclarationNotesPlacement `json:"notes_workspace,omitempty"`
+}
+
+type DeclarationNotesPlacement struct {
+	Resource         ResourceKey `json:"resource"`
+	SourceCollection string      `json:"source_collection,omitempty"`
+	SourcePath       string      `json:"source_path"`
+	CurrentRoot      string      `json:"current_root,omitempty"`
+	DesiredRoot      string      `json:"desired_root"`
+	Change           string      `json:"change"`
+	SourceStatus     string      `json:"source_status,omitempty"`
+	IndexInclude     []string    `json:"index_include"`
+	IndexExclude     []string    `json:"index_exclude"`
+	WorkspaceInclude []string    `json:"workspace_include"`
+	WorkspaceExclude []string    `json:"workspace_exclude"`
 }
 
 // DeclarationPlanRequest resolves the selected project/location without source
@@ -397,6 +457,7 @@ type DeclarationActionResult struct {
 
 type DeclarationResult struct {
 	SchemaVersion string                    `json:"schema_version"`
+	Effects       []DeclarationEffect       `json:"effects,omitempty"`
 	OperationID   string                    `json:"operation_id"`
 	PlanID        string                    `json:"plan_id"`
 	Target        DeclarationTarget         `json:"target"`
@@ -409,12 +470,17 @@ type DeclarationResult struct {
 }
 
 type DeclarationResourceStatus struct {
+	// Path is the source-declared repository location on the verified owner.
+	// It is navigation, not an assertion about Git or deployment readiness.
+	Path      string               `json:"path,omitempty"`
 	Binding   DeclarationBinding   `json:"binding"`
 	Readiness DeclarationReadiness `json:"readiness"`
 	Errors    []DeclarationError   `json:"errors"`
 }
 
 type DeclarationStatus struct {
+	Lifecycle     string                                    `json:"lifecycle,omitempty"`
+	WorkState     string                                    `json:"work_state,omitempty"`
 	Development   *DeclarationDevelopmentContext            `json:"development,omitempty"`
 	SchemaVersion string                                    `json:"schema_version"`
 	Target        DeclarationTarget                         `json:"target"`
@@ -429,14 +495,32 @@ type DeclarationStatus struct {
 // A compact, source-declared context alongside technical readiness. Detailed
 // captured evidence belongs to the project Provenance snapshot, not this view.
 type DeclarationDevelopmentContext struct {
-	Posture      string `json:"posture"`
-	SourceDigest string `json:"source_digest,omitempty"`
-	Purpose      string `json:"purpose,omitempty"`
-	CurrentFocus string `json:"current_focus,omitempty"`
-	Progress     string `json:"progress,omitempty"`
-	Blockers     string `json:"blockers,omitempty"`
-	NextAction   string `json:"next_action,omitempty"`
-	SnapshotRef  string `json:"snapshot_ref,omitempty"`
+	TruncatedFields []string                      `json:"truncated_fields,omitempty"`
+	Conversations   *DeclarationConversationIndex `json:"conversations,omitempty"`
+	Archive         *DeclarationArchivedContext   `json:"archive,omitempty"`
+	Posture         string                        `json:"posture"`
+	SourceDigest    string                        `json:"source_digest,omitempty"`
+	Purpose         string                        `json:"purpose,omitempty"`
+	CurrentFocus    string                        `json:"current_focus,omitempty"`
+	Progress        string                        `json:"progress,omitempty"`
+	Blockers        string                        `json:"blockers,omitempty"`
+	NextAction      string                        `json:"next_action,omitempty"`
+	SnapshotRef     string                        `json:"snapshot_ref,omitempty"`
+}
+
+type DeclarationConversationIndex struct {
+	Path      string `json:"path"`
+	Hash      string `json:"hash"`
+	Excerpt   string `json:"excerpt,omitempty"`
+	Truncated bool   `json:"truncated"`
+}
+
+type DeclarationArchivedContext struct {
+	ReadOnlyRoot     string   `json:"read_only_root,omitempty"`
+	OperationID      string   `json:"operation_id"`
+	ManifestDigest   string   `json:"manifest_digest"`
+	ArchivedAt       string   `json:"archived_at"`
+	MissingDocuments []string `json:"missing_documents,omitempty"`
 }
 
 type DeclarationErrorCode string
@@ -452,7 +536,12 @@ const (
 	DeclarationApprovalRequired  DeclarationErrorCode = "declaration.approval_required"
 	DeclarationOperationConflict DeclarationErrorCode = "declaration.operation_conflict"
 	DeclarationOwnerFailed       DeclarationErrorCode = "declaration.owner_failed"
+	DeclarationOwnerPending      DeclarationErrorCode = "declaration.owner_pending"
 )
+
+func DeclarationWaitingForOwner(code DeclarationErrorCode, cause string) bool {
+	return code == DeclarationOwnerPending || code == DeclarationOwnerFailed && cause == "owner_pending"
+}
 
 // DeclarationError preserves the typed owner cause and known completed effects.
 // Message must be redacted. Retryable never means bypass authority or replan.

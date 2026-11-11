@@ -1,35 +1,44 @@
 # Project Delegation
 
+Carry the selected Box ID/policy and parent-authorized scope. Company Basecamp
+writes need the operator's explicit approval; no Personal account/capture fallback.
+Keep results in their owning Box and member repos portable.
+
+Implement directly, including substantial features. Delegation is optional.
+
 ## Ordinary edits
 
-Specify a bounded outcome, source root, appropriate tests and concise handoff.
+Give a bounded outcome, owning source, appropriate tests and concise handoff.
 Follow actual repository instructions. No new planning files or formal file
-inventories for small edits.
-Start with `.project/STATE.md`; consult OVERVIEW (or existing PROJECT.md), ROADMAP
-and MAP as relevant. `.loom/` owns identity/resources, not development prose.
-Absent optional `.repo/` needs no installation. Context reads never enroll
-resources, refresh projections or accept claims. Administration and documentation
-searches are not editing prerequisites.
+inventories unless required there. `.loom/` owns resources, not development prose;
+absent optional `.repo/` needs no installation. Context reads do not enroll,
+refresh projections or accept claims. No administrative editing prerequisites.
 
 ## Planned or high-impact work
 
-Follow the accepted plan: exact accepted base, scope, dependencies, validation,
-checkpoints and stop conditions. Respect repository-specific integrator/worker policy.
+Follow the accepted plan/base, validation and stop conditions; coordinate actual
+shared owners. An integrator handoff is not mandatory. Edit real source, never an
+immutable deployed release.
 
 ## Harness and authority
 
-The running harness owns lifecycle: a Codex model inside ORCA remains ORCA-owned.
-Use ORCA-native controls or Codex-managed tasks/worktrees accordingly. Neither
-harness adopts the other's worktree; LOOM creates no competing registry.
+Use native Hermes delegation or independent Codex Desktop/direct CLI; no extra
+coding-assistant profile or mirrored chats. Give each worktree one lifecycle
+owner; other clients open its existing path. Worktrees are optional.
 
-A Git worktree contains tracked files at its selected revision, not untracked
-or parent context. Supply relevant parent `.project` context and source references
-in the normal handoff; never duplicate its canonical tree. Worktrees are optional.
-Workers report branch results; the coordinator updates shared STATE/ROADMAP
-after integration.
+Tracked context travels at its selected revision, with source pointers, not
+canonical-tree copies. Do not give the worker MINA's SOUL, private history or
+implied credentials, permissions or operational authority. Fix task-owned defects
+when that development scope is authorized; request missing effects explicitly.
+Review results; the coordinator owns shared STATE/ROADMAP after integration.
+Delegation changes neither identity nor publication, contact, merge, deployment
+or account authority; preserve unfinished work.
 
-Do not give the worker MINA's SOUL, Hermes memory or unrelated conversations, or
-imply inherited credentials, permissions or operational authority. Route core
-defects to LOOM's developer and deployments to its operator. Review handoff
-evidence and record unfinished work. Assignment grants no external commitments,
-publication, contact, merge, deployment or account changes.
+Record `.project/CONVERSATIONS.md` pointers: returned exact thread ID,
+host, actual cwd and role. Unknown stays unknown; no private-state scraping or
+scheduled verification substitutes. This is not transcript storage.
+
+Retained Codex assignments use a fresh chat in the remote MINA project, not
+personal chats/forks. Creation is tool output: bootstrap only, then
+`loom-codex-message task` with sender/authorization while idle. `report` is
+informational; same-task follow-ups stay together. Workers use their own project.

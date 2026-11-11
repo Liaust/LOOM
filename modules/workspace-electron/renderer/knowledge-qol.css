@@ -1,0 +1,12 @@
+.knowledge-view .knowledge-legend { gap:8px 18px; }
+.knowledge-legend-item { display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted); }
+.knowledge-class-swatch { display:inline-block;width:10px;height:10px;flex:none;border-radius:50%; }
+.knowledge-view .knowledge-summary { flex-wrap:wrap; }
+.knowledge-filter-label { max-width:100%;overflow-wrap:anywhere; }
+.knowledge-view .choice-select { min-width:0;max-width:100%; }
+.knowledge-view .choice-select-trigger { min-width:0;max-width:100%; }
+.knowledge-view .choice-select-trigger>span:first-child { min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.knowledge-category .category-row { gap:12px; }
+.knowledge-category .category-row>span:first-child { min-width:0;overflow-wrap:anywhere;text-align:left; }
+.knowledge-view:has(.knowledge-graph) { height:100%;min-height:600px; }
+.knowledge-view .knowledge-graph { height:auto;min-height:260px;flex:1 0 260px; }

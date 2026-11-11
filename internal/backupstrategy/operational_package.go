@@ -18,6 +18,7 @@ import (
 
 	"golang.org/x/sys/unix"
 	"loom.local/loom/internal/redaction"
+	"loom.local/loom/internal/restoreauthority"
 )
 
 const (
@@ -37,13 +38,13 @@ const (
 	OperationalMigrationStateSchema = "loom.operational_backup.migration_state.v1"
 	OperationalRedactionPolicy      = "loom.internal.redaction.default.v1"
 
-	OperationalRetentionCount  = 3
-	OperationalPackageMaxBytes = int64(17 << 30)
+	OperationalRetentionCount  = 1
+	OperationalPackageMaxBytes = operationalDumpMaxBytes + int64(1<<30)
 
 	operationalManifestMaxBytes = int64(4 << 20)
-	// Notes embeddings are database state, not user payload copied into a dump.
-	// Keep a finite streaming bound with room for a real document collection.
-	operationalDumpMaxBytes   = int64(16 << 30)
+	// Keep producer, verifier and the privileged restore reader at one finite
+	// streaming bound, including retained historical database payloads.
+	operationalDumpMaxBytes   = restoreauthority.DefaultMaxDumpBytes
 	operationalConfigMaxBytes = int64(4 << 20)
 	operationalStateMaxBytes  = int64(16 << 20)
 	operationalHealthMaxBytes = int64(1 << 20)
@@ -98,30 +99,35 @@ type operationalArtifactSpec struct {
 type OperationalConfigRedactor func(kind string, source []byte) ([]byte, error)
 
 type OperationalPackageCreateInput struct {
-	PackagesRoot    string
-	PackageID       string
-	CreatedAt       time.Time
-	SchemaHead      int64
-	PostgresDump    func(context.Context, string) error
-	ServiceConfig   string
-	InstallConfig   string
-	ReleaseConfig   string
-	MigrationState  string
-	UpdateState     string
-	Health          string
-	RedactConfig    OperationalConfigRedactor
-	ForbiddenValues []string
+	PackagesRoot string
+	PackageID    string
+	CreatedAt    time.Time
+	SchemaHead   int64
+	PostgresDump func(context.Context, string) error
+	// PostgresDumpWithExtensions binds privileged extension requirements to the
+	// same source snapshot as the dump. The legacy callback declares none.
+	PostgresDumpWithExtensions func(context.Context, string) ([]restoreauthority.ExtensionRequirement, error)
+	ServiceConfig              string
+	InstallConfig              string
+	ReleaseConfig              string
+	MigrationState             string
+	UpdateState                string
+	Health                     string
+	RedactConfig               OperationalConfigRedactor
+	ForbiddenValues            []string
+	DeferRetentionPlanning     bool
 }
 
 type OperationalPackageManifest struct {
-	Schema                string                       `json:"schema"`
-	PackageID             string                       `json:"package_id"`
-	CreatedAt             time.Time                    `json:"created_at"`
-	SchemaHead            int64                        `json:"schema_head"`
-	PostgresFormat        string                       `json:"postgres_format"`
-	Artifacts             []OperationalPackageArtifact `json:"artifacts"`
-	Redaction             OperationalRedactionEvidence `json:"redaction"`
-	SourceStabilitySHA256 string                       `json:"source_stability_sha256"`
+	Schema                string                                  `json:"schema"`
+	PackageID             string                                  `json:"package_id"`
+	CreatedAt             time.Time                               `json:"created_at"`
+	SchemaHead            int64                                   `json:"schema_head"`
+	PostgresFormat        string                                  `json:"postgres_format"`
+	PostgresExtensions    []restoreauthority.ExtensionRequirement `json:"postgres_extensions,omitempty"`
+	Artifacts             []OperationalPackageArtifact            `json:"artifacts"`
+	Redaction             OperationalRedactionEvidence            `json:"redaction"`
+	SourceStabilitySHA256 string                                  `json:"source_stability_sha256"`
 }
 
 type OperationalPackageArtifact struct {
@@ -210,6 +216,7 @@ type OperationalPackageCreateResult struct {
 }
 
 type OperationalRetentionPlan struct {
+	Status     string                      `json:"status,omitempty"`
 	Root       string                      `json:"root"`
 	KeepLatest int                         `json:"keep_latest"`
 	Keep       []OperationalRetentionEntry `json:"keep"`
@@ -245,8 +252,8 @@ func CreateOperationalPackage(ctx context.Context, input OperationalPackageCreat
 	if err := validatePackageID(input.PackageID); err != nil {
 		return OperationalPackageCreateResult{}, err
 	}
-	if input.PostgresDump == nil {
-		return OperationalPackageCreateResult{}, fmt.Errorf("%w: PostgreSQL dump capture is required", ErrOperationalPackageInvalid)
+	if (input.PostgresDump == nil) == (input.PostgresDumpWithExtensions == nil) {
+		return OperationalPackageCreateResult{}, fmt.Errorf("%w: exactly one PostgreSQL dump capture is required", ErrOperationalPackageInvalid)
 	}
 	createdAt := input.CreatedAt.UTC()
 	if createdAt.IsZero() {
@@ -277,8 +284,17 @@ func CreateOperationalPackage(ctx context.Context, input OperationalPackageCreat
 	redactionArtifacts := make([]OperationalArtifactRedactionEvidence, 0, 3)
 	totalRedactions := 0
 	dumpPath := filepath.Join(stage, operationalArtifactSpecs[0].Path)
-	if err := input.PostgresDump(ctx, dumpPath); err != nil {
+	var extensions []restoreauthority.ExtensionRequirement
+	if input.PostgresDumpWithExtensions != nil {
+		extensions, err = input.PostgresDumpWithExtensions(ctx, dumpPath)
+	} else {
+		err = input.PostgresDump(ctx, dumpPath)
+	}
+	if err != nil {
 		return OperationalPackageCreateResult{}, fmt.Errorf("capture custom PostgreSQL dump: %w", err)
+	}
+	if err := restoreauthority.ValidateExtensionRequirements(restoreauthority.KindOperational, extensions); err != nil {
+		return OperationalPackageCreateResult{}, fmt.Errorf("%w: %v", ErrOperationalPackageInvalid, err)
 	}
 	if err := normalizeCreatedArtifact(dumpPath); err != nil {
 		return OperationalPackageCreateResult{}, err
@@ -375,12 +391,13 @@ func CreateOperationalPackage(ctx context.Context, input OperationalPackageCreat
 	}
 
 	manifest := OperationalPackageManifest{
-		Schema:         OperationalPackageSchema,
-		PackageID:      input.PackageID,
-		CreatedAt:      createdAt,
-		SchemaHead:     input.SchemaHead,
-		PostgresFormat: "custom",
-		Artifacts:      artifacts,
+		Schema:             OperationalPackageSchema,
+		PackageID:          input.PackageID,
+		CreatedAt:          createdAt,
+		SchemaHead:         input.SchemaHead,
+		PostgresFormat:     "custom",
+		PostgresExtensions: append([]restoreauthority.ExtensionRequirement(nil), extensions...),
+		Artifacts:          artifacts,
 		Redaction: OperationalRedactionEvidence{
 			Policy:            OperationalRedactionPolicy,
 			ArtifactCount:     len(redactionArtifacts),
@@ -414,6 +431,10 @@ func CreateOperationalPackage(ctx context.Context, input OperationalPackageCreat
 	}
 
 	expectedHead := input.SchemaHead
+	verifiedIdentity, _, err := retentionIdentity(stage)
+	if err != nil {
+		return OperationalPackageCreateResult{}, err
+	}
 	verification, err := VerifyOperationalPackage(ctx, OperationalPackageVerificationInput{
 		PackageDir:             stage,
 		ExpectedManifestSHA256: manifestSHA,
@@ -426,6 +447,9 @@ func CreateOperationalPackage(ctx context.Context, input OperationalPackageCreat
 	}
 	if verification.Status != "succeeded" {
 		return OperationalPackageCreateResult{}, fmt.Errorf("%w: staging verification failed: %s", ErrOperationalPackageInvalid, summarizeOperationalFindings(verification.Findings))
+	}
+	if identity, _, err := retentionIdentity(stage); err != nil || identity != verifiedIdentity {
+		return OperationalPackageCreateResult{}, fmt.Errorf("%w: staging changed during verification", ErrOperationalPackageChanged)
 	}
 	if err := revalidateSources(artifacts); err != nil {
 		return OperationalPackageCreateResult{}, err
@@ -441,9 +465,17 @@ func CreateOperationalPackage(ctx context.Context, input OperationalPackageCreat
 	published = true
 	verification.PackageDir = finalDir
 	verification.ManifestPath = filepath.Join(finalDir, OperationalManifestFile)
-	retention, err := PlanOperationalPackageRetention(ctx, root, input.ForbiddenValues)
+	receiptErr := recordOperationalVerification(ctx, verification)
+	retention := DeferredOperationalRetention(root)
+	if !input.DeferRetentionPlanning {
+		retention, err = PlanOperationalPackageRetention(ctx, root, input.ForbiddenValues)
+	}
 	if err != nil {
 		return OperationalPackageCreateResult{PackageDir: finalDir, ManifestSHA256: manifestSHA, Verification: verification}, err
+	}
+	if receiptErr != nil {
+		retention.Findings = append(retention.Findings, operationalFinding("verification_receipt_unavailable", input.PackageID,
+			"published package verified, but retention receipt could not be recorded; hold until explicit verification"))
 	}
 	return OperationalPackageCreateResult{
 		PackageDir:     finalDir,
@@ -589,7 +621,7 @@ func VerifyOperationalPackage(ctx context.Context, input OperationalPackageVerif
 			verification.Findings = append(verification.Findings, operationalFinding(OperationalFindingInvalidPath, spec.Kind, "artifact path escapes package"))
 			continue
 		}
-		inspected, inspectErr := inspectStableFile(artifactPath, spec.MaxBytes, spec.Redacted)
+		inspected, inspectErr := inspectStableFile(artifactPath, spec.MaxBytes, spec.Redacted || spec.Kind == OperationalArtifactUpdate)
 		if inspectErr != nil {
 			verification.Findings = append(verification.Findings, classifyOperationalFileError(spec.Kind, inspectErr))
 			continue
@@ -608,6 +640,11 @@ func VerifyOperationalPackage(ctx context.Context, input OperationalPackageVerif
 		}
 		if spec.Redacted && !artifact.Redacted {
 			verification.Findings = append(verification.Findings, operationalFinding(OperationalFindingRedactionMissing, spec.Kind, "configuration artifact lacks redaction evidence"))
+		}
+		if spec.Kind == OperationalArtifactUpdate {
+			if _, err := ReadBoxRecoveryContext(inspected.Raw); err != nil {
+				verification.Findings = append(verification.Findings, operationalFinding(OperationalFindingManifestInvalid, spec.Kind, "invalid Box recovery context"))
+			}
 		}
 		if spec.Redacted {
 			evidence, ok := redactionByKind[spec.Kind]
@@ -662,9 +699,10 @@ func VerifyOperationalPackage(ctx context.Context, input OperationalPackageVerif
 	return verification, nil
 }
 
-// PlanOperationalPackageRetention identifies the latest three verified
-// packages and exact older candidates. It never renames, removes, chmods, or
-// otherwise mutates any package.
+// PlanOperationalPackageRetention identifies the latest verified
+// packages and exact older candidates from unchanged verification receipts. A
+// caller supplying forbidden values explicitly requests full content checks.
+// It never changes packages or creates receipts for historical entries.
 func PlanOperationalPackageRetention(ctx context.Context, root string, forbiddenValues []string) (OperationalRetentionPlan, error) {
 	root, err := exactAbsolutePath(root)
 	if err != nil {
@@ -674,7 +712,8 @@ func PlanOperationalPackageRetention(ctx context.Context, root string, forbidden
 		return OperationalRetentionPlan{}, err
 	}
 	plan := OperationalRetentionPlan{
-		Root: root, KeepLatest: OperationalRetentionCount,
+		Status: "planned_not_applied",
+		Root:   root, KeepLatest: OperationalRetentionCount,
 		Keep: []OperationalRetentionEntry{}, Remove: []OperationalRetentionEntry{}, Findings: []OperationalPackageFinding{},
 	}
 	entries, err := os.ReadDir(root)
@@ -704,12 +743,26 @@ func PlanOperationalPackageRetention(ctx context.Context, root string, forbidden
 			plan.Findings = append(plan.Findings, operationalFinding(OperationalFindingUnexpectedArtifact, entry.Name(), "non-package entry is never retention eligible"))
 			continue
 		}
-		verification, verifyErr := VerifyOperationalPackage(ctx, OperationalPackageVerificationInput{PackageDir: path, ForbiddenValues: forbiddenValues})
+		var verification OperationalPackageVerification
+		var verifyErr error
+		if len(forbiddenValues) != 0 {
+			verification, verifyErr = VerifyOperationalPackage(ctx, OperationalPackageVerificationInput{PackageDir: path, ForbiddenValues: forbiddenValues})
+		} else {
+			verification, verifyErr = inspectOperationalVerificationReceipt(ctx, path)
+		}
 		if verifyErr != nil {
-			return OperationalRetentionPlan{}, verifyErr
+			if err := ctx.Err(); err != nil {
+				return OperationalRetentionPlan{}, err
+			}
+			plan.Findings = append(plan.Findings, operationalFinding("verification_receipt_required", entry.Name(), "prior verification is missing or its file identities changed; explicitly verify this package before retention"))
+			continue
 		}
 		if verification.Status != "succeeded" {
 			plan.Findings = append(plan.Findings, operationalFinding(OperationalFindingManifestInvalid, entry.Name(), "unverified package is never retention eligible"))
+			continue
+		}
+		if verification.PackageID != entry.Name() {
+			plan.Findings = append(plan.Findings, operationalFinding(OperationalFindingManifestIdentityMismatch, entry.Name(), "package directory does not match its verified identity"))
 			continue
 		}
 		candidates = append(candidates, OperationalRetentionEntry{
@@ -725,14 +778,21 @@ func PlanOperationalPackageRetention(ctx context.Context, root string, forbidden
 	})
 	for index, candidate := range candidates {
 		if index < OperationalRetentionCount {
-			candidate.Reason = "latest_three_verified"
+			candidate.Reason = "latest_verified"
 			plan.Keep = append(plan.Keep, candidate)
 		} else {
-			candidate.Reason = "older_than_latest_three_verified"
+			candidate.Reason = "older_than_latest_verified"
 			plan.Remove = append(plan.Remove, candidate)
 		}
 	}
 	return plan, nil
+}
+
+// Retention is an operator maintenance operation, not part of publishing a
+// newly verified backup. Avoid rehashing all historical dumps on every capture.
+func DeferredOperationalRetention(root string) OperationalRetentionPlan {
+	return OperationalRetentionPlan{Root: root, KeepLatest: OperationalRetentionCount,
+		Status: "operator_review_required", Keep: []OperationalRetentionEntry{}, Remove: []OperationalRetentionEntry{}}
 }
 
 func artifactFromInspection(spec operationalArtifactSpec, inspected operationalFileInspection, source *OperationalSourceEvidence) OperationalPackageArtifact {
@@ -744,6 +804,9 @@ func artifactFromInspection(spec operationalArtifactSpec, inspected operationalF
 }
 
 func validateOperationalManifest(manifest OperationalPackageManifest) error {
+	if err := restoreauthority.ValidateExtensionRequirements(restoreauthority.KindOperational, manifest.PostgresExtensions); err != nil {
+		return err
+	}
 	if manifest.Schema != OperationalPackageSchema {
 		return fmt.Errorf("unsupported operational package schema %q", manifest.Schema)
 	}
@@ -959,8 +1022,11 @@ func inspectStableFile(path string, maxBytes int64, load bool) (operationalFileI
 	if !before.Mode().IsRegular() {
 		return operationalFileInspection{}, fmt.Errorf("path must be a regular file")
 	}
-	if before.Size() <= 0 || before.Size() > maxBytes {
-		return operationalFileInspection{}, fmt.Errorf("file is empty or exceeds %d-byte bound", maxBytes)
+	if before.Size() <= 0 {
+		return operationalFileInspection{}, fmt.Errorf("file is empty: observed %d bytes (maximum %d bytes)", before.Size(), maxBytes)
+	}
+	if before.Size() > maxBytes {
+		return operationalFileInspection{}, fmt.Errorf("file exceeds byte bound: observed %d bytes, maximum %d bytes", before.Size(), maxBytes)
 	}
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
@@ -1083,6 +1149,11 @@ func validateStateArtifact(kind string, payload []byte, expectedSchemaHead int64
 	case OperationalArtifactUpdate, OperationalArtifactHealth:
 		if err := validateJSONObject(payload); err != nil {
 			return fmt.Errorf("%w: %s must be one bounded JSON object", ErrOperationalPackageInvalid, kind)
+		}
+		if kind == OperationalArtifactUpdate {
+			if _, err := ReadBoxRecoveryContext(payload); err != nil {
+				return fmt.Errorf("%w: invalid Box recovery context", ErrOperationalPackageInvalid)
+			}
 		}
 	}
 	return nil

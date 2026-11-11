@@ -20,6 +20,8 @@ type Service struct {
 	DB       *sql.DB
 	Policy   policy.Service
 	Registry *ProviderRuntimeRegistry
+	// A best-effort delivery hint after commit, never execution or queue authority.
+	RemoteDispatchQueued func(targetNodeID string)
 }
 
 func NewService(db *sql.DB) Service {

@@ -100,8 +100,9 @@ func (s *Service) ensureLockedPipelineRunTx(ctx context.Context, tx *sql.Tx, obj
 			return PipelineRun{}, false, err
 		}
 	}
+	finishPublication := admissionPhase(ctx, "pipeline_publication")
 	if err := withdrawIncompatiblePublicationsTx(ctx, tx, object.KnowledgeObjectID, plan); err != nil {
-		return PipelineRun{}, false, err
+		return PipelineRun{}, false, finishPublication(err)
 	}
 	selected, keep, err := selectedPipelineRunTx(ctx, tx, object, snapshot)
 	if err != nil {
@@ -298,6 +299,9 @@ func (s *Service) ensureLockedPipelineRunTx(ctx context.Context, tx *sql.Tx, obj
 		WHERE knowledge_object_id=$1`, object.KnowledgeObjectID, run.PipelineDefinitionKey, run.PipelineDefinitionVersion, now); err != nil {
 		return PipelineRun{}, false, err
 	}
+	if err := notifyPipelineWorkTx(ctx, tx); err != nil {
+		return PipelineRun{}, false, err
+	}
 	return run, true, nil
 }
 
@@ -324,6 +328,16 @@ func lockCurrentPipelineObjectTx(ctx context.Context, tx *sql.Tx, objectID strin
 	if err := requireNotesCustodyWriteTx(ctx, tx, object); err != nil {
 		return KnowledgeObject{}, err
 	}
+	var ownsBody bool
+	if err := tx.QueryRowContext(ctx, `SELECT `+notesCanonicalBodyOwnerSQL("ko")+` FROM knowledge.knowledge_objects ko WHERE knowledge_object_id=$1`, objectID).Scan(&ownsBody); err != nil {
+		return KnowledgeObject{}, err
+	}
+	if !ownsBody {
+		return KnowledgeObject{}, ErrNotesCustodyPaused
+	}
+	if err := bindObjectBoxMembership(ctx, tx, &object); err != nil {
+		return KnowledgeObject{}, err
+	}
 	return object, nil
 }
 
@@ -348,9 +362,8 @@ func isRetryablePipelineRunStatus(status string) bool {
 }
 
 func supersedePipelineRunsTx(ctx context.Context, tx *sql.Tx, objectID string, now time.Time) error {
-	if err := lockPipelineTrajectoryRowsTx(ctx, tx, objectID); err != nil {
-		return err
-	}
+	// Called only by ensureLockedPipelineRunTx after the canonical trajectory
+	// and current-object locks are already held in this transaction.
 	artifactRows, err := tx.QueryContext(ctx, `SELECT a.knowledge_derived_artifact_id
 		FROM knowledge.derived_artifacts a
 		JOIN knowledge.pipeline_runs r ON r.knowledge_pipeline_run_id=a.knowledge_pipeline_run_id
@@ -457,14 +470,22 @@ func lockPipelineTrajectoryRowsTx(ctx context.Context, tx *sql.Tx, objectID stri
 }
 
 func validateRetryReuseTx(ctx context.Context, tx *sql.Tx, object KnowledgeObject, version KnowledgeObjectVersion, plan CompiledPipelinePlan, snapshot json.RawMessage, sourceRunID string, retryIndex int) (PipelineInspect, error) {
-	source, err := scanPipelineRun(tx.QueryRowContext(ctx, `SELECT `+pipelineRunColumns()+` FROM knowledge.pipeline_runs WHERE knowledge_pipeline_run_id=$1 FOR UPDATE`, sourceRunID))
+	return inspectRetryReuseTx(ctx, tx, object, version, plan, snapshot, sourceRunID, retryIndex, true)
+}
+
+func inspectRetryReuseTx(ctx context.Context, tx *sql.Tx, object KnowledgeObject, version KnowledgeObjectVersion, plan CompiledPipelinePlan, snapshot json.RawMessage, sourceRunID string, retryIndex int, lockRows bool) (PipelineInspect, error) {
+	lock := ""
+	if lockRows {
+		lock = " FOR UPDATE"
+	}
+	source, err := scanPipelineRun(tx.QueryRowContext(ctx, `SELECT `+pipelineRunColumns()+` FROM knowledge.pipeline_runs WHERE knowledge_pipeline_run_id=$1`+lock, sourceRunID))
 	if err != nil {
 		return PipelineInspect{}, err
 	}
 	if source.KnowledgeObjectID != object.KnowledgeObjectID || !isRetryablePipelineRunStatus(source.Status) {
 		return PipelineInspect{}, fmt.Errorf("%w: pipeline run is not retryable", ErrInvalid)
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT `+pipelineStageRunColumns()+` FROM knowledge.pipeline_stage_runs WHERE knowledge_pipeline_run_id=$1 ORDER BY ordinal FOR UPDATE`, sourceRunID)
+	rows, err := tx.QueryContext(ctx, `SELECT `+pipelineStageRunColumns()+` FROM knowledge.pipeline_stage_runs WHERE knowledge_pipeline_run_id=$1 ORDER BY ordinal`+lock, sourceRunID)
 	if err != nil {
 		return PipelineInspect{}, err
 	}
@@ -484,7 +505,7 @@ func validateRetryReuseTx(ctx context.Context, tx *sql.Tx, object KnowledgeObjec
 	if err = rows.Close(); err != nil {
 		return PipelineInspect{}, err
 	}
-	artifactRows, err := tx.QueryContext(ctx, `SELECT `+derivedArtifactColumns()+` FROM knowledge.derived_artifacts WHERE knowledge_pipeline_run_id=$1 FOR UPDATE`, sourceRunID)
+	artifactRows, err := tx.QueryContext(ctx, `SELECT `+derivedArtifactColumns()+` FROM knowledge.derived_artifacts WHERE knowledge_pipeline_run_id=$1`+lock, sourceRunID)
 	if err != nil {
 		return PipelineInspect{}, err
 	}

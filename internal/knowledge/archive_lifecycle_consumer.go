@@ -51,13 +51,42 @@ func notesCustodyFinding(err error) NotesCustodyFindingCode {
 
 type NotesCustodyBatchItem struct {
 	NotesArchiveProjectionResult
-	Finding NotesCustodyFindingCode `json:"finding,omitempty"`
+	Finding           NotesCustodyFindingCode `json:"finding,omitempty"`
+	KnowledgeObjectID string                  `json:"knowledge_object_id,omitempty"`
+	EvidenceReason    string                  `json:"evidence_reason,omitempty"`
+}
+
+type notesCustodyEvidenceError struct {
+	ObjectID, Reason string
+}
+
+func (e *notesCustodyEvidenceError) Error() string { return "Notes custody source evidence conflict" }
+
+func (item *NotesCustodyBatchItem) recordFinding(err error) {
+	item.Finding = notesCustodyFinding(err)
+	var evidence *notesCustodyEvidenceError
+	if !errors.As(err, &evidence) || !notesCustodyObjectID.MatchString(evidence.ObjectID) {
+		return
+	}
+	switch evidence.Reason {
+	case "source_path", "transition", "predecessor", "binding", "inventory", "file", "workspace", "catalog":
+		item.KnowledgeObjectID, item.EvidenceReason = evidence.ObjectID, evidence.Reason
+	}
 }
 
 type NotesCustodyBatchResult struct {
 	Items      []NotesCustodyBatchItem `json:"items"`
 	NextCursor string                  `json:"next_cursor"`
 	Wrapped    bool                    `json:"wrapped"`
+}
+
+// Final project events wake discovery; projection still verifies the complete
+// workspace/project evidence. Failed historical rows retain periodic retries.
+func (p NotesArchiveProjector) CompletionRevision(ctx context.Context) (string, error) {
+	var revision string
+	err := p.DB.QueryRowContext(ctx, `SELECT COALESCE(max(event_id),'') FROM events.events
+	 WHERE event_type IN ('project.archived','project.restored')`).Scan(&revision)
+	return revision, err
 }
 
 // ConsumeBatch uses the caller's durable worker checkpoint for fair traversal.
@@ -112,7 +141,7 @@ func (p NotesArchiveProjector) ConsumeBatch(ctx context.Context, cursor string, 
 		entry := NotesCustodyBatchItem{NotesArchiveProjectionResult: projection}
 		entry.EventID = item.event
 		if err != nil {
-			entry.Finding = notesCustodyFinding(err)
+			entry.recordFinding(err)
 		}
 		result.Items = append(result.Items, entry)
 		result.NextCursor = item.event

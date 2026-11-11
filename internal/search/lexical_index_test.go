@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"compress/zlib"
 	"math/rand"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 func TestBuildLexicalDocumentStoresFieldLengthsAndTermFrequencies(t *testing.T) {
@@ -116,5 +119,49 @@ func TestBuildLexicalDocumentBoundsNonCompressibleTermsAndMatchesQuery(t *testin
 	}
 	if document.DocumentLength != 4 || document.FieldLengths[LexicalFieldBody] != 4 {
 		t.Fatalf("ranking lengths changed: %#v", document)
+	}
+}
+
+func TestLexicalTermWriteBatchBounds(t *testing.T) {
+	terms := make([]LexicalTerm, lexicalWriteBatchRows+1)
+	for i := range terms {
+		terms[i] = LexicalTerm{FieldKey: "body", Term: "café", TermFrequency: 2}
+	}
+	if end := lexicalTermBatchEnd(terms, 0); end != lexicalWriteBatchRows {
+		t.Fatalf("row-limited end = %d", end)
+	}
+	if end := lexicalTermBatchEnd(terms, lexicalWriteBatchRows); end != len(terms) {
+		t.Fatalf("last page end = %d", end)
+	}
+	if end := lexicalTermBatchEnd(nil, 0); end != 0 {
+		t.Fatalf("empty end = %d", end)
+	}
+	terms = []LexicalTerm{{FieldKey: strings.Repeat("界", lexicalWriteBatchBytes/3), Term: "quote'"}, {FieldKey: "body", Term: "next"}}
+	if end := lexicalTermBatchEnd(terms, 0); end != 1 {
+		t.Fatalf("oversized row must stand alone: end = %d", end)
+	}
+}
+
+func TestLexicalTypedArraysUseExistingPGXEncoding(t *testing.T) {
+	// Exercise the actual pgx codec, including SQL-looking text and UTF-8, rather
+	// than inventing a PostgreSQL array literal/escaping implementation.
+	codec := pgtype.NewMap()
+	want := []string{"body", "quote'\"\\,{}", "café 日本語", ""}
+	raw, err := codec.Encode(pgtype.TextArrayOID, pgtype.BinaryFormatCode, want, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	if err := codec.Scan(pgtype.TextArrayOID, pgtype.BinaryFormatCode, raw, &got); err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("text array round trip = %#v: %v", got, err)
+	}
+	frequencies := []int64{1, 2, 9, 0}
+	raw, err = codec.Encode(pgtype.Int8ArrayOID, pgtype.BinaryFormatCode, frequencies, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var actual []int64
+	if err := codec.Scan(pgtype.Int8ArrayOID, pgtype.BinaryFormatCode, raw, &actual); err != nil || !reflect.DeepEqual(actual, frequencies) {
+		t.Fatalf("frequency array round trip = %#v: %v", actual, err)
 	}
 }

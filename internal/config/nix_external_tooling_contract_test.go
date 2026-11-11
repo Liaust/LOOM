@@ -44,7 +44,7 @@ func TestNixBasecampReleasePin(t *testing.T) {
 		t.Fatalf("Basecamp release/source identity drift: %+v", upstream.Locked)
 	}
 	for name, want := range map[string]string{
-		lock.Nodes[raw.Root].Inputs["nixpkgs"]: "26ef669cffa904b6f6832ab57b77892a37c1a671",
+		lock.Nodes[raw.Root].Inputs["nixpkgs"]: "cd4ea8d57de16f4810bc5f14207bac45fbf19f67",
 		upstream.Inputs["nixpkgs"]:             "c27cdad491a991b11ed731760aa2ef8db0cb0410",
 	} {
 		var node struct{ Locked struct{ Rev string } }
@@ -143,7 +143,7 @@ in {
   sameTmpfiles = on.systemd.tmpfiles.rules == off.systemd.tmpfiles.rules;
 }`
 	cmd := exec.Command(nix, "--extra-experimental-features", "nix-command flakes",
-		"eval", "--impure", "--json", ".#nixosConfigurations.hardware-main", "--apply", apply)
+		"eval", "--offline", "--impure", "--json", ".#nixosConfigurations.hardware-main", "--apply", apply)
 	cmd.Dir = repoRoot(t)
 	payload, err := cmd.Output()
 	if err != nil {
@@ -167,14 +167,14 @@ in {
 		t.Fatal(err)
 	}
 	packageCmd := exec.Command(nix, "--extra-experimental-features", "nix-command flakes",
-		"eval", "--raw", ".#packages.x86_64-linux.basecamp-cli.outPath")
+		"eval", "--offline", "--raw", ".#packages.x86_64-linux.basecamp-cli.outPath")
 	packageCmd.Dir = repoRoot(t)
 	expected, err := packageCmd.Output()
 	if err != nil {
 		t.Fatalf("evaluate exact Basecamp output: %v", err)
 	}
 	got.Basecamp = string(expected)
-	if got.GithubVersion != "2.83.2" {
+	if got.GithubVersion != "2.102.0" {
 		t.Fatalf("GitHub must use LOOM's pinned nixpkgs gh: %s", got.GithubVersion)
 	}
 	for _, pkg := range []string{got.Basecamp, got.Github} {
@@ -237,7 +237,7 @@ func TestNixMorathustraAccountBindings(t *testing.T) {
  offBinding = off.environment.etc ? "loom-morathustra-accounts.json";
  disabledBinding = disabled.environment.etc ? "loom-morathustra-accounts.json";
  legacyBindingPresent = builtins.any (c: c.environment.etc ? "loom/morathustra-accounts.json") [ on off disabled ];
- protectedAccessScript = on.system.activationScripts.loomOrcaAccess.text;
+ protectedAccessScript = on.system.activationScripts.loomAgentsAccess.text;
  addedUserPackages = builtins.filter (x: !(builtins.elem x (map toString off.users.users.agents.packages))) (map toString on.users.users.agents.packages);
  global = map toString on.environment.systemPackages;
  environment = on.systemd.services.loom-morathustra.environment;
@@ -312,5 +312,136 @@ func TestNixMorathustraAccountBindings(t *testing.T) {
 				t.Fatalf("account state escaped child: %s", key)
 			}
 		}
+	}
+}
+
+func TestNixNamedAccountBindingSource(t *testing.T) {
+	module := readRepoFile(t, "nix/modules/loom-morathustra.nix")
+	for _, want := range []string{
+		`imports = [ ./loom-mina-tools.nix ];`,
+		"externalAccountBinding = lib.mkOption {\n        default = null;",
+		`assertion = !cfg.externalAccountsEnabled || cfg.externalAccountBinding != null;`,
+		`assertion = config.loom.agents.enable;`,
+		`assertion = !config.loom.mina.macComputerUseEnabled || minaSelected;`,
+		`users.users.agents.packages = lib.optionals (!minaSelected)`,
+		`lib.optionalAttrs (!minaSelected && cfg.externalAccountsEnabled && cfg.externalAccountBinding != null)`,
+	} {
+		requireContains(t, module, want)
+	}
+	for _, path := range []string{"nix/modules/loom-morathustra.nix", "nix/modules/loom-mina-tools.nix"} {
+		t.Run(path, func(t *testing.T) {
+			source := readRepoFile(t, path)
+			for _, want := range []string{
+				`basecampAccountID = cfg.externalAccountBinding.basecampAccountID;`,
+				`lib.optionals (cfg.externalAccountsEnabled && cfg.externalAccountBinding != null) accountTools`,
+				`login = cfg.externalAccountBinding.githubLogin;`,
+				`id = cfg.externalAccountBinding.githubID;`,
+				`identity_id = cfg.externalAccountBinding.basecampIdentityID;`,
+				`account_id = cfg.externalAccountBinding.basecampAccountID;`,
+				`person_id = cfg.externalAccountBinding.basecampPersonID;`,
+				`email = cfg.externalAccountBinding.basecampEmail;`,
+			} {
+				requireContains(t, source, want)
+			}
+			if strings.Contains(source, "if cfg.externalAccountBinding == null then") {
+				t.Fatal("missing bindings must not synthesize account defaults")
+			}
+		})
+	}
+	mina := readRepoFile(t, "nix/modules/loom-mina-tools.nix")
+	requireContains(t, mina, `selected = cfg.selected || cfg.enable || cfg.recoveryEnabled;`)
+	requireContains(t, mina, `config = lib.mkIf selected`)
+	requireContains(t, mina, `lib.optionalAttrs (cfg.externalAccountsEnabled && cfg.externalAccountBinding != null)`)
+	tools := readRepoFile(t, "nix/packages/morathustra-external-tools.nix")
+	requireContains(t, tools, `assert builtins.isInt basecampAccountID && basecampAccountID > 0;`)
+	requireContains(t, tools, `--replace-fail '@basecampAccountID@' '${toString basecampAccountID}'`)
+	wrapper := readRepoFile(t, "nix/files/morathustra-account-tool.sh")
+	requireContains(t, wrapper, `BASECAMP_ACCOUNT_ID=@basecampAccountID@`)
+}
+
+func TestNixMinaSelectedAccountBindings(t *testing.T) {
+	nix, err := exec.LookPath("nix")
+	if err != nil {
+		nix = "/nix/var/nix/profiles/default/bin/nix"
+		if _, err := os.Stat(nix); err != nil {
+			t.Skip("Nix unavailable; selected MINA binding render requires Nix")
+		}
+	}
+	apply := `actual: let
+ system = (import ./tests/nix/legacy_agent_host.nix) actual;
+ make = binding: enabled: (system.extendModules { modules = [ ({ lib, ... }: {
+   loom.orca.enable = lib.mkForce false;
+   loom.morathustra.enable = lib.mkForce false;
+   loom.morathustra.recoveryEnabled = lib.mkForce false;
+   loom.morathustra.recoveryPublicKey = lib.mkForce "";
+   loom.mina.selected = true;
+   loom.mina.enable = false;
+   loom.mina.recoveryEnabled = false;
+   loom.mina.externalAccountsEnabled = enabled;
+   loom.mina.externalAccountBinding = binding;
+ }) ]; }).config;
+ binding = {
+   githubLogin = "configured-operator"; githubID = 510001;
+   basecampIdentityID = 520001; basecampAccountID = 530001;
+   basecampPersonID = 540001; basecampEmail = "configured-agent@example.test";
+ };
+ on = make binding true;
+ missing = make null true;
+ off = make binding false;
+ tools = c: builtins.filter (p: builtins.elem p.name [ "loom-mina-gh" "loom-mina-basecamp" ]) c.users.users.agents.packages;
+ in {
+ binding = builtins.fromJSON on.environment.etc."loom-mina-accounts.json".text;
+ accountBuilds = map (p: p.buildCommand) (tools on);
+ missingRefused = builtins.any (a: !a.assertion && a.message == "Named external account tools require an explicit externalAccountBinding verified by the operator.") missing.assertions;
+ missingBinding = missing.environment.etc ? "loom-mina-accounts.json";
+ missingTools = builtins.length (tools missing);
+ offBinding = off.environment.etc ? "loom-mina-accounts.json";
+ offTools = builtins.length (tools off);
+ legacyBinding = on.environment.etc ? "loom-morathustra-accounts.json";
+ }`
+	cmd := exec.Command(nix, "--extra-experimental-features", "nix-command flakes", "eval", "--offline", "--impure", "--json", ".#nixosConfigurations.hardware-main", "--apply", apply)
+	cmd.Dir = repoRoot(t)
+	out, err := cmd.Output()
+	if err != nil {
+		if e, ok := err.(*exec.ExitError); ok {
+			t.Fatalf("selected MINA account render: %v %s", err, e.Stderr)
+		}
+		t.Fatal(err)
+	}
+	var got struct {
+		Binding struct {
+			SchemaVersion int `json:"schema_version"`
+			Github        struct {
+				Host, Login string
+				ID          int
+			}
+			Basecamp struct {
+				Profile, Email string
+				IdentityID     int `json:"identity_id"`
+				AccountID      int `json:"account_id"`
+				PersonID       int `json:"person_id"`
+			}
+		}
+		AccountBuilds                                             []string
+		MissingRefused, MissingBinding, OffBinding, LegacyBinding bool
+		MissingTools, OffTools                                    int
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	b := got.Binding
+	if b.SchemaVersion != 1 || b.Github.Host != "github.com" || b.Github.Login != "configured-operator" || b.Github.ID != 510001 ||
+		b.Basecamp.Profile != "mina" || b.Basecamp.IdentityID != 520001 || b.Basecamp.AccountID != 530001 ||
+		b.Basecamp.PersonID != 540001 || b.Basecamp.Email != "configured-agent@example.test" {
+		t.Fatal("selected MINA must publish only the explicit operator binding")
+	}
+	if !got.MissingRefused || got.MissingBinding || got.OffBinding || got.LegacyBinding || got.MissingTools != 0 || got.OffTools != 0 {
+		t.Fatal("missing/disabled bindings must not publish account metadata or named tools")
+	}
+	if len(got.AccountBuilds) != 2 {
+		t.Fatal("selected MINA requires exactly two named account tools without the legacy gateway")
+	}
+	for _, build := range got.AccountBuilds {
+		requireContains(t, build, `--replace-fail '@basecampAccountID@' '530001'`)
 	}
 }

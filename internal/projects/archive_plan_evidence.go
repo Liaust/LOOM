@@ -66,12 +66,22 @@ func ValidateProjectPlanEvidence(e ProjectPlanEvidence) error {
 		Request       requestctx.Context `json:"request"`
 		PlanDigest    string             `json:"plan_digest"`
 		Workspace     struct {
+			SchemaVersion string `json:"schema_version"`
 			OperationID   string `json:"operation_id"`
 			OperationKind string `json:"operation_kind"`
 			ObjectID      string `json:"object_id"`
 		} `json:"workspace"`
 	}
-	if json.Unmarshal(e.Payload, &envelope) != nil || envelope.SchemaVersion != "storage.project_physical_"+e.OperationKind+"_plan.v1" || envelope.Request != e.Request || envelope.PlanDigest != e.PlanDigest || envelope.Workspace.OperationID != e.OperationID || envelope.Workspace.OperationKind != e.OperationKind || envelope.Workspace.ObjectID != e.ProjectID {
+	if json.Unmarshal(e.Payload, &envelope) != nil {
+		return ErrProjectPlanEvidenceConflict
+	}
+	version := "v1"
+	if envelope.Workspace.SchemaVersion == "storage.workspace_archive_plan.v2" {
+		version = "v2"
+	} else if envelope.Workspace.SchemaVersion == "storage.workspace_archive_plan.v3" {
+		version = "v3"
+	}
+	if envelope.SchemaVersion != "storage.project_physical_"+e.OperationKind+"_plan."+version || envelope.Request != e.Request || envelope.PlanDigest != e.PlanDigest || envelope.Workspace.OperationID != e.OperationID || envelope.Workspace.OperationKind != e.OperationKind || envelope.Workspace.ObjectID != e.ProjectID {
 		return ErrProjectPlanEvidenceConflict
 	}
 	return nil

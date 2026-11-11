@@ -38,6 +38,7 @@ func newBackupCommand(opts *options) *cobra.Command {
 	}
 
 	cmd.AddCommand(newBackupStatusCommand(opts))
+	cmd.AddCommand(newNotesRecoveryInventoryCommand(opts))
 	cmd.AddCommand(newBackupListCommand(opts))
 	cmd.AddCommand(newBackupCreateCommand(opts))
 	cmd.AddCommand(newBackupVerifyCommand(opts))
@@ -45,6 +46,29 @@ func newBackupCommand(opts *options) *cobra.Command {
 	cmd.AddCommand(newBackupCoverageCommand(opts))
 	cmd.AddCommand(newBackupContractsCommand(opts))
 	cmd.AddCommand(newBackupContractCommand(opts))
+	cmd.AddCommand(newBackupRetentionCommand(opts))
+	return cmd
+}
+
+func newNotesRecoveryInventoryCommand(opts *options) *cobra.Command {
+	var refresh bool
+	cmd := &cobra.Command{
+		Use: "notes-inventory", Short: "Resolve current Notes backup membership without running sync", Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			commandCtx, err := resolveCommandContext(opts)
+			if err != nil {
+				return renderError(cmd, opts, correlation.Normalize(opts.correlationID), err)
+			}
+			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+			defer cancel()
+			envelope, err := commandCtx.Client.NotesRecoveryInventory(ctx, commandCtx.CorrelationID, refresh)
+			if err != nil {
+				return renderError(cmd, opts, commandCtx.CorrelationID, err)
+			}
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(envelope)
+		},
+	}
+	cmd.Flags().BoolVar(&refresh, "refresh", false, "refresh derived registration metadata only; never scan, index or deliver files")
 	return cmd
 }
 
@@ -848,7 +872,9 @@ func newBackupVerifyCommand(opts *options) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ref := strings.TrimSpace(args[0])
-			if isLocalDirectory(ref) {
+			commandCtx, contextErr := resolveCommandContext(opts)
+			localFallback := contextErr != nil && opts.configFile == "" && os.Getenv("LOOM_CONFIG_FILE") == ""
+			if isLocalDirectory(ref) && (localFallback || contextErr == nil && commandCtx.Config.Env != "production") {
 				correlationID := correlation.Normalize(opts.correlationID)
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 				defer cancel()
@@ -859,9 +885,8 @@ func newBackupVerifyCommand(opts *options) *cobra.Command {
 				return renderBackupVerificationEnvelope(cmd, opts, correlationID, verification)
 			}
 
-			commandCtx, err := resolveCommandContext(opts)
-			if err != nil {
-				return renderError(cmd, opts, correlation.Normalize(opts.correlationID), err)
+			if contextErr != nil {
+				return renderError(cmd, opts, correlation.Normalize(opts.correlationID), contextErr)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
@@ -1023,14 +1048,20 @@ func renderRestoreDrillResult(cmd *cobra.Command, result backup.RestoreDrillResu
 func renderBackupCoverage(cmd *cobra.Command, report backupcoverage.Report) {
 	fmt.Fprintf(cmd.OutOrStdout(), "LOOM backup coverage: %s\n", report.Status)
 	fmt.Fprintf(cmd.OutOrStdout(), "Coverage mode: %s\n", firstNonEmpty(report.Mode, backupcoverage.ModeLocal))
+	fmt.Fprintf(cmd.OutOrStdout(), "Observed: %s; current-file protection: unknown (coverage is not current-generation assurance)\n", report.GeneratedAt.UTC().Format(time.RFC3339Nano))
 	if report.BackupRoot != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "Backup root: %s\n", report.BackupRoot)
 	}
 	if report.LatestManifestPath != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "Latest manifest: %s\n", report.LatestManifestPath)
+		captured := "unknown"
+		if report.ManifestCapturedAt != nil {
+			captured = report.ManifestCapturedAt.UTC().Format(time.RFC3339Nano)
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Manifest class: %s; captured: %s (dated inclusion, not current source equality)\n", firstNonEmpty(report.ManifestClass, "unknown"), captured)
 	}
 	writer := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-	fmt.Fprintln(writer, "STATUS\tITEM\tPATH\tDETAIL")
+	fmt.Fprintln(writer, "STATUS\tITEM\tPATH\tEVIDENCE BASIS\tCAPTURED AT\tCURRENT PROTECTION\tDETAIL")
 	for _, entry := range report.Entries {
 		detail := entry.Message
 		if detail == "" {
@@ -1039,7 +1070,7 @@ func renderBackupCoverage(cmd *cobra.Command, report backupcoverage.Report) {
 		if detail == "" && entry.Exists {
 			detail = fmt.Sprintf("%d files, %d bytes", entry.FileCount, entry.TotalBytes)
 		}
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\n", entry.Status, entry.Label, entry.Path, detail)
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", entry.Status, entry.Label, entry.Path, firstNonEmpty(entry.EvidenceBasis, "unknown"), timePtrOrDash(entry.EvidenceCapturedAt), firstNonEmpty(entry.CurrentProtection, "unknown"), detail)
 	}
 	_ = writer.Flush()
 	if len(report.CriticalMissing) > 0 {
@@ -1244,12 +1275,14 @@ func renderBackupContractPlan(cmd *cobra.Command, plan backupcoverage.ContractPl
 	fmt.Fprintf(cmd.OutOrStdout(), "Coverage mode: %s\n", firstNonEmpty(plan.Mode, backupcoverage.ModeLocal))
 	fmt.Fprintf(cmd.OutOrStdout(), "Satisfied: %d  Needs attention: %d  Critical: %d\n", plan.Summary.Satisfied, plan.Summary.NeedsAttention, plan.Summary.Critical)
 	writer := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
-	fmt.Fprintln(writer, "STATUS\tCONTRACT\tCOVERAGE\tACTION")
+	fmt.Fprintln(writer, "STATUS\tCONTRACT\tCOVERAGE\tREQUIREMENT BASIS\tEVIDENCE BASIS\tACTION")
 	for _, contract := range plan.Contracts {
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			contract.ContractStatus,
 			contract.Label,
 			contract.CoverageStatus,
+			firstNonEmpty(contract.RequirementBasis, "unknown"),
+			firstNonEmpty(contract.EvidenceBasis, "unknown"),
 			contract.Action,
 		)
 	}

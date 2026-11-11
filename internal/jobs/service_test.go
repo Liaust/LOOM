@@ -1,11 +1,39 @@
 package jobs
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestPersistedCodexTerminalOutcomes(t *testing.T) {
+	for _, outcome := range []string{"completed", "needs_input", "failed", "interrupted", "unknown"} {
+		result := resultFile{Status: outcome, Outputs: map[string]json.RawMessage{
+			"protocol_version": json.RawMessage(`2`), "executor": json.RawMessage(`"agents"`),
+			"thread_id": json.RawMessage(`"00000000-0000-4000-8000-000000000002"`),
+			"outcome":   json.RawMessage(`"` + outcome + `"`),
+		}}
+		want := "codex_" + outcome
+		if outcome == "completed" {
+			want = ""
+		}
+		if outcome == "unknown" {
+			want = "codex_result_invalid"
+		}
+		if got := persistedCodexFailure(result); got != want {
+			t.Fatalf("%s: got %q want %q", outcome, got, want)
+		}
+		result.Outputs["thread_id"] = json.RawMessage(`null`)
+		if got := persistedCodexFailure(result); got != "codex_result_invalid" {
+			t.Fatalf("missing identity: %q", got)
+		}
+	}
+	if got := persistedCodexFailure(resultFile{Status: "failed"}); got != "" {
+		t.Fatal("legacy result reinterpreted")
+	}
+}
 
 func TestParseResultFileAllowsMissingFile(t *testing.T) {
 	result, err := parseResultFile(filepath.Join(t.TempDir(), "missing.json"))

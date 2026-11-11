@@ -174,7 +174,7 @@ describe("native exact-base publication and source acknowledgement", () => {
             await expect(f.c.inspectCreateRecovery(id)).rejects.toThrow("different recovery");
         } finally { await f.d.db.destroy(); }
     });
-    it.each(["md", "canvas"])("reflects native %s creates and accepted renames after grouping in the layout_ namespace", async extension => {
+    it.each(["md", "canvas", "base"])("reflects native %s creates and accepted renames after grouping in the layout_ namespace", async extension => {
         const f = await fixture();
         try {
             f.c.onReflect = vi.fn();

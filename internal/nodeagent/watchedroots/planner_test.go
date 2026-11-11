@@ -76,6 +76,55 @@ func TestDocumentSyncPlannerHonorsTransportAndRootLimits(t *testing.T) {
 	}
 }
 
+func TestPlanOutputsForPathsLoadsOnlyExactSelectedRows(t *testing.T) {
+	store := NewStore(t.TempDir())
+	config := NormalizeRootConfig(RootConfig{RootKey: "notes"})
+	root := ValidatedRoot{Config: config, ConfigHash: ConfigHash(config), RootReachable: true}
+	modified := time.Now().UTC()
+	for _, path := range []string{"a.md", "b.md"} {
+		if err := store.SavePathState(PathState{RootKey: "notes", RelativePath: path, Status: PathStatusIncluded, Kind: PathKindFile, ModifiedAt: &modified}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checkpoint := RootCheckpoint{ConfigHash: root.ConfigHash, ObservationConfigHash: "retained-audit"}
+	if err := store.SaveCheckpoint("notes", checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	ordered, err := PlanOutputsForPaths(store, root, "test", []string{"b.md", "a.md", "b.md"})
+	if err != nil || len(ordered.Actions) != 2 || ordered.Actions[0].RelativePath != "a.md" || ordered.Actions[1].RelativePath != "b.md" {
+		t.Fatal("scoped plan did not sort and coalesce exact paths", ordered, err)
+	}
+	state, err := store.LoadPathState("notes", "a.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchored := root
+	anchored.ObservationConfigHash = checkpoint.ObservationConfigHash
+	want, ok := planFileObservation(anchored, state)
+	if !ok || ordered.Actions[0].ObservationFingerprint != want.ObservationFingerprint || ordered.Actions[0].SourceGeneration != root.ConfigHash {
+		t.Fatal("scoped planning lost observation identity or current audit")
+	}
+	if err := os.WriteFile(store.pathStatePath("notes", PathKey("notes", "b.md")), []byte("unrelated malformed history"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	selected, err := PlanOutputsForPaths(store, root, "test", []string{"a.md"})
+	if err != nil || len(selected.Actions) != 1 || selected.Actions[0].RelativePath != "a.md" {
+		t.Fatal("scoped plan read unrelated path history", selected, err)
+	}
+	empty, err := PlanOutputsForPaths(store, root, "test", nil)
+	if err != nil || len(empty.Actions) != 0 {
+		t.Fatal("empty scope expanded to full inventory", empty, err)
+	}
+	if _, err := PlanOutputs(store, root, "test"); err == nil {
+		t.Fatal("full planning stopped validating complete inventory")
+	}
+	for _, path := range []string{"b.md", "missing.md", "", ".", "../escape", "__rescan__"} {
+		if _, err := PlanOutputsForPaths(store, root, "test", []string{path}); err == nil {
+			t.Fatalf("invalid/missing selected row %q was silently omitted", path)
+		}
+	}
+}
+
 func TestPlanOutputsQueuesSelectedFilesAndSkipsCurrentHashes(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -108,10 +157,13 @@ func TestPlanOutputsQueuesSelectedFilesAndSkipsCurrentHashes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PlanOutputs failed: %v", err)
 	}
-	if plan.Counts.SyncObjects != 1 || len(plan.Actions) != 1 {
+	if plan.Counts.SyncObjects != 1 || plan.Counts.FileObservations != 1 || len(plan.Actions) != 2 {
 		t.Fatalf("expected one sync object action, got %#v", plan)
 	}
-	action := plan.Actions[0]
+	action := plan.Actions[1]
+	if action.LocalObjectID != plan.Actions[0].LocalObjectID {
+		t.Fatal("metadata and content did not share the same local file identity")
+	}
 	if action.ActionKind != OutputActionSyncObject ||
 		action.LocalObjectID == "" ||
 		action.LocalVersionID == "" ||
@@ -127,6 +179,7 @@ func TestPlanOutputsQueuesSelectedFilesAndSkipsCurrentHashes(t *testing.T) {
 	}
 	state.LocalObjectID = action.LocalObjectID
 	state.LocalVersionID = action.LocalVersionID
+	state.LastQueuedFileObservation = plan.Actions[0].ObservationFingerprint
 	state.LastQueuedHashURI = state.ContentHashURI
 	state.SyncStatus = OutputStatusQueued
 	if err := store.SavePathState(state); err != nil {
@@ -181,12 +234,12 @@ func TestPlanOutputsBacksUpNotesAttachmentsWithoutSyncingThem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PlanOutputs failed: %v", err)
 	}
-	if plan.Counts.SyncObjects != 1 || plan.Counts.BackupFiles != 2 || plan.Counts.BackupMetadata != 1 || len(plan.Actions) != 4 {
+	if plan.Counts.SyncObjects != 1 || plan.Counts.BackupFiles != 2 || plan.Counts.BackupMetadata != 1 || plan.Counts.FileObservations != 2 || len(plan.Actions) != 6 {
 		t.Fatalf("expected one markdown sync, two file backups, and one directory metadata backup, got %#v", plan)
 	}
 	pdfBackups := 0
 	for _, action := range plan.Actions {
-		if action.RelativePath == "attachments/a.pdf" {
+		if action.RelativePath == "attachments/a.pdf" && action.ActionKind != OutputActionFileObservation {
 			if action.ActionKind != OutputActionBackupFile || action.BackupMode != BackupModeIncrementalRaw {
 				t.Fatalf("pdf should only produce an incremental backup action, got %#v", action)
 			}
@@ -240,12 +293,12 @@ func TestPlanOutputsSyncsMetadataOnlyNotesAttachmentsWithoutBackup(t *testing.T)
 	if err != nil {
 		t.Fatalf("PlanOutputs failed: %v", err)
 	}
-	if plan.Counts.SyncObjects != 2 || len(plan.Actions) != 2 {
+	if plan.Counts.SyncObjects != 2 || plan.Counts.FileObservations != 2 || len(plan.Actions) != 4 {
 		t.Fatalf("expected markdown text sync and pdf metadata-only sync, got %#v", plan)
 	}
 	pdfSyncs := 0
 	for _, action := range plan.Actions {
-		if action.RelativePath == "attachments/a.pdf" {
+		if action.RelativePath == "attachments/a.pdf" && action.ActionKind != OutputActionFileObservation {
 			if action.ActionKind != OutputActionSyncObject || action.SyncPolicy != SyncModeSelectedFiles || action.IndexPolicy != IndexModeMetadataOnly {
 				t.Fatalf("pdf should produce metadata-only sync action, got %#v", action)
 			}
@@ -304,14 +357,30 @@ func TestPlanOutputsSkipsSyncObjectsAboveInlineLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PlanOutputs failed: %v", err)
 	}
-	if plan.Counts.SyncObjects != 0 || plan.Counts.Skipped != 1 || len(plan.Actions) != 1 {
+	if plan.Counts.SyncObjects != 0 || plan.Counts.Skipped != 1 || plan.Counts.FileObservations != 1 || len(plan.Actions) != 2 {
 		t.Fatalf("expected oversize sync skip, got %#v", plan)
 	}
-	action := plan.Actions[0]
+	action := plan.Actions[1]
 	if action.ActionKind != OutputActionSkipped ||
 		action.ReasonCode != ReasonSkippedTooLarge ||
 		action.Reason != "path exceeds watched-root sync file limit" {
 		t.Fatalf("unexpected skip action %#v", action)
+	}
+}
+
+func TestRejectedDeletionRemainsHeldUntilNewDeletion(t *testing.T) {
+	root := ValidatedRoot{Config: RootConfig{BackupPolicy: BackupPolicy{Mode: BackupModeIncrementalRaw}}}
+	now := time.Now().UTC()
+	deleted := now.Add(-time.Minute)
+	state := PathState{RelativePath: "old.md", Status: PathStatusDeleted, DeletedAt: &deleted,
+		LastBackupQueuedAt: &now, BackupStatus: OutputStatusFailed, LastBackupErrorCode: FindingBackupBatchRejected}
+	if _, ok := planBackupDeletionAction(root, state); ok {
+		t.Fatal("unchanged permanent rejection was requeued")
+	}
+	later := now.Add(time.Minute)
+	state.DeletedAt = &later
+	if _, ok := planBackupDeletionAction(root, state); !ok {
+		t.Fatal("a new deletion was suppressed by a stale rejection")
 	}
 }
 
@@ -341,10 +410,10 @@ func TestPlanOutputsQueuesBackupFilesAndDeletionMarkers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PlanOutputs failed: %v", err)
 	}
-	if plan.Counts.BackupFiles != 1 || plan.Counts.SyncObjects != 0 || len(plan.Actions) != 1 {
+	if plan.Counts.BackupFiles != 1 || plan.Counts.SyncObjects != 0 || plan.Counts.FileObservations != 1 || len(plan.Actions) != 2 {
 		t.Fatalf("expected one backup file action, got %#v", plan)
 	}
-	action := plan.Actions[0]
+	action := plan.Actions[1]
 	if action.ActionKind != OutputActionBackupFile ||
 		action.BackupMode != BackupModeIncrementalRaw ||
 		action.BackupItemKind != "file" ||
@@ -358,6 +427,8 @@ func TestPlanOutputsQueuesBackupFilesAndDeletionMarkers(t *testing.T) {
 		t.Fatalf("LoadPathState failed: %v", err)
 	}
 	state.LastQueuedBackupHashURI = state.ContentHashURI
+	state.LocalObjectID = plan.Actions[0].LocalObjectID
+	state.LastQueuedFileObservation = plan.Actions[0].ObservationFingerprint
 	state.BackupStatus = OutputStatusQueued
 	if err := store.SavePathState(state); err != nil {
 		t.Fatalf("SavePathState failed: %v", err)
@@ -380,13 +451,13 @@ func TestPlanOutputsQueuesBackupFilesAndDeletionMarkers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PlanOutputs deletion failed: %v", err)
 	}
-	if plan.Counts.BackupDeletionMarkers != 1 || len(plan.Actions) != 1 {
+	if plan.Counts.BackupDeletionMarkers != 1 || plan.Counts.FileObservations != 1 || len(plan.Actions) != 2 {
 		t.Fatalf("expected one backup deletion marker, got %#v", plan)
 	}
-	if plan.Actions[0].ActionKind != OutputActionBackupDeletionMarker ||
-		plan.Actions[0].PreviousHashURI == "" ||
-		plan.Actions[0].DeletedAt == nil {
-		t.Fatalf("unexpected backup deletion action %#v", plan.Actions[0])
+	if plan.Actions[1].ActionKind != OutputActionBackupDeletionMarker ||
+		plan.Actions[1].PreviousHashURI == "" ||
+		plan.Actions[1].DeletedAt == nil {
+		t.Fatalf("unexpected backup deletion action %#v", plan.Actions[1])
 	}
 }
 
@@ -415,11 +486,11 @@ func TestPlanOutputsQueuesMetadataOnlyBackup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PlanOutputs failed: %v", err)
 	}
-	if plan.Counts.BackupMetadata != 1 || len(plan.Actions) != 1 {
+	if plan.Counts.BackupMetadata != 1 || plan.Counts.FileObservations != 1 || len(plan.Actions) != 2 {
 		t.Fatalf("expected metadata backup action, got %#v", plan)
 	}
-	if plan.Actions[0].ActionKind != OutputActionBackupMetadata || plan.Actions[0].BackupItemKind != "metadata" {
-		t.Fatalf("unexpected metadata backup action %#v", plan.Actions[0])
+	if plan.Actions[1].ActionKind != OutputActionBackupMetadata || plan.Actions[1].BackupItemKind != "metadata" {
+		t.Fatalf("unexpected metadata backup action %#v", plan.Actions[1])
 	}
 }
 

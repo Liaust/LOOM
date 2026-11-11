@@ -87,6 +87,10 @@ type ApplicationSystem interface {
 	RemoveManagement(context.Context, ApplicationGeneration) error
 	PublishEdge(context.Context, ApplicationGeneration, []byte) error
 }
+
+type applicationNetworkSystem interface {
+	ensureApplicationNetwork(context.Context, ApplicationGeneration, ApplicationGrant) error
+}
 type ApplicationGeneration struct {
 	Listener   *ApplicationListener
 	Owner      ApplicationOwner
@@ -170,6 +174,14 @@ func (r ApplicationRuntime) Execute(ctx context.Context, peerUID uint32, q Appli
 		return receipt, err
 	}
 	defer release()
+	if q.Operation != "inspect" {
+		if active, err := r.applicationActionActive(q.Owner); err != nil || active {
+			if err != nil {
+				return receipt, err
+			}
+			return receipt, applicationError("action.active")
+		}
+	}
 	policy, err = r.policy()
 	if err != nil {
 		return receipt, err
@@ -196,7 +208,7 @@ func (r ApplicationRuntime) Execute(ctx context.Context, peerUID uint32, q Appli
 	if err = r.Store.read("publication-"+q.Owner.Instance(), &publication); err != nil {
 		return receipt, applicationError("artifact.publication_prerequisite")
 	}
-	if publication.Owner != q.Owner || publication.GrantDigest != applicationSHA(grant) || publication.Revision != q.ExpectedRevision || publication.PolicyRevision != grant.PolicyRevision || publication.LocationRevision != grant.LocationRevision || q.PolicyRevision != grant.PolicyRevision || q.LocationRevision != grant.LocationRevision || publication.Descriptor.RepositoryID != grant.RepositoryID || policy.Platform != publication.Descriptor.Artifact.Platform {
+	if publication.Owner != q.Owner || publication.GrantDigest != applicationSHA(grant) || publication.Revision != q.ExpectedRevision || publication.PolicyRevision != grant.PolicyRevision || publication.LocationRevision != grant.LocationRevision || q.PolicyRevision != grant.PolicyRevision || q.LocationRevision != grant.LocationRevision || publication.Descriptor.ProducerIdentity() != grant.ProducerIdentity() || policy.Platform != publication.Descriptor.Artifact.Platform {
 		return receipt, applicationError("revision.conflict")
 	}
 	if len(q.CredentialRevisions) != len(grant.Credentials) {
@@ -475,6 +487,19 @@ func (r ApplicationRuntime) Execute(ctx context.Context, peerUID uint32, q Appli
 	if err = effect("account", nil, func() error { return r.System.EnsureAccount(ctx, q.Owner, installed.UID, exists) }, true); err != nil {
 		return receipt, err
 	}
+	needsQuiescence := grant.Network == ApplicationNetworkOutboundHTTPS
+	for _, data := range grant.Data {
+		needsQuiescence = needsQuiescence || data.StorageClass == ApplicationProjectStateStorageClass
+	}
+	if needsQuiescence {
+		stopped := func() bool {
+			p, e := r.System.Observe(ctx, generation)
+			return e == nil && (p.State == "inactive" || p.State == "failed")
+		}
+		if err = effect("prepare_quiescence", stopped, func() error { return r.System.Stop(ctx, generation) }, true); err != nil {
+			return receipt, err
+		}
+	}
 	for _, key := range applicationSortedData(grant) {
 		var priorData *ApplicationDataIdentity
 		if old, ok := installed.Data[key]; ok {
@@ -503,6 +528,18 @@ func (r ApplicationRuntime) Execute(ctx context.Context, peerUID uint32, q Appli
 		generation.Previous = &previous
 	}
 	generation.DropIn = applicationDropIn(grant, m, descriptor, r.System.ConfigurationPath(generation), installed.UID)
+	if network, ok := r.System.(applicationNetworkSystem); ok {
+		if err = effect("network", nil, func() error { return network.ensureApplicationNetwork(ctx, generation, grant) }, true); err != nil {
+			return receipt, err
+		}
+		// An old completed effect is historical evidence, not proof that current
+		// UID rules still protect a resumed publish/start.
+		if err = network.ensureApplicationNetwork(ctx, generation, grant); err != nil {
+			return receipt, err
+		}
+	} else if grant.Network == ApplicationNetworkOutboundHTTPS {
+		return receipt, applicationError("network.backend_unavailable")
+	}
 	if err = effect("generation", func() bool { return r.System.GenerationPublished(generation) }, func() error { return r.System.PublishGeneration(ctx, generation) }, true); err != nil {
 		return receipt, err
 	}
@@ -628,24 +665,39 @@ func receiptError(r ApplicationRuntimeReceipt) error {
 // the root executor. SocketPath is local configuration, never an RPC field.
 type ApplicationHelperClient struct{ SocketPath string }
 type ApplicationHelperEnvelope struct {
-	Prepared      *ApplicationPreparedPublication `json:"prepared,omitempty"`
-	ProvisionPlan *ApplicationProvisionRequest    `json:"provision_plan,omitempty"`
-	Provision     *ApplicationProvisionPlan       `json:"provision,omitempty"`
-	Prerequisites *ApplicationPrerequisiteQuery   `json:"prerequisites,omitempty"`
-	Archive       *ApplicationArchiveControl      `json:"archive,omitempty"`
-	Request       *ApplicationRuntimeRequest      `json:"request,omitempty"`
-	Publication   *ApplicationPublication         `json:"publication,omitempty"`
+	Action           *ApplicationActionRequest       `json:"action,omitempty"`
+	ActionStatus     *ApplicationActionRequest       `json:"action_status,omitempty"`
+	CredentialImport *ApplicationCredentialImport    `json:"credential_import,omitempty"`
+	Browse           *ApplicationBrowseRequest       `json:"browse,omitempty"`
+	BrowseRead       *ApplicationBrowseRead          `json:"browse_read,omitempty"`
+	Prepared         *ApplicationPreparedPublication `json:"prepared,omitempty"`
+	ProvisionPlan    *ApplicationProvisionRequest    `json:"provision_plan,omitempty"`
+	Provision        *ApplicationProvisionPlan       `json:"provision,omitempty"`
+	Prerequisites    *ApplicationPrerequisiteQuery   `json:"prerequisites,omitempty"`
+	Archive          *ApplicationArchiveControl      `json:"archive,omitempty"`
+	Request          *ApplicationRuntimeRequest      `json:"request,omitempty"`
+	Publication      *ApplicationPublication         `json:"publication,omitempty"`
 }
 type ApplicationHelperResponse struct {
-	Provision     *ApplicationProvisionPlan        `json:"provision,omitempty"`
-	Prerequisites *ApplicationPrerequisiteSnapshot `json:"prerequisites,omitempty"`
-	Manager       *ManagerResult                   `json:"manager,omitempty"`
-	Receipt       *ApplicationRuntimeReceipt       `json:"receipt,omitempty"`
-	ErrorCode     string                           `json:"error_code,omitempty"`
+	Action           *ApplicationActionReceipt           `json:"action,omitempty"`
+	CredentialImport *ApplicationCredentialImportReceipt `json:"credential_import,omitempty"`
+	Browse           *ApplicationBrowseReceipt           `json:"browse,omitempty"`
+	BrowseResult     *ApplicationBrowseResult            `json:"browse_result,omitempty"`
+	Provision        *ApplicationProvisionPlan           `json:"provision,omitempty"`
+	Prerequisites    *ApplicationPrerequisiteSnapshot    `json:"prerequisites,omitempty"`
+	Manager          *ManagerResult                      `json:"manager,omitempty"`
+	Receipt          *ApplicationRuntimeReceipt          `json:"receipt,omitempty"`
+	ErrorCode        string                              `json:"error_code,omitempty"`
 }
 type ApplicationHelperConfig struct {
+	SystemdRun string `json:"systemd_run,omitempty"`
+	IPTables   string `json:"iptables,omitempty"`
+	IP6Tables  string `json:"ip6tables,omitempty"`
+	Getfacl    string `json:"getfacl,omitempty"`
+	Setfacl    string `json:"setfacl,omitempty"`
 	// Host-managed exact ancestors only; these bindings never come from projects.
 	TrustedParentOwners map[string]uint32 `json:"trusted_parent_owners,omitempty"`
+	TrustedParentGroups map[string]uint32 `json:"trusted_parent_groups,omitempty"`
 	PassCLI             string            `json:"pass_cli,omitempty"`
 	PassSessionEnsure   string            `json:"pass_session_ensure,omitempty"`
 	FixtureFaultPath    string            `json:"fixture_fault_path,omitempty"`
@@ -796,6 +848,13 @@ func (r ApplicationRuntime) restoreCommittedOwner(ctx context.Context, owner App
 		return
 	}
 	defer release()
+	if active, err := r.applicationActionActive(owner); err != nil || active {
+		out.State, out.ErrorCode = "held", "application.action.active"
+		if err != nil {
+			out.State, out.ErrorCode = "failed", applicationSafeError(err)
+		}
+		return
+	}
 	defer func() {
 		out.ObservedAt = time.Now().UTC()
 		if e := r.Store.write("startup-"+owner.Instance(), out); e != nil {
@@ -824,7 +883,7 @@ func (r ApplicationRuntime) restoreCommittedOwner(ctx context.Context, owner App
 		return
 	}
 	var publication ApplicationPublication
-	if r.Store.read("publication-"+owner.Instance(), &publication) != nil || publication.Owner != owner || publication.GrantDigest != applicationSHA(grant) || publication.Revision != q.ExpectedRevision || publication.PolicyRevision != q.PolicyRevision || publication.PolicyRevision != grant.PolicyRevision || publication.LocationRevision != q.LocationRevision || publication.LocationRevision != grant.LocationRevision || publication.Descriptor.RepositoryID != grant.RepositoryID || publication.Descriptor.Artifact.Platform != policy.Platform || applicationSHA(publication.Descriptor) != q.DescriptorDigest || applicationSHA(publication.Descriptor) != applicationSHA(i.Descriptor) {
+	if r.Store.read("publication-"+owner.Instance(), &publication) != nil || publication.Owner != owner || publication.GrantDigest != applicationSHA(grant) || publication.Revision != q.ExpectedRevision || publication.PolicyRevision != q.PolicyRevision || publication.PolicyRevision != grant.PolicyRevision || publication.LocationRevision != q.LocationRevision || publication.LocationRevision != grant.LocationRevision || publication.Descriptor.ProducerIdentity() != grant.ProducerIdentity() || publication.Descriptor.Artifact.Platform != policy.Platform || applicationSHA(publication.Descriptor) != q.DescriptorDigest || applicationSHA(publication.Descriptor) != applicationSHA(i.Descriptor) {
 		out.ErrorCode = "application.boot.revision_conflict"
 		return
 	}
@@ -883,6 +942,15 @@ func (r ApplicationRuntime) restoreCommittedOwner(ctx context.Context, owner App
 	}
 	if err != nil {
 		out.ErrorCode = applicationSafeError(err)
+		return
+	}
+	if network, ok := r.System.(applicationNetworkSystem); ok {
+		if err = network.ensureApplicationNetwork(ctx, g, grant); err != nil {
+			out.ErrorCode = applicationSafeError(err)
+			return
+		}
+	} else if grant.Network == ApplicationNetworkOutboundHTTPS {
+		out.ErrorCode = "application.network.backend_unavailable"
 		return
 	}
 	if !r.System.GenerationPublished(g) {

@@ -56,13 +56,17 @@ func findReusablePipelineRunTx(ctx context.Context, tx *sql.Tx, versionID, key, 
 }
 
 func (s Store) GetPipelineRun(ctx context.Context, ref string) (PipelineRun, error) {
+	args := []any{ref}
+	selection := notesSelectedPipelineRunSQL(ctx, "pipeline_runs", &args)
 	return scanPipelineRun(s.db.QueryRowContext(ctx, `SELECT `+pipelineRunColumns()+` FROM knowledge.pipeline_runs
-		WHERE knowledge_pipeline_run_id=$1 OR knowledge_object_id=$1 ORDER BY generation DESC LIMIT 1`, ref))
+		WHERE (knowledge_pipeline_run_id=$1 OR knowledge_object_id=$1) AND `+selection+` ORDER BY generation DESC LIMIT 1`, args...))
 }
 
 func (s Store) ListPipelineStageRuns(ctx context.Context, runID string) ([]PipelineStageRun, error) {
+	args := []any{runID}
+	selection := notesSelectedPipelineChildSQL(ctx, "pipeline_stage_runs", &args)
 	rows, err := s.db.QueryContext(ctx, `SELECT `+pipelineStageRunColumns()+` FROM knowledge.pipeline_stage_runs
-		WHERE knowledge_pipeline_run_id=$1 ORDER BY ordinal`, runID)
+		WHERE knowledge_pipeline_run_id=$1 AND `+selection+` ORDER BY ordinal`, args...)
 	if err != nil {
 		return nil, err
 	}

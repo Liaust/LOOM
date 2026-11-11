@@ -1,0 +1,19 @@
+--- a/nix/python.nix
++++ b/nix/python.nix
+@@ -124,6 +124,15 @@
+         };
+       }
+     else
+-      { };
++      {
++        # The binding wheel and split core wheel are one ABI-matched release.
++        # Do not substitute the separately versioned faster-whisper ORT wheel.
++        sherpa-onnx = _prev.sherpa-onnx.overrideAttrs (old: {
++          buildInputs = (old.buildInputs or [ ]) ++ [ final.sherpa-onnx-core ];
++          preFixup = (old.preFixup or "") + ''
++            addAutoPatchelfSearchPath "${final.sherpa-onnx-core}/${python.sitePackages}/sherpa_onnx/lib"
++          '';
++        });
++      };
+ 
+   pythonSet =

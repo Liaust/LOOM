@@ -44,23 +44,26 @@ type Checks struct {
 }
 
 type Report struct {
-	Service     string   `json:"service"`
-	Status      string   `json:"status"`
-	Version     string   `json:"version"`
-	Environment string   `json:"environment"`
-	Node        NodeInfo `json:"node"`
-	Checks      Checks   `json:"checks"`
+	Instance    *InstanceIdentity `json:"instance,omitempty"`
+	Service     string            `json:"service"`
+	Status      string            `json:"status"`
+	Version     string            `json:"version"`
+	Environment string            `json:"environment"`
+	Node        NodeInfo          `json:"node"`
+	Checks      Checks            `json:"checks"`
 }
 
 type Service struct {
-	Config  config.Config
-	Version version.Info
+	Config   config.Config
+	Version  version.Info
+	instance *InstanceIdentity
 }
 
 func NewService(cfg config.Config, info version.Info) Service {
 	return Service{
-		Config:  cfg,
-		Version: info,
+		Config:   cfg,
+		Version:  info,
+		instance: selfIdentity(),
 	}
 }
 
@@ -92,6 +95,7 @@ func (s Service) Check(ctx context.Context) Report {
 	}
 
 	return Report{
+		Instance:    s.instance,
 		Service:     "loomd",
 		Status:      status,
 		Version:     s.Version.Version,

@@ -66,8 +66,11 @@ func (authorizer PolicyWorkspaceArchiveAuthorizer) Authorize(ctx context.Context
 }
 
 func (s Server) handleWorkspaceArchivePlan(w http.ResponseWriter, r *http.Request) {
-	correlationID, ctx, cancel := workspaceArchiveRequestMeta(r)
+	correlationID, ctx, cancel, bound := s.workspaceArchiveRequestMeta(w, r)
 	defer cancel()
+	if !bound {
+		return
+	}
 	if !s.requireWorkspaceArchiveMethod(w, r, correlationID, http.MethodPost) {
 		return
 	}
@@ -79,7 +82,7 @@ func (s Server) handleWorkspaceArchivePlan(w http.ResponseWriter, r *http.Reques
 	if !s.decodeWorkspaceArchiveRequest(w, r, correlationID, &input) {
 		return
 	}
-	service, ok := s.workspaceArchiveService(w, correlationID)
+	service, ok := s.workspaceArchiveService(w, ctx, correlationID)
 	if !ok {
 		return
 	}
@@ -87,6 +90,9 @@ func (s Server) handleWorkspaceArchivePlan(w http.ResponseWriter, r *http.Reques
 		OperationID: input.OperationID, Kind: input.Kind, ObjectID: input.ObjectID,
 		Slug: input.Slug, ActorID: req.ActorID, Reason: input.Reason,
 	})
+	if err == nil {
+		err = s.validateLifecycleBoxID(ctx, review.BoxID)
+	}
 	if err != nil {
 		s.writeWorkspaceArchiveError(w, correlationID, "plan", err)
 		return
@@ -95,8 +101,11 @@ func (s Server) handleWorkspaceArchivePlan(w http.ResponseWriter, r *http.Reques
 }
 
 func (s Server) handleWorkspaceArchiveRestorePlan(w http.ResponseWriter, r *http.Request) {
-	correlationID, ctx, cancel := workspaceArchiveRequestMeta(r)
+	correlationID, ctx, cancel, bound := s.workspaceArchiveRequestMeta(w, r)
 	defer cancel()
+	if !bound {
+		return
+	}
 	if !s.requireWorkspaceArchiveMethod(w, r, correlationID, http.MethodPost) {
 		return
 	}
@@ -108,7 +117,7 @@ func (s Server) handleWorkspaceArchiveRestorePlan(w http.ResponseWriter, r *http
 	if !s.decodeWorkspaceArchiveRequest(w, r, correlationID, &input) {
 		return
 	}
-	service, ok := s.workspaceArchiveService(w, correlationID)
+	service, ok := s.workspaceArchiveService(w, ctx, correlationID)
 	if !ok {
 		return
 	}
@@ -116,6 +125,9 @@ func (s Server) handleWorkspaceArchiveRestorePlan(w http.ResponseWriter, r *http
 		OperationID: input.OperationID, ArchiveOperationID: input.ArchiveOperationID,
 		ActorID: req.ActorID, Reason: input.Reason,
 	})
+	if err == nil {
+		err = s.validateLifecycleBoxID(ctx, review.BoxID)
+	}
 	if err != nil {
 		s.writeWorkspaceArchiveError(w, correlationID, "restore-plan", err)
 		return
@@ -132,8 +144,11 @@ func (s Server) handleWorkspaceArchiveRestoreApply(w http.ResponseWriter, r *htt
 }
 
 func (s Server) handleWorkspaceArchiveApplyKind(w http.ResponseWriter, r *http.Request, kind storagearchive.WorkspaceOperationKind, capability string) {
-	correlationID, ctx, cancel := workspaceArchiveRequestMeta(r)
+	correlationID, ctx, cancel, bound := s.workspaceArchiveRequestMeta(w, r)
 	defer cancel()
+	if !bound {
+		return
+	}
 	if !s.requireWorkspaceArchiveMethod(w, r, correlationID, http.MethodPost) {
 		return
 	}
@@ -149,11 +164,18 @@ func (s Server) handleWorkspaceArchiveApplyKind(w http.ResponseWriter, r *http.R
 		s.writeError(w, correlationID, http.StatusBadRequest, "workspace_archive.confirmation_required", "workspace_archive", "apply", "Exact plan digest and explicit confirmation are required.", nil)
 		return
 	}
-	service, ok := s.workspaceArchiveService(w, correlationID)
+	if err := s.validateLifecycleBoxID(ctx, input.Plan.BoxID); err != nil {
+		s.writeLifecycleBoxError(w, correlationID, err)
+		return
+	}
+	service, ok := s.workspaceArchiveService(w, ctx, correlationID)
 	if !ok {
 		return
 	}
 	plan, err := service.ReplanReviewed(ctx, input.Plan)
+	if err == nil {
+		err = s.validateLifecycleBoxID(ctx, plan.BoxID)
+	}
 	if err != nil {
 		s.writeWorkspaceArchiveError(w, correlationID, "apply", err)
 		return
@@ -172,8 +194,11 @@ func (s Server) handleWorkspaceArchiveApplyKind(w http.ResponseWriter, r *http.R
 }
 
 func (s Server) handleWorkspaceArchiveInspect(w http.ResponseWriter, r *http.Request) {
-	correlationID, ctx, cancel := workspaceArchiveRequestMeta(r)
+	correlationID, ctx, cancel, bound := s.workspaceArchiveRequestMeta(w, r)
 	defer cancel()
+	if !bound {
+		return
+	}
 	if !s.requireWorkspaceArchiveMethod(w, r, correlationID, http.MethodGet) {
 		return
 	}
@@ -182,11 +207,14 @@ func (s Server) handleWorkspaceArchiveInspect(w http.ResponseWriter, r *http.Req
 		return
 	}
 	operationID := strings.TrimSpace(r.URL.Query().Get("operation_id"))
-	service, ok := s.workspaceArchiveService(w, correlationID)
+	service, ok := s.workspaceArchiveService(w, ctx, correlationID)
 	if !ok {
 		return
 	}
 	inspection, err := service.InspectOperation(ctx, operationID)
+	if err == nil {
+		err = s.validateLifecycleInspection(ctx, operationID, inspection)
+	}
 	if err != nil {
 		s.writeWorkspaceArchiveError(w, correlationID, "inspect", err)
 		return
@@ -199,8 +227,11 @@ func (s Server) handleWorkspaceArchiveInspect(w http.ResponseWriter, r *http.Req
 }
 
 func (s Server) handleWorkspaceArchiveRecover(w http.ResponseWriter, r *http.Request) {
-	correlationID, ctx, cancel := workspaceArchiveRequestMeta(r)
+	correlationID, ctx, cancel, bound := s.workspaceArchiveRequestMeta(w, r)
 	defer cancel()
+	if !bound {
+		return
+	}
 	if !s.requireWorkspaceArchiveMethod(w, r, correlationID, http.MethodPost) {
 		return
 	}
@@ -216,11 +247,14 @@ func (s Server) handleWorkspaceArchiveRecover(w http.ResponseWriter, r *http.Req
 		s.writeError(w, correlationID, http.StatusBadRequest, "workspace_archive.confirmation_required", "workspace_archive", "recover", "Exact plan digest and explicit confirmation are required.", nil)
 		return
 	}
-	service, ok := s.workspaceArchiveService(w, correlationID)
+	service, ok := s.workspaceArchiveService(w, ctx, correlationID)
 	if !ok {
 		return
 	}
 	inspection, err := service.InspectOperation(ctx, input.OperationID)
+	if err == nil {
+		err = s.validateLifecycleInspection(ctx, input.OperationID, inspection)
+	}
 	if err != nil {
 		s.writeWorkspaceArchiveError(w, correlationID, "recover", err)
 		return
@@ -241,17 +275,17 @@ func (s Server) handleWorkspaceArchiveRecover(w http.ResponseWriter, r *http.Req
 	s.writeBoundedWorkspaceArchiveJSON(w, correlationID, http.StatusOK, response.Success(correlationID, storagearchive.NewWorkspaceMoveInspectionSummary(inspection)))
 }
 
-func workspaceArchiveRequestMeta(r *http.Request) (string, context.Context, context.CancelFunc) {
+func (s Server) workspaceArchiveRequestMeta(w http.ResponseWriter, r *http.Request) (string, context.Context, context.CancelFunc, bool) {
 	correlationID, ctx := requestMeta(r)
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	return correlationID, ctx, cancel
+	ctx, err := s.lifecycleRequestContext(ctx, r)
+	if err != nil {
+		s.writeLifecycleBoxError(w, correlationID, err)
+	}
+	return correlationID, ctx, cancel, err == nil
 }
 
 func (s Server) authorizeWorkspaceArchive(w http.ResponseWriter, ctx context.Context, correlationID, capability string) (requestctx.Context, bool) {
-	if s.services.WorkspaceArchive == nil {
-		s.writeError(w, correlationID, http.StatusServiceUnavailable, "workspace_archive.not_ready", "workspace_archive", "runtime", "Workspace archive lifecycle is not ready.", nil)
-		return requestctx.Context{}, false
-	}
 	resolver := s.services.WorkspaceArchiveRequestResolver
 	if resolver == nil {
 		resolver = func(ctx context.Context, correlationID string) (requestctx.Context, error) {
@@ -279,12 +313,13 @@ func (s Server) authorizeWorkspaceArchive(w http.ResponseWriter, ctx context.Con
 	return req, true
 }
 
-func (s Server) workspaceArchiveService(w http.ResponseWriter, correlationID string) (WorkspaceArchiveLifecycleService, bool) {
-	if s.services.WorkspaceArchive == nil {
-		s.writeError(w, correlationID, http.StatusServiceUnavailable, "workspace_archive.not_ready", "workspace_archive", "runtime", "Workspace archive lifecycle is not ready.", nil)
+func (s Server) workspaceArchiveService(w http.ResponseWriter, ctx context.Context, correlationID string) (WorkspaceArchiveLifecycleService, bool) {
+	service, err := s.lifecycleWorkspaceArchive(ctx)
+	if err != nil {
+		s.writeLifecycleBoxError(w, correlationID, err)
 		return nil, false
 	}
-	return s.services.WorkspaceArchive, true
+	return service, true
 }
 
 func (s Server) requireWorkspaceArchiveMethod(w http.ResponseWriter, r *http.Request, correlationID, method string) bool {

@@ -238,11 +238,14 @@ func TestSchemaV1PreservesCurrentInitiativeAttachments(t *testing.T) {
 		}
 	}
 	sort.Strings(actualAttachments)
-	if !reflect.DeepEqual(actualAttachments, currentAttachments) {
-		t.Fatalf("current initiative attachments = %#v, want frozen inventory %#v", actualAttachments, currentAttachments)
+	for _, source := range currentAttachments {
+		index := sort.SearchStrings(actualAttachments, source)
+		if index == len(actualAttachments) || actualAttachments[index] != source {
+			t.Errorf("original initiative attachment is no longer preserved: %q", source)
+		}
 	}
 
-	for _, source := range currentAttachments {
+	for _, source := range actualAttachments {
 		parts := strings.Split(source, "/")
 		if len(parts) != 4 || parts[0] != ".project" || parts[1] != "initiatives" || parts[2] == "" || parts[3] == "" {
 			t.Errorf("current initiative attachment has an unsupported shape: %q", source)

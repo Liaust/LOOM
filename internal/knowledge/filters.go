@@ -110,7 +110,7 @@ func sourceContextRootSQL(root string) string {
 // policy or source observation hides prior publications until eligible admission.
 // This runs before query limits, so excluded hits cannot crowd out valid ones.
 func visibleNotesKnowledgeObjectSQL(object string) string {
-	return notesKnowledgeVisibilitySQL(object, true)
+	return "(" + notesKnowledgeVisibilitySQL(object, true) + " AND " + notesObservedSourcePresentSQL(object) + ")"
 }
 
 // Admission and current reads must use the same scope authority. Box areas are
@@ -146,22 +146,23 @@ func notesSyncedBoxOriginSQL(root, version, file, replica string) string {
 // or unavailable version must not resurrect an older source. Reads share this
 // fence so a prior publication stops being current before the next admission.
 func notesSyncedCurrentSourceSQL(scope, object, version, file string) string {
-	return fmt.Sprintf(`NOT EXISTS (
-	 SELECT 1 FROM objects.objects newer_object
-	 JOIN files.file_metadata newer_file ON newer_file.object_id = newer_object.object_id
-	 JOIN objects.object_versions newer_version ON newer_version.object_version_id = newer_file.latest_version_id
-	 AND newer_version.object_id = newer_object.object_id
-	 WHERE EXISTS (SELECT 1 FROM objects.object_scope_links newer_scope
+	newer := fmt.Sprintf(`SELECT 1 FROM objects.object_versions newer_version
+	 JOIN files.file_metadata newer_file ON newer_file.latest_version_id = newer_version.object_version_id
+	 JOIN objects.objects newer_object ON newer_object.object_id = newer_file.object_id
+	 WHERE newer_version.object_id = newer_object.object_id
+	 AND EXISTS (SELECT 1 FROM objects.object_scope_links newer_scope
 	 WHERE newer_scope.scope_id = %[1]s.scope_id AND newer_scope.object_id = newer_object.object_id
 	 AND newer_scope.relevance_status = 'active')
 	 AND COALESCE(newer_version.source_node_id, newer_file.source_node_id)
-	 IS NOT DISTINCT FROM COALESCE(%[3]s.source_node_id, %[4]s.source_node_id)
-	 AND (newer_version.source_path = COALESCE(%[3]s.source_path, %[4]s.source_path, %[2]s.metadata->>'source_path', '')
-	 OR (newer_version.source_path IS NULL
-	 AND COALESCE(newer_file.source_path, newer_object.metadata->>'source_path', '')
-	 = COALESCE(%[3]s.source_path, %[4]s.source_path, %[2]s.metadata->>'source_path', '')))
-	 AND (newer_version.created_at, newer_version.object_version_id) > (%[3]s.created_at, %[3]s.object_version_id)
-	)`, scope, object, version, file)
+	 IS NOT DISTINCT FROM COALESCE(%[2]s.source_node_id, %[3]s.source_node_id)
+	 AND (newer_version.created_at, newer_version.object_version_id) > (%[2]s.created_at, %[2]s.object_version_id)
+	 AND `, scope, version, file)
+	sourcePath := fmt.Sprintf("COALESCE(%s.source_path, %s.source_path, %s.metadata->>'source_path', '')", version, file, object)
+	// Separate the legacy fallback so the ordinary branch can use the existing
+	// source-path/version index before joining the remaining authority evidence.
+	return "(NOT EXISTS (" + newer + "newer_version.source_path = " + sourcePath + ")" +
+		" AND NOT EXISTS (" + newer + "newer_version.source_path IS NULL" +
+		" AND COALESCE(newer_file.source_path, newer_object.metadata->>'source_path', '') = " + sourcePath + "))"
 }
 
 // Passage reads apply the same current-evidence fence to legacy roots too.
@@ -174,7 +175,73 @@ func notesKnowledgeArchiveVisibilitySQL(object string) string {
 }
 
 func notesKnowledgeVisibilityPolicySQL(object string, legacySearch, archiveRead, publishedRead bool) string {
+	return notesKnowledgeVisibilityPolicyWithAuthoritySQL(object, legacySearch, archiveRead, publishedRead, "")
+}
+
+func notesKnowledgeVisibilityPolicyWithAuthoritySQL(object string, legacySearch, archiveRead, publishedRead bool, authority string) string {
 	legacy := ""
+	sourceMatches := declarationWatchSourceMatchesSQL
+	if authority != "" {
+		sourceMatches = notesStatementWatchSourceMatchesSQL
+	}
+	declaration := sourceMatches("visibility_root", "COALESCE("+object+".metadata->'source_root'->'knowledge_source','null'::jsonb)", "COALESCE(visibility_root.metadata->'registration_metadata'->'knowledge_source','null'::jsonb)")
+	rootReadable := "visibility_root.status = 'active'"
+	scopeReadable := notesSyncedScopeSQL("visibility_root", "visibility_scope_owner")
+	if archiveRead {
+		stop := notesProjectArchiveStopSQL("visibility_root", object, notesReadArchiveOperationSQL(object))
+		legacyEvidence := declarationLegacyNotesEvidenceSQL("visibility_root", object, true)
+		if authority != "" {
+			legacyEvidence = notesStatementLegacyObjectSQL("visibility_root", object)
+		}
+		rootReadable = `((visibility_root.status='active' AND (visibility_root.project_id IS NULL OR EXISTS (
+		 SELECT 1 FROM projects.project_watched_root_registrations read_writer
+		 WHERE read_writer.project_watched_root_registration_id=visibility_root.project_watched_root_registration_id
+		 AND read_writer.project_id=visibility_root.project_id AND read_writer.node_id=visibility_root.node_id
+		 AND read_writer.owner_node_key=visibility_root.node_key AND read_writer.backend_root_key=visibility_root.backend_root_key
+		 AND read_writer.root_relative_path=visibility_root.root_relative_path
+		 AND read_writer.activation_status IN ('applied','reported')
+		 AND read_writer.metadata=visibility_root.metadata->'registration_metadata')))
+			 OR ` + stop + ` OR ` + legacyEvidence + `)`
+		scopeReadable = `(` + scopeReadable + ` OR (` + stop + ` AND EXISTS (
+		 SELECT 1 FROM projects.projects read_project WHERE read_project.project_id=visibility_root.project_id
+		 AND read_project.project_scope_id=visibility_scope_owner.scope_id)))`
+		declaration = sourceMatches("visibility_root", `COALESCE(`+object+`.metadata->'source_root'->'knowledge_source','null'::jsonb)`, `COALESCE(`+notesEffectiveDeclarationSQL("visibility_root", object, notesReadArchiveOperationSQL(object))+`,'null'::jsonb)`)
+	}
+	if legacySearch {
+		legacy = "(visibility_root.root_kind NOT IN ('box_topics','box_library','project_material') AND (visibility_root.root_kind <> 'box_notes' OR " + object + ".storage_entry_id IS NOT NULL)) OR "
+		declaration = "CASE WHEN visibility_root.root_kind = 'box_notes' THEN " + declaration + " ELSE " + sourceMatches("visibility_root", object+".metadata->'source_root'->'knowledge_source'", "visibility_root.metadata->'registration_metadata'->'knowledge_source'") + " END"
+	}
+	projectReadable := "true"
+	if !archiveRead {
+		// Legacy projects may predate physical custody receipts. Their archived
+		// status must still stop active search and processing.
+		projectReadable = `(visibility_root.project_id IS NULL OR EXISTS (
+		 SELECT 1 FROM projects.projects current_project
+		 WHERE current_project.project_id=visibility_root.project_id AND current_project.status='active'))`
+	}
+	rootRelation := "knowledge.notes_source_roots"
+	enrollment := declarationEnrollmentEvidenceSQL("visibility_root", object, archiveRead)
+	if authority != "" {
+		rootRelation = authority
+		enrollment = notesStatementEnrollmentSQL("visibility_root", object, archiveRead)
+	}
+	return `EXISTS (SELECT 1 FROM ` + rootRelation + ` visibility_root
+	 WHERE visibility_root.notes_source_root_id = ` + object + `.notes_source_root_id
+	 AND ` + projectReadable + `
+	 AND ` + enrollment + `
+	 AND (` + legacy + `(
+	 ` + rootReadable + `
+	 AND ` + object + `.source_node_key = visibility_root.node_key
+	 AND ` + object + `.project_id IS NOT DISTINCT FROM visibility_root.project_id
+	 AND ` + object + `.metadata->'source_root'->>'source_path' = visibility_root.source_path
+	 AND ` + object + `.metadata->'source_root'->>'root_relative_path' = visibility_root.root_relative_path
+	 AND ` + declaration + `
+	 AND ` + notesKnowledgeSourceEvidenceSQL(object, scopeReadable, publishedRead) + `)))`
+}
+
+// Exact-source diagnostics reuse current catalog/scope evidence but do not
+// infer root activation from it. This evidence never admits a file by itself.
+func notesKnowledgeSourceEvidenceSQL(object, scopeReadable string, publishedRead bool) string {
 	replicaJoin := "visibility_replica.replica_id = " + object + ".metadata->'synced_object'->>'replica_id'"
 	observation := `visibility_file.latest_version_id = ` + object + `.metadata->'synced_object'->>'object_version_id'
 	 AND visibility_replica.replica_id = ` + object + `.metadata->'synced_object'->>'replica_id'
@@ -182,8 +249,7 @@ func notesKnowledgeVisibilityPolicySQL(object string, legacySearch, archiveRead,
 	 AND visibility_object.metadata = COALESCE(` + object + `.metadata->'object_metadata','{}'::jsonb)
 	 AND visibility_version.metadata = COALESCE(` + object + `.metadata->'version_metadata','{}'::jsonb)`
 	if publishedRead {
-		// A new accepted revision may precede Notes admission. Only reads may
-		// bridge that window, using current access evidence for the same source.
+		// Bridge an admission lag only with current evidence for the same source.
 		replicaJoin = "visibility_replica.replicated_id = visibility_version.object_version_id"
 		refresh := `visibility_file.latest_version_id <> ` + object + `.metadata->'synced_object'->>'object_version_id'
 		 AND visibility_version.source_path = ` + object + `.metadata->'synced_object'->>'source_path'
@@ -196,49 +262,7 @@ func notesKnowledgeVisibilityPolicySQL(object string, legacySearch, archiveRead,
 		}
 		observation = "((" + observation + ") OR (" + refresh + "))"
 	}
-	declaration := "COALESCE(" + object + ".metadata->'source_root'->'knowledge_source','null'::jsonb) = COALESCE(visibility_root.metadata->'registration_metadata'->'knowledge_source','null'::jsonb)"
-	rootReadable := "visibility_root.status = 'active'"
-	scopeReadable := notesSyncedScopeSQL("visibility_root", "visibility_scope_owner")
-	if archiveRead {
-		stop := notesProjectArchiveStopSQL("visibility_root", object, notesReadArchiveOperationSQL(object))
-		rootReadable = `((visibility_root.status='active' AND (visibility_root.project_id IS NULL OR EXISTS (
-		 SELECT 1 FROM projects.project_watched_root_registrations read_writer
-		 WHERE read_writer.project_watched_root_registration_id=visibility_root.project_watched_root_registration_id
-		 AND read_writer.project_id=visibility_root.project_id AND read_writer.node_id=visibility_root.node_id
-		 AND read_writer.owner_node_key=visibility_root.node_key AND read_writer.backend_root_key=visibility_root.backend_root_key
-		 AND read_writer.root_relative_path=visibility_root.root_relative_path
-		 AND read_writer.activation_status IN ('applied','reported')
-		 AND read_writer.metadata=visibility_root.metadata->'registration_metadata')))
-		 OR ` + stop + ` OR ` + declarationLegacyNotesEvidenceSQL("visibility_root", object, true) + `)`
-		scopeReadable = `(` + scopeReadable + ` OR (` + stop + ` AND EXISTS (
-		 SELECT 1 FROM projects.projects read_project WHERE read_project.project_id=visibility_root.project_id
-		 AND read_project.project_scope_id=visibility_scope_owner.scope_id)))`
-		declaration = `COALESCE(` + object + `.metadata->'source_root'->'knowledge_source','null'::jsonb) = COALESCE(` + notesEffectiveDeclarationSQL("visibility_root", object, notesReadArchiveOperationSQL(object)) + `,'null'::jsonb)`
-	}
-	if legacySearch {
-		legacy = "(visibility_root.root_kind NOT IN ('box_topics','box_library','project_material') AND (visibility_root.root_kind <> 'box_notes' OR " + object + ".storage_entry_id IS NOT NULL)) OR "
-		declaration = "CASE WHEN visibility_root.root_kind = 'box_notes' THEN " + declaration + " ELSE " + object + ".metadata->'source_root'->'knowledge_source' = visibility_root.metadata->'registration_metadata'->'knowledge_source' END"
-	}
-	projectReadable := "true"
-	if !archiveRead {
-		// Legacy projects may predate physical custody receipts. Their archived
-		// status must still stop active search and processing.
-		projectReadable = `(visibility_root.project_id IS NULL OR EXISTS (
-		 SELECT 1 FROM projects.projects current_project
-		 WHERE current_project.project_id=visibility_root.project_id AND current_project.status='active'))`
-	}
-	return `EXISTS (SELECT 1 FROM knowledge.notes_source_roots visibility_root
-	 WHERE visibility_root.notes_source_root_id = ` + object + `.notes_source_root_id
-	 AND ` + projectReadable + `
-	 AND ` + declarationEnrollmentEvidenceSQL("visibility_root", object, archiveRead) + `
-	 AND (` + legacy + `(
-	 ` + rootReadable + `
-	 AND ` + object + `.source_node_key = visibility_root.node_key
-	 AND ` + object + `.project_id IS NOT DISTINCT FROM visibility_root.project_id
-	 AND ` + object + `.metadata->'source_root'->>'source_path' = visibility_root.source_path
-	 AND ` + object + `.metadata->'source_root'->>'root_relative_path' = visibility_root.root_relative_path
-	 AND ` + declaration + `
-	 AND ((` + object + `.storage_entry_id IS NULL AND EXISTS (
+	return `((` + object + `.storage_entry_id IS NULL AND EXISTS (
 	 SELECT 1 FROM files.file_metadata visibility_file
 	 JOIN objects.objects visibility_object ON visibility_object.object_id = visibility_file.object_id
 	 JOIN objects.object_versions visibility_version ON visibility_version.object_version_id = visibility_file.latest_version_id
@@ -266,7 +290,7 @@ func notesKnowledgeVisibilityPolicySQL(object string, legacySearch, archiveRead,
 	 AND visibility_entry.watched_root_key = visibility_root.backend_root_key
 	 AND visibility_entry.metadata = COALESCE(` + object + `.metadata->'storage_metadata','{}'::jsonb)
 	 AND visibility_entry.checksum_hex = COALESCE(` + object + `.metadata->'storage_entry'->>'checksum_hex','')
-	 )))))`
+	 ))`
 }
 
 const ignoredNotesKnowledgeContractReason = "ignored_notes_control_contract"
@@ -297,8 +321,8 @@ func visibleNotesKnowledgeRelativePathSQL(column string) string {
 	return "(lower(" + column + ") NOT IN ('loom.notes.yaml', 'loom.notes.yml') AND lower(" + column + ") NOT LIKE '%/loom.notes.yaml' AND lower(" + column + ") NOT LIKE '%/loom.notes.yml' AND lower(replace(" + column + ", chr(92), '/')) !~ '(^|/)[.]loom-notes-[0-9a-f]{64}(/|$)')"
 }
 
-// Only v0.5 uses this additional live fence. A stripped version marker cannot
-// downgrade a registration whose authoritative project source is still v0.5.
+// Declaration versions use this additional live fence. A stripped version
+// marker cannot downgrade an authoritative declaration to legacy admission.
 func declarationEnrollmentMembershipSQL(root string) string {
 	return declarationEnrollmentEvidenceSQL(root, "", false)
 }
@@ -315,17 +339,25 @@ func declarationEnrollmentEvidenceSQL(root, object string, archiveRead bool) str
 		// accepted declaration/configuration must still equal retained evidence.
 		archive = notesProjectArchiveStopSQL(root, object, notesReadArchiveOperationSQL(object)) +
 			" AND accepted.registration_status IN ('registered','archived')" +
-			" AND " + object + ".metadata#>'{source_root,knowledge_source}'=expected.value#>'{metadata,knowledge_source}'"
+			" AND " + declarationWatchSourceMatchesSQL(root, object+".metadata#>'{source_root,knowledge_source}'", "expected.value#>'{metadata,knowledge_source}'")
 	}
-	live := "accepted.registration_status='registered' AND declared_project.status='active' AND declared.activation_status='reported'" +
-		" AND declared.metadata=" + root + ".metadata->'registration_metadata' AND (declared.metadata - 'declaration_adapter')=expected.value->'metadata'" +
-		" AND owner_report.status NOT IN ('disabled','blocked','stale')"
-	return `(` + declarationLegacyNotesEvidenceSQL(root, object, archiveRead) + ` OR (` + retainedVersion + ` AND NOT COALESCE((` + root + `.metadata#>'{registration_metadata,knowledge_source}') ? 'schema_version',false)
+	return `(` + declarationLegacyNotesEvidenceSQL(root, object, archiveRead) + ` OR (` + retainedVersion + ` AND ` + declarationUnversionedRootSQL(root) + `)
+	 OR ` + declarationRegistrationAuthoritySQL(root, archive) + `)`
+}
+
+func declarationUnversionedRootSQL(root string) string {
+	return `NOT COALESCE((` + root + `.metadata#>'{registration_metadata,knowledge_source}') ? 'schema_version',false)
 	 AND NOT EXISTS (SELECT 1 FROM projects.project_watched_root_registrations declaration_probe
 	 JOIN projects.project_contract_registrations declaration_source USING(project_contract_registration_id)
 	 WHERE declaration_probe.project_watched_root_registration_id=` + root + `.project_watched_root_registration_id
-	 AND declaration_source.contract_schema_version='project.contract.v0.5'))
-	 OR EXISTS (
+	 AND declaration_source.contract_schema_version IN ('project.contract.v0.5','project.contract.v0.6'))`
+}
+
+func declarationRegistrationAuthoritySQL(root, archive string) string {
+	live := "accepted.registration_status='registered' AND declared_project.status='active' AND declared.activation_status='reported'" +
+		" AND declared.metadata=" + root + ".metadata->'registration_metadata' AND projects.declaration_watch_metadata_matches(expected.value->'metadata',declared.metadata - 'declaration_adapter')" +
+		" AND owner_report.status NOT IN ('disabled','blocked','stale')"
+	return `EXISTS (
 	 SELECT 1 FROM projects.project_watched_root_registrations declared
 	 JOIN projects.project_contract_registrations accepted USING(project_contract_registration_id)
 	 JOIN projects.projects declared_project ON declared_project.project_id=declared.project_id
@@ -333,7 +365,8 @@ func declarationEnrollmentEvidenceSQL(root, object string, archiveRead bool) str
 	 JOIN watched_roots.roots owner_report ON owner_report.watched_root_id=declared.watched_root_id
 	 CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(accepted.registration_plan_json->'watched_roots')='array' THEN accepted.registration_plan_json->'watched_roots' ELSE '[]'::jsonb END) expected
 	 WHERE declared.project_watched_root_registration_id=` + root + `.project_watched_root_registration_id
-	 AND accepted.contract_schema_version='project.contract.v0.5' AND accepted.project_id=declared.project_id
+	 AND accepted.contract_schema_version IN ('project.contract.v0.5','project.contract.v0.6') AND accepted.project_id=declared.project_id
+	 AND accepted.contract_json->>'schema_version'=accepted.contract_schema_version
 	 AND ((` + live + `) OR (` + archive + `))
 	 AND accepted.validation_report_json->>'ok'='true' AND accepted.validation_report_json->>'registerable'='true'
 	 AND accepted.registration_plan_json->>'registerable'='true'
@@ -342,7 +375,7 @@ func declarationEnrollmentEvidenceSQL(root, object string, archiveRead bool) str
 	 AND declared.owner_node_key=` + root + `.node_key AND declared_node.node_key=declared.owner_node_key
 	 AND declared.backend_root_key=` + root + `.backend_root_key AND declared.root_relative_path=` + root + `.root_relative_path
 	 AND ((NOT expected.value#>'{metadata,knowledge_source}' ? 'application_data'
-	 AND ` + root + `.source_path=accepted.project_root || '/' || declared.root_relative_path)
+	 AND ` + root + `.source_path=accepted.project_root || CASE WHEN declared.root_relative_path='.' THEN '' ELSE '/' || declared.root_relative_path END)
 	 OR (expected.value#>'{metadata,knowledge_source}' ? 'application_data'
 	 AND ` + root + `.source_path=declared.metadata#>>'{declaration_adapter,application_data,path}' || CASE WHEN coalesce(declared.metadata#>>'{declaration_adapter,application_data,subpath}','')='' THEN '' ELSE '/' || (declared.metadata#>>'{declaration_adapter,application_data,subpath}') END
 	 AND owner_report.metadata->'application_data'=declared.metadata#>'{declaration_adapter,application_data}'
@@ -374,12 +407,12 @@ func declarationEnrollmentEvidenceSQL(root, object string, archiveRead bool) str
 	 AND declared.root_relative_path='application-data/'||(expected.value#>>'{metadata,knowledge_source,resource_key}')
 	 AND accepted.contract_json->'resources'->(expected.value#>>'{metadata,knowledge_source,application_data,application}')->'application'->'data'->(expected.value#>>'{metadata,knowledge_source,application_data,data}')->>'binding_ref'=declared.metadata#>>'{declaration_adapter,application_data,binding_ref}'))
 	 AND (accepted.contract_json->'resources'->(expected.value#>>'{metadata,knowledge_source,resource_key}'))#>>'{knowledge,category}'=expected.value#>>'{metadata,knowledge_source,declaration}'
-	 ))`
+	 )`
 }
 
 // Retained Notes keep their original identity. This branch is available only
 // through an immutable journal action and the registration owner's committed
-// receipt; neither a v0.5 parent nor a declaration_adapter flag grants it.
+// receipt; neither a declaration parent nor a declaration_adapter flag grants it.
 // The old report is allowed during delivery/ACK lag, distinct from the effective
 // successor configuration. All ordinary object/privacy/custody fences surround it.
 func declarationLegacyNotesEvidenceSQL(root, object string, archiveRead bool) string {
@@ -394,6 +427,10 @@ func declarationLegacyNotesEvidenceSQL(root, object string, archiveRead bool) st
 	if archiveRead {
 		archive = notesProjectArchiveStopSQL(root, object, notesReadArchiveOperationSQL(object))
 	}
+	return declarationLegacyNotesAuthoritySQL(root, objectIdentity, archive)
+}
+
+func declarationLegacyNotesAuthoritySQL(root, objectIdentity, archive string) string {
 	return `EXISTS (
  SELECT 1 FROM projects.project_watched_root_registrations legacy_row
  JOIN projects.project_contract_registrations legacy_source USING(project_contract_registration_id)
@@ -420,7 +457,7 @@ func declarationLegacyNotesEvidenceSQL(root, object string, archiveRead bool) st
   'group_hash',desired.value->>'group_hash','safe_root_key','declaration_'||lower(legacy_row.project_id),
   'compiler_config_json',successor.value->>'compiler_config_json','compiler_config_hash',successor.value->>'compiler_config_hash',
   'effective_config_hash',successor.value->>'config_hash')) AS value) successor_metadata
- WHERE ` + root + `.status='active' AND ` + root + `.root_kind='project_notes' AND ` + objectIdentity + `
+ WHERE (` + root + `.status='active' OR (` + archive + `)) AND ` + root + `.root_kind='project_notes' AND ` + objectIdentity + `
  AND NOT COALESCE((` + root + `.metadata#>'{registration_metadata,knowledge_source}') ? 'schema_version',false)
  AND legacy_row.project_watched_root_registration_id=` + root + `.project_watched_root_registration_id
  AND legacy_row.project_watched_root_registration_id=old_row.value->>'project_watched_root_registration_id'
@@ -431,7 +468,8 @@ func declarationLegacyNotesEvidenceSQL(root, object string, archiveRead bool) st
  AND action.action_id='register_project:project' AND operation.state<>'superseded'
  AND predecessor.value->>'schema_version'='project.declaration_legacy_predecessor.v1'
  AND predecessor.value->>'project_id'=legacy_row.project_id AND predecessor.value->>'node_id'=legacy_row.node_id
- AND legacy_source.contract_schema_version='project.contract.v0.5'
+ AND legacy_source.contract_schema_version IN ('project.contract.v0.5','project.contract.v0.6')
+ AND legacy_source.contract_json->>'schema_version'=legacy_source.contract_schema_version
  AND legacy_source.contract_json=intent.value->'declaration'
  AND legacy_source.contract_hash=intent.value->>'contract_hash' AND legacy_source.contract_path=intent.value->>'contract_path'
  AND legacy_source.project_root=intent.value->>'project_root' AND legacy_source.project_root=predecessor.value->>'project_root'
@@ -475,7 +513,7 @@ func declarationLegacyNotesEvidenceSQL(root, object string, archiveRead bool) st
  AND legacy_row.sync_mode=old_row.value->>'sync_mode' AND legacy_row.index_mode=old_row.value->>'index_mode'
  AND legacy_row.backup_mode=old_row.value->>'backup_mode' AND legacy_row.delete_mode=old_row.value->>'delete_mode'
  AND legacy_row.created_at=(old_row.value->>'created_at')::timestamptz
- AND (` + root + `.metadata->'registration_metadata'=old_row.value->'metadata' OR ` + root + `.metadata->'registration_metadata'=successor_metadata.value)
+ AND (` + root + `.metadata->'registration_metadata'=old_row.value->'metadata' OR ` + root + `.metadata->'registration_metadata'=successor_metadata.value OR (` + archive + `))
  AND ((legacy_source.registration_status='registered' AND legacy_project.status='active' AND legacy_project.archive_state='{}'::jsonb
   AND ((legacy_row.metadata=old_row.value->'metadata' AND legacy_row.safe_root_key='project'
    AND legacy_row.config_hash=old_row.value->>'config_hash' AND legacy_row.config_json=old_row.value->'config_json'
@@ -498,7 +536,7 @@ func declarationLegacyNotesEvidenceSQL(root, object string, archiveRead bool) st
    AND legacy_report.config_json=old_report.value->'config_json'
    AND COALESCE((SELECT jsonb_object_agg(key,value) FROM jsonb_each(legacy_report.metadata)
     WHERE key IN ('source','runtime_worker','root_reachable','safe_root_key','root_relative_path')),'{}'::jsonb)=old_report.value->'metadata')
-  OR (legacy_report.status='healthy' AND legacy_row.metadata=successor_metadata.value AND legacy_report.safe_root_key=legacy_row.safe_root_key
+  OR (legacy_report.status='healthy' AND (legacy_row.metadata=successor_metadata.value OR (` + archive + `)) AND legacy_report.safe_root_key=legacy_row.safe_root_key
    AND legacy_report.config_hash=successor.value->>'config_hash' AND legacy_report.config_json=successor.value->'config_json'))
  AND COALESCE((SELECT jsonb_object_agg(key,value) FROM jsonb_each(legacy_report.metadata)
   WHERE key IN ('source','runtime_worker','root_reachable','safe_root_key','root_relative_path')),'{}'::jsonb)

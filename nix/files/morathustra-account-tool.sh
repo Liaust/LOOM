@@ -144,7 +144,7 @@ if [[ "$tool" == gh ]]; then
     'GH_NO_EXTENSION_UPDATE_NOTIFIER=1' "$native" "${args[@]}"
 else
   exec '@coreutils@/bin/env' -i "${child[@]}" \
-  'BASECAMP_BASE_URL=https://3.basecampapi.com' 'BASECAMP_ACCOUNT_ID=@basecampAccountID@' \
+    'BASECAMP_BASE_URL=https://3.basecampapi.com' 'BASECAMP_ACCOUNT_ID=@basecampAccountID@' \
     'BASECAMP_NO_KEYRING=1' 'BASECAMP_NO_UPDATE_CHECK=1' \
     'BASECAMP_CACHE_DIR=@authRoot@/cache' \
     "$native" --profile @identity@ "${args[@]}"

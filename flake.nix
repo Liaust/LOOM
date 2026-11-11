@@ -2,18 +2,25 @@
   description = "LOOM NixOS runtime profiles";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    # Yesterday's Node fixes have not reached the binary-cache channel yet.
+    # Select only those packages, not an uncached desktop/OS dependency tree.
+    nixpkgs-security.url = "github:NixOS/nixpkgs/ec33567eec32a0c1f6448ce858fc5a22193c8370";
     # Hermes v0.21.0 / v2026.8.31, peeled annotated tag. Keep its own
     # dependency lock: its Python/Node toolchain is independent of LOOM's.
     hermes-upstream.url = "github:NousResearch/hermes-agent/29112bef099274229cadff79cdff7bf7b99c4b77";
+    # Native conversational runtime. Keep the legacy tool/recovery closure above
+    # independent so a Hermes upgrade cannot replace working Codex Mac tools.
+    hermes-runtime-upstream.url = "github:NousResearch/hermes-agent/d923a5eb487a17c0a68801bba9ef0f56c81040a8";
     # Basecamp v0.10.0; retain its separate Go 1.26 toolchain lock.
     basecamp-upstream.url = "github:basecamp/basecamp-cli/e4bfd014bf137771d454515b4f7314ce651ee096";
   };
 
   outputs =
-    { self, nixpkgs, hermes-upstream, basecamp-upstream }:
+    { self, nixpkgs, nixpkgs-security, hermes-upstream, hermes-runtime-upstream, basecamp-upstream }:
     let
       lib = nixpkgs.lib;
+      securityOverlay = import ./nix/overlays/security-20261022.nix { inherit nixpkgs-security; };
 
       mkNixos =
         { system, modules }:
@@ -22,7 +29,7 @@
           specialArgs = {
             inherit self;
           };
-          modules = modules;
+          modules = modules ++ [ { nixpkgs.overlays = [ securityOverlay ]; } ];
         };
 
       devShellSystems = [
@@ -38,7 +45,7 @@
           system:
           f {
             inherit system;
-            pkgs = import nixpkgs { inherit system; };
+            pkgs = import nixpkgs { inherit system; overlays = [ securityOverlay ]; };
           }
         );
 
@@ -47,7 +54,7 @@
           pkgs,
           name,
           subPackages,
-          vendorHash ? "sha256-Q8RWoTCPXWxSnEapfYjel9Q+sFlWYp653w17I2R+jdw=",
+          vendorHash ? "sha256-sG3aa/UsyeBT6YGh56ILhqRITx2iJ9ENcw1Uj+nACyk=",
         }:
         pkgs.buildGoModule {
           pname = name;
@@ -95,6 +102,7 @@
             name = "loom";
             subPackages = [
               "cmd/loom"
+              "cmd/loom-notes-dedup"
             ];
           };
 
@@ -114,11 +122,16 @@
             ];
           };
 
+          loom-application-launcher = mkGoPackage {
+            inherit pkgs;
+            name = "loom-application-launcher";
+            subPackages = [ "cmd/loom-application-launcher" ];
+          };
           loom-service-manager = mkGoPackage {
             inherit pkgs;
             name = "loom-service-manager";
             subPackages = [ "cmd/loom-service-manager" ];
-            vendorHash = "sha256-Q8RWoTCPXWxSnEapfYjel9Q+sFlWYp653w17I2R+jdw=";
+            vendorHash = "sha256-sG3aa/UsyeBT6YGh56ILhqRITx2iJ9ENcw1Uj+nACyk=";
           };
 
           loom-project-preparation = mkGoPackage {
@@ -144,6 +157,10 @@
           hermes-agent = pkgs.callPackage ./nix/packages/hermes-agent.nix {
             inherit hermes-upstream system;
           };
+          hermes-native-agent = import ./nix/packages/hermes-native-agent.nix {
+            inherit pkgs hermes-runtime-upstream system;
+            chromium = if system == "x86_64-linux" then self.packages.${system}.agent-browser.chromium else null;
+          };
           mac-computer-use-bridge = import ./nix/packages/mac-computer-use-bridge.nix {
             inherit hermes-upstream system;
           };
@@ -153,7 +170,9 @@
           };
           notes-workspace-sync = pkgs.callPackage ./nix/packages/notes-workspace-sync.nix { };
           agent-browser = pkgs.callPackage ./nix/packages/agent-browser.nix {
-            chromium = hermes-upstream.inputs.nixpkgs.legacyPackages.${system}.chromium;
+            # Its build-only Node is not an exposed runtime. Retain the cached
+            # upstream browser rather than rebuilding Chromium for a Node fix.
+            chromium = nixpkgs.legacyPackages.${system}.chromium;
           };
           orca-headless = pkgs.callPackage ./nix/packages/orca-headless.nix { };
           proton-pass-cli = pkgs.callPackage ./nix/packages/proton-pass-cli.nix { };
@@ -165,6 +184,7 @@
         orca = self.packages.x86_64-linux.orca-headless;
       };
 
+      nixosModules.loom-agents = import ./nix/modules/loom-agents.nix;
       nixosModules.loom-orca = import ./nix/modules/loom-orca.nix;
       checks.aarch64-linux.project-applications-rendered = import ./nix/tests/project-applications.nix {
         inherit lib self;

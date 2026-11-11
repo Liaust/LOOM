@@ -22,6 +22,7 @@ import (
 	"loom.local/loom/internal/realtime"
 	"loom.local/loom/internal/requestctx"
 	"loom.local/loom/internal/scripts"
+	"loom.local/loom/internal/workers"
 	"loom.local/loom/internal/workflows"
 )
 
@@ -639,8 +640,10 @@ func (s Service) ClaimNextWithOptions(ctx context.Context, req requestctx.Contex
 		return JobClaim{}, err
 	}
 
+	args := []any{runner.NodeID}
+	predicate := jobBoxPredicate(ctx, &args)
 	row := tx.QueryRowContext(ctx, jobSelectSQL()+`
-		WHERE j.status = 'queued'
+		WHERE `+predicate+` AND j.status = 'queued'
 		  AND j.job_type IN ('script_run', 'workflow_run')
 		  AND j.execution_node_id = $1
 		  AND (j.lease_expires_at IS NULL OR j.lease_expires_at < now())
@@ -659,7 +662,7 @@ func (s Service) ClaimNextWithOptions(ctx context.Context, req requestctx.Contex
 		         j.queued_at ASC NULLS LAST, j.created_at ASC
 		FOR UPDATE SKIP LOCKED
 		LIMIT 1
-	`, runner.NodeID)
+	`, args...)
 	job, err := scanJob(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -745,8 +748,10 @@ func (s Service) ClaimJob(ctx context.Context, req requestctx.Context, runnerID 
 		return JobClaim{}, err
 	}
 
+	args := []any{jobID, runner.NodeID}
+	predicate := jobBoxPredicate(ctx, &args)
 	row := tx.QueryRowContext(ctx, jobSelectSQL()+`
-		WHERE j.job_id = $1
+		WHERE `+predicate+` AND j.job_id = $1
 		  AND j.status = 'queued'
 		  AND j.job_type IN ('script_run', 'workflow_run')
 		  AND j.execution_node_id = $2
@@ -757,7 +762,7 @@ func (s Service) ClaimJob(ctx context.Context, req requestctx.Context, runnerID 
 		  AND j.cancelled_at IS NULL
 		FOR UPDATE SKIP LOCKED
 		LIMIT 1
-	`, jobID, runner.NodeID)
+	`, args...)
 	job, err := scanJob(row)
 	if err != nil {
 		return JobClaim{}, err
@@ -1042,18 +1047,27 @@ func (s Service) runClaim(ctx context.Context, req requestctx.Context, claim Job
 		exitCode = -1
 	}
 
-	if timedOut {
+	resultFile, resultErr := parseResultFile(paths.ResultFile)
+	persistedCodex := isPersistedCodexResult(resultFile)
+	if persistedCodex && (timedOut || err != nil) {
+		resultFile.Status = "interrupted"
+		resultFile.Outputs["outcome"] = json.RawMessage(`"interrupted"`)
+		resultFile.Raw, _ = json.Marshal(resultFile)
+		persistenceCtx, persistenceCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer persistenceCancel()
+		ctx = persistenceCtx
+	}
+	if timedOut && !persistedCodex {
 		return s.failClaimWithStatus(ctx, req, claim, StatusTimedOut, claim.Package.Kind+"_timed_out", fmt.Errorf("%s timed out after %s", runLabel(claim.Job.JobType), timeout), &exitCode, runnerLog)
 	}
-	if err != nil {
+	if err != nil && !persistedCodex {
 		return s.failClaimWithStatus(ctx, req, claim, StatusFailed, claim.Package.Kind+"_failed", err, &exitCode, runnerLog)
 	}
 
-	resultFile, err := parseResultFile(paths.ResultFile)
-	if err != nil {
-		return s.failClaimWithStatus(ctx, req, claim, StatusFailed, "result_parse_failed", err, &exitCode, runnerLog)
+	if resultErr != nil {
+		return s.failClaimWithStatus(ctx, req, claim, StatusFailed, "result_parse_failed", resultErr, &exitCode, runnerLog)
 	}
-	if strings.EqualFold(resultFile.Status, "error") || strings.EqualFold(resultFile.Status, "failed") {
+	if !persistedCodex && (strings.EqualFold(resultFile.Status, "error") || strings.EqualFold(resultFile.Status, "failed")) {
 		return s.failClaimWithStatus(ctx, req, claim, StatusFailed, "result_failed", fmt.Errorf("%s result status is %q", runLabel(claim.Job.JobType), resultFile.Status), &exitCode, runnerLog)
 	}
 
@@ -1116,6 +1130,10 @@ func (s Service) runClaim(ctx context.Context, req requestctx.Context, claim Job
 		}
 	}
 
+	if code := persistedCodexFailure(resultFile); code != "" {
+		artifactJSON, _ := json.Marshal(artifactRefs)
+		return s.failClaimWithResult(ctx, req, claim, StatusFailed, code, errors.New(code+": inspect the saved Codex thread/result before explicit continuation"), &exitCode, runnerLog, resultFile.Raw, artifactJSON)
+	}
 	job, err := s.completeClaim(ctx, req, claim, resultFile.Raw, artifactRefs, exitCode)
 	if err != nil {
 		return RunResult{}, err
@@ -1327,6 +1345,10 @@ func (s Service) attemptWorkdir(jobID string, attemptNumber int) string {
 
 func insertJobTx(ctx context.Context, tx *sql.Tx, jobID string, req requestctx.Context, jobType, status, scopeID, targetKind, targetID, scriptID, scriptVersionID, workflowID, workflowVersionID, sourceObjectID, sourceVersionID string, timeoutSeconds int, inputJSON []byte, routeID, capabilityCallID string, credentialBindings []CredentialBinding) (Job, error) {
 	metadata := jobMetadata(routeID, capabilityCallID, req.CorrelationID, req.Source, credentialBindings)
+	metadata, err := bindJobBoxMetadata(ctx, tx, scopeID, capabilityCallID, metadata)
+	if err != nil {
+		return Job{}, err
+	}
 	row := tx.QueryRowContext(ctx, `
 		INSERT INTO jobs.jobs (
 			job_id, job_type, status, origin_actor_id, origin_node_id, execution_node_id,
@@ -1342,7 +1364,11 @@ func insertJobTx(ctx context.Context, tx *sql.Tx, jobID string, req requestctx.C
 	`, jobID, jobType, status, req.ActorID, req.OriginNodeID, req.OriginNodeID, scopeID,
 		targetKind, targetID, scriptID, scriptVersionID, workflowID, workflowVersionID,
 		sourceObjectID, sourceVersionID, inputJSON, timeoutSeconds, metadata)
-	return scanJob(row)
+	job, err := scanJob(row)
+	if err == nil && status == StatusQueued {
+		err = workers.NotifyQueueTx(ctx, tx, workers.KindJobRunner)
+	}
+	return job, err
 }
 
 func updateJobStatusTx(ctx context.Context, tx *sql.Tx, jobID, status string, exitCode *int, failureCode, failureMessage string) (Job, error) {
@@ -1372,7 +1398,11 @@ func updateJobStatusTx(ctx context.Context, tx *sql.Tx, jobID, status string, ex
 		WHERE job_id = $1
 		RETURNING `+jobReturningColumns()+`
 	`, jobID, status, exitCode, failureCode, failureMessage, attentionStatus)
-	return scanJob(row)
+	job, err := scanJob(row)
+	if err == nil && status != StatusRunning {
+		err = workers.NotifyQueueTx(ctx, tx, workers.KindJobRunner)
+	}
+	return job, err
 }
 
 func claimJobTx(ctx context.Context, tx *sql.Tx, jobID, runnerID, workdir string, attemptNumber int) (Job, error) {
@@ -1545,6 +1575,10 @@ func (s Service) failClaim(ctx context.Context, req requestctx.Context, claim Jo
 }
 
 func (s Service) failClaimWithStatus(ctx context.Context, req requestctx.Context, claim JobClaim, status, code string, cause error, exitCode *int, runnerLog io.Writer) (RunResult, error) {
+	return s.failClaimWithResult(ctx, req, claim, status, code, cause, exitCode, runnerLog, nil, nil)
+}
+
+func (s Service) failClaimWithResult(ctx context.Context, req requestctx.Context, claim JobClaim, status, code string, cause error, exitCode *int, runnerLog io.Writer, outputJSON, artifactJSON []byte) (RunResult, error) {
 	if runnerLog != nil {
 		fmt.Fprintf(runnerLog, "failure code=%s error=%v\n", code, cause)
 	}
@@ -1553,6 +1587,16 @@ func (s Service) failClaimWithStatus(ctx context.Context, req requestctx.Context
 		return RunResult{}, err
 	}
 	defer tx.Rollback()
+	if outputJSON != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE jobs.jobs SET output_json=$2, artifact_refs_json=$3 WHERE job_id=$1`, claim.Job.JobID, outputJSON, artifactJSON); err != nil {
+			return RunResult{}, err
+		}
+	}
+	if strings.HasPrefix(code, "codex_") {
+		if _, err := tx.ExecContext(ctx, `UPDATE jobs.jobs SET manual_action_required=true WHERE job_id=$1`, claim.Job.JobID); err != nil {
+			return RunResult{}, err
+		}
+	}
 	job, err := updateJobStatusTx(ctx, tx, claim.Job.JobID, status, exitCode, code, cause.Error())
 	if err != nil {
 		return RunResult{}, err
@@ -1724,6 +1768,28 @@ type resultArtifactCandidate struct {
 	Path  string `json:"path"`
 	Type  string `json:"type"`
 	Title string `json:"title"`
+}
+
+func isPersistedCodexResult(result resultFile) bool {
+	return string(result.Outputs["protocol_version"]) == "2" && string(result.Outputs["executor"]) == `"agents"`
+}
+
+func persistedCodexFailure(result resultFile) string {
+	if !isPersistedCodexResult(result) {
+		return ""
+	}
+	var thread, outcome string
+	if json.Unmarshal(result.Outputs["thread_id"], &thread) != nil || len(thread) != 36 || json.Unmarshal(result.Outputs["outcome"], &outcome) != nil || outcome != result.Status {
+		return "codex_result_invalid"
+	}
+	switch outcome {
+	case "completed":
+		return ""
+	case "needs_input", "failed", "interrupted":
+		return "codex_" + outcome
+	default:
+		return "codex_result_invalid"
+	}
 }
 
 func parseResultFile(path string) (resultFile, error) {
@@ -2520,10 +2586,13 @@ func (s Service) resolveJob(ctx context.Context, ref string) (Job, error) {
 	if ref == "" {
 		return Job{}, fmt.Errorf("job ref is required")
 	}
+	args := []any{ref}
+	predicate := jobBoxPredicate(ctx, &args)
 	row := s.DB.QueryRowContext(ctx, jobSelectSQL()+`
 		WHERE j.job_id = $1
+		AND `+predicate+`
 		LIMIT 1
-	`, ref)
+	`, args...)
 	return scanJob(row)
 }
 

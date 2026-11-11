@@ -46,6 +46,75 @@ type declarationEnrollmentDBFixture struct {
 	report     func(projectcontracts.ProjectWatchedRootItem)
 }
 
+func TestDeclarationAuditRevisionPreservesPublicationPostgres(t *testing.T) {
+	f := declarationEnrollmentDB(t)
+	f.report(f.analysis.Report.WatchedRoots[0])
+	f.reconcile(t, SourceRootStatusActive)
+	object := f.publish(t)
+	f.visible(t, 1)
+	revision, err := f.service.NotesAdmissionRevision(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.correlate(t)
+	again, err := f.service.NotesAdmissionRevision(t.Context())
+	if err != nil || revision != again {
+		t.Fatalf("ordinary status correlation woke admission: %s -> %s: %v", revision, again, err)
+	}
+	var before string
+	if err := f.db.QueryRow(`SELECT concat_ws('/',source_hash,source_revision,last_processed_at::text,
+	 lexical_version_id,(SELECT count(*) FROM knowledge.pipeline_runs WHERE knowledge_object_id=o.knowledge_object_id))
+	 FROM knowledge.knowledge_objects o WHERE knowledge_object_id=$1`, object.KnowledgeObjectID).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(f.analysis.Report.ProjectRoot, ".loom/project.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(path, []byte(strings.Replace(string(raw), "name: Declaration proof", "name: Revised display name", 1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	next := projectcontracts.Analyze(f.analysis.Report.ProjectRoot)
+	input, err := projectregistration.BuildInput(next, "audit-revision")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, err := f.projects.RegisterProjectContract(t.Context(), f.req, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := next.Report.WatchedRoots[0]
+	root := f.input
+	root.ProjectContractRegistrationID = registered.Detail.Registration.ProjectContractRegistrationID
+	root.Metadata, root.ConfigJSON, root.ConfigHash = mustJSON(t, item.Metadata), item.ConfigJSON, item.ConfigHash
+	f.upsert(t, root)
+	f.report(item)
+	f.correlate(t)
+	f.reconcile(t, SourceRootStatusActive)
+	f.visible(t, 1)
+	changedRevision, err := f.service.NotesAdmissionRevision(t.Context())
+	if err != nil || changedRevision == revision {
+		t.Fatalf("accepted source change did not wake admission: %v", err)
+	}
+	status, err := f.service.ProjectAdmissionStatus(t.Context(), f.input.ProjectID)
+	if err != nil || len(status) != 1 || status[0].State != "ready" || status[0].PendingBindings != 0 || status[0].AdmittedObjects != 1 {
+		t.Fatalf("admission status=%+v error=%v", status, err)
+	}
+	var after string
+	if err = f.db.QueryRow(`SELECT concat_ws('/',source_hash,source_revision,last_processed_at::text,
+	 lexical_version_id,(SELECT count(*) FROM knowledge.pipeline_runs WHERE knowledge_object_id=o.knowledge_object_id))
+	 FROM knowledge.knowledge_objects o WHERE knowledge_object_id=$1`, object.KnowledgeObjectID).Scan(&after); err != nil || before != after {
+		t.Fatalf("audit revision changed content or pipeline: %s -> %s: %v", before, after, err)
+	}
+	var matches bool
+	if err = f.db.QueryRow(`SELECT o.metadata#>'{source_root,knowledge_source}'=r.metadata#>'{registration_metadata,knowledge_source}'
+	 FROM knowledge.knowledge_objects o JOIN knowledge.notes_source_roots r USING(notes_source_root_id)
+	 WHERE knowledge_object_id=$1`, object.KnowledgeObjectID).Scan(&matches); err != nil || !matches {
+		t.Fatalf("admission binding not refreshed: %t %v", matches, err)
+	}
+}
+
 func TestDeclarationReportAutomaticallyEnablesNotesPostgres(t *testing.T) {
 	f := declarationEnrollmentDB(t)
 	item := f.analysis.Report.WatchedRoots[0]
@@ -492,13 +561,25 @@ func declarationBoundEnrollmentDB(t *testing.T, shared ...*declarationEnrollment
 		t.Fatalf("node ACK failed: %s", ack.ResultJSON)
 	}
 	ack.CredentialToken = credential.CredentialToken
+	beforeAck, err := f.service.NotesAdmissionRevision(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err = communication.NewService(db).Ack(t.Context(), req, ack); err != nil {
 		t.Fatal(err)
+	}
+	afterAck, err := f.service.NotesAdmissionRevision(t.Context())
+	if err != nil || beforeAck == afterAck {
+		t.Fatalf("real owner acknowledgement did not wake admission: %v", err)
 	}
 	apply.OperationID = pending.OperationID
 	done, err := service.Apply(t.Context(), principal, apply)
 	if err != nil || done.State != projectcontracts.DeclarationOperationSucceeded {
 		t.Fatalf("ack completion=%+v %v", done, err)
+	}
+	afterReceipt, err := f.service.NotesAdmissionRevision(t.Context())
+	if err != nil || afterReceipt == afterAck {
+		t.Fatalf("final owner receipt did not wake admission: %v", err)
 	}
 	item := payload.Group.Roots[0]
 	if _, err = watchedroots.NewService(db).Report(t.Context(), watchedroots.ReportInput{NodeRef: payload.Group.NodeID, CredentialToken: credential.CredentialToken, RootKey: item.BackendRootKey, ConfigHash: item.ConfigHash, ConfigJSON: item.ConfigJSON, Status: watchedroots.StatusHealthy}); err != nil {
@@ -676,6 +757,10 @@ func TestDeclarationLegacyNotesContinuityPostgres(t *testing.T) {
 	}
 }
 func testDeclarationLegacyNotesContinuity(t *testing.T, predecessorStatus string) {
+	testDeclarationLegacyNotesContinuityObserved(t, predecessorStatus, nil)
+}
+
+func testDeclarationLegacyNotesContinuityObserved(t *testing.T, predecessorStatus string, observe func(*declarationEnrollmentDBFixture, SourceRoot)) {
 	db, url := boxSourcesDatabase(t)
 	if _, err := migrations.Up(t.Context(), url, filepath.Join("..", "..", "migrations")); err != nil {
 		t.Fatal(err)
@@ -858,6 +943,9 @@ func testDeclarationLegacyNotesContinuity(t *testing.T, predecessorStatus string
 	}
 	f.correlate(t)
 	check("successor reported")
+	if observe != nil {
+		observe(f, originalRoot)
+	}
 	assertNotesCustodyReadRevocations(t, f.service, object, map[string]string{
 		"registration_source":   `UPDATE projects.project_contract_registrations SET contract_hash='sha256:'||repeat('f',64) WHERE project_id=(SELECT project_id FROM knowledge.knowledge_objects WHERE knowledge_object_id=$1)`,
 		"declaration_intent":    `UPDATE projects.project_contract_registrations SET contract_json=jsonb_set(contract_json,'{project,name}','"forged"'::jsonb) WHERE project_id=(SELECT project_id FROM knowledge.knowledge_objects WHERE knowledge_object_id=$1)`,

@@ -29,6 +29,7 @@ type NotesArchiveProjectionResult struct {
 	EventID     string `json:"event_id"`
 	Projected   int    `json:"projected"`
 	Replayed    int    `json:"replayed"`
+	NotMoved    int    `json:"not_moved,omitempty"`
 }
 
 const maxNotesCustodyObjects = 250000
@@ -81,6 +82,10 @@ func (p NotesArchiveProjector) ProjectOperation(ctx context.Context, operationID
 		inventory[entry.RelativePath] = entry
 	}
 	for _, candidate := range candidates {
+		if notesCustodyAbsentFromInventory(candidate, evidence.ArchivePlan.Source.Path.AbsolutePath, inventory) {
+			result.NotMoved++
+			continue
+		}
 		replayed, err := p.projectNotesObject(ctx, tx, evidence, projectEvent, candidate, inventory)
 		if err != nil {
 			return NotesArchiveProjectionResult{OperationID: operationID, EventID: result.EventID}, notesCustodyFailure(NotesCustodySourceConflict, err)
@@ -141,9 +146,24 @@ func lockNotesUpstream(ctx context.Context, tx *sql.Tx, operationID string) erro
 }
 
 type notesCustodyCandidate struct {
-	Object KnowledgeObject
-	Root   SourceRoot
-	Bound  bool
+	Object        KnowledgeObject
+	Root          SourceRoot
+	Bound         bool
+	ArchiveMember bool
+}
+
+// Retained pre-rename records are not payload members. Existing transitions
+// still pass through strict replay validation, even when evidence is missing.
+func notesCustodyAbsentFromInventory(c notesCustodyCandidate, source string, inventory map[string]storagearchive.NoFollowInventoryEntry) bool {
+	if !c.Bound || c.ArchiveMember || c.Object.SourcePath != filepath.Join(c.Root.SourcePath, filepath.FromSlash(c.Object.RelativePath)) {
+		return false
+	}
+	rel, err := filepath.Rel(source, c.Object.SourcePath)
+	if err != nil || !notesCustodyRelativePath(filepath.ToSlash(rel)) {
+		return false
+	}
+	_, covered := inventory[filepath.ToSlash(rel)]
+	return !covered
 }
 
 func (p NotesArchiveProjector) notesCustodyCandidates(ctx context.Context, tx *sql.Tx, evidence storagearchive.WorkspaceLifecycleEvidence) ([]notesCustodyCandidate, error) {
@@ -193,7 +213,8 @@ func (p NotesArchiveProjector) notesCustodyCandidates(ctx context.Context, tx *s
 	 AND entry.watched_root_key=r.backend_root_key AND entry.deleted_at IS NULL
 	 AND entry.checksum_algorithm='sha256' AND 'sha256:' || entry.checksum_hex=o.source_hash
 	 AND entry.size_bytes=o.size_bytes AND entry.metadata=COALESCE(o.metadata->'storage_metadata','{}'::jsonb)
-	 )))),false)
+	 )))),false), EXISTS (SELECT 1 FROM knowledge.notes_custody_transitions prior
+	 WHERE prior.knowledge_object_id=o.knowledge_object_id AND prior.archive_operation_id=$4)
 	 FROM knowledge.knowledge_objects o JOIN knowledge.notes_source_roots r USING(notes_source_root_id)
 	 JOIN nodes.nodes node ON node.node_id=r.node_id AND node.node_key=r.node_key
 	 WHERE r.node_key=$1 AND node.node_role='main'
@@ -210,7 +231,7 @@ func (p NotesArchiveProjector) notesCustodyCandidates(ctx context.Context, tx *s
 	for rows.Next() {
 		var candidate notesCustodyCandidate
 		var objectJSON, rootJSON []byte
-		if err := rows.Scan(&objectJSON, &rootJSON, &candidate.Bound); err != nil {
+		if err := rows.Scan(&objectJSON, &rootJSON, &candidate.Bound, &candidate.ArchiveMember); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(objectJSON, &candidate.Object); err != nil {
@@ -229,12 +250,12 @@ func (p NotesArchiveProjector) notesCustodyCandidates(ctx context.Context, tx *s
 
 func (p NotesArchiveProjector) projectNotesObject(ctx context.Context, tx *sql.Tx, e storagearchive.WorkspaceLifecycleEvidence, projectEvent string, c notesCustodyCandidate, inventory map[string]storagearchive.NoFollowInventoryEntry) (bool, error) {
 	object, root := c.Object, c.Root
-	fail := func() (bool, error) {
-		return false, fmt.Errorf("Notes custody evidence is missing, changed or out of order for %s", object.KnowledgeObjectID)
+	fail := func(reason string) (bool, error) {
+		return false, &notesCustodyEvidenceError{ObjectID: object.KnowledgeObjectID, Reason: reason}
 	}
 	rel, err := filepath.Rel(e.ArchivePlan.Source.Path.AbsolutePath, object.SourcePath)
 	if err != nil {
-		return fail()
+		return fail("source_path")
 	}
 	rel = filepath.ToSlash(rel)
 	transition := NotesCustodyTransition{KnowledgeObjectID: object.KnowledgeObjectID,
@@ -250,7 +271,7 @@ func (p NotesArchiveProjector) projectNotesObject(ctx context.Context, tx *sql.T
 		transition.PreviousEventID = existing.PreviousEventID
 		transition.TransitionDigest = NotesCustodyTransitionDigest(transition)
 		if ValidateNotesCustodyTransition(existing) != nil || !reflect.DeepEqual(existing, transition) {
-			return fail()
+			return fail("transition")
 		}
 		var currentChain bool
 		if err := tx.QueryRowContext(ctx, `WITH RECURSIVE chain AS (
@@ -266,23 +287,30 @@ func (p NotesArchiveProjector) projectNotesObject(ctx context.Context, tx *sql.T
 			return false, err
 		}
 		if !currentChain {
-			return fail()
+			return fail("predecessor")
 		}
 		// A historical replay must not replace a later current pointer.
 		return true, nil
 	}
 	entry, covered := inventory[rel]
-	if !c.Bound || !covered || entry.Kind != storagearchive.InventoryEntryFile ||
-		entry.ContentDigest != object.SourceHash || object.SizeBytes == nil || entry.SizeBytes != *object.SizeBytes ||
-		object.SourcePath != filepath.Join(root.SourcePath, filepath.FromSlash(object.RelativePath)) ||
+	if !c.Bound {
+		return fail("binding")
+	}
+	if !covered || entry.Kind != storagearchive.InventoryEntryFile {
+		return fail("inventory")
+	}
+	if entry.ContentDigest != object.SourceHash || object.SizeBytes == nil || entry.SizeBytes != *object.SizeBytes {
+		return fail("file")
+	}
+	if object.SourcePath != filepath.Join(root.SourcePath, filepath.FromSlash(object.RelativePath)) ||
 		!notesCustodyRelativePath(object.RelativePath) || object.DeletedAt != nil {
-		return fail()
+		return fail("source_path")
 	}
 	switch e.Plan.Kind {
 	case storagearchive.WorkspaceKindProject:
 		if valueOrEmpty(root.ProjectID) != e.Plan.ObjectID || (root.RootKind != RootKindProjectNotes && root.RootKind != RootKindProjectMaterial) ||
 			root.SourcePath != filepath.Join(e.ArchivePlan.Source.Path.AbsolutePath, filepath.FromSlash(root.RootRelativePath)) {
-			return fail()
+			return fail("workspace")
 		}
 	case storagearchive.WorkspaceKindTopic, storagearchive.WorkspaceKindLibraryItem:
 		want := RootKindBoxTopics
@@ -290,10 +318,10 @@ func (p NotesArchiveProjector) projectNotesObject(ctx context.Context, tx *sql.T
 			want = RootKindBoxLibrary
 		}
 		if root.RootKind != want || root.ProjectID != nil || root.SourcePath != filepath.Join(p.Workspace.Roots.BoxRoot, filepath.FromSlash(root.RootRelativePath)) {
-			return fail()
+			return fail("workspace")
 		}
 	default:
-		return fail()
+		return fail("workspace")
 	}
 	if object.StorageEntryID != nil {
 		matched := false
@@ -309,7 +337,7 @@ func (p NotesArchiveProjector) projectNotesObject(ctx context.Context, tx *sql.T
 			}
 		}
 		if !matched {
-			return fail()
+			return fail("catalog")
 		}
 	}
 	var currentID, lifecycle, currentArchive, canonical string
@@ -321,7 +349,7 @@ func (p NotesArchiveProjector) projectNotesObject(ctx context.Context, tx *sql.T
 	if canonical != filepath.Join(e.Plan.Source.Path.AbsolutePath, filepath.FromSlash(rel)) ||
 		(e.Plan.OperationKind == storagearchive.WorkspaceOperationArchive && lifecycle != "active") ||
 		(e.Plan.OperationKind == storagearchive.WorkspaceOperationRestore && (lifecycle != "archived" || currentArchive != e.ArchivePlan.OperationID || currentID == "")) {
-		return fail()
+		return fail("predecessor")
 	}
 	transition.PreviousEventID = currentID
 	transition.TransitionDigest = NotesCustodyTransitionDigest(transition)
@@ -339,6 +367,9 @@ func (p NotesArchiveProjector) projectNotesObject(ctx context.Context, tx *sql.T
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO knowledge.notes_current_custody(knowledge_object_id,workspace_lifecycle_event_id)
 	 VALUES ($1,$2) ON CONFLICT(knowledge_object_id) DO UPDATE SET workspace_lifecycle_event_id=EXCLUDED.workspace_lifecycle_event_id`, object.KnowledgeObjectID, e.Event.EventID)
+	if err == nil {
+		err = MarkProjectionDirtyTx(ctx, tx, ProjectionDirtyInput{ObjectIDs: []string{object.KnowledgeObjectID}})
+	}
 	return false, err
 }
 

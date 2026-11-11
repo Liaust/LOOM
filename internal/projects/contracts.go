@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"loom.local/loom/internal/boxregistry"
 	"loom.local/loom/internal/events"
 	"loom.local/loom/internal/ids"
 	"loom.local/loom/internal/requestctx"
@@ -96,6 +97,7 @@ const (
 )
 
 type RegisterProjectContractInput struct {
+	verifiedHomeBoxID     string
 	ProjectRoot           string                                `json:"project_root"`
 	ContractPath          string                                `json:"contract_path"`
 	ContractHash          string                                `json:"contract_hash"`
@@ -118,6 +120,7 @@ type ProjectContractProjectInput struct {
 	Description string `json:"description,omitempty"`
 	OwnerNode   string `json:"owner_node"`
 	Status      string `json:"status,omitempty"`
+	WorkState   string `json:"work_state,omitempty"`
 }
 
 // RegisterProjectRepositorySourceInput contains the repository-contract source
@@ -613,6 +616,7 @@ type ApplyProjectWatchPolicyResult struct {
 }
 
 func (s Service) RegisterProjectContract(ctx context.Context, req requestctx.Context, input RegisterProjectContractInput) (RegisterProjectContractResult, error) {
+	ctx = s.boxRegistrationContext(ctx)
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return RegisterProjectContractResult{}, err
@@ -664,6 +668,16 @@ type preparedProjectRegistration struct {
 
 func registerPreparedProjectContractTx(ctx context.Context, tx *sql.Tx, req requestctx.Context, prepared preparedProjectRegistration) (RegisterProjectContractResult, error) {
 	input := prepared.input
+	if catalog, ok := ctx.Value(projectBoxCatalogKey{}).(boxregistry.Catalog); ok {
+		var err error
+		input, err = BindBoxMembership(input, catalog)
+		if err != nil {
+			return RegisterProjectContractResult{}, err
+		}
+	}
+	if selected, ok := boxregistry.FromContext(ctx); ok && !selected.AllBoxes && !selected.Contains(input.verifiedHomeBoxID) {
+		return RegisterProjectContractResult{}, fmt.Errorf("project placement is outside the selected Box or is not verified")
+	}
 	initialMetadata, err := projectRegistrationMetadata(nil, input)
 	if err != nil {
 		return RegisterProjectContractResult{}, err
@@ -690,6 +704,12 @@ func registerPreparedProjectContractTx(ctx context.Context, tx *sql.Tx, req requ
 		return RegisterProjectContractResult{}, err
 	}
 	if projectExists {
+		if err := ensureProjectBoxSelection(ctx, existingProject); err != nil && HomeBoxID(existingProject.Metadata) != "" {
+			return RegisterProjectContractResult{}, err
+		}
+		if home := HomeBoxID(existingProject.Metadata); home != "" && input.verifiedHomeBoxID != "" && home != input.verifiedHomeBoxID {
+			return RegisterProjectContractResult{}, fmt.Errorf("project home Box changed; explicit reassociation is required")
+		}
 		if input.Project.ID != "" && existingProject.ProjectID != input.Project.ID {
 			return RegisterProjectContractResult{}, fmt.Errorf("project slug %q belongs to project %s, not %s", input.Project.Slug, existingProject.ProjectID, input.Project.ID)
 		}
@@ -716,8 +736,11 @@ func registerPreparedProjectContractTx(ctx context.Context, tx *sql.Tx, req requ
 		if err != nil && err != sql.ErrNoRows {
 			return RegisterProjectContractResult{}, err
 		}
-		if registrationExists && existingRegistration.ContractSchemaVersion == ProjectRepositoryProjectSchemaV05 && input.ContractSchemaVersion != ProjectRepositoryProjectSchemaV05 {
+		if registrationExists && isDeclarationSchemaVersion(existingRegistration.ContractSchemaVersion) && !isDeclarationSchemaVersion(input.ContractSchemaVersion) {
 			return RegisterProjectContractResult{}, fmt.Errorf("declaration registration cannot downgrade its project source")
+		}
+		if HomeBoxID(existingProject.Metadata) == "" && input.verifiedHomeBoxID != "" && (!registrationExists || existingRegistration.ProjectRoot != input.ProjectRoot) {
+			return RegisterProjectContractResult{}, fmt.Errorf("unassigned existing project placement differs; reconcile ownership from exact registration evidence first")
 		}
 		existingFacets, err = listContractFacetsByProjectTx(ctx, tx, projectID)
 		if err != nil {
@@ -745,8 +768,9 @@ func registerPreparedProjectContractTx(ctx context.Context, tx *sql.Tx, req requ
 	}
 
 	createResult, err := createProjectTx(ctx, tx, req, createInput, createProjectTxOptions{
-		ProjectID:   projectID,
-		EventSource: "project.register",
+		ProjectID:       projectID,
+		EventSource:     "project.register",
+		AllowUnassigned: input.verifiedHomeBoxID != "" && registrationExists && existingRegistration.ProjectRoot == input.ProjectRoot,
 	})
 	if err != nil {
 		return RegisterProjectContractResult{}, err
@@ -879,6 +903,16 @@ func registerPreparedProjectContractTx(ctx context.Context, tx *sql.Tx, req requ
 			return RegisterProjectContractResult{}, err
 		}
 		eventIDs = append(eventIDs, event.EventID)
+	}
+	for _, changed := range changedKeys {
+		if changed == "project.work_state" {
+			// Delivered only after commit. The Notes owner rechecks current
+			// registration and source policy; this hint is not write authority.
+			if _, err := tx.ExecContext(ctx, `SELECT pg_notify('loom_worker_wake','notes_workspace_sync')`); err != nil {
+				return RegisterProjectContractResult{}, err
+			}
+			break
+		}
 	}
 
 	detail := ProjectRegistrationDetail{Project: ProjectDetail{Project: project}, Registration: &registration}
@@ -1066,7 +1100,7 @@ func (s Service) ListProjectScriptExposures(ctx context.Context, projectRef stri
 	if projectID == "" {
 		return nil, fmt.Errorf("project ref is required")
 	}
-	if !strings.HasPrefix(projectID, ids.ProjectPrefix+"_") {
+	if projectRefNeedsResolution(ctx, projectID) {
 		project, err := s.ResolveProjectRef(ctx, projectRef)
 		if err != nil {
 			return nil, err
@@ -1172,7 +1206,7 @@ func (s Service) ListProjectScheduleRegistrations(ctx context.Context, projectRe
 	if projectID == "" {
 		return nil, fmt.Errorf("project ref is required")
 	}
-	if !strings.HasPrefix(projectID, ids.ProjectPrefix+"_") {
+	if projectRefNeedsResolution(ctx, projectID) {
 		project, err := s.ResolveProjectRef(ctx, projectRef)
 		if err != nil {
 			return nil, err
@@ -1270,7 +1304,7 @@ func (s Service) ListProjectDirectEventRegistrations(ctx context.Context, projec
 	if projectID == "" {
 		return nil, fmt.Errorf("project ref is required")
 	}
-	if !strings.HasPrefix(projectID, ids.ProjectPrefix+"_") {
+	if projectRefNeedsResolution(ctx, projectID) {
 		project, err := s.ResolveProjectRef(ctx, projectRef)
 		if err != nil {
 			return nil, err
@@ -1396,7 +1430,7 @@ func (s Service) ListProjectWatchedRootRegistrations(ctx context.Context, projec
 	if projectID == "" {
 		return nil, fmt.Errorf("project ref is required")
 	}
-	if !strings.HasPrefix(projectID, ids.ProjectPrefix+"_") {
+	if projectRefNeedsResolution(ctx, projectID) {
 		project, err := s.ResolveProjectRef(ctx, projectRef)
 		if err != nil {
 			return nil, err
@@ -1536,7 +1570,7 @@ func (s Service) ListProjectConnectorRegistrations(ctx context.Context, projectR
 	if projectID == "" {
 		return nil, fmt.Errorf("project ref is required")
 	}
-	if !strings.HasPrefix(projectID, ids.ProjectPrefix+"_") {
+	if projectRefNeedsResolution(ctx, projectID) {
 		project, err := s.ResolveProjectRef(ctx, projectRef)
 		if err != nil {
 			return nil, err
@@ -1642,7 +1676,7 @@ func (s Service) ListProjectModuleRegistrations(ctx context.Context, projectRef 
 	if projectID == "" {
 		return nil, fmt.Errorf("project ref is required")
 	}
-	if !strings.HasPrefix(projectID, ids.ProjectPrefix+"_") {
+	if projectRefNeedsResolution(ctx, projectID) {
 		project, err := s.ResolveProjectRef(ctx, projectRef)
 		if err != nil {
 			return nil, err
@@ -1778,7 +1812,7 @@ func (s Service) ListProjectWorkflowRegistrations(ctx context.Context, projectRe
 	if projectID == "" {
 		return nil, fmt.Errorf("project ref is required")
 	}
-	if !strings.HasPrefix(projectID, ids.ProjectPrefix+"_") {
+	if projectRefNeedsResolution(ctx, projectID) {
 		project, err := s.ResolveProjectRef(ctx, projectRef)
 		if err != nil {
 			return nil, err
@@ -2291,6 +2325,9 @@ func normalizeRegisterProjectContractFields(input RegisterProjectContractInput) 
 	if !map[string]bool{"draft": true, "active": true, "paused": true, "archived": true}[input.Project.Status] {
 		return input, fmt.Errorf("project status is not supported")
 	}
+	if input.Project.WorkState != "" && input.Project.WorkState != "working" && input.Project.WorkState != "passive" {
+		return input, fmt.Errorf("project.work_state must be working or passive")
+	}
 	if input.ProjectRoot == "" {
 		return input, fmt.Errorf("project root is required")
 	}
@@ -2346,8 +2383,8 @@ func normalizeRegisterProjectContractFields(input RegisterProjectContractInput) 
 			return input, fmt.Errorf("facet key is required")
 		}
 	}
-	if input.ContractSchemaVersion == ProjectRepositoryProjectSchemaV05 && input.RepositorySource == nil {
-		input.RepositorySource = &RegisterProjectRepositorySourceInput{ContractPath: input.ContractPath, ContractHash: input.ContractHash, ContractSchemaVersion: ProjectRepositoryProjectSchemaV05}
+	if isDeclarationSchemaVersion(input.ContractSchemaVersion) && input.RepositorySource == nil {
+		input.RepositorySource = &RegisterProjectRepositorySourceInput{ContractPath: input.ContractPath, ContractHash: input.ContractHash, ContractSchemaVersion: input.ContractSchemaVersion}
 	}
 	if input.RepositorySource != nil {
 		input.RepositorySource.ContractPath = strings.TrimSpace(input.RepositorySource.ContractPath)
@@ -2396,7 +2433,7 @@ type projectRepositoryContractDocument struct {
 }
 
 func buildProjectRepositoryValidatedSourceInput(input RegisterProjectContractInput, projectID string) (ProjectRepositoryValidatedSourceInput, error) {
-	if input.ContractSchemaVersion == ProjectRepositoryProjectSchemaV05 {
+	if isDeclarationSchemaVersion(input.ContractSchemaVersion) {
 		return buildDeclarationRepositorySource(input, projectID)
 	}
 	if input.RepositorySource == nil {
@@ -2626,7 +2663,7 @@ func prepareProjectRepositoryRegistrationTx(ctx context.Context, tx *sql.Tx, inp
 
 func prepareProjectRepositoryRegistrationSourceTx(ctx context.Context, tx *sql.Tx, input RegisterProjectContractInput, projectID string, registration ProjectContractRegistration, registrationExists bool, validated ProjectRepositoryValidatedSourceInput) (*projectRepositoryRegistrationPlan, error) {
 	var err error
-	if validated.Versions == projectRepositorySourceV05V05 {
+	if validated.Versions == projectRepositorySourceV05V05 || validated.Versions == projectRepositorySourceV06V06 {
 		validated, err = resolveDeclarationRepositoryIDsTx(ctx, tx, validated)
 		if err != nil {
 			return nil, err
@@ -3237,6 +3274,9 @@ func (s Service) resolveNodeRef(ctx context.Context, ref string) (string, error)
 
 func changedProjectKeys(project Project, homeNodeID string, input RegisterProjectContractInput) []string {
 	keys := []string{}
+	if input.verifiedHomeBoxID != "" && HomeBoxID(project.Metadata) != input.verifiedHomeBoxID {
+		keys = append(keys, "project.home_box_id")
+	}
 	if project.Name != input.Project.Name {
 		keys = append(keys, "project.name")
 	}
@@ -3248,6 +3288,9 @@ func changedProjectKeys(project Project, homeNodeID string, input RegisterProjec
 	}
 	if project.Status != projectStatusFromContract(input.Project.Status) {
 		keys = append(keys, "project.status")
+	}
+	if ProjectWorkState(project.Metadata) != input.Project.WorkState {
+		keys = append(keys, "project.work_state")
 	}
 	return keys
 }
@@ -3269,6 +3312,20 @@ func projectRegistrationMetadata(existing json.RawMessage, input RegisterProject
 		if err := json.Unmarshal(existing, &metadata); err != nil {
 			return nil, err
 		}
+	}
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	if input.verifiedHomeBoxID != "" {
+		if home := HomeBoxID(existing); home != "" && home != input.verifiedHomeBoxID {
+			return nil, fmt.Errorf("project home Box changed; explicit reassociation is required")
+		}
+		metadata["home_box_id"] = input.verifiedHomeBoxID
+	}
+	if input.Project.WorkState == "" {
+		delete(metadata, "work_state")
+	} else {
+		metadata["work_state"] = input.Project.WorkState
 	}
 	metadata["v0_3_project_contract"] = map[string]any{
 		"source":                  "project.register",

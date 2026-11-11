@@ -82,6 +82,30 @@ func TestFoundationAPIExactGetAndValidationErrors(t *testing.T) {
 	}
 }
 
+func TestFoundationCandidatePreDeliveryValidationPreservesDefaultsAndEvidence(t *testing.T) {
+	fixture := loadLifecycleParityFixture(t)
+	input := CandidateRegistrationRequest{Candidates: []CandidateRegistration{fixture.CandidateRegistration}}
+	input.Candidates[0].SchemaVersion = ""
+	input.Candidates[0].Visibility = ""
+	before, _ := json.Marshal(input)
+	if err := ValidateCandidateRegistrationRequest("stable-key", input); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := json.Marshal(input)
+	if string(before) != string(after) {
+		t.Fatal("validation mutated producer/source evidence or defaults")
+	}
+	batch := foundationRegistrationBatch(" stable-key ", input)
+	if batch.ReplayKey != "stable-key" || batch.Candidates[0].SchemaVersion != SchemaVersion || batch.Candidates[0].Visibility != "private" {
+		t.Fatalf("defaults=%#v", batch)
+	}
+	for _, key := range []string{"", strings.Repeat("k", 257)} {
+		if err := ValidateCandidateRegistrationRequest(key, input); err == nil {
+			t.Fatal("invalid replay key accepted")
+		}
+	}
+}
+
 func TestFoundationAPIAppliesDecodedLifecycleValuesAndReplaysPostgres(t *testing.T) {
 	_, store, _ := migratedStore(t, "foundation_api_operations")
 	service, err := NewService(store, WithClock(fixedClock), WithIDFactory(sequentialIDFactory(20000)))

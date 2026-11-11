@@ -74,13 +74,17 @@ func TestSourcePipelinePolicyOverrides(t *testing.T) {
 			}
 		})
 	}
-	legacy, err := CompilePipelinePlan(KnowledgeObject{FileClass: storagecatalog.FileClassPDF}, DefaultPipelinePolicy())
+	legacy, err := CompilePipelinePlan(KnowledgeObject{FileClass: storagecatalog.FileClassMarkdown}, DefaultPipelinePolicy())
 	if err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := legacy.Snapshot()
 	if strings.Contains(string(raw), "source_policy") || strings.Contains(string(raw), "effective_policy") {
 		t.Fatal("legacy snapshot changed")
+	}
+	pdf, err := CompilePipelinePlan(KnowledgeObject{FileClass: storagecatalog.FileClassPDF}, DefaultPipelinePolicy())
+	if err != nil || pdf.SchemaVersion != "knowledge.pipeline_plan.v2" || pdf.EffectivePolicy == nil || pdf.SourcePolicy != nil {
+		t.Fatalf("new PDF policy snapshot: %#v %v", pdf, err)
 	}
 }
 

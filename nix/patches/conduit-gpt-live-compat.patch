@@ -1,0 +1,90 @@
+--- a/dashboard/plugin_api.py
++++ b/dashboard/plugin_api.py
+@@ -1234,7 +1234,14 @@
+     except ImportError:
+         raise TokenError(503, "This Hermes version has no Codex sign-in. " + GPT_LIVE_NO_FALLBACK)
+     try:
+-        credentials = resolve_codex_runtime_credentials(refresh_if_expiring=refresh_if_expiring)
++        options = {"refresh_if_expiring": refresh_if_expiring}
++        if not refresh_if_expiring:
++            # Native Hermes' diagnostic mode also forbids CLI token adoption,
++            # quota probes and auth-store/lock writes. Disabling refresh alone
++            # does not make a readiness check read-only. Fail closed if an
++            # older resolver cannot accept read_only; never retry without it.
++            options["read_only"] = True
++        credentials = resolve_codex_runtime_credentials(**options)
+     except AuthError:
+         raise TokenError(503, "GPT-Live needs a working Codex sign-in on the Hermes host. "
+                               "Run `hermes auth` and choose OpenAI Codex. " + GPT_LIVE_NO_FALLBACK)
+--- a/tests/test_gpt_live.py
++++ b/tests/test_gpt_live.py
+@@ -288,6 +288,69 @@
+     for _ in range(api.GPT_LIVE_LIMIT):
+         assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).status_code == 200
+     assert client.post(f"{BASE}/gpt-live/session", json={"sdp": OFFER}).status_code == 429
++
++
++def test_status_cannot_adopt_cli_credentials_or_write_auth_state(client, hermes, monkeypatch, openai):
++    """Native Hermes permits CLI adoption/lock writes unless read_only is set,
++    even when refresh_if_expiring is false (auth_codex #68004)."""
++    requests, mutations = [], []
++
++    def resolve(*, refresh_if_expiring=True, read_only=False):
++        requests.append((refresh_if_expiring, read_only))
++        if read_only:
++            raise AuthError("no token in this profile's own store")
++        mutations.append("adopt CLI token / write auth lock")
++        return {"api_key": GOOD_TOKEN}
++
++    monkeypatch.setattr(sys.modules["hermes_cli.auth_codex"], "resolve_codex_runtime_credentials", resolve)
++    body = client.get(f"{BASE}/gpt-live/status?profile=mina").json()
++    assert body["available"] is False
++    assert requests == [(False, True)]
++    assert mutations == [] and openai.calls == []
++    assert hermes.entered == ["mina"]
++
++
++def test_session_retains_native_refresh_in_its_selected_profile(client, hermes, monkeypatch, openai):
++    requests = []
++
++    def resolve(*, refresh_if_expiring=True, read_only=False):
++        requests.append((refresh_if_expiring, read_only, hermes.entered[-1]))
++        return {"api_key": GOOD_TOKEN}
++
++    monkeypatch.setattr(sys.modules["hermes_cli.auth_codex"], "resolve_codex_runtime_credentials", resolve)
++    response = client.post(f"{BASE}/gpt-live/session?profile=mina", json={"sdp": OFFER})
++    assert response.status_code == 200
++    assert response.json()["auth"] == "subscription"
++    assert requests == [(True, False, "mina")]
++    assert len(openai.calls) == 1
++
++
++def test_status_never_retries_a_legacy_resolver_without_read_only(client, monkeypatch, openai):
++    calls = []
++
++    def legacy_resolve(*, refresh_if_expiring=True):
++        calls.append(refresh_if_expiring)
++        return {"api_key": GOOD_TOKEN}
++
++    monkeypatch.setattr(sys.modules["hermes_cli.auth_codex"], "resolve_codex_runtime_credentials", legacy_resolve)
++    body = client.get(f"{BASE}/gpt-live/status").json()
++    assert body["available"] is False
++    assert calls == [] and openai.calls == []
++
++
++@pytest.mark.parametrize("route, method", [("status", "get"), ("session", "post")])
++def test_gpt_live_unknown_profile_never_reads_another_profiles_sign_in(client, hermes, openai, monkeypatch, route, method):
++    @contextlib.contextmanager
++    def scope(profile):
++        raise api.HTTPException(status_code=404, detail="Unknown profile")
++        yield
++
++    monkeypatch.setattr(sys.modules["hermes_cli.web_server_profiles"], "_config_profile_scope", scope)
++    kwargs = {"json": {"sdp": OFFER}} if method == "post" else {}
++    response = getattr(client, method)(f"{BASE}/gpt-live/{route}?profile=missing", **kwargs)
++    assert response.status_code == 404
++    assert response.headers["cache-control"] == "no-store"
++    assert hermes.refresh == [] and openai.calls == []
+
+
+ # --- Stepping aside once Hermes ships hermes-agent#108940 ---------------------

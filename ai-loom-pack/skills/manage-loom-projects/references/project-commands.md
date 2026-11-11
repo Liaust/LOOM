@@ -30,7 +30,7 @@ Categories: notes/docs/research. Notes reads eligible files after apply;
 ignores/formats still apply. No implied backup or Provenance acceptance.
 Allocation sources: [reference](application-data-notes.md).
 
-For intake filters, quiet windows and enrichment see
+For client placement, selection, intake filters and enrichment see
 [Notes pipeline declaration](notes-pipeline.md); load only when needed.
 
 Saving source does not enroll it. Plan against the selected owner node:
@@ -52,6 +52,12 @@ and `loom provenance project sync`. Do not work around absent composition with
 manual owner calls. Activation has no general dry-run; runtime/archive/migration
 retain separate authorization.
 
+## Classification-only metadata
+
+Passive means editable ongoing service work, not pause or physical archive.
+For classification-only registration, read [lifecycle and custody](project-lifecycle.md).
+Do not reconcile resources merely to change grouping or hand-move client folders.
+
 ## Managed applications
 
 Prepared application installation uses the same plan/apply/status route within
@@ -61,38 +67,18 @@ domain); no per-app host setup.
 
 [Schedules](project-schedules.md) use the same plan/apply route.
 
-## ORCA ordinary folders
+## Coding Client Folders
 
-```sh
-orca repo add --path <existing-folder> --kind folder --json
-```
-
-Registration neither creates missing directories nor validates existence.
-Create the directory first. Native polling may convert its kind if Git appears.
-Do not manufacture a Git wrapper.
+Open the existing registered project path in the native coding client. Client
+sidebar membership is separate from LOOM registration; no ORCA registration or
+Git wrapper is required.
 
 ## Restored projects
 
-Physical restore returns the files and registration but deliberately leaves the
-project inactive. Inspect it with `loom project archive inspect <project>`, then
-explicitly release that completed restore:
-
-```sh
-loom project archive reactivate <project> --restore-operation <restore-operation-id> --yes
-```
-
-Reactivation makes the project editable again; it does not start watchers,
-services or schedules. Review `loom project plan` before `loom project apply`
-to resume selected declarations. Deliberately paused or completed schedules stay
-stopped. Archive and restore receipts remain historical evidence, not a claim
-that runtime is running. The same reactivation command is safe to retry after a
-lost response; it must refer to the exact completed restore.
+Restore leaves a project inactive. [Inspect and explicitly reactivate](project-lifecycle.md#restored-projects)
+the exact completed restore for editing; this never starts runtime resources.
 
 ## Export custody
 
-`loom project export <path> --mode <human|portable|archival> --out <archive.tar>`;
-`<ref> --backend` downloads locally. Review overwrites. Human omits controls,
-managed AGENTS and `.loom-acceptance`; portable keeps contracts; archival adds
-non-secret registration references. `.loomignore`: nested, last-match-wins,
-no implicit `.gitignore`. Keep Git unless excluded; never re-include `.loom/state/`
-or `.loom/tmp/`; reject escaping paths/symlinks. Edit source, not generated views.
+See [export custody](project-lifecycle.md#export-custody) before exporting or
+overwriting a destination. Exclude runtime state/secrets and preserve path guards.

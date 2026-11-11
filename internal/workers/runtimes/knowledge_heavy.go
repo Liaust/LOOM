@@ -15,6 +15,7 @@ type KnowledgeHeavyRuntime struct {
 	Vision    knowledge.VisionRuntime
 	Embedding knowledge.EmbeddingRuntime
 	Now       func() time.Time
+	Pressure  func(time.Time) workers.ResourcePressureSnapshot
 }
 
 type knowledgeHeavyConfig struct {
@@ -49,6 +50,34 @@ func (r KnowledgeHeavyRuntime) ValidateConfig(_ context.Context, raw json.RawMes
 	_, err := parseKnowledgeHeavyConfig(raw)
 	return err
 }
+
+func (r KnowledgeHeavyRuntime) AutomaticReady(ctx context.Context, _ workers.WorkerInstance, now time.Time) (bool, *time.Time, error) {
+	next, err := r.Knowledge.NextPipelineWorkAt(ctx, knowledge.PipelineExecutionHeavy, now)
+	if err != nil || next == nil || next.After(now) {
+		return false, next, err
+	}
+	state, err := (workers.Service{DB: r.Knowledge.Store().DB()}).ResourcePressureDeadline(ctx, workers.ResourceKnowledgeHeavy)
+	if err != nil {
+		return false, nil, err
+	}
+	if state.BlockedUntil != nil && state.BlockedUntil.After(now) {
+		return false, state.BlockedUntil, nil
+	}
+	if state.OptionalNotBefore != nil && state.OptionalNotBefore.After(now) {
+		ordinary, err := r.Knowledge.NextOrdinaryPipelineWorkAt(ctx, now)
+		if err != nil {
+			return false, nil, err
+		}
+		if ordinary == nil || ordinary.After(now) {
+			at := *state.OptionalNotBefore
+			if ordinary != nil && ordinary.Before(at) {
+				at = *ordinary
+			}
+			return false, &at, nil
+		}
+	}
+	return true, next, nil
+}
 func (r KnowledgeHeavyRuntime) RunOnce(ctx context.Context, run workers.RunContext) (workers.RunResult, error) {
 	if r.Knowledge == nil || r.Knowledge.Store().DB() == nil {
 		return workers.RunResult{}, fmt.Errorf("knowledge heavy service is not configured")
@@ -80,6 +109,8 @@ func drainKnowledgeHeavy(ctx context.Context, stageBudget time.Duration, policy 
 	var total knowledge.HeavyExecutorRunResult
 	stages := make([]knowledge.HeavyExecutorRunResult, 0, 8)
 	mayHaveMore := false
+	var pressureNext *time.Time
+	var completedUnits, yielded, pressureSamples, pressureDeferred int64
 	for len(stages) < 8 {
 		if err := ctx.Err(); err != nil {
 			return workers.RunResult{}, err
@@ -95,9 +126,27 @@ func drainKnowledgeHeavy(ctx context.Context, stageBudget time.Duration, policy 
 		if err != nil {
 			return workers.RunResult{}, err
 		}
+		if a := result.Observation.Admission; a != nil {
+			pressureSamples++
+			if !a.Admitted || (!a.AllowOptional && result.Claimed == 0) {
+				pressureDeferred++
+				pressureNext = a.NextEligibleAt
+			}
+		}
 		if result.Claimed == 0 {
-			mayHaveMore = false
+			mayHaveMore = pressureNext != nil
+			if result.Observation.Admission != nil {
+				stages = append(stages, result)
+			}
 			break
+		}
+		var units struct {
+			Units int64 `json:"units"`
+		}
+		_ = json.Unmarshal(result.Observation.Observed, &units)
+		completedUnits += units.Units
+		if result.Completed == 0 && result.Failed == 0 {
+			yielded++
 		}
 		stages = append(stages, result)
 		total.Claimed += result.Claimed
@@ -114,13 +163,15 @@ func drainKnowledgeHeavy(ctx context.Context, stageBudget time.Duration, policy 
 		MoreWork bool                               `json:"more_work"`
 	}{total, stages, mayHaveMore}
 	next := policy.NextAfter(now())
-	if mayHaveMore && policy.Mode == workers.TickModeInterval && policy.IntervalSeconds > workers.MinimumIntervalSeconds {
+	if pressureNext != nil && policy.Mode == workers.TickModeInterval {
+		next = pressureNext
+	} else if mayHaveMore && policy.Mode == workers.TickModeInterval && policy.IntervalSeconds > workers.MinimumIntervalSeconds {
 		at := now().Add(time.Duration(workers.MinimumIntervalSeconds) * time.Second)
 		next = &at
 	}
 	return workers.RunResult{
 		Status: workers.RunStatusSucceeded, ResultSummary: mustWorkerJSON(summary),
-		Counters:      map[string]int64{"claimed": total.Claimed, "completed": total.Completed, "failed": total.Failed},
+		Counters:      map[string]int64{"claimed": total.Claimed, "completed": total.Completed, "failed": total.Failed, "completed_units": completedUnits, "yielded_turns": yielded, "pressure_samples": pressureSamples, "pressure_deferred": pressureDeferred},
 		ResourceUsage: mustWorkerJSON(map[string]any{"stages": stages}),
 		NextRunAfter:  next,
 	}, nil
@@ -128,13 +179,30 @@ func drainKnowledgeHeavy(ctx context.Context, stageBudget time.Duration, policy 
 
 func (r KnowledgeHeavyRuntime) runStage(ctx context.Context, run workers.RunContext, config knowledgeHeavyConfig) (knowledge.HeavyExecutorRunResult, error) {
 	now := r.currentTime()
+	// Empty/future queues never read pressure, acquire a lease or call a model.
+	ready, err := r.Knowledge.NextPipelineWorkAt(ctx, knowledge.PipelineExecutionHeavy, now)
+	if err != nil || ready == nil || ready.After(now) {
+		return knowledge.HeavyExecutorRunResult{}, err
+	}
+	sample := r.Pressure
+	if sample == nil {
+		sample = workers.SampleResourcePressure
+	}
+	admission, err := run.Service.AdmitResourceTurn(ctx, workers.ResourceKnowledgeHeavy, sample(now), config.Resource.MaxUnits, config.Resource.MaxTempBytes)
+	if err != nil {
+		return knowledge.HeavyExecutorRunResult{}, err
+	}
+	deferred := knowledge.HeavyExecutorRunResult{Observation: knowledge.HeavyStageObservation{Admission: &admission}}
+	if !admission.Admitted {
+		return deferred, nil
+	}
 	runID, instanceID := run.Run.WorkerRunID, run.Instance.WorkerInstanceID
-	items, err := r.Knowledge.ClaimPipelineRuns(ctx, knowledge.PipelineExecutionHeavy, runID, knowledge.PipelineClaimOptions{Limit: 1, LeaseDuration: time.Duration(config.LeaseDurationSeconds) * time.Second, Now: now})
+	items, err := r.Knowledge.ClaimPipelineRuns(ctx, knowledge.PipelineExecutionHeavy, runID, knowledge.PipelineClaimOptions{OrdinaryOnly: !admission.AllowOptional, Limit: 1, LeaseDuration: time.Duration(config.LeaseDurationSeconds) * time.Second, Now: now})
 	if err != nil {
 		return knowledge.HeavyExecutorRunResult{}, err
 	}
 	if len(items) == 0 {
-		return knowledge.HeavyExecutorRunResult{}, nil
+		return deferred, nil
 	}
 	item := items[0]
 	pipelineRunID, stageRunID := item.Run.KnowledgePipelineRunID, item.Stage.KnowledgePipelineStageRunID
@@ -151,7 +219,19 @@ func (r KnowledgeHeavyRuntime) runStage(ctx context.Context, run workers.RunCont
 	if r.Embedding != nil {
 		handlers[knowledge.FilePipelineStageEmbedding] = knowledge.EmbeddingStageHandler{Service: r.Knowledge, Runtime: r.Embedding}
 	}
-	return r.Knowledge.ExecuteClaimedHeavyStage(ctx, item, config.Resource, handlers)
+	resource := config.Resource
+	resource.MaxUnits = admission.BudgetMaxUnits
+	if !knowledge.IsOrdinaryPipelineWork(item) && admission.Reason == "sustained_pressure" {
+		resource.MaxUnits = 1
+		admission.BudgetMaxUnits = 1
+		if err = run.Service.RecordOptionalResourceTurn(ctx, workers.ResourceKnowledgeHeavy, now); err != nil {
+			_ = r.Knowledge.ReleasePipelineClaim(ctx, item)
+			return knowledge.HeavyExecutorRunResult{}, err
+		}
+	}
+	result, err := r.Knowledge.ExecuteClaimedHeavyStage(ctx, item, resource, handlers, &admission)
+	result.Observation.Admission = &admission
+	return result, err
 }
 
 func parseKnowledgeHeavyConfig(raw json.RawMessage) (knowledgeHeavyConfig, error) {

@@ -7,7 +7,7 @@
 | Source wording | LOOM Notes |
 | Qualified decisions, constraints, relationships and unresolved cases | LOOM Provenance |
 | Jobs, workers and permissioned actions | LOOM capability and worker surfaces |
-| Interactive folder/worktree/task/terminal lifecycle | Installed release-matched ORCA tools |
+| Interactive folder/worktree/task/terminal lifecycle | Current harness's native controls; ORCA is retired, never a fallback |
 | Model execution and conversation retrieval | Pinned Hermes runtime and session-search tools |
 | Conversational continuity | Hermes memory, with pilot write approval |
 | Native/created skills | Hermes `skill_manage`, with `category="created"` for new skills and write approval |
@@ -34,7 +34,8 @@ installed skills in both gateway and TUI.
 
 Use `loom-morathustra-gh` and `loom-morathustra-basecamp` with literal
 `--profile morathustra` for named account work, following the corresponding protocol preflight against
-operator binding documented in release-matched ORCA Main Operations. Put the command first (after Basecamp's
+the configured deployment's operator binding. Missing binding holds account work.
+Put the command first (after Basecamp's
 literal profile pair), then its options. The wrappers select only the pinned
 native CLI and protected auth HOME/config/cache inside the child. Ordinary `gh`
 and `basecamp` retain their normal behavior for other coding agents. Never set

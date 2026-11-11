@@ -163,7 +163,7 @@ func unchangedProjectBindings(previous, next ProjectContextProjection) map[strin
 }
 
 func reboundRepositorySnapshot(card RepositoryCard, binding ProjectRepositoryBinding, next projectSnapshot, current ProjectContextProjection) (repositorySnapshot, error) {
-	card.OwningProject = RepositoryOwningProject{ProjectID: current.ProjectID, Name: current.Name,
+	card.OwningProject = RepositoryOwningProject{HomeBoxID: current.HomeBoxID, ProjectID: current.ProjectID, Name: current.Name,
 		Slug: current.Slug, Lifecycle: current.Lifecycle, NavigationRef: current.NavigationRef}
 	// Freshness and all repository capture fields deliberately remain untouched.
 	payload, err := json.Marshal(card)

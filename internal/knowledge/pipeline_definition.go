@@ -10,6 +10,7 @@ import (
 
 const (
 	PipelineDefinitionVersionV1 = "notes_file_pipeline.v1"
+	PipelineDefinitionVersionV2 = "notes_file_pipeline.v2"
 	StageContractVersionV1      = "v1"
 )
 
@@ -71,11 +72,12 @@ func PipelineDefinitionForObject(object KnowledgeObject) PipelineDefinition {
 	definition := PipelineDefinition{Key: key, Version: PipelineDefinitionVersionV1, FileFamily: family}
 	switch family {
 	case "pdf":
+		definition.Version = PipelineDefinitionVersionV2
 		analysis := coordinator(FilePipelineStagePDFPageAnalysis, []string{FilePipelineStageNativeText}, []string{ArtifactKindEmbeddedText}, nil)
 		ocr := heavy(FilePipelineStagePDFOCR, []string{FilePipelineStagePDFPageAnalysis}, nil, []string{ArtifactKindOCRText})
 		definition.Stages = append([]PipelineStageDefinition{metadata, native, analysis, ocr, consolidateAfter(FilePipelineStagePDFOCR)}, finish(FilePipelineStageConsolidateText)...)
 	case "image":
-		definition.Version = "notes_image_pipeline.v2"
+		definition.Version = "notes_image_pipeline.v3"
 		ocr := heavy(FilePipelineStageImageOCR, []string{FilePipelineStageMetadata}, nil, []string{ArtifactKindOCRText})
 		description := heavy(FilePipelineStageImageDescription, []string{FilePipelineStageImageOCR}, nil, []string{ArtifactKindVisionDescription})
 		definition.Stages = append([]PipelineStageDefinition{metadata, ocr, description, consolidateAfter(FilePipelineStageImageDescription)}, finish(FilePipelineStageConsolidateText)...)
@@ -90,8 +92,9 @@ func PipelineDefinitionForObject(object KnowledgeObject) PipelineDefinition {
 }
 
 func pipelineFileFamily(object KnowledgeObject) string {
-	// Canvas is a retained attachment, even when MIME sniffing calls its JSON text.
-	if knowledgeObjectExtension(object) == ".canvas" {
+	// Obsidian navigation/configuration is retained without semantic enrichment,
+	// even when MIME sniffing identifies its JSON/YAML as text.
+	if ext := knowledgeObjectExtension(object); ext == ".canvas" || ext == ".base" {
 		return "metadata_only"
 	}
 	switch object.FileClass {

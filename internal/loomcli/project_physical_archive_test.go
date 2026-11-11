@@ -1,6 +1,7 @@
 package loomcli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,10 +13,42 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+	"loom.local/loom/internal/projects"
 	"loom.local/loom/internal/requestctx"
 	"loom.local/loom/internal/response"
 	"loom.local/loom/internal/storagearchive"
 )
+
+func TestProjectArchiveInspectRetainedNavigation(t *testing.T) {
+	review := projectCLIReview(false)
+	digest := review.PlanDigest
+	now := review.Workspace.PlannedAt
+	state := projects.ProjectPhysicalArchiveState{SchemaVersion: projects.ProjectPhysicalArchiveStateSchemaVersion, Status: "archived", Phase: projects.ProjectArchivePhaseComplete, MutationBlocked: true, ProjectID: "project_test", ProjectSlug: "test", OperationID: review.Workspace.OperationID, PlanDigest: digest, WorkspacePlanDigest: digest, ActivePath: "/old/box/test", ArchivePath: "/retained/test", ActorID: "actor", Reason: "fixture", StartedAt: now, RuntimeDeactivatedAt: &now, RuntimeQuiescenceDigest: digest, WorkspaceCompletedAt: &now, ArchiveManifestDigest: digest, ArchivedAt: &now}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := projects.ParseProjectPhysicalArchiveState(raw); !ok {
+		t.Fatal("invalid fixture")
+	}
+	for _, evidence := range []string{"verified", "unavailable", "conflict", "pending"} {
+		var out bytes.Buffer
+		cmd := &cobra.Command{}
+		cmd.SetOut(&out)
+		result := storagearchive.ProjectArchiveInspectResult{ArchiveState: raw, Physical: &storagearchive.ProjectPhysicalArchiveInspection{ProjectID: state.ProjectID, ArchiveOperationID: state.OperationID, EvidenceStatus: evidence, Workspace: &storagearchive.WorkspaceMoveInspectionSummary{Custody: storagearchive.CustodyArchived}}}
+		renderProjectArchiveInspect(cmd, result)
+		if strings.Contains(out.String(), state.ArchivePath) != (evidence == "verified") || strings.Contains(out.String(), state.ActivePath) {
+			t.Fatalf("unqualified retained path (%s): %s", evidence, out.String())
+		}
+		result.Physical.Workspace.Custody = storagearchive.CustodyActive
+		out.Reset()
+		renderProjectArchiveInspect(cmd, result)
+		if strings.Contains(out.String(), state.ArchivePath) {
+			t.Fatal("restored custody shown as archive")
+		}
+	}
+}
 
 func projectCLIReview(restore bool) storagearchive.ProjectPhysicalPlanReview {
 	digest := "sha256:" + strings.Repeat("a", 64)

@@ -429,7 +429,7 @@ validate_search_query() {
   request_to_file "$api_path" -H 'Content-Type: application/json' \
     --data-binary "@$request_path" http://loom/v1/provenance/search
 
-  local cli_args=(provenance search "$query")
+  local cli_args=(provenance search "$query" --details)
   [[ "$include_pending" == true ]] && cli_args+=(--include-pending)
   [[ -z "$project" ]] || cli_args+=(--project "$project")
   [[ -z "$repository" ]] || cli_args+=(--repo "$repository")
@@ -474,7 +474,7 @@ validate_search_query() {
         (.match.assertion_posture | length) > 0 and
         (.exact_get.id | length) > 0 and
         (.exact_get.path | startswith("/v1/provenance/")) and
-        ((tojson | length) <= 800)
+        ((tojson | length) <= 1600)
       )) and
     ((.data | tojson | length) <= 6000)
   ' "$api_path" >/dev/null || {
@@ -562,7 +562,7 @@ validate_exact_get() {
     loom provenance repo get "$id" >"$cli_path"
   else
     request_to_file "$api_path" "http://loom/v1/provenance/$api_resource/$id?limit=16"
-    loom provenance "$resource" get "$id" --limit 16 >"$cli_path"
+    loom provenance "$resource" get "$id" --limit 16 --details >"$cli_path"
   fi
   assert_json_equal "$api_path" "$cli_path" "exact get for $query_id"
   jq -e --arg id "$id" "$identity_filter == \$id" "$api_path" >/dev/null \
@@ -728,8 +728,8 @@ request_to_file "$TMP_ROOT/archivist-candidate.json" \
   "http://loom/v1/provenance/candidates/$ARCHIVIST_CANDIDATE_ID?limit=16"
 request_to_file "$TMP_ROOT/archivist-case.json" \
   "http://loom/v1/provenance/cases/$ARCHIVIST_CASE_ID?limit=16"
-loom provenance candidate get "$ARCHIVIST_CANDIDATE_ID" --limit 16 >"$TMP_ROOT/archivist-candidate-cli.json"
-loom provenance case get "$ARCHIVIST_CASE_ID" --limit 16 >"$TMP_ROOT/archivist-case-cli.json"
+loom provenance candidate get "$ARCHIVIST_CANDIDATE_ID" --limit 16 --details >"$TMP_ROOT/archivist-candidate-cli.json"
+loom provenance case get "$ARCHIVIST_CASE_ID" --limit 16 --details >"$TMP_ROOT/archivist-case-cli.json"
 assert_json_equal "$TMP_ROOT/archivist-candidate.json" "$TMP_ROOT/archivist-candidate-cli.json" 'manual Archivist candidate exact get'
 assert_json_equal "$TMP_ROOT/archivist-case.json" "$TMP_ROOT/archivist-case-cli.json" 'manual Archivist case exact get'
 jq -e --arg candidate "$ARCHIVIST_CANDIDATE_ID" '

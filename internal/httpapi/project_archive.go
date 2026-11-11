@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"loom.local/loom/internal/capabilities"
+	"loom.local/loom/internal/projects"
 	"loom.local/loom/internal/requestctx"
 	"loom.local/loom/internal/response"
 	"loom.local/loom/internal/storagearchive"
@@ -35,7 +36,7 @@ func projectPhysicalArchiveRoute(path string) (string, storagearchive.WorkspaceO
 	} else if len(parts) != 3 {
 		return "", "", "", false
 	}
-	return parts[0], kind, action, action == "plan" || action == "apply" || action == "recover" || (len(parts) == 3 && action == "reactivate")
+	return parts[0], kind, action, action == "plan" || action == "apply" || action == "recover" || (len(parts) == 3 && (action == "reactivate" || action == "retire-plan" || action == "retire-apply"))
 }
 
 func (s Server) handleProjectPhysicalArchive(w http.ResponseWriter, r *http.Request, ref string, kind storagearchive.WorkspaceOperationKind, action string) {
@@ -52,9 +53,15 @@ func (s Server) handleProjectPhysicalArchive(w http.ResponseWriter, r *http.Requ
 		fail("method_not_allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	service := s.services.ProjectPhysicalArchive
-	if service == nil {
-		service = s.services.ProjectArchive
+	ctx, err := s.lifecycleRequestContext(ctx, r)
+	if err != nil {
+		s.writeLifecycleBoxError(w, corr, err)
+		return
+	}
+	service, err := s.lifecycleProjectArchive(ctx)
+	if err != nil {
+		s.writeLifecycleBoxError(w, corr, err)
+		return
 	}
 	if projectArchiveDependencyNil(service) || projectArchiveDependencyNil(s.services.WorkspaceArchiveAuthorizer) {
 		fail("not_ready", http.StatusServiceUnavailable)
@@ -85,7 +92,7 @@ func (s Server) handleProjectPhysicalArchive(w http.ResponseWriter, r *http.Requ
 	if kind == storagearchive.WorkspaceOperationRestore || action == "reactivate" {
 		capability = capabilities.WorkspaceArchiveRestoreApplyCapability
 	}
-	if action == "plan" {
+	if action == "plan" || action == "retire-plan" {
 		capability = capabilities.WorkspaceArchivePlanCapability
 		if kind == storagearchive.WorkspaceOperationRestore {
 			capability = capabilities.WorkspaceArchiveRestorePlanCapability
@@ -113,6 +120,50 @@ func (s Server) handleProjectPhysicalArchive(w http.ResponseWriter, r *http.Requ
 			return false
 		}
 		return true
+	}
+	if action == "retire-plan" || action == "retire-apply" {
+		owner, ok := service.(interface {
+			ReviewProjectRegistrationRetirement(context.Context, requestctx.Context, string, storagearchive.ProjectRetirementInput) (storagearchive.ProjectRetirementPlan, error)
+			ApplyProjectRegistrationRetirement(context.Context, requestctx.Context, string, storagearchive.ProjectRetirementApply) (projects.Project, error)
+		})
+		if !ok {
+			fail("not_ready", http.StatusServiceUnavailable)
+			return
+		}
+		if action == "retire-plan" {
+			var in storagearchive.ProjectRetirementInput
+			if !decode(&in) {
+				return
+			}
+			out, err := owner.ReviewProjectRegistrationRetirement(ctx, req, projectID, in)
+			if err != nil {
+				s.writeProjectPhysicalError(w, corr, err, nil)
+				return
+			}
+			s.writeProjectPhysicalJSON(w, corr, http.StatusOK, response.Success(corr, out))
+		} else {
+			var in storagearchive.ProjectRetirementApply
+			if !decode(&in) {
+				return
+			}
+			bound := req
+			bound.CorrelationID = in.Plan.Request.CorrelationID
+			if !in.Confirm || in.PlanDigest == "" || in.PlanDigest != in.Plan.PlanDigest {
+				fail("review_confirmation_required", http.StatusBadRequest)
+				return
+			}
+			if in.Plan.ProjectID != projectID || bound != in.Plan.Request {
+				fail("caller_mismatch", http.StatusForbidden)
+				return
+			}
+			out, err := owner.ApplyProjectRegistrationRetirement(ctx, req, projectID, in)
+			if err != nil {
+				s.writeProjectPhysicalError(w, corr, err, nil)
+				return
+			}
+			s.writeProjectPhysicalJSON(w, corr, http.StatusOK, response.Success(corr, out))
+		}
+		return
 	}
 	if action == "reactivate" {
 		var input storagearchive.ProjectReactivationRequest
@@ -160,6 +211,10 @@ func (s Server) handleProjectPhysicalArchive(w http.ResponseWriter, r *http.Requ
 			fail("invalid_review", http.StatusConflict)
 			return
 		}
+		if err := s.validateLifecycleBoxID(ctx, review.Workspace.BoxID); err != nil {
+			s.writeLifecycleBoxError(w, corr, err)
+			return
+		}
 		s.writeProjectPhysicalJSON(w, corr, http.StatusOK, response.Success(corr, review))
 		return
 	}
@@ -181,6 +236,10 @@ func (s Server) handleProjectPhysicalArchive(w http.ResponseWriter, r *http.Requ
 		}
 		if storagearchive.ValidateProjectPhysicalPlanReview(input.Plan) != nil {
 			fail("invalid_review", http.StatusBadRequest)
+			return
+		}
+		if err := s.validateLifecycleBoxID(ctx, input.Plan.Workspace.BoxID); err != nil {
+			s.writeLifecycleBoxError(w, corr, err)
 			return
 		}
 		result, err = service.ApplyReviewedProjectPhysicalPlan(ctx, req, projectID, input)
@@ -217,7 +276,7 @@ func (s Server) writeProjectPhysicalError(w http.ResponseWriter, corr string, er
 			code, status = failure.Code, http.StatusBadRequest
 		case "caller_mismatch", "project_mismatch":
 			code, status = failure.Code, http.StatusForbidden
-		case "plan_unavailable", "invalid_plan", "evidence_too_large", "evidence_conflict", "restore_not_ready", "evidence_missing", "review_stale", "review_mismatch":
+		case "plan_unavailable", "invalid_plan", "evidence_too_large", "evidence_conflict", "restore_not_ready", "evidence_missing", "review_stale", "review_mismatch", "retirement_requires_inactive_registration", "retirement_unsupported_custody", "retirement_original_root_not_absent", "retained_source_unavailable", "retained_contract_mismatch", "retained_inventory_unavailable", "retirement_runtime_not_inactive", "project_busy", "retirement_failed":
 			code, status = failure.Code, http.StatusConflict
 		}
 	}

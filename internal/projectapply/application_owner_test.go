@@ -197,6 +197,7 @@ type applicationContinuationCalls struct {
 	stored     map[string]routing.CapabilityCall
 	dispatches int
 	failures   int
+	preparing  bool
 }
 
 func (f *applicationContinuationCalls) FindCapabilityCallByToken(_ context.Context, _ string, token string) (routing.CapabilityCall, error) {
@@ -218,11 +219,43 @@ func (f *applicationContinuationCalls) Call(_ context.Context, req requestctx.Co
 	if f.failures > 0 {
 		f.failures--
 		r.State, r.ErrorCode = "partial", "application.health.process_unproven"
+		if f.preparing {
+			r.Applied = false
+			r.InstallationRevision = q.ExpectedInstallationRevision
+			r.ErrorCode = "application.network.unit_not_quiescent"
+		}
 		call.Status, call.ErrorCode = routing.CapabilityCallStatusFailed, &r.ErrorCode
 	}
 	call.ResultJSON, _ = json.Marshal(r)
 	f.stored[token] = call
 	return routing.CapabilityCallOutcome{CapabilityCall: call}, nil
+}
+
+func TestApplicationPreparingDeliveryContinuation(t *testing.T) {
+	for _, previous := range []string{"", "previous-installation"} {
+		call, _, _ := applicationFixture(t)
+		var payload applicationPayload
+		if err := json.Unmarshal(call.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		payload.Request.ExpectedInstallationRevision = previous
+		call.Payload, _ = canonicalValue(payload)
+		call.Action.InputHash = hashBytes(call.Payload)
+		f := &applicationContinuationCalls{stored: map[string]routing.CapabilityCall{}, failures: 1, preparing: true}
+		o := ApplicationOwner{Calls: f}
+		first, err := o.Apply(t.Context(), call)
+		if err != nil || first.State != Resumable || f.dispatches != 1 {
+			t.Fatalf("known preparing effect was not resumable: %+v %v", first, err)
+		}
+		original := f.stored[call.Token]
+		last, err := o.Apply(t.Context(), call)
+		if err != nil || last.State != Committed || f.dispatches != 2 {
+			t.Fatalf("same-token recovery failed: %+v %v", last, err)
+		}
+		if !sameJSON(original.ResultJSON, f.stored[call.Token].ResultJSON) {
+			t.Fatal("original preparing receipt overwritten")
+		}
+	}
 }
 
 func TestApplicationPartialDeliveryContinuation(t *testing.T) {

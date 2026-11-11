@@ -708,6 +708,10 @@ func (s Server) handleSchedule(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, correlationID, http.StatusNotFound, "schedule.ref_required", "automation", "schedule", "Schedule reference is required.", nil)
 		return
 	}
+	if strings.HasSuffix(ref, "/timing") {
+		s.handleScheduleTiming(w, r, strings.Trim(strings.TrimSuffix(ref, "/timing"), "/"))
+		return
+	}
 	if strings.HasSuffix(ref, "/pause") || strings.HasSuffix(ref, "/resume") || strings.HasSuffix(ref, "/disable") {
 		if r.Method != http.MethodPost {
 			s.writeError(w, correlationID, http.StatusMethodNotAllowed, "method.not_allowed", "automation", r.URL.Path, "Method is not allowed.", nil)
@@ -801,6 +805,45 @@ func (s Server) handleSchedule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.WriteJSON(w, http.StatusOK, response.Success(correlationID, detail))
+}
+
+func (s Server) handleScheduleTiming(w http.ResponseWriter, r *http.Request, ref string) {
+	correlationID, ctx := requestMeta(r)
+	if r.Method != http.MethodPost {
+		s.writeError(w, correlationID, http.StatusMethodNotAllowed, "method.not_allowed", "automation", ref, "Method is not allowed.", nil)
+		return
+	}
+	var input automation.ScheduleTimingInput
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		s.writeError(w, correlationID, http.StatusBadRequest, "request.invalid_json", "automation", "body", "Request body is not valid schedule timing JSON.", err)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		s.writeError(w, correlationID, http.StatusBadRequest, "request.invalid_json", "automation", "body", "Provide exactly one schedule timing object.", err)
+		return
+	}
+	req, err := requestctx.ResolveBootstrap(ctx, s.services.DB, correlationID)
+	if err != nil {
+		s.writeError(w, correlationID, http.StatusInternalServerError, "request.context_failed", "automation", "bootstrap", "Could not resolve request context.", err)
+		return
+	}
+	intent := map[string]any{"schedule_ref": ref, "input": input}
+	record, proceed := s.beginIdempotency(w, r, ctx, correlationID, req, "automation.schedule.timing", intent)
+	if !proceed {
+		return
+	}
+	detail, err := s.services.Automation.UpdateScheduleTiming(ctx, req, ref, input)
+	if err != nil {
+		failure := scheduleResponseError(err, "schedule.timing_update_failed", ref, "Could not update timing; pause the existing cron schedule and check its timing fields.")
+		s.failIdempotency(ctx, record, failure.Code, response.FailureWithIdempotency(correlationID, record.Key, failure))
+		s.writeError(w, correlationID, http.StatusBadRequest, failure.Code, failure.Domain, failure.Target, failure.Summary, err)
+		return
+	}
+	envelope := response.SuccessWithIdempotency(correlationID, record.Key, detail)
+	s.completeIdempotency(ctx, record, "schedule", detail.Schedule.ScheduleID, envelope)
+	response.WriteJSON(w, http.StatusOK, envelope)
 }
 
 func scheduleResponseError(err error, code, target, summary string) *loomerrors.Error {

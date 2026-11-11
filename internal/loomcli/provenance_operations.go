@@ -1,16 +1,84 @@
 package loomcli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	loomerrors "loom.local/loom/internal/errors"
+	"loom.local/loom/internal/localclient"
 	"loom.local/loom/internal/provenance"
+	"loom.local/loom/internal/response"
 )
+
+const provenanceRegistrationExample = `{"candidates":[{"claim":"Use Caddy for LOOM HTTP ingress.","record_kind":"decision","record_context":"LOOM architecture, AGENTS.md","domain":"loom-development","visibility":"private","temporal_interpretation":{"interpretation":"Current architecture"},"assertion_posture":"source_claim","producer":{"producer_id":"project-codex","producer_kind":"working_agent","task_id":"actual-task-id","run_id":"11111111-1111-4111-8111-111111111111"},"sources":[{"kind":"file","status":"resolved","verification_posture":"unknown","resolver_name":"working-agent","resolver_version":"1.0","canonical_locator":"AGENTS.md","version_address":"actual-git-commit","content_digest":"actual-source-hash","submitted":{"path":"AGENTS.md","excerpt":"Caddy is the selected reverse proxy/TLS ingress"}}]}]}`
+
+func newProvenanceCandidateRegisterCommand(opts *options) *cobra.Command {
+	var file, key string
+	var yes bool
+	cmd := &cobra.Command{Use: "register", Args: cobra.NoArgs, Short: "Register source-backed pending candidates, without acceptance",
+		Long:    "Submit a saved CandidateRegistrationRequest through the authorized backend. Preserve the actual producer/task/run, source version/hash and resolver posture. Registration is pending, not acceptance. On uncertain delivery retry the exact file with the same key. Replace example attribution and source observations with actual evidence.",
+		Example: "  loom provenance candidate register --file candidate.json --idempotency-key stable-task-key --yes --json\n\n  candidate.json (CandidateRegistrationRequest):\n  " + provenanceRegistrationExample,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			jsonOpts := *opts
+			jsonOpts.jsonOutput = true
+			invalid := func(err error) error {
+				return renderError(cmd, &jsonOpts, opts.correlationID, loomerrors.Wrap("provenance.invalid_request", "provenance", "candidate_register", "Supply a valid CandidateRegistrationRequest with --file, a stable --idempotency-key and --yes.", err))
+			}
+			if !yes || strings.TrimSpace(key) == "" || strings.TrimSpace(file) == "" {
+				return invalid(nil)
+			}
+			var input provenance.CandidateRegistrationRequest
+			if err := readProvenanceJSON(file, provenance.MaximumFoundationRequestBytes, &input); err != nil {
+				return invalid(err)
+			}
+			if err := provenance.ValidateCandidateRegistrationRequest(key, input); err != nil {
+				return invalid(err)
+			}
+			cc, err := resolveCommandContext(opts)
+			if err != nil {
+				return renderError(cmd, &jsonOpts, opts.correlationID, err)
+			}
+			client, _ := withEffectIdempotency(cc.Client, key, "provenance.candidates")
+			ctx, cancel := context.WithTimeout(cmd.Context(), provenance.FoundationRequestTimeout)
+			defer cancel()
+			env, err := client.RegisterProvenanceCandidates(ctx, cc.CorrelationID, input)
+			if err == nil && (!env.OK || env.Data.Receipt.SchemaVersion != provenance.SchemaVersion || len(env.Data.Receipt.Receipts) != len(input.Candidates)) {
+				err = errors.New("candidate registration response is missing its complete receipt")
+			}
+			if err != nil {
+				var rejection *localclient.RequestError
+				if errors.As(err, &rejection) && rejection.StatusCode < 500 {
+					return renderError(cmd, &jsonOpts, cc.CorrelationID, err)
+				}
+				uncertain := loomerrors.New("provenance.delivery_uncertain", "provenance", "candidate_register", "Registration delivery is uncertain; retry the exact file with the same idempotency key.")
+				return renderOwnedCLIError(cmd, uncertain, func(view *cobra.Command) error {
+					return json.NewEncoder(view.OutOrStdout()).Encode(response.FailureWithIdempotency(cc.CorrelationID, strings.TrimSpace(key), uncertain))
+				})
+			}
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(env)
+		}}
+	cmd.Flags().StringVar(&file, "file", "", "JSON CandidateRegistrationRequest; preserve actual producer and source evidence")
+	cmd.Flags().StringVar(&key, "idempotency-key", "", "stable key retained with the exact request for same-key retry")
+	cmd.Flags().BoolVar(&yes, "yes", false, "confirm pending candidate registration, not acceptance")
+	return cmd
+}
+
+func readProvenanceJSON(file string, maxBytes int64, target any) error {
+	var payload json.RawMessage
+	if err := readBoundedJSON(file, maxBytes, &payload); err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(target)
+}
 
 // Reviewed operations use the same authorized foundation client as the API;
 // exposing them here does not introduce a second reconciliation policy.

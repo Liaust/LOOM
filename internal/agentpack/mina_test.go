@@ -15,9 +15,9 @@ import (
 
 // This inventory is deliberately independent of the manifest being tested.
 var minaSourceFiles = []string{
-	".hermes/SOUL.md", "AGENTS.md", "OPERATING-POLICY.md", "TOOLING.md", "WORKFLOW.md", "WORKSPACE-MAP.md",
+	".agents/skills/README.md", "AGENTS.md", "OPERATING-POLICY.md", "SOUL.md", "TOOLING.md", "WORKFLOW.md", "WORKSPACE-MAP.md",
 	"handoffs/HANDOFF-TEMPLATE.md", "investigations/README.md", "protocols/BASECAMP.md", "protocols/CREDENTIALS.md", "protocols/DEVICE-AND-TOOL-ROUTING.md",
-	"protocols/EXTERNAL-MESSAGING.md", "protocols/GITHUB.md", "protocols/LOOM-ROUTING.md", "protocols/MAC-COMPUTER-USE.md", "protocols/PROJECT-DELEGATION.md",
+	"protocols/EXTERNAL-MESSAGING.md", "protocols/GITHUB.md", "protocols/HERMES-RUNTIME.md", "protocols/LOOM-ROUTING.md", "protocols/MAC-COMPUTER-USE.md", "protocols/PROJECT-DELEGATION.md",
 	"protocols/PROVENANCE-AND-MEMORY.md", "protocols/PROVENANCE-RECONCILIATION.md", "protocols/README.md", "protocols/SESSION-RETRIEVAL.md",
 	"protocols/SKILL-CREATION-AND-PROMOTION.md", "recovery/README.md", "skills/installed/README.md", "tmp/README.md",
 }
@@ -91,7 +91,7 @@ func TestMinaScaffoldCompletePortablePrivateAndExactReplay(t *testing.T) {
 	if !reflect.DeepEqual(got, minaSourceFiles) {
 		t.Fatalf("output inventory: %v", got)
 	}
-	for name, mode := range map[string]os.FileMode{".": 0700, ".hermes": 0700, ".hermes/SOUL.md": 0600, "skills": 0555, "skills/installed": 0555, "skills/installed/README.md": 0444} {
+	for name, mode := range map[string]os.FileMode{".": 0700, "SOUL.md": 0600, "skills": 0555, "skills/installed": 0555, "skills/installed/README.md": 0444} {
 		info, err := os.Stat(filepath.Join(destination, name))
 		if err != nil {
 			t.Fatal(err)
@@ -101,7 +101,7 @@ func TestMinaScaffoldCompletePortablePrivateAndExactReplay(t *testing.T) {
 		}
 	}
 	for name, content := range map[string]string{
-		".hermes/SOUL.md":   "# MINA\n\nOperator-curated personality.\n",
+		"SOUL.md":           "# MINA\n\nOperator-curated personality.\n",
 		"WORKFLOW.md":       "Operator-owned workflow edits.\n",
 		"operator-note.txt": "Private unrelated note, preserved unread.\n",
 	} {
@@ -115,7 +115,7 @@ func TestMinaScaffoldCompletePortablePrivateAndExactReplay(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, name := range []string{".hermes/SOUL.md", "WORKFLOW.md"} {
+		for _, name := range []string{"SOUL.md", "WORKFLOW.md"} {
 			if !hasWorkspaceAction(plan, name, WorkspacePreserveUserFile) {
 				t.Fatalf("did not preserve %s", name)
 			}
@@ -205,7 +205,7 @@ func minaTemplate(t *testing.T, pack *Pack) *ManifestTemplate {
 
 func TestMinaRejectsPrivateRuntimeAndDuplicatePersonalitySource(t *testing.T) {
 	for _, name := range []string{
-		"MINA.md", "MINA.backup.md", "MORA.md", "SOUL.md", "IDENTITY.md", "protocols/personality.md",
+		"MINA.md", "MINA.backup.md", "MORA.md", ".hermes/SOUL.md", "IDENTITY.md", "protocols/personality.md",
 		"memory/INDEX.md", "memories/private.md", "integrations/README.md", ".hermes/config.yaml",
 		".hermes/state.db-wal", ".hermes/skills/created/SKILL.md", ".hermes/sessions/session.md",
 		".git/config", ".env", ".ssh/key", "credentials.md", "skills/created/SKILL.md",
@@ -248,6 +248,34 @@ func TestMinaRejectsPrivateRuntimeAndDuplicatePersonalitySource(t *testing.T) {
 	}
 }
 
+func TestMinaPublicAccountLocatorIsNarrowInstructionException(t *testing.T) {
+	for _, path := range []string{"protocols/BASECAMP.md", "protocols/GITHUB.md"} {
+		if err := validatePersonaContent("mina", path, []byte("Read `/etc/loom-mina-accounts.json` for non-secret actor metadata.")); err != nil {
+			t.Fatalf("approved public locator rejected in %s: %v", path, err)
+		}
+		for _, body := range []string{
+			"Read /etc/loom-mina-accounts.json",
+			"Read `/etc/loom-mina-accounts.json/../shadow`",
+			"Read `/etc/loom-mina-accounts.json.key`",
+			"Read `/etc/loom-mina-accounts.json` and /etc/shadow",
+			"Read `/etc/loom-mina-accounts.json`; token=synthetic-not-secret",
+		} {
+			if err := validatePersonaContent("mina", path, []byte(body)); err == nil {
+				t.Fatalf("private or secret-bearing content allowed in %s", path)
+			}
+		}
+	}
+	for _, input := range []struct{ template, path string }{
+		{"morathustra", "protocols/BASECAMP.md"},
+		{"mina", "SOUL.md"},
+		{"mina", "protocols/extra.md"},
+	} {
+		if err := validatePersonaContent(input.template, input.path, []byte("Read `/etc/loom-mina-accounts.json`")); err == nil {
+			t.Fatalf("public locator allowed outside its approved instruction scope: %+v", input)
+		}
+	}
+}
+
 func assertMinaSourceRefused(t *testing.T, pack *Pack, private string) {
 	t.Helper()
 	report := Validate(pack)
@@ -268,7 +296,7 @@ func assertMinaSourceRefused(t *testing.T, pack *Pack, private string) {
 }
 
 func TestMinaSoulAndNamedProtocolsCannotBeOmittedOrEmpty(t *testing.T) {
-	for _, name := range []string{".hermes/SOUL.md", "protocols/BASECAMP.md", "protocols/GITHUB.md"} {
+	for _, name := range []string{"SOUL.md", "protocols/BASECAMP.md", "protocols/GITHUB.md"} {
 		t.Run(name, func(t *testing.T) {
 			pack := copyMorathustraPack(t)
 			template := minaTemplate(t, pack)
@@ -282,14 +310,14 @@ func TestMinaSoulAndNamedProtocolsCannotBeOmittedOrEmpty(t *testing.T) {
 	for i, content := range []string{"", "# MINA\n", "<!-- only a comment -->\n", "<!-- unterminated\nprivate"} {
 		t.Run(fmt.Sprintf("empty-%d", i), func(t *testing.T) {
 			pack := copyMorathustraPack(t)
-			writeMinaFixture(t, filepath.Join(pack.Root.Path, "templates/mina"), ".hermes/SOUL.md", content)
+			writeMinaFixture(t, filepath.Join(pack.Root.Path, "templates/mina"), "SOUL.md", content)
 			assertMinaSourceRefused(t, pack, "")
 		})
 	}
 }
 
 func TestMinaRefusesExistingRuntimeOrWritableInstalledStateWithoutMutation(t *testing.T) {
-	for _, name := range []string{"MINA.md", "MORA.md", "SOUL.md", "memory/INDEX.md", ".hermes/config.yaml", ".hermes/state.db", ".hermes/auth.json", ".hermes/skills/created/SKILL.md", ".git/config", ".config/basecamp/credentials.json"} {
+	for _, name := range []string{"MINA.md", "MORA.md", ".hermes/SOUL.md", "memory/INDEX.md", ".hermes/config.yaml", ".hermes/state.db", ".hermes/auth.json", ".hermes/skills/created/SKILL.md", ".git/config", ".config/basecamp/credentials.json"} {
 		t.Run(name, func(t *testing.T) {
 			destination := filepath.Join(t.TempDir(), "mina")
 			writeMinaFixture(t, destination, name, "synthetic state must survive")
@@ -302,7 +330,7 @@ func TestMinaRefusesExistingRuntimeOrWritableInstalledStateWithoutMutation(t *te
 			}
 		})
 	}
-	for _, name := range []string{"skills", "skills/installed", "skills/installed/README.md", ".hermes/SOUL.md"} {
+	for _, name := range []string{"skills", "skills/installed", "skills/installed/README.md", "SOUL.md"} {
 		t.Run(name, func(t *testing.T) {
 			pack := loadRepositoryPack(t)
 			destination := filepath.Join(t.TempDir(), "mina")
@@ -316,7 +344,7 @@ func TestMinaRefusesExistingRuntimeOrWritableInstalledStateWithoutMutation(t *te
 				t.Fatal(err)
 			}
 			path := filepath.Join(destination, name)
-			if name == ".hermes/SOUL.md" {
+			if name == "SOUL.md" {
 				writeMinaFixture(t, destination, name, "<!-- not a personality -->")
 			} else if err := os.Chmod(path, 0755); err != nil {
 				t.Fatal(err)

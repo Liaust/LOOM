@@ -104,6 +104,7 @@ func (client *Client) Restore(ctx context.Context, request RestoreRequest) (Resu
 	header := requestHeader{
 		Schema: ProtocolSchema, Operation: operation, Kind: request.Kind,
 		Database: request.Database, DumpSize: request.DumpSize, DumpSHA256: request.DumpSHA256,
+		Extensions: append([]ExtensionRequirement(nil), request.Extensions...),
 	}
 	return client.exchange(ctx, header, request.Dump)
 }

@@ -14,13 +14,16 @@ type notesLexicalVariant struct {
 func notesLexicalVariants(input NotesSearchInput) []notesLexicalVariant {
 	var variants []notesLexicalVariant
 	add := func(lifecycle SourceLifecycleFilter, limit int) {
-		if input.RequireCurrent {
+		if input.RequireCurrent && !input.fileView {
 			variants = append(variants, notesLexicalVariant{lifecycle, false, 50})
 		}
 		variants = append(variants, notesLexicalVariant{lifecycle, input.RequireCurrent, limit})
 	}
 	if input.SourceLifecycle != SourceLifecycleFilterArchived {
 		add(SourceLifecycleFilterActive, input.Limit)
+	}
+	if input.fileView && input.SourceLifecycle == SourceLifecycleFilterActive {
+		return variants
 	}
 	limit := input.Limit
 	if input.SourceLifecycle == SourceLifecycleFilterActive {
@@ -31,7 +34,7 @@ func notesLexicalVariants(input NotesSearchInput) []notesLexicalVariant {
 }
 
 // Share only the immutable snapshot work within this one request. Each partition
-// retains its own BM25 corpus statistics, ranking and candidate bound.
+// retains its own ranking and candidate bound.
 func (s *Service) loadNotesLexicalBatch(ctx context.Context, input NotesSearchInput) (map[notesLexicalVariant][]NotesSearchResult, error) {
 	variants := notesLexicalVariants(input)
 	query, err := buildNotesSearchVariantsQuery(input, variants)
@@ -60,6 +63,7 @@ func (s *Service) loadNotesLexicalBatch(ctx context.Context, input NotesSearchIn
 		}
 		key := variants[ordinal]
 		result.LexicalRank = len(batch[key]) + 1
+		annotateIndexedNotesLexicalResult(input, &result)
 		result.Citation = notesSearchCitation(result)
 		batch[key] = append(batch[key], result)
 	}

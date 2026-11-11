@@ -35,6 +35,23 @@ func Status(input StatusInput) UpdateStatus {
 	if err == nil {
 		status.ActiveExists = true
 		status.Active = &active
+		raw, readErr := os.ReadFile(activePath)
+		if readErr == nil && operationIDPattern.MatchString(active.UpdateID) {
+			entries, _ := os.ReadDir(filepath.Join(stateDir, "reconciliations", active.UpdateID))
+			for _, entry := range entries {
+				if entry.IsDir() || !strings.HasPrefix(entry.Name(), "ready_") || !strings.HasSuffix(entry.Name(), ".json") {
+					continue
+				}
+				record, readErr := readReconciliation(filepath.Join(stateDir, "reconciliations", active.UpdateID, entry.Name()))
+				if readErr != nil {
+					status.Diagnostics = append(status.Diagnostics, UpdateDiagnostic{Severity: DiagnosticWarning, Code: "update.reconciliation_invalid", Message: readErr.Error()})
+					continue
+				}
+				if record.UpdateID == active.UpdateID && record.InitialManifestSHA256 == bytesSHA256(raw) {
+					status.Reconciliations = append(status.Reconciliations, record)
+				}
+			}
+		}
 	} else if errors.Is(err, fs.ErrNotExist) || !pathExists(activePath) {
 		status.Diagnostics = append(status.Diagnostics, UpdateDiagnostic{
 			Severity: DiagnosticInfo,

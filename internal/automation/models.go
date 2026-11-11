@@ -166,6 +166,7 @@ type ScheduleFire struct {
 	Status           string          `json:"status"`
 	MisfireStatus    string          `json:"misfire_status"`
 	LatenessSeconds  int             `json:"lateness_seconds"`
+	LatenessNote     string          `json:"lateness_note,omitempty"`
 	WorkerRunID      *string         `json:"worker_run_id,omitempty"`
 	InvocationID     *string         `json:"invocation_id,omitempty"`
 	RouteID          *string         `json:"route_id,omitempty"`
@@ -178,6 +179,13 @@ type ScheduleFire struct {
 	CompletedAt      *time.Time      `json:"completed_at,omitempty"`
 	FailedAt         *time.Time      `json:"failed_at,omitempty"`
 	MetadataJSON     json.RawMessage `json:"metadata_json"`
+}
+
+func (f ScheduleFire) LatenessDescription() string {
+	if f.MisfireStatus == "late_run" && f.LatenessSeconds == 0 {
+		return "Positive lateness below one second; lateness_seconds is rounded down."
+	}
+	return ""
 }
 
 type Invocation struct {
@@ -285,6 +293,14 @@ type CreateScheduleInput struct {
 type UpdateScheduleStatusInput struct {
 	Reason   string          `json:"reason,omitempty"`
 	Metadata json.RawMessage `json:"metadata,omitempty"`
+}
+
+// ScheduleTimingInput changes only the timing of an existing paused cron schedule.
+type ScheduleTimingInput struct {
+	Cron                  string `json:"cron"`
+	Timezone              string `json:"timezone"`
+	MisfirePolicy         string `json:"misfire_policy"`
+	LatenessWindowSeconds int    `json:"lateness_window_seconds,omitempty"`
 }
 
 type ScheduleStatus struct {

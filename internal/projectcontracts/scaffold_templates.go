@@ -109,10 +109,56 @@ const conciseRootAgentsTemplate = `# Project Agent Entry Point
 
 Your default working boundary is this project root.
 
-Before changing content or contracts, read ` + "`.loom/project.yaml`" + `,
+Resolve the work Box and its operating policy with ` + "`loom box context --json`" + `;
+ancestor instructions outside a member Git root may not have loaded. Actor,
+Box and service account are distinct. Every Company Basecamp write, including
+routine updates/completion and remote drafts, needs the operator's explicit approval.
+Prepare locally; never mirror Company work into Personal Basecamp/knowledge.
+Normal registration uses this surrounding project's ` + "`.loom`" + `; portable member
+repos/client deliverables need no LOOM SDK, runtime declaration or protocol pack
+for ordinary coding/builds/tests. Main test-host limits do not dictate client
+language or architecture. Declare only requested managed effects.
+
+Before creating a repository/project or designing an infrastructure-bearing
+feature, plan its fit with deployed LOOM first: owning node/paths, actual build
+support and relevant existing runtime/data owners. Keep this in the existing
+plan, not another approval document. Use ` + "`manage-loom-projects`" + ` for detail;
+small edits need no new ceremony. Keep ordinary application code portable.
+
+Report substantial LOOM friction or suspected unsupported features with evidence
+in the project and Basecamp; use ` + "`manage-loom-projects`" + ` for reporting detail.
+Apply the selected Box's write/approval rules to that reporting; Company changes
+are proposals until the operator approves the exact external effect.
+Continue independent authorized work; do not silently bypass LOOM.
+
+Before changing LOOM declarations or managed resources, read ` + "`.loom/project.yaml`" + `,
 ` + "`.loom/agents/project.md`" + `, and the relevant files under
-` + "`.loom/agents/surfaces/`" + `. Use ` + "`search-loom-docs`" + ` for authoritative current
-guidance and ` + "`manage-loom-projects`" + ` for project lifecycle work.
+` + "`.loom/agents/surfaces/`" + `. Use ` + "`manage-loom-projects`" + ` for project lifecycle work.
+
+For known files, use scoped ` + "`rg --files`, `rg`" + ` and direct reads on the owning
+machine, without LOOM search, registration or health preflight. Use Notes for
+discovery and Provenance for relevant durable history; get exact references
+directly. Use local ` + "`--help`" + ` or ` + "`search-loom-docs`" + ` only when needed.
+
+When creating a durable knowledge note, add a supported primary ` + "`type`" + `, useful
+` + "`subject/`" + ` tags and links to existing relevant people/concepts/sources or project
+context. Keep the note with its project; preserve domain properties and tags.
+Use ` + "`people`" + ` for confirmed profiles and ` + "`related`" + ` for other useful links, following
+the shared Notes classification convention. No compulsory global search or
+invented link to fill a field. Code, scratch, generated indexes and imported
+originals do not need this treatment; bulk vault curation is a separate task.
+Links/tags do not equal current authority. Prefer owning-project context, note
+role and substantive chronology, not metadata/import mtimes. A later developed
+view can supersede an early exploration only with contextual evidence; preserve
+historical links, original dates and uncertainty without declaring newer facts true.
+
+Capture source-backed decisions, constraints, corrections and unresolved
+questions likely to matter again with ` + "`use-loom-provenance`" + ` and
+` + "`loom provenance candidate register`" + `; preserve actual producer/task identity,
+source posture and replay receipt. Skip routine edits and transient debugging.
+Pending candidates, Basecamp tasks and automatic project projections are not
+accepted semantic truth. Main agents use ` + "`loom provenance`" + `, not another host's
+standalone ledger; workers never adopt a named agent's identity.
 
 Edit canonical project sources only. Never edit generated ` + "`loom-storage`" + `
 views. Validate with ` + "`loom project validate .`" + ` and review

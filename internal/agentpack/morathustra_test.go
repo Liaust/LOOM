@@ -573,9 +573,8 @@ func TestWorkspaceMetadataParseErrorsDoNotEchoPrivateScalars(t *testing.T) {
 	}
 }
 
-// Source-contract regression for the accepted Phase 9D guidance. Actual native
-// staging/category/collision behavior is separately exercised in a temporary
-// Hermes fixture; these text checks are not a runtime authorization sandbox.
+// These portable ownership checks are not a runtime authorization sandbox or
+// evidence that an operator's profile has a particular catalogue or settings.
 func TestMorathustraNativeSkillOwnershipAndNixGuidance(t *testing.T) {
 	payloads := morathustraInstructions(t)
 	text := func(name string) string { return strings.Join(strings.Fields(string(payloads[name])), " ") }
@@ -597,9 +596,8 @@ func TestMorathustraNativeSkillOwnershipAndNixGuidance(t *testing.T) {
 		"WORKSPACE-MAP.md": {
 			".hermes/skills/created/<name>/SKILL.md", `category="created"`,
 			"The scaffold supplies only the SOUL there", "does not transfer ownership to the curator",
-			"Nineteen visible skills remained after unwanted skills were removed from selection",
-			"historical observation, not a curated or fixed catalogue or a ceiling",
-			"Do not infer a new-skill approval requirement from it", "four platform-hidden skills remain on disk",
+			"no private inventory or live count",
+			"Do not infer a new-skill approval requirement from it", "platform-hidden skills remain on disk",
 		},
 		"protocols/SKILL-CREATION-AND-PROMOTION.md": {
 			`skill_manage`, `action="create"`, `category="created"`,
@@ -618,15 +616,14 @@ func TestMorathustraNativeSkillOwnershipAndNixGuidance(t *testing.T) {
 			"Foreground-created skills are user-owned", "Category alone does not transfer curator ownership",
 			"the operator must explicitly opt", "hermes curator adopt <name>",
 			"adoption does not reset the inactivity clock", "Never forge an ownership marker",
-			"not deletion", "Nineteen visible skills remained after unwanted skills were removed from selection",
-			"historical observation, not a curated or fixed catalogue or a ceiling",
-			"Do not infer a new-skill approval requirement from it", "four platform-hidden Apple skills untouched",
+			"not deletion", "no private inventory or live count", "optional configuration example",
+			"Do not infer a new-skill approval requirement from it", "Keep platform-hidden skills untouched",
 		},
 	} {
 		content := text(name)
 		for _, want := range requirements {
 			if !strings.Contains(content, want) {
-				t.Errorf("%s lost Phase 9D guidance %q", name, want)
+				t.Errorf("%s lost portable ownership guidance %q", name, want)
 			}
 		}
 	}
@@ -636,25 +633,11 @@ func TestMorathustraNativeSkillOwnershipAndNixGuidance(t *testing.T) {
 			t.Errorf("skill protocol contains unsupported/bypass instruction %q", forbidden)
 		}
 	}
-	// The selection list is bounded at its own paragraph, so unrelated mentions
-	// elsewhere cannot hide an omission, extra name or duplicate.
-	start := strings.Index(protocol, "- airtable,")
-	end := strings.Index(protocol, "Nineteen visible skills remained")
-	if start < 0 || end <= start {
-		t.Fatal("missing exact bundled selection list")
-	}
-	got := strings.Split(strings.TrimSuffix(strings.TrimSpace(protocol[start+2:end]), "."), ",")
-	want := strings.Fields(`airtable arxiv ascii-video baoyu-infographic box claude-code
-        claude-design codebase-inspection codex competitor-news-monitor computer-use design-md dogfood
-        email-inbox-triage gif-search google-workspace hermes-agent-skill-authoring himalaya humanizer
-        inspecting-hermes-desktop-dom llm-wiki manim-video maps node-inspect-debugger notion obsidian
-        opencode p5js popular-web-designs product-price-monitor python-debugpy requesting-code-review
-        sdlc-review simplify-code songsee songwriting-and-ai-music spike systematic-debugging
-        teams-meeting-pipeline test-driven-development xurl youtube-content`)
-	for i := range got {
-		got[i] = strings.TrimSpace(got[i])
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("instruction disabled set drift: %v", got)
+	if failures := instructionBoundaryFailures(protocol, []string{
+		"Inspect the actual installed catalogue and the operator's selected skills",
+		"only when authorized", "ORCA's legacy skills are retired",
+		"do not disable native Hermes tools",
+	}, []string{"Disable the following exact", "Nineteen visible skills remained"}); len(failures) != 0 {
+		t.Fatal(failures)
 	}
 }

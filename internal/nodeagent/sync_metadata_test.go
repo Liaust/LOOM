@@ -74,7 +74,18 @@ func metadataAck(item LocalSyncOutboxItem) loomsync.SyncItemResult {
 }
 
 func TestSourceMetadataOwnerQueueTransportReplayAndOrdering(t *testing.T) {
+	testSourceMetadataOwnerQueueTransportReplayAndOrdering(t, false)
+}
+func TestQueueRecordsMetadataTransportReplayAndOrdering(t *testing.T) {
+	testSourceMetadataOwnerQueueTransportReplayAndOrdering(t, true)
+}
+func testSourceMetadataOwnerQueueTransportReplayAndOrdering(t *testing.T, records bool) {
 	s, config, state, a, original := metadataOwnerFixture(t)
+	if records {
+		if _, err := s.MigrateQueueRecords(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
 	first, err := s.QueueWatchedRootMetadata(state, a)
 	if err != nil {
 		t.Fatal(err)

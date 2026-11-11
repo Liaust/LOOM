@@ -16,6 +16,7 @@ func TestSupportedProjectRepositorySourceVersionsMatchValidator(t *testing.T) {
 		{ProjectContract: projectcontracts.ProjectSchemaV04, ReposContract: projectcontracts.ReposSchemaV03},
 		{ProjectContract: projectcontracts.ProjectSchemaV04, ReposContract: projectcontracts.ReposSchemaV04},
 		{ProjectContract: projectcontracts.ProjectSchemaV05, ReposContract: projectcontracts.ProjectSchemaV05},
+		{ProjectContract: projectcontracts.ProjectSchemaV06, ReposContract: projectcontracts.ProjectSchemaV06},
 	}
 	if got := projects.SupportedProjectRepositorySourceVersions(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("supported source versions = %#v, want %#v", got, want)
@@ -150,7 +151,7 @@ func TestPlanProjectRepositorySourceVersionTransitionRejectsUnknownVersions(t *t
 func TestDeclarationRepositorySourceV05UpgradeAndDowngrade(t *testing.T) {
 	v05 := projects.ProjectRepositorySourceVersions{ProjectContract: projectcontracts.ProjectSchemaV05, ReposContract: projectcontracts.ProjectSchemaV05}
 	for _, legacy := range projects.SupportedProjectRepositorySourceVersions() {
-		if legacy == v05 {
+		if legacy == v05 || legacy.ProjectContract == projectcontracts.ProjectSchemaV06 {
 			continue
 		}
 		transition, err := projects.PlanProjectRepositorySourceVersionTransition(&legacy, v05)
@@ -164,6 +165,36 @@ func TestDeclarationRepositorySourceV05UpgradeAndDowngrade(t *testing.T) {
 	for _, mixed := range []projects.ProjectRepositorySourceVersions{{ProjectContract: projectcontracts.ProjectSchemaV05, ReposContract: projectcontracts.ReposSchemaV04}, {ProjectContract: projectcontracts.ProjectSchemaV04, ReposContract: projectcontracts.ProjectSchemaV05}, {ProjectContract: projectcontracts.ProjectSchemaV05, ReposContract: "repos.contract.v0.5"}} {
 		if _, err := projects.PlanProjectRepositorySourceVersionTransition(nil, mixed); err == nil {
 			t.Fatalf("fictitious/mixed source accepted %+v", mixed)
+		}
+	}
+}
+
+func TestDeclarationRepositorySourceV06UpgradeAndDowngrade(t *testing.T) {
+	v06 := projects.ProjectRepositorySourceVersions{ProjectContract: projectcontracts.ProjectSchemaV06, ReposContract: projectcontracts.ProjectSchemaV06}
+	for _, previous := range projects.SupportedProjectRepositorySourceVersions() {
+		if previous == v06 {
+			continue
+		}
+		transition, err := projects.PlanProjectRepositorySourceVersionTransition(&previous, v06)
+		if err != nil || transition.Kind != projects.ProjectRepositorySourceVersionToV06 {
+			t.Fatalf("upgrade %v: %+v %v", previous, transition, err)
+		}
+		if _, err := projects.PlanProjectRepositorySourceVersionTransition(&v06, previous); !errors.Is(err, projects.ErrUnsupportedProjectRepositorySourceVersionTransition) {
+			t.Fatalf("downgrade %v: %v", previous, err)
+		}
+	}
+	for _, mixed := range []projects.ProjectRepositorySourceVersions{
+		{ProjectContract: projectcontracts.ProjectSchemaV06, ReposContract: projectcontracts.ProjectSchemaV05},
+		{ProjectContract: projectcontracts.ProjectSchemaV05, ReposContract: projectcontracts.ProjectSchemaV06},
+		{ProjectContract: projectcontracts.ProjectSchemaV06, ReposContract: projectcontracts.ReposSchemaV04},
+		{ProjectContract: projectcontracts.ProjectSchemaV06, ReposContract: "repos.contract.v0.6"},
+		{ProjectContract: "project.contract.v0.7", ReposContract: "project.contract.v0.7"},
+	} {
+		if _, err := projects.PlanProjectRepositorySourceVersionTransition(nil, mixed); !errors.Is(err, projects.ErrUnsupportedProjectRepositorySourceVersions) {
+			t.Fatalf("mixed/unknown next schema accepted %+v: %v", mixed, err)
+		}
+		if _, err := projects.PlanProjectRepositorySourceVersionTransition(&mixed, v06); !errors.Is(err, projects.ErrUnsupportedProjectRepositorySourceVersions) {
+			t.Fatalf("mixed/unknown history accepted %+v: %v", mixed, err)
 		}
 	}
 }

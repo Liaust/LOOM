@@ -547,8 +547,12 @@ func TestPlanContractsFromReportSummarizesCoverageContracts(t *testing.T) {
 	if plan.Status != OverallCritical {
 		t.Fatalf("status = %q, want %q", plan.Status, OverallCritical)
 	}
-	if plan.Mode != ModeMainBacked || plan.Summary.Satisfied != 2 || plan.Summary.NeedsAttention != 1 || plan.Summary.Critical != 1 {
+	if plan.Mode != ModeMainBacked || plan.Summary.Satisfied != 1 || plan.Summary.NeedsAttention != 2 || plan.Summary.Critical != 2 {
 		t.Fatalf("unexpected contract summary: %#v", plan)
+	}
+	postgres := findBackupContract(plan.Contracts, "postgres")
+	if postgres.ContractStatus != "needs_attention" || postgres.RequirementBasis != "recovery_assurance" || postgres.EvidenceBasis != "policy_declaration" || postgres.CurrentProtection != "unknown" {
+		t.Fatalf("declared policy promoted to recovery: %+v", postgres)
 	}
 	export := findBackupContract(plan.Contracts, "storage-export")
 	if export.ContractStatus != "satisfied" || export.Action != "keep exclusion documented" {
@@ -557,6 +561,71 @@ func TestPlanContractsFromReportSummarizesCoverageContracts(t *testing.T) {
 	retention := findBackupContract(plan.Contracts, "storage-retention")
 	if retention.ContractStatus != "needs_attention" || retention.Action == "" {
 		t.Fatalf("missing retention should need attention with action: %#v", retention)
+	}
+}
+
+func TestCoverageEvidenceSeparatesObservationCaptureAndProtection(t *testing.T) {
+	root := t.TempDir()
+	mustMkdir(t, filepath.Join(root, "object-store"))
+	mustMkdir(t, filepath.Join(root, "imports"))
+	mustMkdir(t, filepath.Join(root, "applications"))
+	manifestPath := filepath.Join(root, "backups/main/old/manifest.json")
+	writeManifest(t, manifestPath, maintenance.BackupManifest{Schema: maintenance.BackupManifestSchemaV09, BackupKind: "loom_main_state", CreatedAt: "2026-08-30T00:00:00Z", Paths: maintenance.BackupManifestPaths{MainDocuments: "main-documents"}, Policies: maintenance.BackupManifestPolicies{MainBox: "declared"}})
+	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	report, err := Check(context.Background(), Options{DataDir: root, MainBoxPath: filepath.Join(root, "box"), ImportsRoot: filepath.Join(root, "imports"), ApplicationDataRoot: filepath.Join(root, "applications"), ManifestPath: manifestPath, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.ManifestCapturedAt == nil || report.ManifestCapturedAt.Equal(now) || !report.ObservedAt.Equal(now) || report.ManifestClass != "local_main_backup" {
+		t.Fatalf("capture conflated with observation: %+v", report)
+	}
+	for key, basis := range map[string]string{"object-store": "source_inventory", "imports": "source_readability", "postgres": "policy_declaration", "latest-main-documents": "manifest_declaration", "latest-main-box-policy": "manifest_policy_declaration"} {
+		entry := findCoverageEntry(report.Entries, key)
+		if entry.Status != StatusCovered || entry.EvidenceBasis != basis || entry.CurrentProtection != "unknown" || !entry.ObservedAt.Equal(now) {
+			t.Fatalf("%s evidence: %+v", key, entry)
+		}
+	}
+	entry := findCoverageEntry(report.Entries, "latest-main-documents")
+	if entry.EvidenceRef != manifestPath || entry.EvidenceCapturedAt == nil || !entry.EvidenceCapturedAt.Equal(*report.ManifestCapturedAt) {
+		t.Fatal("dated manifest navigation lost")
+	}
+	if findCoverageEntry(report.Entries, "application-data").Status != StatusUnknown || findCoverageEntry(report.Entries, "latest-provenance-ledger").Status != StatusUnknown || !slices.Contains(report.CriticalMissing, "storage-retention") {
+		t.Fatal("unknowns or genuine critical findings lost")
+	}
+	contract := contractFromEntry(findCoverageEntry(report.Entries, "imports"))
+	if contract.ContractStatus == "satisfied" || contract.RequirementBasis != "recovery_assurance" {
+		t.Fatal("readability became recovery assurance")
+	}
+	ready := contractFromEntry(Entry{Evidence: Evidence{EvidenceBasis: "policy_declaration", RequirementBasis: "configured_readiness"}, Status: StatusCovered, Category: "policy", Policy: "declared"})
+	if ready.ContractStatus != "satisfied" || ready.CurrentProtection != "unknown" {
+		t.Fatal("configured readiness not separately qualified")
+	}
+}
+
+func TestCoverageManifestSelectionStaysInLocalProducerClass(t *testing.T) {
+	root := t.TempDir()
+	oldPath := filepath.Join(root, "20260830/manifest.json")
+	main := maintenance.BackupManifest{Schema: maintenance.BackupManifestSchemaV09, BackupKind: "loom_main_state", CreatedAt: "2026-08-30T00:00:00Z"}
+	writeManifest(t, oldPath, main)
+	other := main
+	other.BackupKind, other.CreatedAt = "operational_package", "2026-10-13T00:00:00Z"
+	writeManifest(t, filepath.Join(root, "latest-operational/manifest.json"), other)
+	invalid := main
+	invalid.CreatedAt = "not-a-time"
+	writeManifest(t, filepath.Join(root, "zz-invalid/manifest.json"), invalid)
+	got, _, found, err := resolveManifest(Options{BackupRoot: root})
+	if err != nil || !found || got != oldPath {
+		t.Fatalf("unrelated/invalid manifest selected: %s %t %v", got, found, err)
+	}
+	main.CreatedAt = "2026-10-01T00:00:00Z"
+	newPath := filepath.Join(root, "alphabetically-first/manifest.json")
+	writeManifest(t, newPath, main)
+	got, _, found, err = resolveManifest(Options{BackupRoot: root})
+	if err != nil || !found || got != newPath {
+		t.Fatal("newer same-class capture not selected")
+	}
+	if _, _, _, err := resolveManifest(Options{ManifestPath: filepath.Join(root, "latest-operational/manifest.json")}); err == nil {
+		t.Fatal("explicit unrelated package treated as local main backup")
 	}
 }
 
@@ -924,14 +993,15 @@ func TestHermesCoverageActivationMatrix(t *testing.T) {
 					t.Fatal("coverage gate coupled to runtime")
 				}
 				// Both archive formats share this boundary before source enumeration.
-				// Runtime-only bootstrap preserves the complete live/recovery exclusions.
+				// The fixture retains a trust key even when daily recovery is off;
+				// authenticated recovery stays included, excluding only staging.
 				exclusions, evidence, err := backupstrategy.HermesArchiveBoundary(context.Background(), []backupstrategy.DirectArchiveRoot{{Name: "agents", Path: opts.HermesRecovery.Workspace}}, nil, opts.HermesRecovery, time.Now())
 				if recovery {
 					if err == nil {
 						t.Fatal("cloud boundary accepted absent recovery")
 					}
 				} else {
-					want := []backupstrategy.DirectArchiveExclusion{{Root: "agents", RelativePath: ".hermes"}, {Root: "agents", RelativePath: "recovery"}}
+					want := []backupstrategy.DirectArchiveExclusion{{Root: "agents", RelativePath: ".hermes"}, {Root: "agents", RelativePath: "recovery/.staging"}}
 					if err != nil || len(evidence) != 0 || !slices.Equal(exclusions, want) {
 						t.Fatalf("bootstrap cloud boundary changed: %v %v %v", exclusions, evidence, err)
 					}

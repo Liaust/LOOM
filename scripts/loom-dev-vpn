@@ -4,7 +4,6 @@ set -euo pipefail
 MAIN_HOST="${LOOM_MAIN_HOST:-loom-dev}"
 WORKSPACE_HOST="${LOOM_WORKSPACE_HOST:-loom-workspace}"
 VPS_HOST="${LOOM_VPS_HOST:-loom-vps}"
-MAIN_HTTP_URL="${LOOM_MAIN_HTTP_URL:-http://10.44.0.2:8080}"
 
 usage() {
   cat <<EOF
@@ -13,14 +12,14 @@ Usage: scripts/loom-dev-vpn <command>
 Commands:
   status       Show concise WireGuard and LOOM listener status.
   ping         Ping the hub/main/workspace WireGuard addresses.
-  curl-health  Call the main loomd health endpoint from the workspace VM.
+  health       Read Main health over authenticated SSH/local transport.
+  curl-health  Compatibility alias for health (no unauthenticated HTTP call).
   wg-show      Show WireGuard state on VPS, main, and workspace.
 
 Environment:
   LOOM_MAIN_HOST       Main VM SSH alias. Default: loom-dev
   LOOM_WORKSPACE_HOST  Workspace VM SSH alias. Default: loom-workspace
   LOOM_VPS_HOST        VPS SSH alias. Default: loom-vps
-  LOOM_MAIN_HTTP_URL   Main private HTTP URL. Default: http://10.44.0.2:8080
 EOF
 }
 
@@ -61,7 +60,7 @@ cmd_ping() {
 }
 
 cmd_curl_health() {
-  remote "$WORKSPACE_HOST" "nix-shell -p curl jq --run 'curl -fsS $MAIN_HTTP_URL/v1/health | jq .'"
+  remote "$MAIN_HOST" 'loom --config /etc/loom/loom.env health --json'
 }
 
 cmd_wg_show() {
@@ -81,7 +80,7 @@ main() {
   case "$cmd" in
     status) cmd_status ;;
     ping) cmd_ping ;;
-    curl-health) cmd_curl_health ;;
+    health|curl-health) cmd_curl_health ;;
     wg-show) cmd_wg_show ;;
     -h|--help|help|"") usage ;;
     *) fail "unknown command: $cmd" ;;

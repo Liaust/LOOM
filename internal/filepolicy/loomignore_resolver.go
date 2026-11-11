@@ -2,6 +2,7 @@ package filepolicy
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -236,6 +238,63 @@ func (resolver *Resolver) PolicyFiles() []PolicyFile {
 	result := make([]PolicyFile, len(resolver.policyFiles))
 	copy(result, resolver.policyFiles)
 	return result
+}
+
+// CurrentForPaths checks policy inputs, not the source inventory. Ancestors of
+// each selected path also detect newly created nested rules before publication.
+func (resolver *Resolver) CurrentForPaths(paths []string) (bool, error) {
+	if !resolver.options.DiscoverUserRules {
+		return true, nil
+	}
+	expected := map[string]string{}
+	check := map[string]bool{}
+	for _, file := range resolver.policyFiles {
+		expected[filepath.Clean(file.Path)] = file.ContentHash
+		check[filepath.Clean(file.Path)] = true
+	}
+	paths = append(append([]string{}, paths...), "")
+	for _, relative := range paths {
+		normalized, err := validatedRelativePolicyPath(relative)
+		if err != nil {
+			return false, err
+		}
+		directory := resolver.root
+		if normalized != "" {
+			directory = filepath.Dir(filepath.Join(resolver.root, filepath.FromSlash(normalized)))
+		}
+		for ; ; directory = filepath.Dir(directory) {
+			check[filepath.Join(directory, ".loomignore")] = true
+			if directory == resolver.policyRoot {
+				break
+			}
+			if directory == filepath.Dir(directory) {
+				return false, fmt.Errorf("policy ancestry escaped its boundary")
+			}
+		}
+	}
+	for path := range check {
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR) {
+			if expected[path] != "" {
+				return false, nil
+			}
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		if !info.Mode().IsRegular() {
+			return false, fmt.Errorf(".loomignore %q must be a regular file", path)
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return false, err
+		}
+		if expected[path] != fmt.Sprintf("sha256:%x", sha256.Sum256(content)) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // MayIncludeDescendant reports whether traversal must enter an ignored

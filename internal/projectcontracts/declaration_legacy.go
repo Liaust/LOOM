@@ -220,13 +220,13 @@ func CompileDeclarationLegacyReferences(loaded LoadedProject, c DeclarationCompi
 		sources[s.Ref] = s
 	}
 	active, ok := sources[rootRef]
-	if !ok || active.SchemaVersion != ProjectSchemaV05 || !bytes.Equal(active.Raw, loaded.Raw) {
+	if !ok || active.SchemaVersion != d.SchemaVersion || !bytes.Equal(active.Raw, loaded.Raw) {
 		return nil, fmt.Errorf("legacy active snapshot mismatch")
 	}
 	if rootRef == CanonicalRootContractPath {
 		if other, ok := sources[LegacyRootContractPath]; ok {
 			duplicate, err := ParseProjectDeclaration(other.Raw)
-			if err != nil || other.SchemaVersion != ProjectSchemaV05 || !reflect.DeepEqual(duplicate, d) {
+			if err != nil || other.SchemaVersion != d.SchemaVersion || !reflect.DeepEqual(duplicate, d) {
 				return nil, fmt.Errorf("legacy active layout conflict")
 			}
 		}

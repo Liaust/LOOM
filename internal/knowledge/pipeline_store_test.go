@@ -1,9 +1,15 @@
 package knowledge
 
 import (
+	"context"
 	"database/sql"
+	"path/filepath"
+	"reflect"
+
 	"encoding/json"
 	"fmt"
+	"loom.local/loom/internal/migrations"
+	"loom.local/loom/internal/search"
 	"strings"
 	"testing"
 	"time"
@@ -334,4 +340,162 @@ func assignScanValue(dest any, value any) error {
 		return fmt.Errorf("unsupported scan destination %T", dest)
 	}
 	return nil
+}
+
+func TestPipelineStoreWritePageBoundsAndParameters(t *testing.T) {
+	rows := make([][]any, pipelineWriteBatchRows+1)
+	for i := range rows {
+		rows[i] = []any{"café ' quote", nil, i, json.RawMessage(`{"location":"page:2"}`)}
+	}
+	if end := pipelineWriteBatchEnd(rows, 0); end != pipelineWriteBatchRows {
+		t.Fatalf("row-limited end = %d", end)
+	}
+	if end := pipelineWriteBatchEnd(nil, 0); end != 0 {
+		t.Fatalf("empty end = %d", end)
+	}
+	types := []string{"text", "text", "integer", "jsonb"}
+	values, args := pipelineWriteValues(rows[:2], types)
+	if values != "($1::text,$2::text,$3::integer,$4::jsonb),($5::text,$6::text,$7::integer,$8::jsonb)" ||
+		!reflect.DeepEqual(args, append(append([]any{}, rows[0]...), rows[1]...)) {
+		t.Fatalf("parameter identity/order changed: %s %#v", values, args)
+	}
+	rows = [][]any{{strings.Repeat("界", pipelineWriteBatchBytes/3)}, {"next"}}
+	if end := pipelineWriteBatchEnd(rows, 0); end != 1 {
+		t.Fatalf("oversized scalar must stand alone: end = %d", end)
+	}
+	rows = [][]any{{json.RawMessage(strings.Repeat(" ", pipelineWriteBatchBytes/2))}, {strings.Repeat("x", pipelineWriteBatchBytes/2)}}
+	if end := pipelineWriteBatchEnd(rows, 0); end != 1 {
+		t.Fatalf("JSON bytes not bounded: end = %d", end)
+	}
+}
+
+// This uses the existing guarded disposable DB owner. When no DB is configured,
+// the integrator must run it on Main; local unit checks are not SQL acceptance.
+func TestPipelineStoreBulkReplacementPostgres(t *testing.T) {
+	db, url := boxSourcesDatabase(t)
+	if _, err := migrations.Up(t.Context(), url, filepath.Join("..", "..", "migrations")); err != nil {
+		t.Fatal(err)
+	}
+	s, object := pipelineFixture(t, db, "markdown", "text/markdown", "bulk writes", time.Now().UTC())
+	run, err := s.EnsurePipelineRun(t.Context(), object, PipelinePolicy{}, false, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, err := s.store.getKnowledgeObjectVersion(t.Context(), run.KnowledgeObjectVersionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputs := make([]TextChunkInput, pipelineWriteBatchRows+1)
+	linkInputs := make([]ExtractedLink, len(inputs))
+	for i := range inputs {
+		text := fmt.Sprintf("café ' 日本語 %d", i)
+		// Deliberately descending/noncontiguous ordinals must never be reassigned.
+		inputs[i] = TextChunkInput{Index: (len(inputs) - i) * 2, Text: text, ChunkHash: hashArtifactValue(text),
+			StartOffset: i * 100, EndOffset: i*100 + len(text), TokenCountEstimate: i + 1, StructuralPath: "heading ' / 界",
+			ArtifactIDs: []string{"artifact-test"}, SourceLocators: []string{"page:2"}, SourceKinds: []string{"native_text"}}
+		linkInputs[i] = ExtractedLink{Kind: LinkKindWikilink, RawTarget: fmt.Sprintf("日本語 '%d", i), NormalizedTarget: fmt.Sprintf("target/%d", i), LinkText: text}
+	}
+	tx, err := db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	chunks, err := s.replaceKnowledgeChunksTx(t.Context(), tx, object, version, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	links, err := s.replaceObjectLinksTx(t.Context(), tx, object, linkInputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The lexical writer extends an existing search document, as in production.
+	if _, err := tx.ExecContext(t.Context(), `INSERT INTO search.search_documents
+	 (search_document_id,source_kind,source_id,body,body_hash,tsv,index_version)
+	 VALUES ($1,'object_metadata',$2,'bulk',$3,to_tsvector('simple','bulk'),'bulk-test')`,
+		"search_document_"+object.KnowledgeObjectID, object.KnowledgeObjectID, hashArtifactValue("bulk")); err != nil {
+		t.Fatal(err)
+	}
+	lexical, err := search.UpsertLexicalDocumentTx(t.Context(), tx, search.LexicalDocumentInput{
+		SearchDocumentID: "search_document_" + object.KnowledgeObjectID, IndexVersion: "bulk-test", SourceKind: "knowledge_object", SourceID: object.KnowledgeObjectID,
+		Fields: []search.LexicalFieldInput{{Key: search.LexicalFieldBody, Text: strings.Repeat("café café 日本語 ", 3) + bulkLexicalUniqueTerms()}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	for i, chunk := range chunks {
+		input := inputs[i]
+		if chunk.ChunkIndex != input.Index || chunk.ChunkText != input.Text || chunk.ChunkHash != input.ChunkHash ||
+			*chunk.StartOffset != input.StartOffset || *chunk.EndOffset != input.EndOffset || *chunk.TokenCountEstimate != input.TokenCountEstimate ||
+			chunk.KnowledgeObjectVersionID == nil || *chunk.KnowledgeObjectVersionID != version.KnowledgeObjectVersionID ||
+			!strings.Contains(string(chunk.Metadata), "page:2") || chunk.IndexedAt != nil {
+			t.Fatalf("chunk %d changed identity/offset/provenance: %#v", i, chunk)
+		}
+		if links[i].RawTarget != linkInputs[i].RawTarget || links[i].LinkText != linkInputs[i].LinkText || links[i].ChunkID != nil || links[i].TargetKnowledgeObjectID != nil {
+			t.Fatalf("link %d changed order/null semantics: %#v", i, links[i])
+		}
+	}
+	var termCount, frequency int
+	if err = db.QueryRow(`SELECT count(*),max(term_frequency) FROM search.lexical_terms WHERE search_document_id=$1`, lexical.SearchDocumentID).Scan(&termCount, &frequency); err != nil || termCount != len(lexical.Terms) || frequency != 6 {
+		t.Fatalf("bulk terms count/frequency = %d/%d: %v", termCount, frequency, err)
+	}
+	// A later-page uniqueness failure must roll back the earlier delete and page.
+	bad := append([]TextChunkInput{}, inputs...)
+	bad[len(bad)-1].Index = bad[0].Index
+	tx, err = db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.replaceKnowledgeChunksTx(t.Context(), tx, object, version, bad); err == nil {
+		t.Fatal("expected duplicate ordinal failure")
+	}
+	if err = tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	var original int
+	if err = db.QueryRow(`SELECT count(*) FROM knowledge.knowledge_chunks WHERE knowledge_chunk_id=$1`, chunks[0].KnowledgeChunkID).Scan(&original); err != nil || original != 1 {
+		t.Fatalf("rollback lost original chunk: %d %v", original, err)
+	}
+	// Empty pages still delete the old terms/chunks/links atomically;
+	// no invalid VALUES/unnest page is issued.
+	tx, err = db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if chunks, err := s.replaceKnowledgeChunksTx(context.Background(), tx, object, version, nil); err != nil || len(chunks) != 0 {
+		t.Fatalf("empty chunks: %v", err)
+	}
+	if links, err := s.replaceObjectLinksTx(t.Context(), tx, object, nil); err != nil || len(links) != 0 {
+		t.Fatalf("empty links: %v", err)
+	}
+	if _, err := search.UpsertLexicalDocumentTx(t.Context(), tx, search.LexicalDocumentInput{SearchDocumentID: lexical.SearchDocumentID, IndexVersion: "empty", SourceKind: "knowledge_object", SourceID: object.KnowledgeObjectID}); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"knowledge.knowledge_chunks", "knowledge.object_links", "search.lexical_terms"} {
+		key, id := "knowledge_object_version_id", version.KnowledgeObjectVersionID
+		if table == "knowledge.object_links" {
+			key, id = "source_knowledge_object_id", object.KnowledgeObjectID
+		}
+		if table == "search.lexical_terms" {
+			key, id = "search_document_id", lexical.SearchDocumentID
+		}
+		var count int
+		if err := db.QueryRow(`SELECT count(*) FROM `+table+` WHERE `+key+`=$1`, id).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("empty replacement %s: %d %v", table, count, err)
+		}
+	}
+}
+
+func bulkLexicalUniqueTerms() string {
+	var text strings.Builder
+	for i := 0; i < 300; i++ {
+		fmt.Fprintf(&text, " term%d", i)
+	}
+	return text.String()
 }

@@ -43,6 +43,7 @@ type ProjectPhysicalRestorePlan struct {
 	Workspace        WorkspaceArchivePlan                 `json:"workspace"`
 	ActivationState  WorkspaceActivationState             `json:"activation_state"`
 	PlanDigest       string                               `json:"plan_digest"`
+	ActiveLocation   *WorkspaceActiveLocation             `json:"active_location,omitempty"`
 }
 
 // PlanProjectPhysicalRestore requires the preserved project archive plan:
@@ -98,6 +99,13 @@ func (s ProjectRuntimeService) PlanProjectPhysicalRestore(ctx context.Context, r
 		Registration: detail, Repository: repository,
 		WorkspaceRequest: workspaceRequest, Workspace: workspace,
 		ActivationState: WorkspaceActivationInactive,
+		ActiveLocation:  cloneWorkspaceActiveLocation(archivePlan.ActiveLocation),
+	}
+	if workspace.Placement != nil {
+		plan.SchemaVersion = "storage.project_physical_restore_plan.v2"
+	}
+	if workspace.SchemaVersion == WorkspaceArchivePlanSchemaVersionV3 {
+		plan.SchemaVersion = ProjectPhysicalRestorePlanSchemaVersionV3
 	}
 	if repository.Source != nil {
 		plan.RepositoryRoot = repository.Source.ProjectRoot
@@ -148,26 +156,37 @@ func (s ProjectRuntimeService) readProjectRestoreEvidence(ctx context.Context, r
 		archive, err = planner.InspectArchive(ctx, state.OperationID)
 	}
 	if err == nil {
-		err = validateProjectRestoreArchiveEvidence(archivePlan, state, detail, repository, archive)
+		err = validateProjectRestoreArchiveEvidence(archivePlan, s.WorkspaceRoots, state, detail, repository, archive)
 	}
 	return detail, repository, archive, state, err
 }
 
-func validateProjectRestoreArchiveEvidence(archivePlan ProjectPhysicalArchivePlan, state projects.ProjectPhysicalArchiveState, detail projects.ProjectRegistrationDetail, repository projects.ProjectRepositoryReadModel, archive WorkspaceArchiveInspection) error {
+func validateProjectRestoreArchiveEvidence(archivePlan ProjectPhysicalArchivePlan, roots TrustedWorkspaceRoots, state projects.ProjectPhysicalArchiveState, detail projects.ProjectRegistrationDetail, repository projects.ProjectRepositoryReadModel, archive WorkspaceArchiveInspection) error {
 	if state.Restore != nil {
 		return fmt.Errorf("project archive already has restore intent; recover its exact reviewed plan")
 	}
 	if err := validateProjectPhysicalArchiveStateAgainstPlan(archivePlan, state, archive, true); err != nil {
 		return err
 	}
-	if err := validateCurrentProjectArchiveSnapshots(archivePlan, detail, repository, &state); err != nil {
+	if err := validateCurrentProjectArchiveSnapshots(archivePlan, roots, detail, repository, &state); err != nil {
 		return err
 	}
 	return validateArchivedProjectPhysicalState(archivePlan, detail, repository, state)
 }
 
 func ValidateProjectPhysicalRestorePlan(plan ProjectPhysicalRestorePlan, roots TrustedWorkspaceRoots) error {
-	if plan.SchemaVersion != ProjectPhysicalRestorePlanSchemaVersion || plan.ActivationState != WorkspaceActivationInactive {
+	if plan.Workspace.SchemaVersion == WorkspaceArchivePlanSchemaVersionV3 {
+		if plan.SchemaVersion != ProjectPhysicalRestorePlanSchemaVersionV3 || plan.ArchivePlan.SchemaVersion != ProjectPhysicalArchivePlanSchemaVersionV3 ||
+			!sameWorkspaceActiveLocation(plan.ActiveLocation, plan.ArchivePlan.ActiveLocation) || !sameWorkspaceActiveLocation(plan.ActiveLocation, plan.Workspace.ActiveLocation) {
+			return fmt.Errorf("v3 project restore must preserve the exact archived active location proof")
+		}
+		if err := validateProjectActiveLocationSnapshot(plan.ActiveLocation, plan.ArchivePlan.Custody, plan.Registration, plan.Repository); err != nil {
+			return err
+		}
+	} else if plan.ActiveLocation != nil || plan.ArchivePlan.ActiveLocation != nil || (plan.Workspace.Placement == nil && plan.SchemaVersion != ProjectPhysicalRestorePlanSchemaVersion) || (plan.Workspace.Placement != nil && plan.SchemaVersion != "storage.project_physical_restore_plan.v2") {
+		return fmt.Errorf("project restore plan must use the supported schema and inactive runtime posture")
+	}
+	if plan.ActivationState != WorkspaceActivationInactive {
 		return fmt.Errorf("project restore plan must use the supported schema and inactive runtime posture")
 	}
 	if err := validateProjectRestoreRequest(plan.Request); err != nil {
@@ -199,7 +218,7 @@ func ValidateProjectPhysicalRestorePlan(plan ProjectPhysicalRestorePlan, roots T
 		}
 		repository.Source.ProjectRoot = plan.RepositoryRoot
 	}
-	if err := validateProjectRestoreArchiveEvidence(archivePlan, plan.ArchiveState, plan.Registration, repository, plan.Archive); err != nil {
+	if err := validateProjectRestoreArchiveEvidence(archivePlan, roots, plan.ArchiveState, plan.Registration, repository, plan.Archive); err != nil {
 		return err
 	}
 	workspace := plan.Workspace
@@ -210,7 +229,7 @@ func ValidateProjectPhysicalRestorePlan(plan ProjectPhysicalRestorePlan, roots T
 		workspace.OperationID == plan.ArchiveState.OperationID || workspace.ObjectID != archivePlan.Custody.ProjectID ||
 		workspace.Slug != archivePlan.Custody.ProjectSlug || workspace.ArchiveOperationID != plan.ArchiveState.OperationID ||
 		workspace.ArchiveManifestDigest != plan.ArchiveState.ArchiveManifestDigest || workspace.ActorID != plan.Request.ActorID ||
-		workspace.Source.Path != archivePlan.Workspace.Destination.Path || workspace.Destination.Path != archivePlan.Workspace.Source.Path ||
+		(workspace.Source.Path != archivePlan.Workspace.Destination.Path && (workspace.Placement == nil || plan.Archive.CurrentPayload == nil || workspace.Source.Path != *plan.Archive.CurrentPayload || workspace.Placement.RelocationID != plan.Archive.RelocationID)) || workspace.Destination.Path != archivePlan.Workspace.Source.Path ||
 		!SamePathIdentity(workspace.Source.Identity, archivePlan.Workspace.Source.Identity) ||
 		!reflect.DeepEqual(workspace.Inventory, archivePlan.Workspace.Inventory) {
 		return fmt.Errorf("project restore workspace plan contradicts archived identity or custody")

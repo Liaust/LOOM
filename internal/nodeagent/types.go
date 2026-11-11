@@ -30,6 +30,9 @@ type Config struct {
 	RuntimeClass             string                     `json:"runtime_class"`
 	BoxRootPath              string                     `json:"box_root_path,omitempty"`
 	BoxStateRoot             string                     `json:"box_state_root,omitempty"`
+	BoxesFile                string                     `json:"boxes_file,omitempty"`
+	BoxCatalogDataRoot       string                     `json:"box_catalog_data_root,omitempty"`
+	BoxCatalogStorageRoot    string                     `json:"box_catalog_storage_root,omitempty"`
 	HeartbeatIntervalSeconds int                        `json:"heartbeat_interval_seconds"`
 	PollIntervalSeconds      int                        `json:"poll_interval_seconds"`
 	BackupTransport          BackupTransportConfig      `json:"backup_transport,omitempty"`

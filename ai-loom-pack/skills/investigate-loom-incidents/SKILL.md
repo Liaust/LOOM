@@ -60,18 +60,22 @@ personal data. Never put credentials, Proton session state, tokens, private
 memory, or unrelated user files into Git, Notes, Basecamp, handoffs, or support
 artifacts. Correlation IDs and timestamps should use the system's actual values.
 
-## Current Versus Future
+## Current Environment
 
-Verify every diagnostic command in current CLI help. Mark deferred repair or
-observability capabilities explicitly. The completed Mac evidence covers only
-Orca's disposable local lifecycle, narrow WireGuard/VPS preflight, and Proton
-CLI version/help plus fail-closed no-session behavior. Main/headless,
-browser/mobile/Relay, live TLS/WSS or WireGuard client paths, Proton content and
-credential use, restart continuity, and Mac-off operation remain deferred.
+Main is the live system. MINA uses native Hermes; independent native Codex
+and direct SSH/CLI remain available. ORCA is retired. Existing Main browser and Mac bridge
+tools have separate targets. Check the affected route, not every node, and use
+known commands directly; consult current help for an unfamiliar operation.
+Old acceptance notes establish only their dated scenario, not present availability
+or a blanket restriction. Report a route as unavailable only from current evidence.
 
 ## Escalation
 
-Route project defects to the project owner/worker, host and deployment defects
-to the integrator/operator, credential workflow defects to the Proton owner,
-and LOOM-core defects to the repository developer. Skills organize the handoff;
-they do not grant permission to perform the repair.
+Fix task-owned project defects directly. The current agent may implement a
+LOOM-core repair in its real development checkout when that scope is authorized;
+coordinate actual concurrent owners rather than requiring another coding agent.
+For host policy, credentials or another effect outside the task, request the
+exact missing authority or involve its actual owner. Hold only dependent work
+and continue independent implementation. Skills organize work; they do not grant
+permission or justify bypassing a failed supported interface with an unmanaged
+service, copied validators or a substitute test platform.

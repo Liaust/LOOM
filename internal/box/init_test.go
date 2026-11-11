@@ -11,6 +11,53 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestRetiredLaneStaysDisabledWithoutDeletingPayload(t *testing.T) {
+	root := t.TempDir()
+	resolved := Resolved{RootPath: root, Profile: ProfileWorkspace, OwnerNode: "macbook"}
+	if _, err := Init(InitInput{Resolved: resolved}); err != nil {
+		t.Fatal(err)
+	}
+	payload := filepath.Join(root, DefaultLaneDirName, "pending.txt")
+	if err := os.WriteFile(payload, []byte("pending"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := Init(InitInput{Resolved: resolved, RetireLane: true, DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preview.StatusAfter.Contract.Areas[AreaLane].Enabled {
+		t.Fatal("preview changed contract")
+	}
+	result, err := Init(InitInput{Resolved: resolved, RetireLane: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.StatusAfter.LaneState != "disabled" || len(result.BackupFiles) == 0 {
+		t.Fatalf("retirement: %#v", result)
+	}
+	if data, err := os.ReadFile(payload); err != nil || string(data) != "pending" {
+		t.Fatalf("payload changed: %q %v", data, err)
+	}
+	if err := os.RemoveAll(filepath.Join(root, DefaultLaneDirName)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, ".loom/policies/lane.transfer.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	result, err = Init(InitInput{Resolved: resolved})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.StatusAfter.State != "ok" || result.StatusAfter.LaneState != "disabled" {
+		t.Fatalf("disabled area affects health: %#v", result.StatusAfter)
+	}
+	for _, path := range []string{DefaultLaneDirName, ".loom/policies/lane.transfer.yaml"} {
+		if _, err := os.Stat(filepath.Join(root, path)); !os.IsNotExist(err) {
+			t.Fatalf("repair recreated %s: %v", path, err)
+		}
+	}
+}
+
 func TestInitCreatesCanonicalBoxAndIsIdempotent(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "LOOM Box")
 	resolved := Resolved{
@@ -54,8 +101,6 @@ func TestInitCreatesCanonicalBoxAndIsIdempotent(t *testing.T) {
 		"Documents/AGENTS.md",
 		DefaultLaneDirName + "/README.md",
 		".loom/box.yaml",
-		".loom/policies/notes.watch.yaml",
-		".loom/policies/documents.watch.yaml",
 		".loom/policies/lane.transfer.yaml",
 	} {
 		assertFile(t, root, rel)
@@ -69,6 +114,17 @@ func TestInitCreatesCanonicalBoxAndIsIdempotent(t *testing.T) {
 	}
 	if contract.BoxID != "box_test" || contract.Profile != ProfileWorkspace {
 		t.Fatalf("unexpected contract: %#v", contract)
+	}
+	if contract.SchemaVersion != FolderPolicySchemaVersion || contract.Areas[AreaNotes].Watch == nil || contract.Areas[AreaDocuments].Watch == nil {
+		t.Fatalf("fresh Box must own its watch settings inline: %#v", contract)
+	}
+	for _, area := range []string{AreaNotes, AreaDocuments} {
+		if contract.Policies[area] != "" {
+			t.Fatalf("fresh Box references a separate %s watch policy", area)
+		}
+		if _, err := os.Stat(filepath.Join(root, ".loom", "policies", area+".watch.yaml")); !os.IsNotExist(err) {
+			t.Fatalf("fresh Box created a separate %s watch policy: %v", area, err)
+		}
 	}
 	if _, ok := contract.Areas[AreaDropzone]; ok {
 		t.Fatalf("workspace contract must omit Dropzone: %#v", contract.Areas)

@@ -117,20 +117,26 @@ func (s Server) handleCloudSnapshotStatusLive(w http.ResponseWriter, r *http.Req
 		producer = maintenance.CloudProtectionStatus{Available: false, WorkerState: "unavailable", Verification: "unknown", UpdatedAt: time.Now().UTC()}
 	}
 	report := struct {
-		Cloud     cloudstorage.StatusReport         `json:"cloud"`
-		Snapshots *cloudstorage.SnapshotListResult  `json:"snapshots,omitempty"`
-		Producer  maintenance.CloudProtectionStatus `json:"producer"`
-	}{Cloud: status, Producer: producer}
+		Cloud              cloudstorage.StatusReport         `json:"cloud"`
+		Snapshots          *cloudstorage.SnapshotListResult  `json:"snapshots,omitempty"`
+		Producer           maintenance.CloudProtectionStatus `json:"producer"`
+		InventoryStatus    string                            `json:"inventory_status"`
+		InventoryErrorCode string                            `json:"inventory_error_code,omitempty"`
+	}{Cloud: status, Producer: producer, InventoryStatus: "not_requested"}
 	if loaded.Config.Enabled && status.Status == "reachable" {
 		list, err := cloudstorage.ListSnapshots(ctx, cloudstorage.SnapshotListInput{
 			Config: loaded.Config,
 			NodeID: firstNonEmptyHTTPCloud(input.NodeID, s.services.RuntimeConfig.NodeID),
 		})
 		if err != nil {
-			s.writeError(w, correlationID, http.StatusInternalServerError, "cloud.snapshot_list_failed", "cloud", "snapshots", "Could not list cloud snapshots.", err)
+			report.InventoryStatus = "unavailable"
+			report.InventoryErrorCode = "cloud.snapshot_list_failed"
+			s.logger.Warn("cloud inventory unavailable; producer evidence retained", "correlation_id", correlationID, "error", err)
+			response.WriteJSON(w, http.StatusOK, response.Success(correlationID, report))
 			return
 		}
 		report.Snapshots = &list
+		report.InventoryStatus = "available"
 	}
 	response.WriteJSON(w, http.StatusOK, response.Success(correlationID, report))
 }

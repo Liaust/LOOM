@@ -3,17 +3,304 @@ package loomcli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 	pc "loom.local/loom/internal/projectcontracts"
 	"loom.local/loom/internal/response"
 )
+
+func TestProjectContextCurrentDevelopmentPrecedesRepeatedEvidence(t *testing.T) {
+	status := webDAVContextFixture()
+	status.Development.Purpose = projectPurposeScaffold
+	status.Development.Progress = "Archive and restore complete; useful work preserved. " + strings.Repeat("retained evidence ", 80)
+	status.Development.CurrentFocus = "Continue only the next selected episode."
+	status.Development.NextAction = "No pending archive action."
+	status.Development.Conversations = &pc.DeclarationConversationIndex{Path: ".project/CONVERSATIONS.md", Hash: "source-hash", Excerpt: "Coding | exact-thread | main | repos/code\n" + strings.Repeat("context ", 100)}
+	for i := 0; i < 8; i++ {
+		status.Resources[pc.ResourceKey(fmt.Sprintf("lab_%d", i))] = status.Resources["webdav"]
+	}
+	view := newProjectContext(status)
+	if view.Development == nil || view.Development.Purpose != "" || view.Development.PurposeStatus != "unset_scaffold" || view.Development.CurrentFocus != status.Development.CurrentFocus || !strings.HasPrefix(view.Development.Progress, "Archive and restore complete") || view.Omitted["development_excerpt"] == 0 || view.Omitted["resources"] == 0 || view.Omitted["development_detail"] != 0 || view.Development.Conversations == nil {
+		t.Fatalf("optional detail displaced current context: %+v", view)
+	}
+	for _, jsonMode := range []bool{false, true} {
+		var out bytes.Buffer
+		cmd := &cobra.Command{}
+		cmd.SetOut(&out)
+		if err := renderProjectContext(cmd, &options{jsonOutput: jsonMode}, view); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), "Archive and restore complete") || !strings.Contains(out.String(), "Continue only the next selected episode.") || strings.Contains(out.String(), projectPurposeScaffold) {
+			t.Fatal("current state absent or scaffold presented as purpose", out.String())
+		}
+		if jsonMode {
+			decodeContext(t, out.String())
+		} else if out.Len() > 4096 || strings.Count(out.String(), "\n") > 16 {
+			t.Fatal("human budget exceeded", out.String())
+		}
+	}
+	// Exact generated prose only: real user purposes containing similar words survive.
+	status.Development.Purpose = projectPurposeScaffold + " This is a writing exercise."
+	view = newProjectContext(status)
+	if view.Development.Purpose != status.Development.Purpose || view.Development.PurposeStatus != "source_declared" {
+		t.Fatal("user text mistaken for scaffold")
+	}
+	raw, err := os.ReadFile("../projectcontracts/project_development_pack/templates/.project/OVERVIEW.md")
+	if err != nil || !strings.Contains(string(raw), projectPurposeScaffold) {
+		t.Fatal("scaffold recognition no longer matches generated source", err)
+	}
+}
+
+func TestProjectContextCarriesExactExcerptDisclosure(t *testing.T) {
+	status := webDAVContextFixture()
+	status.Development.Progress = "Backend source excerpt..."
+	status.Development.TruncatedFields = []string{"progress", "progress", "untrusted\nfield"}
+	view := newProjectContext(status)
+	if !reflect.DeepEqual(view.Development.TruncatedFields, []string{"progress"}) {
+		t.Fatal("upstream disclosure lost or unsafe fields copied", view.Development)
+	}
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := renderProjectContext(cmd, &options{}, view); err != nil || !strings.Contains(out.String(), "excerpts: progress (read .project sources for full text)") {
+		t.Fatal("human excerpt not disclosed", err, out.String())
+	}
+	status.Development.TruncatedFields = nil
+	view = newProjectContext(status)
+	if len(view.Development.TruncatedFields) != 0 {
+		t.Fatal("authored ellipsis mistaken for truncation")
+	}
+	status.Development.Progress = strings.Repeat("字", 1000)
+	view = newProjectContext(status)
+	if !reflect.DeepEqual(view.Development.TruncatedFields, []string{"progress"}) || !utf8.ValidString(view.Development.Progress) {
+		t.Fatal("CLI truncation not disclosed", view.Development)
+	}
+}
+
+func webDAVContextFixture() pc.DeclarationStatus {
+	s := contextFixture()
+	s.ObservedAt = "2026-10-12T08:00:00Z"
+	s.Development = &pc.DeclarationDevelopmentContext{Posture: "ready", Purpose: "Serve Zotero files", CurrentFocus: "Routine use", Progress: "Deployed", NextAction: "Continue ordinary project work"}
+	s.Readiness.Queued.State, s.Readiness.Applied.State = pc.DeclarationUnknown, pc.DeclarationUnknown
+	s.Resources = map[pc.ResourceKey]pc.DeclarationResourceStatus{
+		"source": {Path: "/owner/quote's project/src", Binding: pc.DeclarationBinding{Kind: pc.DeclarationRepository, RepositoryID: "verified-repository"}},
+		"files":  {Binding: pc.DeclarationBinding{Kind: pc.DeclarationKnowledge}},
+		"webdav": {Binding: pc.DeclarationBinding{Kind: pc.DeclarationApplication}, Readiness: pc.DeclarationReadiness{
+			Desired:   pc.DeclarationFact{State: pc.DeclarationSatisfied, Revision: "desired-application-input"},
+			Applied:   pc.DeclarationFact{State: pc.DeclarationSatisfied, Revision: "installation-revision", EvidenceRef: "application-installation:webdav"},
+			Healthy:   pc.DeclarationFact{State: pc.DeclarationSatisfied, Revision: "generation-revision", EvidenceRef: "application-installation:webdav"},
+			Protected: pc.DeclarationFact{State: pc.DeclarationSatisfied, Revision: "backup-manifest-revision", EvidenceRef: "backup-operation"},
+			Verified:  pc.DeclarationFact{State: pc.DeclarationUnknown},
+			Endpoint:  &pc.ApplicationEndpointStatus{URL: "https://webdav.example.test", DNS: "satisfied", TLS: "satisfied", Routing: "satisfied", HTTPStatus: 207, ObservedAt: time.Date(2026, 10, 12, 7, 59, 0, 0, time.UTC)},
+		}},
+	}
+	return s
+}
+
+func TestProjectContextWorkStateIndependentOfReadiness(t *testing.T) {
+	for _, state := range []string{"", "working", "passive", "archived", "passive\ncommand"} {
+		status := webDAVContextFixture()
+		status.WorkState = state
+		before := newProjectContext(status)
+		status.WorkState = ""
+		baseline := newProjectContext(status)
+		want := ""
+		if pc.ValidProjectWorkState(state) {
+			want = state
+		}
+		if before.WorkState != want || before.Readiness != baseline.Readiness || before.Lifecycle != baseline.Lifecycle {
+			t.Fatal("classification changed readiness/lifecycle", before)
+		}
+		raw, err := json.Marshal(before)
+		if err != nil || bytes.Contains(raw, []byte(`"work_state":"`)) != (want != "") {
+			t.Fatalf("context JSON %s: %v", raw, err)
+		}
+		cmd := &cobra.Command{}
+		var output bytes.Buffer
+		cmd.SetOut(&output)
+		if err := renderProjectContext(cmd, &options{}, before); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(output.String(), "Work state: "+state+" (independent of runtime status)") != (want != "") {
+			t.Fatal(output.String())
+		}
+		if len(raw)+1 > 8192 || output.Len() > 4096 || strings.Count(output.String(), "\n") > 16 {
+			t.Fatal("work state exceeded context budget")
+		}
+	}
+}
+
+func TestProjectContextConversationIndexPreservesPointerAndBounds(t *testing.T) {
+	status := webDAVContextFixture()
+	index := &pc.DeclarationConversationIndex{Path: ".project/CONVERSATIONS.md", Hash: "exact-source-hash", Excerpt: "# Conversations\nCoding | exact-thread | main | repos/code | neutral\n"}
+	status.Development.Conversations = index
+	view := newProjectContext(status)
+	if view.Development.Conversations == nil || !reflect.DeepEqual(view.Development.Conversations, index) || !view.fits() {
+		t.Fatal("known conversation pointer lost")
+	}
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := renderProjectContext(cmd, &options{}, view); err != nil || !strings.Contains(out.String(), "exact-thread") {
+		t.Fatal("human context hides conversation pointer")
+	}
+	index.Excerpt = "bad\x1b[31m"
+	view = newProjectContext(status)
+	if view.Development.Conversations == nil || view.Development.Conversations.Hash != index.Hash || view.Development.Conversations.Excerpt != "" || !view.Development.Conversations.Truncated || view.Omitted["conversation_excerpt"] != 1 {
+		t.Fatal("unsafe excerpt lost safe file pointer or was rendered")
+	}
+}
+
+func TestProjectContextConversationNavigationPrecedesOptionalProse(t *testing.T) {
+	status := webDAVContextFixture()
+	status.Development.Purpose = strings.Repeat("p", 1800)
+	status.Development.CurrentFocus = strings.Repeat("f", 1800)
+	status.Development.Progress = strings.Repeat("h", 1800)
+	status.Development.Conversations = &pc.DeclarationConversationIndex{Path: ".project/CONVERSATIONS.md", Hash: "exact-hash", Excerpt: "Coding | exact-thread | main | repos/code | ordinary\n" + strings.Repeat("context ", 100)}
+	view := newProjectContext(status)
+	if view.Development == nil || view.Development.Conversations == nil || view.Development.Conversations.Truncated || !strings.Contains(view.Development.Conversations.Excerpt, "exact-thread") || !view.fits() {
+		t.Fatalf("optional detail crowded out conversation navigation: %+v", view)
+	}
+}
+
+func TestProjectContextWebDAVResourceQualificationsAndNavigation(t *testing.T) {
+	status := webDAVContextFixture()
+	view := newProjectContext(status)
+	if len(view.Resources) != 3 || len(view.Repositories) != 1 || view.Omitted["resources"] != 0 || view.Development.Posture != "ready" {
+		t.Fatalf("inspected shape hidden: %+v", view)
+	}
+	if view.NextAction.Kind != "none" || strings.Contains(view.NextAction.Command, "old-operation") || strings.Contains(view.NextAction.Command, "apply") {
+		t.Fatalf("historical success became action: %+v", view.NextAction)
+	}
+	var webdav contextResource
+	for _, r := range view.Resources {
+		if r.Key == "webdav" {
+			webdav = r
+		}
+	}
+	if webdav.Applied.Revision != "installation-revision" || webdav.Healthy.Revision != "generation-revision" || webdav.Protected.Revision != "backup-manifest-revision" || webdav.Protected.RevisionBasis != "owner_revision_not_declaration" || webdav.Protected.Coverage != "resource_only" || webdav.Protected.EvidenceTime != "not_reported" || webdav.Protected.ReadAt != status.ObservedAt || webdav.Endpoint == nil || !webdav.Endpoint.ObservedAt.Equal(status.Resources["webdav"].Readiness.Endpoint.ObservedAt) {
+		t.Fatalf("mixed revision/time/coverage: %+v", webdav)
+	}
+	if view.Readiness.Healthy.State != pc.DeclarationUnknown || view.Readiness.Protected.State != pc.DeclarationUnknown {
+		t.Fatalf("invented overall green: %+v", view.Readiness)
+	}
+	for _, jsonMode := range []bool{false, true} {
+		var out bytes.Buffer
+		cmd := &cobra.Command{}
+		cmd.SetOut(&out)
+		if err := renderProjectContext(cmd, &options{jsonOutput: jsonMode}, view); err != nil {
+			t.Fatal(err)
+		}
+		if jsonMode {
+			got := decodeContext(t, out.String())
+			if len(got["resources"].([]any)) != 3 {
+				t.Fatalf("resources: %s", out.String())
+			}
+		} else {
+			for _, value := range []string{"Root: /owner/quote's project", "Repository: source; path /owner/quote's project/src", "Development: ready", "Resource: webdav", "installation-revision", "generation-revision", "backup-manifest-revision", "Publication: webdav", "DNS=satisfied TLS=satisfied Route=satisfied", "fact observation times not reported"} {
+				if !strings.Contains(out.String(), value) {
+					t.Fatalf("missing %q: %s", value, out.String())
+				}
+			}
+			if out.Len() > 4096 || strings.Count(out.String(), "\n") > 16 {
+				t.Fatalf("human bounds: %s", out.String())
+			}
+		}
+	}
+}
+
+func TestProjectContextGroupsUnknownFactsWithoutInventingEvidence(t *testing.T) {
+	view := projectContext{
+		Revision: "current-declaration",
+		Resources: []contextResource{{
+			Key: "notes", Kind: pc.DeclarationKnowledge,
+			Applied:   contextFact{DeclarationFact: pc.DeclarationFact{State: pc.DeclarationUnknown, Revision: "unproven-revision"}},
+			Healthy:   contextFact{DeclarationFact: pc.DeclarationFact{State: pc.DeclarationUnknown, Revision: "unproven-revision"}},
+			Protected: contextFact{DeclarationFact: pc.DeclarationFact{State: pc.DeclarationUnknown, Revision: "unproven-revision"}},
+			Verified:  contextFact{DeclarationFact: pc.DeclarationFact{State: pc.DeclarationUnknown, Revision: "unproven-revision"}},
+		}},
+	}
+	before, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := renderProjectContext(cmd, &options{}, view); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Resource: notes (knowledge); applied/healthy/protected/verified=unknown") || strings.Contains(out.String(), "unproven-revision") {
+		t.Fatalf("unknown facts suggest revision evidence: %s", out.String())
+	}
+	after, err := json.Marshal(view)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("human rendering changed JSON facts")
+	}
+	view.Resources[0].Applied.State = pc.DeclarationSatisfied
+	view.Resources[0].Applied.Revision = "actual-installation"
+	out.Reset()
+	if err := renderProjectContext(cmd, &options{}, view); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "applied=satisfied@actual-installation; healthy=unknown; protected=unknown; verified=unknown") || strings.Contains(out.String(), "unknown@") {
+		t.Fatalf("mixed state lost its independent evidence: %s", out.String())
+	}
+}
+
+func TestProjectContextResourcesBoundedBeforeHistoryAndProse(t *testing.T) {
+	status := webDAVContextFixture()
+	status.Development.Purpose = strings.Repeat("p", 4096)
+	status.Development.Progress = strings.Repeat("<", 4096)
+	status.Operation.OperationID = strings.Repeat("h", 4096)
+	for i := 0; i < 100; i++ {
+		status.Resources[pc.ResourceKey(fmt.Sprintf("z%03d", i))] = pc.DeclarationResourceStatus{Binding: pc.DeclarationBinding{Kind: pc.DeclarationKnowledge}}
+	}
+	view := newProjectContext(status)
+	if len(view.Resources)+view.Omitted["resources"] != len(status.Resources) || view.Omitted["resources"] == 0 || len(view.Repositories) != 1 || view.Target == nil {
+		t.Fatalf("omission/navigation: %+v", view)
+	}
+	for _, jsonMode := range []bool{false, true} {
+		var out bytes.Buffer
+		cmd := &cobra.Command{}
+		cmd.SetOut(&out)
+		if err := renderProjectContext(cmd, &options{jsonOutput: jsonMode}, view); err != nil {
+			t.Fatal(err)
+		}
+		if jsonMode {
+			decodeContext(t, out.String())
+		} else {
+			if out.Len() > 4096 || strings.Count(out.String(), "\n") > 16 || !strings.Contains(out.String(), "Root: /owner/quote's project") || !strings.Contains(out.String(), "path /owner/quote's project/src") || !strings.Contains(out.String(), "Resource: webdav") || !strings.Contains(out.String(), "detail: loom project status 'verified-project' --node 'verified-owner' --json") {
+				t.Fatalf("navigation/resource/detail bounds: %s", out.String())
+			}
+		}
+	}
+	status = webDAVContextFixture()
+	r := status.Resources["webdav"]
+	r.Readiness.Protected.EvidenceRef = "unsafe\nINJECTED"
+	r.Readiness.Endpoint.URL = "unsafe\x1b[31m"
+	status.Resources["webdav"] = r
+	status.ObservedAt = strings.Repeat("<", 4096)
+	view = newProjectContext(status)
+	for _, r := range view.Resources {
+		if r.Key == "webdav" && (r.Protected.State != pc.DeclarationUnknown || r.Endpoint != nil || r.Protected.ReadAt != "") {
+			t.Fatalf("unsafe fact/time: %+v", r)
+		}
+	}
+	if view.Omitted["resource_detail"] == 0 || view.Omitted["publication"] == 0 || view.Omitted["read_time"] == 0 {
+		t.Fatalf("unsafe omission: %+v", view.Omitted)
+	}
+}
 
 func contextFixture() pc.DeclarationStatus {
 	return pc.DeclarationStatus{
@@ -127,6 +414,51 @@ func TestProjectContextDoesNotAdvanceOrSearch(t *testing.T) {
 				t.Fatalf("refusal lost: %v %s", err, out)
 			}
 		})
+	}
+}
+
+func TestProjectContextArchivedDoesNotPlanOrPointToRetiredSource(t *testing.T) {
+	status := contextFixture()
+	status.Lifecycle, status.Revision = "archived", ""
+	status.Development = &pc.DeclarationDevelopmentContext{Posture: "partial", SourceDigest: "retained-digest", Archive: &pc.DeclarationArchivedContext{ReadOnlyRoot: "/retained/project", OperationID: "archive-operation", ManifestDigest: "manifest-digest", ArchivedAt: "2026-10-03T00:00:00Z", MissingDocuments: []string{".project/STATE.md"}}}
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != "GET" {
+			t.Fatal("archived context attempted planning")
+		}
+		response.WriteJSON(w, 200, response.Success("archive", status))
+	}))
+	defer server.Close()
+	cfg := writeProjectBackendInstallManifest(t, server.URL)
+	out, stderr, err := executeRootCommand("--config", cfg, "--json", "project", "context", "archived", "--verbose")
+	if err != nil || calls != 1 {
+		t.Fatalf("historical read: %v calls=%d %s", err, calls, stderr)
+	}
+	got := decodeContext(t, out)
+	if got["lifecycle"] != "archived" || got["source"] != nil || got["revision"] != nil || got["source_status"] != "verified_historical" || got["next_action"].(map[string]any)["kind"] != "historical" {
+		t.Fatalf("retired source or mutation advice: %s", out)
+	}
+	if got["development"].(map[string]any)["archive"].(map[string]any)["read_only_root"] != "/retained/project" {
+		t.Fatalf("retained root missing: %s", out)
+	}
+}
+
+func TestProjectContextArchiveRootBudget(t *testing.T) {
+	status := contextFixture()
+	status.Lifecycle = "archived"
+	status.Development = &pc.DeclarationDevelopmentContext{Posture: "archived", Archive: &pc.DeclarationArchivedContext{OperationID: "archive", ReadOnlyRoot: "/retained/project"}}
+	view := newProjectContext(status)
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := renderProjectContext(cmd, &options{}, view); err != nil || !strings.Contains(out.String(), "Retained root (read-only; verified custody): /retained/project") || !strings.Contains(out.String(), "Root (historical registration):") {
+		t.Fatalf("navigation: %s %v", out.String(), err)
+	}
+	status.Development.Archive.ReadOnlyRoot = "/" + strings.Repeat("a", 4097)
+	view = newProjectContext(status)
+	if view.Development.Archive.ReadOnlyRoot != "" || view.Omitted["archive_root"] != 1 || !strings.Contains(view.DetailCommand, "loom project archive inspect") || view.Source != nil {
+		t.Fatalf("unsafe/budget root not qualified: %+v", view)
 	}
 }
 

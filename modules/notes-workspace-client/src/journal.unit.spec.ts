@@ -69,6 +69,19 @@ describe("incremental journal", () => {
         await expect(j.update(s => { s.holds.a = "pending"; })).rejects.toThrow("transaction_aborted");
         expect(j.state).toBe(old);
         expect(j.state.holds).toEqual({});
+        for (let i=0;i<3;i++) await expect(j.update(s=>{s.holds.a="retry";})).rejects.toThrow("transaction_aborted");
+        expect(j.failure).toBe("transaction_aborted");
+    });
+    it("preserves more than 64 MiB of retained history and can still commit a small change", async () => {
+        const text="x".repeat(65*1024*1024);
+        const j=new Journal({load:async()=>({version:1,device:"history-device",operations:[],bindings:{},candidates:{},reflecting:{},holds:{},
+            retiredLeaves:{saved:{path:"Notes/history.md",revision:"1-saved",binding:"retained",text}}}),
+            save:async()=>{},saveChanges:async()=>{}});
+        await j.ready;
+        await j.update(s=>{s.holds.current="pending";});
+        expect(j.state.retiredLeaves!.saved.text).toBe(text);
+        expect(j.state.holds.current).toBe("pending");
+        expect(j.failure).toBeUndefined();
     });
     it("keeps committed edits durable when a secondary export fails, then flushes latest state", async () => {
         const write = vi.fn(async (_slot: number, _content: string): Promise<void> => { throw Error("export disk"); });

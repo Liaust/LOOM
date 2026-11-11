@@ -118,7 +118,7 @@ func TestNotesSearchFollowupEligibility(t *testing.T) {
 }
 
 func TestBoxSourceLiteralIdentifiersAndQuotedPhrases(t *testing.T) {
-	if got := notesSearchTerms(NotesSearchInput{Query: "SYNTHETIC_NOT_A_SECRET caf\u00e9"}); !reflect.DeepEqual(got, []string{"synthetic_not_a_secret", "caf\u00e9"}) {
+	if got := notesSearchTerms(NotesSearchInput{Query: "SYNTHETIC_NOT_A_SECRET caf\u00e9", Path: "unrelated/path"}); !reflect.DeepEqual(got, []string{"synthetic_not_a_secret", "caf\u00e9"}) {
 		t.Fatalf("identifier terms: %v", got)
 	}
 	input, err := normalizeNotesSearchTemporalInput(NotesSearchInput{Query: `"write contention"`})
@@ -325,8 +325,8 @@ func TestBuildNotesSearchQueryIncludesFilters(t *testing.T) {
 		t.Fatalf("args len = %d, want 11: %#v", len(query.Args), query.Args)
 	}
 	termsJSON, ok := query.Args[1].(string)
-	if !ok || !strings.Contains(termsJSON, "capability") || !strings.Contains(termsJSON, "osint") || !strings.Contains(termsJSON, "daily") {
-		t.Fatalf("terms arg = %#v, want query/filter terms", query.Args[1])
+	if !ok || !strings.Contains(termsJSON, "capability") || !strings.Contains(termsJSON, "osint") || strings.Contains(termsJSON, "daily") {
+		t.Fatalf("terms arg = %#v, want query/tag terms without path-filter words", query.Args[1])
 	}
 	if query.Args[9] != "loom" || query.Args[10] != 56 {
 		t.Fatalf("tail args = %#v, want normalized tag and candidate limit", query.Args[9:])

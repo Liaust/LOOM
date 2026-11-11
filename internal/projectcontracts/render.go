@@ -19,6 +19,9 @@ func RenderValidation(w io.Writer, report ValidationReport) {
 	if report.Project.OwnerNode != "" {
 		fmt.Fprintf(w, "Owner node: %s\n", report.Project.OwnerNode)
 	}
+	if report.Project.WorkState != "" {
+		fmt.Fprintf(w, "Work state: %s (metadata only)\n", report.Project.WorkState)
+	}
 	if provider := firstProvider(report.DerivedProviders); provider != "" {
 		fmt.Fprintf(w, "Provider: %s\n", provider)
 	}
@@ -93,6 +96,9 @@ func RenderPlan(w io.Writer, plan ProjectPlan, includeDiagnostics bool) {
 		fmt.Fprintf(w, "Project plan: %s (%s)\n", plan.Project.Slug, status)
 	} else {
 		fmt.Fprintf(w, "Project plan: %s\n", status)
+	}
+	if plan.Project.WorkState != "" {
+		fmt.Fprintf(w, "Work state: %s (metadata only)\n", plan.Project.WorkState)
 	}
 	if provider := firstProvider(plan.DerivedProviders); provider != "" {
 		fmt.Fprintf(w, "Provider: %s\n", provider)

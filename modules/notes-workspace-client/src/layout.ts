@@ -1,5 +1,5 @@
 import type { IntentClient } from "./client";
-import type { State } from "./journal";
+import { unfinished, type State } from "./journal";
 import { digest, exactBinding, referencePath, sameFile, validate, type Binding, type Layout } from "./protocol";
 
 export interface LayoutFiles {
@@ -26,6 +26,7 @@ export async function relocateLocal(a: Binding, b: Binding, fs: LayoutFiles) {
         // removeEmpty must recheck emptiness. Unknown children are never moved,
         // trashed recursively or interpreted as source-controlled files.
         if (old === "folder") await fs.removeEmpty(a.path);
+        if (await fs.stat(a.path)) throw Error("layout_preserves_local_children");
     } else {
         if (old === "folder" || target === "folder") throw Error("layout_destination_collision");
         if (old && await fs.hash(a.path) !== a.sha256) throw Error("layout_preserves_local_edit");
@@ -35,6 +36,7 @@ export async function relocateLocal(a: Binding, b: Binding, fs: LayoutFiles) {
             await ensure(b.path.split("/").slice(0, -1).join("/"));
             if (await fs.hash(a.path) !== a.sha256) throw Error("layout_preserves_local_edit");
             if (!target) {
+                if (a.sha256 !== b.sha256) throw Error("layout_target_pending");
                 if (await fs.stat(b.path)) throw Error("layout_destination_collision");
                 await fs.rename(a.path, b.path);
             } else await fs.removeFile(a.path);
@@ -75,20 +77,46 @@ export function layoutAlias(state: State, path: string): string | undefined {
     if (!matches.length) return;
     const first = matches[0].control.previous;
     if (matches.some(r => !sameFile(r.control.previous, first))) return;
-    const latest = applied.filter(r => sameFile(r.control.binding, first))
-        .sort((a, b) => b.control.binding.sourceSequence! - a.control.binding.sourceSequence!);
-    const b = latest[0].control.binding;
-    if (latest.some(r => r.control.binding.sourceSequence === b.sourceSequence && !exactBinding(r.control.binding, b))) return;
-    return b.path === path ? undefined : b.path;
+    let current=first;
+    const seen=new Set<string>();
+    for(let n=0;n<=applied.length;n++) {
+        const key=JSON.stringify([current.workspace,current.collection,current.fileId,current.path,current.sourceSequence]);
+        if(seen.has(key))return;seen.add(key);
+        const edges=applied.filter(r=>sameFile(r.control.previous,current)&&r.control.previous.path===current.path&&
+            (r.control.previous.sourceSequence??0)>=(current.sourceSequence??0))
+            .sort((a,b)=>(b.control.previous.sourceSequence??0)-(a.control.previous.sourceSequence??0));
+        if(!edges.length)return current.path===path?undefined:current.path;
+        const next=edges[0].control;
+        if(edges.some(r=>r.control.previous.sourceSequence===next.previous.sourceSequence&&!exactBinding(r.control.binding,next.binding)))return;
+        current=next.binding;
+    }
 }
 
 export class SourceLayouts {
     private serial = Promise.resolve();
+    private retirements?: Map<string,number>;
     active?: Layout;
     constructor(private client: IntentClient) {}
     get records() { return Object.values(this.client.journal.state.layouts ?? {}); }
+    sourceRetired(b:Binding) {
+        const key=(b:Binding)=>JSON.stringify([b.workspace,b.collection,b.fileId,b.path]);
+        if(!this.retirements) {
+            this.retirements=new Map();
+            const layouts=this.client.journal.state.layouts??{};
+            for(const id in layouts) {
+                const r=layouts[id];
+                if(!r.control.sourceMove||r.state!=="applied")continue;
+                const a=r.retiredPrevious??r.control.previous,k=key(a);
+                this.retirements.set(k,Math.max(this.retirements.get(k)??0,a.sourceSequence??0));
+            }
+        }
+        const retired=this.retirements.get(key(b));
+        return retired!==undefined&&retired>=(b.sourceSequence??0);
+    }
     suppress(b: Binding) {
-        return this.records.some(r => sameFile(r.control.binding, b) &&
+        return this.records.some(r => r.control.sourceMove && r.state === "applied" &&
+            sameFile(r.control.previous, b) && r.control.previous.path === b.path &&
+            (r.control.previous.sourceSequence ?? 0) >= (b.sourceSequence ?? 0) || sameFile(r.control.binding, b) &&
             (r.state === "applied" && r.control.binding.path !== b.path &&
                 r.control.binding.sourceSequence! > (b.sourceSequence ?? 0) ||
                 r.disposition === "excluded" && ["pending", "moving"].includes(r.state) &&
@@ -108,6 +136,14 @@ export class SourceLayouts {
     }
     async ingest(control: Layout) {
         validate(control);
+        const retained=this.client.journal.state.layouts?.[control.id];
+        if(retained&&JSON.stringify(retained.control)===JSON.stringify(control)) {
+            if(["pending","moving"].includes(retained.state)) {
+                this.client.onReflect(control.previous.path);
+                this.client.onReflect(control.binding.path);
+            }
+            return;
+        }
         await this.client.journal.update(s => {
             const old = s.layouts?.[control.id];
             if (old && (!exactBinding(old.control.previous, control.previous) || !exactBinding(old.control.binding, control.binding)))
@@ -137,15 +173,65 @@ export class SourceLayouts {
                 s.candidates[b.id] = b;
             }
         });
+        this.retirements=undefined;
         this.client.onReflect(control.previous.path);
         this.client.onReflect(control.binding.path);
+    }
+    // Explicit warning reconciliation can trim a completed refiling's empty
+    // local parents without moving the source's retained recovery journals.
+    async retireEmptyParents() {
+        const { journal, io } = this.client;
+        if (!io.retireEmptyDirectory) return;
+        const parents = new Set<string>();
+        for (const r of this.records) if (r.state === "applied" && r.control.sourceMove) {
+            const parts = r.control.previous.path.split("/").slice(0, -1);
+            while (parts.length > 1) { parents.add(parts.join("/")); parts.pop(); }
+        }
+        for (const path of [...parents].sort((a,b)=>b.split("/").length-a.split("/").length || a.localeCompare(b))) {
+            const b = journal.state.bindings[path];
+            if (!b || b.entryKind !== "directory" || b.deleted ||
+                Object.values(journal.state.scopes??{}).some(s=>s.collectionRoot===path) ||
+                Object.values(journal.state.bindings).some(child=>!child.deleted&&child.path.startsWith(path+"/")&&
+                    !(journal.state.holds[child.path]==="configuration_retained_history"&&
+                        journal.state.scopes?.[child.workspace+"/"+child.collection]&&
+                        journal.state.scopes?.[child.workspace+"/"+child.collection]?.generation!==child.generation)) ||
+                journal.state.operations.some(o=>unfinished(o)&&[o.intent.path,o.intent.target].some(p=>p===path||p?.startsWith(path+"/"))) ||
+                this.records.some(r=>["pending","moving"].includes(r.state)&&
+                    [r.control.previous.path,r.control.binding.path].some(p=>p===path||p.startsWith(path+"/")))) continue;
+            const marker={...b,deleted:true};
+            await journal.update(s=>{s.reflecting[path]=marker;});
+            let removed=false;
+            try { removed=await io.retireEmptyDirectory(b); }
+            finally { if(!removed)await journal.update(s=>{if(s.reflecting[path]&&exactBinding(s.reflecting[path],marker))delete s.reflecting[path];}); }
+            if (!removed) continue;
+            await journal.update(s=>{
+                if(s.reflecting[path]&&exactBinding(s.reflecting[path],marker))delete s.reflecting[path];
+                if (s.bindings[path]?.id !== b.id) return;
+                s.candidates[b.id] ??= b;
+                for (const old of Object.values(s.candidates)) if (sameFile(old,b)&&old.path===path&&
+                    (old.sourceSequence??0)<=(b.sourceSequence??0))
+                    (s.pathChanges??={})["reviewed-source-retirement/"+old.id]=true;
+                delete s.bindings[path]; delete s.holds[path];
+            });
+            this.client.retireLayoutCursor(b);
+        }
     }
     resume(path?: string, retryExcluded = false): Promise<void> {
         const run = this.serial.then(async () => {
             await this.client.settled();
-            // Earlier moves establish exact intermediate provenance for a chain.
-            for (const r of this.records.sort((a, b) => a.control.binding.sourceSequence! - b.control.binding.sourceSequence!)) {
+            // Cross-source sequences are unrelated. Follow predecessor edges
+            // and repeat only when a move actually completes in this batch.
+            for(let pass=0;pass<=this.records.length;pass++) {
+              let progressed=false;
+              for (const r of this.records) {
                 if (!["pending", "moving"].includes(r.state) || path && r.control.previous.path !== path && r.control.binding.path !== path) continue;
+                if(this.records.some(prior=>prior.control.id!==r.control.id&&["pending","moving"].includes(prior.state)&&
+                    sameFile(prior.control.binding,r.control.previous)&&prior.control.binding.path===r.control.previous.path&&
+                    (prior.control.binding.sourceSequence??0)<=(r.control.previous.sourceSequence??0))) {
+                    await this.client.journal.update(s=>{s.layouts![r.control.id].reason="layout_chain_pending";},
+                        s=>s.layouts![r.control.id].reason==="layout_chain_pending");
+                    continue;
+                }
                 if (r.disposition === "excluded") {
                     if (!retryExcluded) continue;
                     await this.client.journal.update(s => {
@@ -154,6 +240,9 @@ export class SourceLayouts {
                     });
                 }
                 await this.apply(r.control);
+                progressed ||= this.client.journal.state.layouts?.[r.control.id].state === "applied";
+              }
+              if(!progressed)break;
             }
         });
         this.serial = run.catch(() => {});
@@ -172,7 +261,7 @@ export class SourceLayouts {
                 s => s.layouts![l.id].reason === reason);
             await this.client.hold(a.path, reason);
         };
-        const pending = () => journal.state.operations.some(o => o.state !== "applied" && !o.resolvedBy &&
+        const pending = () => journal.state.operations.some(o => unfinished(o) &&
             [o.intent.path, o.intent.target].some(p => p === a.path || p === b.path ||
                 a.entryKind === "directory" && !!p && (p.startsWith(a.path + "/") || p.startsWith(b.path + "/"))));
         if (this.records.some(r => r.control.id !== l.id && sameFile(r.control.binding, b) &&
@@ -210,7 +299,11 @@ export class SourceLayouts {
             return held("layout_chain_pending");
         // A metadata-only enrollment refresh can advance the authoritative
         // predecessor while this device still displays the same exact leaf.
-        if (old && !exactBinding(old, a) && !(sameFile(old, a) && old.path === a.path &&
+        const sameSourceLeaf = old && l.sourceMove && old.workspace === a.workspace && old.collection === a.collection &&
+            old.fileId === a.fileId && old.path === a.path && old.collectionRoot === a.collectionRoot &&
+            old.entryKind === a.entryKind && old.sha256 === a.sha256 && old.writable === a.writable &&
+            !old.deleted && old.nativeRevision === a.nativeRevision;
+        if (old && !exactBinding(old, a) && !sameSourceLeaf && !(sameFile(old, a) && old.path === a.path &&
             old.collectionRoot === a.collectionRoot && old.entryKind === a.entryKind &&
             old.sha256 === a.sha256 && old.writable === a.writable && !old.deleted &&
             (old.sourceSequence ?? 0) < (a.sourceSequence ?? 0) && old.nativeRevision === a.nativeRevision))
@@ -229,7 +322,13 @@ export class SourceLayouts {
         }
         if (target && !exactBinding(target, b)) return held("layout_destination_collision");
         if (!io.relocate) return held("layout_client_unavailable");
-        const local = await this.read(a), dest = await this.read(b);
+        const local = await this.read(a);
+        if (l.sourceMove && !target) {
+            await this.client.reflectLayoutTarget(b);
+            target = journal.state.bindings[b.path];
+            if (!target || !exactBinding(target, b)) return held("layout_target_pending");
+        }
+        const dest = await this.read(b);
         if (local !== null && await digest(local) !== a.sha256) return held("layout_preserves_local_edit");
         const moving = journal.state.layouts![l.id].state === "moving";
         if (!a.entryKind && dest !== null && ((!moving && !target) || await digest(dest) !== b.sha256))
@@ -249,6 +348,11 @@ export class SourceLayouts {
             if (pending()) return held("layout_pending_intent");
             await journal.update(s => {
                 if (old) s.candidates[old.id] ??= old;
+                if (l.sourceMove && typeof local === "string") {
+                    (s.retiredLeaves ??= {})[`${a.path}@${a.nativeRevision}`] = {
+                        path: a.path, revision: a.nativeRevision, text: local, binding: a.id,
+                    };
+                }
                 s.layouts![l.id].state = "moving"; s.reflecting[b.path] = b;
             });
             try {
@@ -259,22 +363,31 @@ export class SourceLayouts {
                 return held(reason);
             }
             finally { this.active = undefined; }
+            if (a.entryKind === "directory" && await io.directoryExists?.(a.path))
+                return held("layout_preserves_local_children");
             const result = await this.read(b);
             if (pending() || result === null || await digest(result) !== b.sha256) return held("layout_move_unconfirmed");
         }
         await journal.update(s => {
             s.layouts![l.id].state = "applied";
+            // Policy rebinding can arrive before an older move control while
+            // naming the very same immutable native leaf. Retain the actual
+            // locally retired metadata ceiling, not just the earlier control.
+            if (l.sourceMove && old) s.layouts![l.id].retiredPrevious = old;
             delete s.layouts![l.id].reason;
             delete s.bindings[a.path];
             s.bindings[b.path] = b;
+            if (l.sourceMove) (s.pathChanges ??= {})["reviewed-source-move/" + a.id] = true;
+            if (l.sourceMove && old) (s.pathChanges ??= {})["reviewed-source-move/" + old.id] = true;
             delete s.holds[a.path];
             delete s.reflecting[b.path];
         });
+        this.retirements=undefined;
+        this.client.retireLayoutCursor(l.sourceMove && old ? old : a);
         await this.client.install(b);
         this.wakeParents(a);
     }
     private wakeParents(a: Binding) {
-        for (const r of this.records) if (["pending", "moving"].includes(r.state) && r.control.previous.entryKind === "directory" &&
-            a.path.startsWith(r.control.previous.path + "/")) this.client.onReflect(r.control.previous.path);
+        this.client.wakeDirectoryParents(a.path);
     }
 }

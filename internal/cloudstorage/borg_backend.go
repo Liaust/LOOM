@@ -434,6 +434,24 @@ func (b BorgSnapshotBackend) Verify(ctx context.Context, input SnapshotVerifyInp
 		return result, nil
 	}
 	result.Checks["borg_check"] = SnapshotStatusSucceeded
+	if options.RootEvidence {
+		prepared, err := readAuthenticatedDirectArchiveManifest(ctx, runner, cfg, item.Archive)
+		if err != nil {
+			result.Checks["authenticated_root_evidence"] = SnapshotStatusFailed
+			result.Errors = append(result.Errors, err.Error())
+			return result, nil
+		}
+		result.RootCoverage = backupcoverage.CloudRootsFromVersionedManifest(prepared.ManifestV2, prepared.ManifestV3, prepared.ManifestSHA256)
+		if len(result.RootCoverage) == 0 || prepared.ManifestV2 == nil || prepared.ManifestV2.ArchiveName != item.Archive || prepared.ManifestV2.ArchiveRef != item.Ref {
+			result.Checks["authenticated_root_evidence"] = SnapshotStatusFailed
+			result.Errors = append(result.Errors, "This exact archive has no authenticated complete-root evidence.")
+			result.RootCoverage = nil
+			return result, nil
+		}
+		result.SourceManifestSHA256 = prepared.ManifestSHA256
+		result.RecoveryEvidence = snapshotRecoveryEvidence(prepared)
+		result.Checks["authenticated_root_evidence"] = SnapshotStatusSucceeded
+	}
 	result.Coverage = coverage
 	result.Status = SnapshotStatusSucceeded
 	return result, nil
@@ -609,6 +627,9 @@ func verifyDirectArchiveV2ArchivePaths(ctx context.Context, runner BorgCommandRu
 		boundary{path: manifest.OperationalPackage.ArchivePath, kind: "directory"},
 		boundary{path: manifest.ProvenancePackage.ArchivePath, kind: "directory"},
 	)
+	for _, dep := range backupstrategy.AdditionalNotesRecoveryPackages(prepared) {
+		boundaries = append(boundaries, boundary{path: dep.Package.ArchivePath, kind: "directory"})
+	}
 	exact := map[string]string{
 		backupstrategy.DirectArchiveEvidenceDir:                                                          "directory",
 		path.Join(backupstrategy.DirectArchiveEvidenceDir, backupstrategy.DirectArchiveManifestFile):     "file",
@@ -736,6 +757,9 @@ func directArchiveV2FetchPaths(prepared backupstrategy.PreparedDirectArchiveMani
 		paths = append(paths, root.ArchivePath)
 	}
 	paths = append(paths, manifest.OperationalPackage.ArchivePath, manifest.ProvenancePackage.ArchivePath)
+	for _, dep := range backupstrategy.AdditionalNotesRecoveryPackages(prepared) {
+		paths = append(paths, dep.Package.ArchivePath)
+	}
 	return paths
 }
 

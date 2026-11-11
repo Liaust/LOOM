@@ -1,8 +1,9 @@
 # Session Retrieval
 
-Gateway and ORCA-launched TUI share the one `.hermes` profile and workspace,
+When configured, gateway and native TUI share the one `.hermes` profile and workspace,
 while each conversation keeps its own session ID and active context. Never
 claim that they are one continuous transcript.
+ORCA is retired; never launch it to retrieve history.
 
 Use the pinned Hermes session-search surface to find prior task-relevant
 conversations, then load the selected session through its supported retrieval

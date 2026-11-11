@@ -12,6 +12,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"reflect"
 	goruntime "runtime"
 	"sort"
 	"strings"
@@ -24,7 +25,8 @@ import (
 )
 
 type Store struct {
-	DataDir string
+	DataDir           string
+	ReadQueueSnapshot func(context.Context) (QueueSnapshot, error)
 
 	// Test-only hooks make the security-relevant publication and read windows
 	// deterministic without widening the production API.
@@ -47,6 +49,18 @@ type SecureFileIdentity struct {
 
 func NewStore(dataDir string) Store {
 	return Store{DataDir: dataDir}
+}
+
+func (s Store) PollWakePath() string {
+	return filepath.Join(s.DataDir, "node-poll.wake.json")
+}
+
+// RequestPoll only wakes the authenticated queue reader. Missed hints are safe:
+// the durable Main queue and the normal poll interval remain authoritative.
+func (s Store) RequestPoll() error {
+	return writeJSONFile(s.PollWakePath(), struct {
+		RequestedAt time.Time `json:"requested_at"`
+	}{time.Now().UTC()}, 0o600)
 }
 
 func (s Store) Ensure() error {
@@ -880,35 +894,36 @@ func (s Store) AppendRun(run WorkerRun) error {
 	if strings.TrimSpace(run.LocalRunID) == "" {
 		run.LocalRunID = NewLocalRunID()
 	}
-	dir := filepath.Join(s.runsDir(), safeFileSegment(run.WorkerKey))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	return writeJSONFile(filepath.Join(dir, run.LocalRunID+".json"), run, 0o600)
+	return s.appendRunHistory(run)
 }
 
 func (s Store) ListRuns(workerKey string, limit int) ([]WorkerRun, error) {
 	if err := s.Ensure(); err != nil {
 		return nil, err
 	}
-	dir := filepath.Join(s.runsDir(), safeFileSegment(workerKey))
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return []WorkerRun{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	runs := make([]WorkerRun, 0, len(entries))
-	for _, entry := range entries {
-		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".json") {
+	base := filepath.Join(s.runsDir(), safeFileSegment(workerKey))
+	runs := []WorkerRun{}
+	for _, dir := range []string{base, filepath.Join(base, "completed"), filepath.Join(base, "failed")} {
+		entries, err := os.ReadDir(dir)
+		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
-		var run WorkerRun
-		if err := readJSONFile(filepath.Join(dir, entry.Name()), &run); err != nil {
+		if err != nil {
 			return nil, err
 		}
-		runs = append(runs, run)
+		for _, entry := range entries {
+			if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".json") {
+				continue
+			}
+			var run WorkerRun
+			if err := readJSONFile(filepath.Join(dir, entry.Name()), &run); err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					continue // A completed run can expire during a history read.
+				}
+				return nil, err
+			}
+			runs = append(runs, run)
+		}
 	}
 	sort.Slice(runs, func(i, j int) bool {
 		return runs[i].StartedAt.After(runs[j].StartedAt)
@@ -933,7 +948,16 @@ func (s Store) SaveHealth(health WorkerHealth) error {
 		return errors.New("worker key is required")
 	}
 	health.UpdatedAt = time.Now().UTC()
-	return writeJSONFile(s.healthPath(health.WorkerKey), health, 0o600)
+	previous, previousErr := s.LoadHealth(health.WorkerKey)
+	if err := writeJSONFile(s.healthPath(health.WorkerKey), health, 0o600); err != nil {
+		return err
+	}
+	if health.WorkerKey != WorkerKeyLocalQueueReporter && (previousErr != nil || previous.Status != health.Status || previous.Kind != health.Kind) {
+		return writeJSONFile(s.healthSummaryWakePath(), struct {
+			ChangedAt time.Time `json:"changed_at"`
+		}{health.UpdatedAt}, 0600)
+	}
+	return nil
 }
 
 func (s Store) QueueOutbox(item OutboxItem) (OutboxItem, error) {
@@ -952,7 +976,7 @@ func (s Store) QueueOutbox(item OutboxItem) (OutboxItem, error) {
 	if item.CreatedAt.IsZero() {
 		item.CreatedAt = time.Now().UTC()
 	}
-	if err := writeJSONFile(s.outboxPath(item.Status, item.LocalOutboxID), item, 0o600); err != nil {
+	if err := s.mutateFileQueue(s.outboxPath(item.Status, item.LocalOutboxID), "", item); err != nil {
 		return OutboxItem{}, err
 	}
 	return item, nil
@@ -968,11 +992,12 @@ func (s Store) UpdateOutboxItem(item OutboxItem, previousStatus string) (string,
 	if strings.TrimSpace(item.Status) == "" {
 		return "", errors.New("outbox status is required")
 	}
-	if strings.TrimSpace(previousStatus) != "" && previousStatus != item.Status {
-		_ = os.Remove(s.outboxPath(previousStatus, item.LocalOutboxID))
+	previous := ""
+	if strings.TrimSpace(previousStatus) != "" {
+		previous = s.outboxPath(previousStatus, item.LocalOutboxID)
 	}
 	path := s.outboxPath(item.Status, item.LocalOutboxID)
-	return path, writeJSONFile(path, item, 0o600)
+	return path, s.mutateFileQueue(path, previous, item)
 }
 
 func (s Store) ListDueOutbox(now time.Time, limit int) ([]OutboxItem, error) {
@@ -1098,54 +1123,13 @@ func (s Store) ListOutbox(statuses []string, limit int) ([]OutboxItem, error) {
 }
 
 func (s Store) OutboxSummary() (OutboxSummary, error) {
-	if err := s.Ensure(); err != nil {
-		return OutboxSummary{}, err
-	}
-	summary := OutboxSummary{
-		Counts: map[string]int{
-			OutboxStatusPending:      0,
-			OutboxStatusInflight:     0,
-			OutboxStatusDone:         0,
-			OutboxStatusFailed:       0,
-			OutboxStatusManualAction: 0,
-		},
-	}
-	for status := range summary.Counts {
-		count, oldest, nextDue, pendingBytes, err := s.outboxStatusSummary(status)
-		if err != nil {
-			return OutboxSummary{}, err
-		}
-		summary.Counts[status] = count
-		if status == OutboxStatusPending {
-			summary.OldestPendingAt = oldest
-			summary.NextDueAt = nextDue
-			summary.TotalPendingBytes = pendingBytes
-		}
-	}
-	return summary, nil
+	snapshot, err := s.fileQueueSummary()
+	return snapshot.Outbox, err
 }
 
 func (s Store) InboxSummary() (InboxSummary, error) {
-	if err := s.Ensure(); err != nil {
-		return InboxSummary{}, err
-	}
-	counts := map[string]int{
-		OutboxStatusPending: 0,
-		OutboxStatusDone:    0,
-		OutboxStatusFailed:  0,
-	}
-	for status := range counts {
-		count, err := countJSONFiles(filepath.Join(s.DataDir, "inbox", status))
-		if err != nil {
-			return InboxSummary{}, err
-		}
-		counts[status] = count
-	}
-	legacy, err := countLegacyJSONFiles(filepath.Join(s.DataDir, "inbox"))
-	if err != nil {
-		return InboxSummary{}, err
-	}
-	return InboxSummary{Counts: counts, LegacyRecords: legacy}, nil
+	snapshot, err := s.fileQueueSummary()
+	return snapshot.Inbox, err
 }
 
 func (s Store) SaveInboxItem(item InboxItem) (string, error) {
@@ -1167,18 +1151,33 @@ func (s Store) SaveInboxItem(item InboxItem) (string, error) {
 	}
 	item.UpdatedAt = now
 	path := s.inboxPath(item.Status, item.LocalInboxID)
-	return path, writeJSONFile(path, item, 0o600)
+	return path, s.mutateFileQueue(path, "", item)
 }
 
 func (s Store) MoveInboxItem(item InboxItem, previousStatus, nextStatus string) (string, error) {
+	if strings.TrimSpace(item.MessageID) == "" {
+		return "", errors.New("inbox message id is required")
+	}
+	if strings.TrimSpace(nextStatus) == "" {
+		nextStatus = OutboxStatusPending
+	}
 	item.Status = nextStatus
 	if strings.TrimSpace(item.LocalInboxID) == "" {
 		item.LocalInboxID = item.MessageID
 	}
-	if strings.TrimSpace(previousStatus) != "" && previousStatus != nextStatus {
-		_ = os.Remove(s.inboxPath(previousStatus, item.LocalInboxID))
+	if err := s.Ensure(); err != nil {
+		return "", err
 	}
-	return s.SaveInboxItem(item)
+	previous := ""
+	if strings.TrimSpace(previousStatus) != "" {
+		previous = s.inboxPath(previousStatus, item.LocalInboxID)
+	}
+	item.UpdatedAt = time.Now().UTC()
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = item.UpdatedAt
+	}
+	path := s.inboxPath(nextStatus, item.LocalInboxID)
+	return path, s.mutateFileQueue(path, previous, item)
 }
 
 func (s Store) SaveLatestSummary(summary LocalSummary) error {
@@ -1187,6 +1186,21 @@ func (s Store) SaveLatestSummary(summary LocalSummary) error {
 	}
 	if summary.GeneratedAt.IsZero() {
 		summary.GeneratedAt = time.Now().UTC()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	unlock, err := s.AcquireWorkerExecutionLock(ctx, "node-agent.local-summary")
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if previous, err := s.LoadLatestSummary(); err == nil {
+		if previous.CheckedAt.After(summary.CheckedAt) {
+			return nil
+		}
+		if sameSummaryMaterial(previous, summary) && reflect.DeepEqual(previous.RetryAt, summary.RetryAt) {
+			return nil
+		}
 	}
 	return writeJSONFile(s.latestSummaryPath(), summary, 0o600)
 }
@@ -1220,15 +1234,7 @@ func (s Store) Status() (Status, error) {
 		}
 		workerStatuses = append(workerStatuses, status)
 	}
-	summary, err := s.BuildLocalSummary()
-	if err != nil {
-		return Status{}, err
-	}
-	outbox, err := s.OutboxSummary()
-	if err != nil {
-		return Status{}, err
-	}
-	inbox, err := s.InboxSummary()
+	summary, files, err := s.buildLocalSummary(context.Background())
 	if err != nil {
 		return Status{}, err
 	}
@@ -1236,8 +1242,8 @@ func (s Store) Status() (Status, error) {
 		DataDir: s.DataDir,
 		Workers: workerStatuses,
 		Summary: summary,
-		Outbox:  outbox,
-		Inbox:   inbox,
+		Outbox:  files.Outbox,
+		Inbox:   files.Inbox,
 	}, nil
 }
 

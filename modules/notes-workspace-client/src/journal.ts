@@ -3,7 +3,7 @@ import { draft } from "./draft";
 import type { Ack, Binding, Intent, Publication, CollectionScope, Layout } from "./protocol";
 import { NATIVE_REPLAY_ROWS, replayKey, type ReplayPersistence } from "./native-replay";
 export type LayoutRecord = { control: Layout; state: "pending" | "moving" | "applied" | "superseded";
-    disposition?: "excluded"; reason?: string; supersededBy?: string };
+    disposition?: "excluded"; reason?: string; supersededBy?: string; retiredPrevious?: Binding };
 export type Operation = {
     intent: Intent;
     payload: string;
@@ -15,6 +15,10 @@ export type Operation = {
     writing?: string;
     nativeRecovery?: boolean;
     resolvedBy?: string;
+    sourceSatisfiedBy?: Binding;
+    transfer?: { source: { binding: Binding; path: string; predecessor?: string; absent?: boolean }; children?: string[] };
+    transferDeleteOf?: string;
+    transferResolvedBy?: string;
     resolution?: {
         localHash: string;
         covered: string[];
@@ -38,7 +42,7 @@ export type State = {
     pathChanges?: Record<string, boolean>;
     layouts?: Record<string, LayoutRecord>;
 };
-export const unfinished = (o: Operation) => o.state !== "applied" && !o.resolvedBy;
+export const unfinished = (o: Operation) => o.state !== "applied" && !o.resolvedBy && !o.sourceSatisfiedBy;
 export interface Persistence {
     load(): Promise<State | undefined>;
     save(state: State): Promise<void>;
@@ -47,6 +51,8 @@ export interface Persistence {
     checkpointFailure?: string;
 }
 export type Change = { section: string; key: string; value?: unknown };
+// This also retains accepted bindings and conflict bodies, not just unsent edits.
+const MAX_JOURNAL_BYTES = 256 * 1024 * 1024;
 const maps = ["bindings", "candidates", "reflecting", "acks", "holds", "retiredLeaves", "intents", "publications", "resolutionDisplays", "scopes", "pathChanges", "layouts"] as const;
 const rows = (state: State): Change[] => [
     ...maps.flatMap(section => Object.entries(state[section] ?? {}).map(([key, value]) => ({ section, key, value }))),
@@ -250,7 +256,7 @@ export class Journal {
                 const size = rowBytes(row);
                 this.sizes.set(rowKey(row), size); this.bytes += size;
             }
-            if (this.bytes > 64 * 1024 * 1024) throw Error("journal_backlog_limit");
+            if (this.bytes > MAX_JOURNAL_BYTES) throw Error("journal_backlog_limit");
             await this.persistence.save(this.state);
         } catch (e) {
             this.failure = "journal_unavailable";
@@ -282,7 +288,7 @@ export class Journal {
             const sizes = changes.map(row => [rowKey(row), rowBytes(row)] as const);
             const bytes = sizes.reduce((total, [key, size]) => total + size - (this.sizes.get(key) ?? 0), this.bytes);
             // Bounded total state; never discard pending bytes to satisfy the bound.
-            if (bytes > 64 * 1024 * 1024)
+            if (bytes > MAX_JOURNAL_BYTES)
                 throw new Error("journal_backlog_limit");
             if (this.persistence.saveChanges) await this.persistence.saveChanges(next, changes);
             else await this.persistence.save(next);
@@ -291,7 +297,7 @@ export class Journal {
             for (const [key, size] of sizes) this.sizes.set(key, size);
         });
         this.serial = run.catch((e) => {
-            this.failure = String(e);
+            this.failure ??= e instanceof Error ? e.message : String(e);
         });
         return run;
     }

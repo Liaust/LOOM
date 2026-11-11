@@ -18,10 +18,17 @@ func (s Store) ListNotesOverviewRows(ctx context.Context, input NotesOverviewInp
 		return nil, fmt.Errorf("knowledge store is not configured")
 	}
 	clauses, args := notesOverviewRootClauses(input)
+	clauses = append(clauses, notesSelectedRootSQL(notesBoxSelection(ctx), "r", &args))
 	clauses[0] = notesReadableRootWithObjectsSQL("r", input.SourceLifecycle, input.IncludeInactive,
 		`EXISTS (SELECT 1 FROM object_rows visible WHERE visible.notes_source_root_id=r.notes_source_root_id)`)
+	selectedRoots := "true"
+	if len(clauses) > 1 {
+		selectedRoots = strings.Join(clauses[1:], " AND ")
+	}
 	query := `
-		WITH object_rows AS MATERIALIZED (
+		WITH selected_roots AS MATERIALIZED (
+			SELECT r.notes_source_root_id FROM knowledge.notes_source_roots r WHERE ` + selectedRoots + `
+		), object_rows AS MATERIALIZED (
 			SELECT o.notes_source_root_id,
 			       COALESCE(NULLIF(o.file_class, ''), 'unknown') AS file_class,
 			       COALESCE(NULLIF(o.processing_state, ''), 'metadata_only') AS processing_state,
@@ -44,8 +51,10 @@ func (s Store) ListNotesOverviewRows(ctx context.Context, input NotesOverviewInp
 			       object_search.search_document_count,
 			       o.last_seen_at,
 			       o.last_processed_at,
-			       object_search.last_indexed_at
+			       object_search.last_indexed_at,
+			       ps.status AS pipeline_status, ps.updated_at AS pipeline_updated_at, ps.failed_at AS pipeline_failed_at
 			FROM knowledge.knowledge_objects o
+			JOIN selected_roots USING (notes_source_root_id)
 			LEFT JOIN LATERAL (
 				SELECT COUNT(sd.search_document_id)::int AS search_document_count,
 				       MAX(sd.indexed_at) AS last_indexed_at
@@ -55,6 +64,23 @@ func (s Store) ListNotesOverviewRows(ctx context.Context, input NotesOverviewInp
 				 AND sd.source_id = kc.knowledge_chunk_id
 				WHERE kc.knowledge_object_id = o.knowledge_object_id
 			) object_search ON true
+			LEFT JOIN LATERAL (
+				SELECT current_run.status, current_run.updated_at,
+				       CASE WHEN current_run.status = 'failed' THEN current_run.updated_at END AS failed_at
+				FROM (
+					SELECT status, updated_at FROM knowledge.pipeline_runs
+					WHERE knowledge_object_id = o.knowledge_object_id
+					ORDER BY generation DESC, updated_at DESC, knowledge_pipeline_run_id DESC LIMIT 1
+				) current_run
+				UNION ALL
+				SELECT legacy.status, legacy.updated_at, legacy.failed_at
+				FROM (
+					SELECT status, updated_at, failed_at FROM knowledge.pipeline_statuses
+					WHERE knowledge_object_id = o.knowledge_object_id
+					ORDER BY updated_at DESC, knowledge_pipeline_status_id DESC LIMIT 1
+				) legacy
+				WHERE NOT EXISTS (SELECT 1 FROM knowledge.pipeline_runs WHERE knowledge_object_id = o.knowledge_object_id)
+			) ps ON true
 			WHERE o.deleted_at IS NULL
 			  AND ` + visibleNotesCustodyObjectSQL("o", true) + `
 			  AND ` + notesLifecycleSelectionSQL("o", input.SourceLifecycle) + `
@@ -65,6 +91,7 @@ func (s Store) ListNotesOverviewRows(ctx context.Context, input NotesOverviewInp
 			       file_class,
 			       processing_state,
 			       extraction_status,
+			       pipeline_status,
 			       COUNT(knowledge_object_id)::int AS object_count,
 			       COUNT(*) FILTER (WHERE NOT is_archived)::int AS active_count,
 			       COUNT(*) FILTER (WHERE is_archived)::int AS archived_count,
@@ -74,9 +101,11 @@ func (s Store) ListNotesOverviewRows(ctx context.Context, input NotesOverviewInp
 			       COALESCE(SUM(search_document_count), 0)::int AS search_document_count,
 			       MAX(last_seen_at) AS last_seen_at,
 			       MAX(last_processed_at) AS last_processed_at,
-			       MAX(last_indexed_at) AS last_indexed_at
+			       MAX(last_indexed_at) AS last_indexed_at,
+			       MAX(pipeline_updated_at) AS pipeline_updated_at,
+			       MAX(pipeline_failed_at) AS pipeline_failed_at
 			FROM object_rows
-			GROUP BY notes_source_root_id, file_class, processing_state, extraction_status
+			GROUP BY notes_source_root_id, file_class, processing_state, extraction_status, pipeline_status
 		)
 		SELECT r.notes_source_root_id,
 		       r.root_kind,
@@ -102,7 +131,8 @@ func (s Store) ListNotesOverviewRows(ctx context.Context, input NotesOverviewInp
 		       object_stats.last_processed_at,
 		       object_stats.last_indexed_at,
 		       ` + sourceContextRootSQL("r") + `,
-		       COALESCE(object_stats.active_count,0), COALESCE(object_stats.archived_count,0)
+		       COALESCE(object_stats.active_count,0), COALESCE(object_stats.archived_count,0),
+		       COALESCE(object_stats.pipeline_status,''), object_stats.pipeline_updated_at, object_stats.pipeline_failed_at
 		FROM knowledge.notes_source_roots r
 		LEFT JOIN projects.projects p
 		  ON p.project_id = r.project_id
@@ -129,73 +159,34 @@ func (s Store) ListNotesOverviewRows(ctx context.Context, input NotesOverviewInp
 }
 
 func (s Store) ListNotesOverviewPipelineRows(ctx context.Context, input NotesOverviewInput) ([]notesOverviewPipelineRow, error) {
-	if _, err := NormalizeSourceLifecycleFilter(input.SourceLifecycle); err != nil {
-		return nil, err
-	}
-	if err := validateSourceCategory(input.SourceCategory); err != nil {
-		return nil, err
-	}
-	if s.db == nil {
-		return nil, fmt.Errorf("knowledge store is not configured")
-	}
-	clauses, args := notesOverviewRootClauses(input)
-	// The inner pipeline_stats join already proves a visible object in this root.
-	clauses[0] = "true"
-	query := `
-		WITH pipeline_stats AS (
-			SELECT o.notes_source_root_id,
-			       ps.status,
-			       COUNT(*)::int AS status_count,
-			       MAX(ps.updated_at) AS last_updated_at,
-			       MAX(ps.failed_at) AS last_failed_at
-			FROM knowledge.knowledge_objects o
-			JOIN LATERAL (
-				SELECT current_run.status, current_run.updated_at,
-				       CASE WHEN current_run.status = 'failed' THEN current_run.updated_at END AS failed_at
-				FROM (
-					SELECT status, updated_at FROM knowledge.pipeline_runs
-					WHERE knowledge_object_id = o.knowledge_object_id
-					ORDER BY generation DESC, updated_at DESC, knowledge_pipeline_run_id DESC LIMIT 1
-				) current_run
-				UNION ALL
-				SELECT legacy.status, legacy.updated_at, legacy.failed_at
-				FROM (
-					SELECT status, updated_at, failed_at FROM knowledge.pipeline_statuses
-					WHERE knowledge_object_id = o.knowledge_object_id
-					ORDER BY updated_at DESC, knowledge_pipeline_status_id DESC LIMIT 1
-				) legacy
-				WHERE NOT EXISTS (SELECT 1 FROM knowledge.pipeline_runs WHERE knowledge_object_id = o.knowledge_object_id)
-			) ps ON true
-			WHERE o.deleted_at IS NULL
-			  AND ` + visibleNotesCustodyObjectSQL("o", true) + `
-			  AND ` + notesLifecycleSelectionSQL("o", input.SourceLifecycle) + `
-			  AND ` + visibleNotesKnowledgeRelativePathSQL("o.relative_path") + `
-			GROUP BY o.notes_source_root_id, ps.status
-		)
-		SELECT r.notes_source_root_id,
-		       pipeline_stats.status,
-		       pipeline_stats.status_count,
-		       pipeline_stats.last_updated_at,
-		       pipeline_stats.last_failed_at
-		FROM knowledge.notes_source_roots r
-		JOIN pipeline_stats
-		  ON pipeline_stats.notes_source_root_id = r.notes_source_root_id
-		WHERE ` + strings.Join(clauses, " AND ") + `
-		ORDER BY r.node_key, r.root_kind, r.backend_root_key, pipeline_stats.status`
-	rows, err := s.queryNotesOverview(ctx, input, query, args...)
+	rows, err := s.ListNotesOverviewRows(ctx, input)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	return notesOverviewPipelineRows(rows), nil
+}
+
+// The object aggregates also partition by current pipeline status, so both
+// summaries share one visibility evaluation and the same database snapshot.
+func notesOverviewPipelineRows(rows []notesOverviewObjectRow) []notesOverviewPipelineRow {
 	var out []notesOverviewPipelineRow
-	for rows.Next() {
-		row, err := scanNotesOverviewPipelineRow(rows)
-		if err != nil {
-			return nil, err
+	groups := make(map[[2]string]int)
+	for _, row := range rows {
+		if row.PipelineStatus != "" && row.ObjectCount > 0 {
+			key := [2]string{row.NotesSourceRootID, normalizeNotesPipelineStatus(row.PipelineStatus)}
+			if index, ok := groups[key]; ok {
+				out[index].Count += row.ObjectCount
+				out[index].LastUpdatedAt = latestTimePtr(out[index].LastUpdatedAt, row.PipelineUpdatedAt)
+				out[index].LastFailedAt = latestTimePtr(out[index].LastFailedAt, row.PipelineFailedAt)
+				continue
+			}
+			groups[key] = len(out)
+			out = append(out, notesOverviewPipelineRow{NotesSourceRootID: row.NotesSourceRootID,
+				Status: key[1], Count: row.ObjectCount,
+				LastUpdatedAt: row.PipelineUpdatedAt, LastFailedAt: row.PipelineFailedAt})
 		}
-		out = append(out, row)
 	}
-	return out, rows.Err()
+	return out
 }
 
 func notesOverviewRootClauses(input NotesOverviewInput) ([]string, []any) {
@@ -231,6 +222,7 @@ func scanNotesOverviewObjectRow(scanner notesOverviewScanner) (notesOverviewObje
 	var contextRoot []byte
 	var row notesOverviewObjectRow
 	var lastSeenAt, lastProcessedAt, lastIndexedAt sql.NullTime
+	var pipelineUpdatedAt, pipelineFailedAt sql.NullTime
 	if err := scanner.Scan(
 		&row.NotesSourceRootID,
 		&row.RootKind,
@@ -258,6 +250,9 @@ func scanNotesOverviewObjectRow(scanner notesOverviewScanner) (notesOverviewObje
 		&contextRoot,
 		&row.LifecycleCounts.Active,
 		&row.LifecycleCounts.Archived,
+		&row.PipelineStatus,
+		&pipelineUpdatedAt,
+		&pipelineFailedAt,
 	); err != nil {
 		return notesOverviewObjectRow{}, err
 	}
@@ -265,6 +260,8 @@ func scanNotesOverviewObjectRow(scanner notesOverviewScanner) (notesOverviewObje
 	row.SourceContext = sourceContextFromRootJSON(contextRoot, "")
 	row.LastProcessedAt = nullTimePtr(lastProcessedAt)
 	row.LastIndexedAt = nullTimePtr(lastIndexedAt)
+	row.PipelineUpdatedAt = nullTimePtr(pipelineUpdatedAt)
+	row.PipelineFailedAt = nullTimePtr(pipelineFailedAt)
 	return normalizeNotesOverviewObjectRow(row), nil
 }
 

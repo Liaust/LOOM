@@ -6,6 +6,8 @@ import (
 )
 
 const (
+	WorkerKind           = "notes_projection"
+	MaxDeltaIdentities   = 64
 	DefaultDirectoryName = "notes"
 
 	ManifestSchemaVersion = 1
@@ -54,6 +56,35 @@ type SourceListInput struct {
 // pruning generated entries. Payload files themselves are not snapshot-isolated.
 type SourceProvider interface {
 	ListProjectionSources(ctx context.Context, input SourceListInput) ([]SourceObject, error)
+}
+
+// Every requested identity must have a source or exact authoritative withdrawal
+// evidence. Missing/inaccessible rows and failed fences are uncertainty, not deletion.
+type TargetedSourceProvider interface {
+	ReadProjectionSources(context.Context, []string) (SourceDelta, error)
+}
+
+type SourceDelta struct {
+	Sources   []SourceObject
+	Withdrawn map[string]string
+}
+
+type DirtyChange struct {
+	Key      string `json:"key"`
+	ObjectID string `json:"object_id,omitempty"`
+	Sequence int64  `json:"sequence"`
+}
+
+type DirtyCompletion struct {
+	Change  DirtyChange
+	RetryAt *time.Time
+}
+
+type DirtyStore interface {
+	PendingProjectionDirty(context.Context, time.Time, int) ([]DirtyChange, error)
+	NextProjectionDirtyAt(context.Context) (*time.Time, error)
+	FinishProjectionDirty(context.Context, DirtyChange, *time.Time) error
+	RequireProjectionReconcile(context.Context) error
 }
 
 type SourceObject struct {
@@ -136,6 +167,7 @@ type Counts struct {
 }
 
 type ProjectionEntry struct {
+	RootRelativePath  string     `json:"root_relative_path,omitempty"`
 	SourceCategory    string     `json:"source_category,omitempty"`
 	SourcePosture     string     `json:"source_posture,omitempty"`
 	Declaration       string     `json:"declaration,omitempty"`

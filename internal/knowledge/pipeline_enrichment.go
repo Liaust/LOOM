@@ -28,10 +28,11 @@ func (s EnrichmentStages) union(other EnrichmentStages) EnrichmentStages {
 }
 
 type EnrichmentBinding struct {
-	ObjectID       string `json:"object_id"`
-	SourceRevision string `json:"source_revision"`
-	SourceHash     string `json:"source_hash"`
-	AdmissionHash  string `json:"admission_hash"`
+	MembershipDigest string `json:"membership_digest,omitempty"`
+	ObjectID         string `json:"object_id"`
+	SourceRevision   string `json:"source_revision"`
+	SourceHash       string `json:"source_hash"`
+	AdmissionHash    string `json:"admission_hash"`
 }
 type PipelineEnrichment struct {
 	Binding         EnrichmentBinding `json:"binding"`
@@ -53,16 +54,26 @@ func enrichmentBinding(object KnowledgeObject) (EnrichmentBinding, error) {
 	if source != nil {
 		source.Refresh = nil
 	}
-	raw, err := json.Marshal([]any{object.NotesSourceRootID, object.SourcePath, object.RelativePath,
-		object.SourceNodeID, object.SourceNodeKey, object.ProjectID, object.FileClass, source})
+	values := []any{object.NotesSourceRootID, object.SourcePath, object.RelativePath,
+		object.SourceNodeID, object.SourceNodeKey, object.ProjectID, object.FileClass, source}
+	if object.BoxMembershipDigest != "" {
+		values = append(values, object.BoxMembershipDigest)
+	}
+	raw, err := json.Marshal(values)
 	if err != nil {
 		return EnrichmentBinding{}, err
 	}
-	return EnrichmentBinding{object.KnowledgeObjectID, object.SourceRevision, object.SourceHash, hashArtifactValue(string(raw))}, nil
+	return EnrichmentBinding{ObjectID: object.KnowledgeObjectID, SourceRevision: object.SourceRevision, SourceHash: object.SourceHash, AdmissionHash: hashArtifactValue(string(raw)), MembershipDigest: object.BoxMembershipDigest}, nil
 }
 
 func compileEnrichmentPlan(object KnowledgeObject, host PipelinePolicy, intent PipelineEnrichment) (CompiledPipelinePlan, error) {
-	binding, err := enrichmentBinding(object)
+	bound := object
+	// Existing unbound runs remain compatible when ownership is first labelled.
+	// New previews always capture membership and cannot cross a reassociation.
+	if intent.Binding.MembershipDigest == "" {
+		bound.BoxMembershipDigest = ""
+	}
+	binding, err := enrichmentBinding(bound)
 	if err != nil {
 		return CompiledPipelinePlan{}, err
 	}
@@ -84,7 +95,7 @@ func compileEnrichmentPlan(object KnowledgeObject, host PipelinePolicy, intent P
 		(stages.Vision && !host.ImageDescriptionsEnabled) || (stages.Embeddings && !host.EmbeddingsEnabled) {
 		return CompiledPipelinePlan{}, fmt.Errorf("%w: requested enrichment stage is disabled by host policy", ErrInvalid)
 	}
-	plan, err := CompilePipelinePlan(object, host)
+	plan, err := compilePipelinePlan(object, host, stages.any())
 	if err != nil {
 		return plan, err
 	}
@@ -114,6 +125,7 @@ func compileEnrichmentPlan(object KnowledgeObject, host PipelinePolicy, intent P
 		}
 	}
 	plan.EffectivePolicy, plan.Enrichment = &effective, &intent
+	selectUsefulPipelineStages(&plan)
 	return plan, nil
 }
 
@@ -192,6 +204,7 @@ func (s *Service) EnrichPipelineObject(ctx context.Context, expected EnrichmentB
 	}
 	if (expected.SourceRevision != "" && expected.SourceRevision != binding.SourceRevision) ||
 		(expected.SourceHash != "" && expected.SourceHash != binding.SourceHash) ||
+		(expected.MembershipDigest != "" && expected.MembershipDigest != binding.MembershipDigest) ||
 		(expected.AdmissionHash != "" && expected.AdmissionHash != binding.AdmissionHash) {
 		return PipelineRun{}, fmt.Errorf("%w: stale enrichment preview; source version or admission changed", ErrConflict)
 	}
@@ -203,9 +216,41 @@ func (s *Service) EnrichPipelineObject(ctx context.Context, expected EnrichmentB
 		return PipelineRun{}, err
 	}
 	intent := PipelineEnrichment{Binding: binding, Requested: requested, ActorID: actor, HostPolicy: host, AutomaticPolicy: effectiveSourcePipelinePolicy(host, source)}
+	plan, retry, replay, err := assessEnrichmentTx(ctx, tx, object, host, intent, settings.QuietWindowSeconds, true)
+	if err != nil {
+		return PipelineRun{}, err
+	}
+	if replay != nil {
+		if err = tx.Commit(); err != nil {
+			return PipelineRun{}, err
+		}
+		return *replay, nil
+	}
+	if err = s.checkEnrichmentRuntime(ctx, plan.FileFamily, requested, settings); err != nil {
+		return PipelineRun{}, err
+	}
+	snapshot, err := plan.Snapshot()
+	if err != nil {
+		return PipelineRun{}, err
+	}
+	run, _, err := s.ensureLockedPipelineRunTx(ctx, tx, object, plan, snapshot, true, DefaultPipelinePriority, retry)
+	if err != nil {
+		return PipelineRun{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return PipelineRun{}, err
+	}
+	s.cleanupSupersededPipelineInputs(ctx, object.KnowledgeObjectID)
+	return run, nil
+}
+
+// Preview uses the same assessment in a read-only snapshot; apply rechecks it
+// under the existing trajectory/object locks before creating any work.
+func assessEnrichmentTx(ctx context.Context, tx *sql.Tx, object KnowledgeObject, host PipelinePolicy, intent PipelineEnrichment, quietSeconds int, lockRows bool) (CompiledPipelinePlan, *pipelineRetrySpec, *PipelineRun, error) {
+	requested := intent.Requested
 	previous, previousErr := latestEnrichmentRunTx(ctx, tx, object.KnowledgeObjectID)
 	if previousErr != nil && previousErr != sql.ErrNoRows {
-		return PipelineRun{}, previousErr
+		return CompiledPipelinePlan{}, nil, nil, previousErr
 	}
 	var oldPlan CompiledPipelinePlan
 	if previousErr == nil && previous.Status != FilePipelineStatusStale && previous.Status != FilePipelineStatusCancelled && json.Unmarshal(previous.PlanSnapshot, &oldPlan) == nil {
@@ -216,19 +261,16 @@ func (s *Service) EnrichPipelineObject(ctx context.Context, expected EnrichmentB
 					// Prior permission is not evidence that newly derived text was
 					// vectorized. The object is locked, so publication cannot move
 					// between this check and queue creation.
-					if err = tx.QueryRowContext(ctx, `SELECT COALESCE(lexical_version_id=semantic_version_id AND lexical_version_id=$2,false)
-                        FROM knowledge.knowledge_objects WHERE knowledge_object_id=$1`, object.KnowledgeObjectID, previous.KnowledgeObjectVersionID).Scan(&embeddingsPublishedForOutput); err != nil {
-						return PipelineRun{}, err
+					if e := tx.QueryRowContext(ctx, `SELECT COALESCE(lexical_version_id=semantic_version_id AND lexical_version_id=$2,false)
+                        FROM knowledge.knowledge_objects WHERE knowledge_object_id=$1`, object.KnowledgeObjectID, previous.KnowledgeObjectVersionID).Scan(&embeddingsPublishedForOutput); e != nil {
+						return CompiledPipelinePlan{}, nil, nil, e
 					}
 				}
 				if enrichmentReplayStages(*oldPlan.Enrichment, embeddingsPublishedForOutput).contains(requested) {
-					if err = tx.Commit(); err != nil {
-						return PipelineRun{}, err
-					}
-					return previous, nil
+					return oldPlan, nil, &previous, nil
 				}
 				if !isRetryablePipelineRunStatus(previous.Status) {
-					return PipelineRun{}, fmt.Errorf("%w: enrichment is already in progress; wait before adding stages", ErrConflict)
+					return CompiledPipelinePlan{}, nil, nil, fmt.Errorf("%w: enrichment is already in progress; wait before adding stages", ErrConflict)
 				}
 				intent.Preserved = oldPlan.Enrichment.Requested.union(oldPlan.Enrichment.Retained).union(oldPlan.Enrichment.Preserved)
 			}
@@ -236,11 +278,9 @@ func (s *Service) EnrichPipelineObject(ctx context.Context, expected EnrichmentB
 	}
 	plan, err := compileEnrichmentPlan(object, host, intent)
 	if err != nil {
-		return PipelineRun{}, err
+		return CompiledPipelinePlan{}, nil, nil, err
 	}
-	if err = s.checkEnrichmentRuntime(ctx, plan.FileFamily, requested, settings); err != nil {
-		return PipelineRun{}, err
-	}
+	plan.HeavyQuietWindowSeconds = quietSeconds
 	// Reuse only a finished compatible prefix of this exact version. Embedding-only
 	// keeps valid extraction/chunks, including previously authorized OCR/vision.
 	var retry *pipelineRetrySpec
@@ -282,10 +322,10 @@ func (s *Service) EnrichPipelineObject(ctx context.Context, expected EnrichmentB
 			if stage.StageKey != target {
 				continue
 			}
-			candidate.HeavyQuietWindowSeconds = settings.QuietWindowSeconds
+			candidate.HeavyQuietWindowSeconds = quietSeconds
 			snapshot, _ := candidate.Snapshot()
 			version := KnowledgeObjectVersion{KnowledgeObjectVersionID: previous.KnowledgeObjectVersionID}
-			inspection, e := validateRetryReuseTx(ctx, tx, object, version, candidate, snapshot, previous.KnowledgePipelineRunID, i)
+			inspection, e := inspectRetryReuseTx(ctx, tx, object, version, candidate, snapshot, previous.KnowledgePipelineRunID, i, lockRows)
 			if e == nil {
 				extra := map[string]bool{}
 				for _, compiled := range candidate.Stages {
@@ -314,21 +354,9 @@ func (s *Service) EnrichPipelineObject(ctx context.Context, expected EnrichmentB
 		}
 	}
 	if retry == nil && ((!requested.OCR && intent.Preserved.OCR) || (!requested.Vision && intent.Preserved.Vision)) {
-		return PipelineRun{}, fmt.Errorf("%w: prior enrichment outputs are not reusable; retry the prior run or explicitly select those stages again", ErrConflict)
+		return CompiledPipelinePlan{}, nil, nil, fmt.Errorf("%w: prior enrichment outputs are not reusable; retry the prior run or explicitly select those stages again", ErrConflict)
 	}
-	snapshot, err := plan.Snapshot()
-	if err != nil {
-		return PipelineRun{}, err
-	}
-	run, _, err := s.ensureLockedPipelineRunTx(ctx, tx, object, plan, snapshot, true, DefaultPipelinePriority, retry)
-	if err != nil {
-		return PipelineRun{}, err
-	}
-	if err = tx.Commit(); err != nil {
-		return PipelineRun{}, err
-	}
-	s.cleanupSupersededPipelineInputs(ctx, object.KnowledgeObjectID)
-	return run, nil
+	return plan, retry, nil, nil
 }
 
 func (s *Service) checkEnrichmentRuntime(ctx context.Context, family string, stages EnrichmentStages, settings EmbeddingSettings) error {

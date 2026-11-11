@@ -362,12 +362,20 @@ func TestDeclarationMigrationReadOnlyRolePostgres(t *testing.T) {
 		migrationSQL(t, f.db, fmt.Sprintf(`GRANT USAGE ON SCHEMA %q TO %q; GRANT SELECT ON ALL TABLES IN SCHEMA %q TO %q`, s, role, s, role))
 	}
 	u, _ := url.Parse(f.url)
-	u.User = url.User(role)
+	// Keep the test connection's existing authentication, then assume only the
+	// disposable role. This exercises SQL privileges without requiring trust auth.
+	query := u.Query()
+	query.Set("options", strings.TrimSpace(query.Get("options")+" -c role="+role))
+	u.RawQuery = query.Encode()
 	readDB, e := sql.Open("pgx", u.String())
 	if e != nil {
 		t.Fatal(e)
 	}
 	defer readDB.Close()
+	var currentRole string
+	if e = readDB.QueryRow(`SELECT current_user`).Scan(&currentRole); e != nil || currentRole != role {
+		t.Fatalf("read-only role not active: %q %v", currentRole, e)
+	}
 	f.resolver.DB = readDB
 	f.service.auth = NewCurrentAuthority(readDB)
 	if _, e = readDB.Exec(`UPDATE projects.projects SET name=name`); e == nil {

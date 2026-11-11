@@ -8,7 +8,6 @@ LOOM_CLI_BIN="${LOOM_CLI_BIN:-loom}"
 PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 MAIN_HOST="${LOOM_MAIN_HOST:-loom-main}"
 VPS_HOST="${LOOM_VPS_HOST:-loom-vps}"
-MAIN_HTTP_URL="${LOOM_MAIN_HTTP_URL:-http://10.44.0.2:8080}"
 MAC_WG_IP="${LOOM_MACBOOK_WG_IP:-10.44.0.5}"
 WG_CONF="${LOOM_MACBOOK_WG_CONF:-$HOME/.loom/secrets/wireguard/loomwg0.conf}"
 WG_PUB="${LOOM_MACBOOK_WG_PUB:-$HOME/.loom/secrets/wireguard/macbook-primary.pub}"
@@ -58,7 +57,7 @@ Usage: scripts/loom-macbook <command>
 
 Commands:
   auth-status    Check SSH agent/Keychain, main SSH, SMB, and Storage Box auth.
-  network-check  Verify SSH, WireGuard route, and direct main HTTP health.
+  network-check  Verify SSH, WireGuard route, and authenticated Main health.
   safe-check     Run the production MacBook LOOM workspace lifecycle smoke.
   smb-preflight  Verify SMB client tools, route, TCP/445, and local mount path.
   smb-host-alias-status
@@ -108,7 +107,6 @@ Commands:
 Environment:
   LOOM_MAIN_HOST         Production main SSH alias. Default: loom-main
   LOOM_VPS_HOST          WireGuard hub SSH alias. Default: loom-vps
-  LOOM_MAIN_HTTP_URL     Production main private HTTP URL. Default: http://10.44.0.2:8080
   LOOM_MACBOOK_WG_IP     MacBook WireGuard address. Default: 10.44.0.5
   LOOM_MACBOOK_WG_CONF   Local WireGuard config path. Default: ~/.loom/secrets/wireguard/loomwg0.conf
   LOOM_MACBOOK_WG_PUB    Local WireGuard public key path. Default: ~/.loom/secrets/wireguard/macbook-primary.pub
@@ -925,7 +923,7 @@ REMOTE
 }
 
 cmd_network_check() {
-  require_command curl
+  require_command ssh
 
   printf 'ssh main: '
   ssh -o BatchMode=yes "$MAIN_HOST" 'hostname >/dev/null && systemctl is-active loomd >/dev/null' \
@@ -942,8 +940,9 @@ cmd_network_check() {
     fail "missing MacBook WireGuard address $MAC_WG_IP"
   fi
 
-  printf 'main private health: '
-  curl --max-time 5 -fsS "$MAIN_HTTP_URL/v1/health" | {
+  printf 'main health over SSH: '
+  ssh -o BatchMode=yes -o ConnectTimeout=5 "$MAIN_HOST" \
+    'loom --config /etc/loom/loom.env health --json' | {
     if command -v jq >/dev/null 2>&1; then
       jq -r '"ok=" + (.ok|tostring) + " status=" + (.data.status // "unknown") + " node=" + (.data.node.id // "unknown")'
     else

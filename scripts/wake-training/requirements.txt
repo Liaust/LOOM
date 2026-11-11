@@ -1,0 +1,7 @@
+# Python 3.11, private Mac environment. No recording or model belongs in Git.
+tensorflow==2.19.1
+keras==3.10.0
+pyopen-wakeword==1.1.0
+piper-tts==1.3.0
+scipy==1.15.3
+soundfile==0.13.1

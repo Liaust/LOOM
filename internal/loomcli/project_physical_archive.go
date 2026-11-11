@@ -21,6 +21,7 @@ import (
 
 func addProjectPhysicalArchiveCommands(parent *cobra.Command, opts *options, restore bool) {
 	if !restore {
+		addProjectRetirementCommands(parent, opts)
 		var operation string
 		var yes bool
 		command := &cobra.Command{Use: "reactivate <project-ref>", Short: "Release a completed restore for editing; do not start runtime resources", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
@@ -34,7 +35,9 @@ func addProjectPhysicalArchiveCommands(parent *cobra.Command, opts *options, res
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 4*time.Minute)
 			defer cancel()
+			stopWait := startProjectRequestWait(cmd, opts, operation, "restore-fence release", 2*time.Second, 15*time.Second)
 			out, err := cc.Client.ReactivateProject(ctx, cc.CorrelationID, args[0], storagearchive.ProjectReactivationRequest{RestoreOperationID: operation, Confirm: true})
+			stopWait()
 			if err != nil {
 				return renderError(cmd, opts, cc.CorrelationID, err)
 			}
@@ -115,6 +118,15 @@ func addProjectPhysicalArchiveCommands(parent *cobra.Command, opts *options, res
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), 4*time.Minute)
 			defer cancel()
+			operation := review.Workspace.OperationID
+			if recover {
+				operation = args[1]
+			}
+			activity := "archive"
+			if restore {
+				activity = "restore"
+			}
+			stopWait := startProjectRequestWait(cmd, opts, operation, activity, 2*time.Second, 15*time.Second)
 			var out response.Envelope[storagearchive.ProjectPhysicalMutationSummary]
 			if recover {
 				input := storagearchive.ProjectPhysicalRecoverRequest{OperationID: args[1], PlanDigest: digest, Confirm: true}
@@ -131,6 +143,7 @@ func addProjectPhysicalArchiveCommands(parent *cobra.Command, opts *options, res
 					out, err = cc.Client.ApplyProjectPhysicalArchive(ctx, cc.CorrelationID, args[0], input)
 				}
 			}
+			stopWait()
 			if err != nil {
 				return renderProjectPhysicalFailure(cmd, opts, cc.CorrelationID, out.Data, err)
 			}
@@ -148,28 +161,92 @@ func addProjectPhysicalArchiveCommands(parent *cobra.Command, opts *options, res
 
 func readProjectPhysicalReview(path string) (storagearchive.ProjectPhysicalPlanReview, error) {
 	var review storagearchive.ProjectPhysicalPlanReview
+	if err := readProjectReviewFile(path, &review); err != nil {
+		return review, err
+	}
+	return review, storagearchive.ValidateProjectPhysicalPlanReview(review)
+}
+
+func readProjectReviewFile(path string, review any) error {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
-		return review, errors.New("review unavailable")
+		return errors.New("review unavailable")
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Size() > storagearchive.MaximumWorkspaceSurfaceRequestBytes {
-		return review, errors.New("invalid review file")
+		return errors.New("invalid review file")
 	}
 	raw, err := io.ReadAll(io.LimitReader(f, storagearchive.MaximumWorkspaceSurfaceRequestBytes+1))
 	if err != nil || len(raw) > storagearchive.MaximumWorkspaceSurfaceRequestBytes {
-		return review, errors.New("invalid bounded review")
+		return errors.New("invalid bounded review")
 	}
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.DisallowUnknownFields()
-	if err := d.Decode(&review); err != nil {
-		return review, err
+	if err := d.Decode(review); err != nil {
+		return err
 	}
 	if err := d.Decode(new(any)); !errors.Is(err, io.EOF) {
-		return review, errors.New("trailing review data")
+		return errors.New("trailing review data")
 	}
-	return review, storagearchive.ValidateProjectPhysicalPlanReview(review)
+	return nil
+}
+
+func addProjectRetirementCommands(parent *cobra.Command, opts *options) {
+	retire := &cobra.Command{Use: "retire", Short: "Reconcile an inactive legacy registration with its retained files; no file move or deletion"}
+	var root, reason string
+	plan := &cobra.Command{Use: "plan <project-ref>", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		cc, err := resolveCommandContext(opts)
+		if err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(cmd.Context(), time.Minute)
+		defer cancel()
+		out, err := cc.Client.ReviewProjectRegistrationRetirement(ctx, cc.CorrelationID, args[0], storagearchive.ProjectRetirementInput{RetainedRoot: root, Reason: reason})
+		if err != nil {
+			return renderError(cmd, opts, cc.CorrelationID, err)
+		}
+		if opts.jsonOutput {
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(out.Data)
+		}
+		p := out.Data
+		fmt.Fprintf(cmd.OutOrStdout(), "Retire registration: %s\nRetain in place: %s\nInventory: %d entries, %d bytes\nPlan digest: %s\nNo physical archive, deletion or runtime activation.\n", p.ProjectSlug, p.RetainedRoot, p.InventoryEntries, p.InventoryBytes, p.PlanDigest)
+		return nil
+	}}
+	plan.Flags().StringVar(&root, "retained-root", "", "exact retained legacy root")
+	plan.Flags().StringVar(&reason, "reason", "", "reason for this retained disposition")
+	_ = plan.MarkFlagRequired("retained-root")
+	_ = plan.MarkFlagRequired("reason")
+	var digest string
+	var yes bool
+	apply := &cobra.Command{Use: "apply <project-ref> <plan-json-file>", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+		var p storagearchive.ProjectRetirementPlan
+		if err := readProjectReviewFile(args[1], &p); err != nil {
+			return err
+		}
+		if !yes || digest == "" || digest != p.PlanDigest {
+			return errors.New("exact --plan-digest and --yes are required")
+		}
+		cc, err := resolveCommandContext(opts)
+		if err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(cmd.Context(), time.Minute)
+		defer cancel()
+		out, err := cc.Client.ApplyProjectRegistrationRetirement(ctx, cc.CorrelationID, args[0], storagearchive.ProjectRetirementApply{Plan: p, PlanDigest: digest, Confirm: yes})
+		if err != nil {
+			return renderError(cmd, opts, cc.CorrelationID, err)
+		}
+		if opts.jsonOutput {
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(out)
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), "Legacy registration retired. Retained files and history unchanged; no physical archive was claimed.")
+		return nil
+	}}
+	apply.Flags().StringVar(&digest, "plan-digest", "", "exact reviewed retirement digest")
+	apply.Flags().BoolVar(&yes, "yes", false, "confirm this exact registration retirement")
+	retire.AddCommand(plan, apply)
+	parent.AddCommand(retire)
 }
 
 func renderProjectPhysicalSummary(w io.Writer, result storagearchive.ProjectPhysicalMutationSummary) {

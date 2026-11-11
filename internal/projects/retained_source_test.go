@@ -13,11 +13,17 @@ func TestRetainedSourceSelector(t *testing.T) {
 		for _, pair := range SupportedProjectRepositorySourceVersions() {
 			for _, member := range []string{"app", "repos/app", "code/app", "."} {
 				t.Run(pair.ProjectContract+"/"+pair.ReposContract+"/"+member, func(t *testing.T) {
+					if pair == projectRepositorySourceV06V06 && member == "." {
+						if _, err := retainedRepositoryPath(pair, member); err == nil {
+							t.Fatal("v0.6 root repository accepted")
+						}
+						return
+					}
 					want := "repos/" + member
 					if member == "." {
 						want = "repos"
 					}
-					if pair == projectRepositorySourceV05V05 {
+					if pair == projectRepositorySourceV05V05 || pair == projectRepositorySourceV06V06 {
 						want = member
 					}
 					got, err := retainedRepositoryPath(pair, member)

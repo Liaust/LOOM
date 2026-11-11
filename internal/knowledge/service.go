@@ -13,10 +13,16 @@ type Clock func() time.Time
 type Option func(*Service)
 
 type Service struct {
-	store             Store
-	now               Clock
-	embeddingRuntime  EmbeddingRuntime
-	sourceStagingRoot string
+	store              Store
+	now                Clock
+	embeddingRuntime   EmbeddingRuntime
+	sourceStagingRoot  string
+	fileSourceReader   FileSourceReader
+	notesSearchBackend string
+}
+
+func WithNotesSearchBackend(backend string) Option {
+	return func(s *Service) { s.notesSearchBackend = backend }
 }
 
 func WithSourceStagingRoot(path string) Option {

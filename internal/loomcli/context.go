@@ -1,11 +1,14 @@
 package loomcli
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"loom.local/loom/internal/boxregistry"
 	"loom.local/loom/internal/config"
 	"loom.local/loom/internal/correlation"
 	loomerrors "loom.local/loom/internal/errors"
@@ -69,6 +72,10 @@ func resolveCommandContext(opts *options) (commandContext, error) {
 }
 
 func resolveCLIConfig(opts *options) (config.Config, error) {
+	return resolveCLIConfigWithClientEnv(opts, "/etc/loom-client.env")
+}
+
+func resolveCLIConfigWithClientEnv(opts *options, clientEnvPath string) (config.Config, error) {
 	if opts == nil {
 		opts = &options{}
 	}
@@ -78,28 +85,138 @@ func resolveCLIConfig(opts *options) (config.Config, error) {
 	if manifest, ok := explicitInstallManifest(os.Getenv("LOOM_CONFIG_FILE")); ok {
 		return config.Load(overridesFromInstallManifest(manifest, opts))
 	}
-	if strings.TrimSpace(opts.configFile) == "" && strings.TrimSpace(os.Getenv("LOOM_CONFIG_FILE")) == "" {
+	configFile := opts.configFile
+	if strings.TrimSpace(configFile) == "" && strings.TrimSpace(os.Getenv("LOOM_CONFIG_FILE")) == "" {
 		if manifest, ok := defaultInstallManifest(); ok {
 			return config.Load(overridesFromInstallManifest(manifest, opts))
 		}
+		info, err := os.Stat(clientEnvPath)
+		if err != nil && !os.IsNotExist(err) {
+			return config.Config{}, fmt.Errorf("read CLI client configuration: %w", err)
+		}
+		if err == nil {
+			if !info.Mode().IsRegular() {
+				return config.Config{}, fmt.Errorf("CLI client configuration must be a regular file")
+			}
+			configFile = clientEnvPath
+		}
 	}
 	return config.Load(config.Overrides{
-		ConfigFile: opts.configFile,
+		ConfigFile: configFile,
 		SocketPath: opts.socketPath,
 	})
 }
 
 func resolveCLIClient(cfg config.Config, opts *options) (localclient.Client, error) {
+	ref, _, err := resolveCLIBoxSelection(cfg, opts)
+	if err != nil {
+		return localclient.Client{}, err
+	}
+	all := opts != nil && opts.allBoxes
+	var client localclient.Client
 	if opts != nil && strings.TrimSpace(opts.socketPath) != "" {
-		return localclient.New(cfg.SocketPath), nil
+		client = localclient.New(cfg.SocketPath)
+	} else if (strings.TrimSpace(os.Getenv("LOOM_MAIN_URL")) != "" || cfg.NodeKind != "main") && strings.TrimSpace(cfg.MainURL) != "" {
+		client, err = localclient.NewHTTP(cfg.MainURL)
+	} else {
+		client = localclient.New(cfg.SocketPath)
 	}
-	if strings.TrimSpace(os.Getenv("LOOM_MAIN_URL")) != "" && strings.TrimSpace(cfg.MainURL) != "" {
-		return localclient.NewHTTP(cfg.MainURL)
+	return client.WithBoxContext(ref, all), err
+}
+
+// Shared by transport selection and offline Box policy discovery.
+func resolveCLIBoxSelection(cfg config.Config, opts *options) (string, string, error) {
+	ref := strings.TrimSpace(os.Getenv("LOOM_BOX_ID"))
+	origin := "default"
+	if ref != "" {
+		origin = "env"
 	}
-	if cfg.NodeKind != "main" && strings.TrimSpace(cfg.MainURL) != "" {
-		return localclient.NewHTTP(cfg.MainURL)
+	all := false
+	if opts != nil {
+		if opts.boxRef != "" {
+			ref = opts.boxRef
+			origin = "flag"
+		}
+		all = opts.allBoxes
+		if all && opts.boxRef != "" {
+			return "", "", fmt.Errorf("--box and --all-boxes are mutually exclusive")
+		}
 	}
-	return localclient.New(cfg.SocketPath), nil
+	if ref == "" && !all && cfg.BoxesFile != "" {
+		var err error
+		ref, err = boxRefFromWorkingDirectory(cfg)
+		if err != nil {
+			return "", "", err
+		}
+		if ref != "" {
+			origin = "cwd"
+		}
+	}
+	return ref, origin, nil
+}
+
+func boxRefFromWorkingDirectory(cfg config.Config) (string, error) {
+	catalog, err := cfg.BoxCatalog()
+	if err != nil {
+		return "", err
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("resolve Box working directory: %w", err)
+	}
+	// Getwd may retain a logical PWD alias. Select the actual directory, not
+	// a lexical prefix that can cross a Box boundary through a symlink.
+	cwd, err = filepath.EvalSymlinks(cwd)
+	if err != nil {
+		return "", fmt.Errorf("resolve Box working directory: %w", err)
+	}
+	if cwd == string(filepath.Separator) {
+		return "", nil
+	}
+	binding, err := catalog.ForPath(cwd)
+	if err == nil {
+		return binding.ID, nil
+	}
+	if !errors.Is(err, boxregistry.ErrUnknown) {
+		return "", err
+	}
+	var ref string
+	for _, binding := range catalog.Boxes {
+		// Personal's legacy ArchiveRoot is the whole Storage root, not an
+		// ownership boundary. Only additional Boxes have dedicated archives.
+		if binding.Primary {
+			continue
+		}
+		archiveRoot := binding.ArchiveRoot
+		if archiveRoot == "" {
+			// Unavailable entries have no descriptor-derived fields yet, but
+			// their retained archives still use the catalog's fixed layout.
+			archiveRoot = filepath.Join(cfg.StorageRoot, "Boxes", binding.Key)
+		}
+		resolvedArchive, err := filepath.EvalSymlinks(archiveRoot)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("resolve Box %q archive directory: %w", binding.Key, err)
+		}
+		if resolvedArchive != archiveRoot {
+			return "", fmt.Errorf("%w: Box archive must be canonical", boxregistry.ErrUnavailable)
+		}
+		rel, err := filepath.Rel(archiveRoot, cwd)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		selected, err := catalog.Get(binding.Key)
+		if err != nil {
+			return "", err
+		}
+		if ref != "" {
+			return "", fmt.Errorf("%w: working directory matches multiple Box archives", boxregistry.ErrSelection)
+		}
+		ref = selected.ID
+	}
+	return ref, nil
 }
 
 func explicitInstallManifest(path string) (setup.InstallManifest, bool) {

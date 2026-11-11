@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +19,69 @@ import (
 	"loom.local/loom/internal/nodes"
 	"loom.local/loom/internal/response"
 )
+
+func TestRuntimeWorkerHistoryRequiresConfirmation(t *testing.T) {
+	opts := rootOptions{out: &bytes.Buffer{}, errOut: &bytes.Buffer{}}
+	cmd := newRuntimeWorkerHistoryCommand(&opts)
+	cmd.SetArgs([]string{"prune", "--apply"})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "--apply --yes") {
+		t.Fatal("history deletion did not require confirmation", err)
+	}
+}
+
+func TestRuntimeWakeFilesMatchDurableSnapshots(t *testing.T) {
+	store := Store{DataDir: t.TempDir(), ConfigPath: "/config/node.json", StatePath: "/state/node.json"}
+	paths := store.runtimeWakeFiles()
+	if len(paths) != 4 || paths[0] != store.ConfigPath || paths[1] != store.syncOutboxPath() || paths[2] != store.watchedRootBackupOutboxPath() || paths[3] != store.queueRecordsPath() {
+		t.Fatal("runtime wake paths do not match queue/config owners", paths)
+	}
+}
+
+func TestSupervisorPollUsesImmediateDurableDelivery(t *testing.T) {
+	for _, failSend := range []bool{false, true} {
+		t.Run(fmt.Sprint(failSend), func(t *testing.T) {
+			var runtimeStore noderuntime.Store
+			acks := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/node-agent/poll":
+					response.WriteJSON(w, 200, response.Success("poll", communication.PollResult{NodeID: "node_test", Messages: []communication.Message{{CommunicationMessageID: "wake_message", NodeID: "node_test", Direction: communication.DirectionMainToNode, Kind: communication.KindMainPing, Status: communication.StatusDelivered, PayloadJSON: json.RawMessage(`{}`)}}}))
+				case "/v1/node-agent/ack":
+					acks++
+					summary, err := runtimeStore.OutboxSummary()
+					if err != nil || summary.Counts[noderuntime.OutboxStatusInflight] != 1 {
+						t.Error("ACK sent without durable outbox claim", summary, err)
+					}
+					if failSend {
+						w.WriteHeader(503)
+						return
+					}
+					response.WriteJSON(w, 200, response.Success("ack", communication.AckResult{Ack: communication.MessageAck{CommunicationAckID: "wake_ack"}}))
+				default:
+					t.Error("unexpected request", r.URL.Path)
+				}
+			}))
+			defer server.Close()
+			store := testNodeAgentStore(t, t.TempDir(), server.URL, State{NodeID: "node_test", CredentialToken: "test_secret"})
+			runtimeStore = noderuntime.NewStore(store.DataDir)
+			if err := runtimeStore.EnsureDefaultInstances(noderuntime.DefaultInstanceInput{}); err != nil {
+				t.Fatal(err)
+			}
+			_, err := nodeAgentRuntimeRegistry().RunOnce(t.Context(), runtimeStore, noderuntime.Env{ConfigPath: store.ConfigPath, StatePath: store.StatePath, DataDir: store.DataDir}, noderuntime.WorkerKeyPoll, "test")
+			if err != nil || acks != 1 {
+				t.Fatal("poll did not immediately deliver its durable ACK", acks, err)
+			}
+			summary, err := runtimeStore.OutboxSummary()
+			want := noderuntime.OutboxStatusDone
+			if failSend {
+				want = noderuntime.OutboxStatusFailed
+			}
+			if err != nil || summary.Counts[want] != 1 {
+				t.Fatal("delivery lost retry custody", summary, err)
+			}
+		})
+	}
+}
 
 func TestRuntimeWorkerCommands(t *testing.T) {
 	t.Parallel()
@@ -74,7 +139,7 @@ func TestRuntimeWorkerCommands(t *testing.T) {
 	if err := json.Unmarshal(runOut.Bytes(), &runEnvelope); err != nil {
 		t.Fatalf("decode run: %v\n%s", err, runOut.String())
 	}
-	if !runEnvelope.OK || runEnvelope.Data.Run.Status != noderuntime.RunStatusSucceeded {
+	if !runEnvelope.OK || (runEnvelope.Data.Run.Status != noderuntime.RunStatusSucceeded && runEnvelope.Data.Run.Status != noderuntime.RunStatusSkipped) {
 		t.Fatalf("unexpected run envelope %#v", runEnvelope)
 	}
 

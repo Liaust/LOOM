@@ -10,14 +10,15 @@ import { ControlTransport, nativeChunk, nativeMetadataChange } from "./control";
 import { Journal, indexedDBPersistence, indexedDBReplayPersistence, recoveryPersistence } from "./journal";
 import { NativeReplay, nativeDatabaseIdentity, replayBacklog, replayControlPaths, NATIVE_REPLAY_BATCH, type ReplayWork } from "./native-replay";
 import { IntentClient } from "./client";
-import { MAX_BYTES, MAX_REFERENCE_BYTES, referenceBytes, reserved, isControlPath, digest, referencePath, type Binding } from "./protocol";
+import { MAX_BYTES, MAX_REFERENCE_BYTES, referenceBytes, nativeText, reserved, isControlPath, digest, referencePath, type Binding } from "./protocol";
 import { layoutAlias, layoutPolicyPaths, relocateLocal } from "./layout";
 import { convergeNative } from "./conflicts";
 import { NotesConflictsModal, NotesStatusModal } from "./conflict-ui";
 import { classifyNativeTarget, type NativeLeaf } from "./native-target";
 import { PathWork, WakeLoop } from "./work";
-import { TextFileView, TFolder } from "obsidian";
+import { FileSystemAdapter, TextFileView, TFolder } from "obsidian";
 import { UpdateBarrier, startupHeld } from "./update";
+import { startWorkspaceBridge } from "./workspace-bridge";
 import release from "./release.json";
 
 export function createUpdateHandoff(plugin: ObsidianLiveSyncPlugin) {
@@ -120,8 +121,8 @@ export function createLoomClient(
             if (!await revisionReady(path, rev)) throw Error("native_conflict_chunks_pending");
             const entry = await access.fetchEntry(path as FilePathWithPrefix, rev, false, true, true);
             if (!entry || entry.deleted || entry._deleted || entry.size > MAX_BYTES) throw Error("native_conflict_text_unavailable");
-            const text = readContent(entry);
-            if (typeof text !== "string") throw Error("native_conflict_not_text");
+            const text = nativeText(path, readContent(entry));
+            if (text === null) throw Error("native_conflict_not_text");
             result.push({ revision: rev, text });
         }
         return result;
@@ -135,11 +136,25 @@ export function createLoomClient(
         },
         readControl: (path, revision) => transport.get(path, revision),
         conflictLeaves: nativeLeaves,
+        async retiredRevision(path, revision) {
+            const meta = await access.fetchEntryMeta(path as FilePathWithPrefix, undefined, true);
+            // PouchDB may hide a physically deleted winning root from metadata
+            // reads. Its deterministic native ID still resolves retained leaves.
+            const id=meta?meta._id:await plugin.core.services.path.path2id(path as FilePathWithPrefix);
+            let rows;
+            try { rows=await local().localDatabase.get(id, { open_revs: "all", revs: true }); }
+            catch(error){if((error as {status?:number}).status===404)return false;throw error;}
+            if (!rows.length) return false;
+            return rows.every(row => {
+                if (!("ok" in row) || !(row.ok._deleted || "deleted" in row.ok && row.ok.deleted)) return false;
+                const r = (row.ok as { _revisions?: { start: number; ids: string[] } })._revisions;
+                return !!r && r.ids.some((id, index) => `${r.start-index}-${id}` === revision);
+            });
+        },
         async readRevision(path, revision) {
             if (!await revisionReady(path, revision)) return null;
             const entry = await access.fetchEntry(path as FilePathWithPrefix, revision, false, true, true);
-            const text = entry && !entry.deleted && !entry._deleted ? readContent(entry) : null;
-            return typeof text === "string" ? text : null;
+            return entry && !entry.deleted && !entry._deleted ? nativeText(path, readContent(entry)) : null;
         },
         async readReference(path, revision) {
             if (!await referenceAllowed(path, revision)) return null;
@@ -248,6 +263,28 @@ export function createLoomClient(
         },
         async directoryExists(path) {
             return (await plugin.app.vault.adapter.stat(path))?.type === "folder";
+        },
+        async retireEmptyDirectory(binding) {
+            const vault=plugin.app.vault;
+            return (plugin.core.serviceModules.fileHandler as ServiceFileHandler).loomPublish([binding.path as FilePathWithPrefix],async()=>{
+                if ((await vault.adapter.stat(binding.path))?.type!=="folder") return false;
+                const entries=await vault.adapter.list(binding.path);
+                if(entries.files.length||entries.folders.length)return false;
+                // Nonrecursive rmdir is atomic against a concurrently created child.
+                try {
+                    if(vault.adapter instanceof FileSystemAdapter) {
+                        // Static require("fs") is replaced by the upstream web
+                        // build. Resolve Electron's desktop API only in this branch.
+                        const fs=(window as Window & {require:NodeJS.Require}).require("fs") as typeof import("fs");
+                        const fullPath=vault.adapter.getFullPath(binding.path);
+                        await new Promise<void>((resolve,reject)=>fs.rmdir(fullPath,error=>error?reject(error):resolve()));
+                    } else await vault.adapter.rmdir(binding.path,false);
+                } catch(error) {
+                    if(["ENOTEMPTY","EEXIST"].includes((error as {code?:string}).code??""))return false;
+                    if((error as {code?:string}).code!=="ENOENT")throw error;
+                }
+                return !await vault.adapter.exists(binding.path);
+            });
         },
         async reflectDirectory(binding) {
             const vault = plugin.app.vault;
@@ -494,6 +531,19 @@ export function createLoomClient(
 
 export async function startLoomClient(plugin: ObsidianLiveSyncPlugin) {
     const client = plugin.loomClient;
+    if (plugin.app.vault.adapter instanceof FileSystemAdapter) {
+        try {
+            const node = window as Window & { require: NodeJS.Require };
+            plugin.register(startWorkspaceBridge({ fs: node.require("fs"), paths: node.require("path"),
+                pluginDirectory: plugin.app.vault.adapter.getFullPath(`${plugin.app.vault.configDir}/plugins/${plugin.manifest.id}`),
+                vaultRoot: plugin.app.vault.adapter.getBasePath(),
+                state: () => !client.stopped && !client.journal.failure ? client.journal.state : undefined,
+                owner: { app: plugin.app,
+                    async ready() { await client.ready; await client.settled(); if (client.stopped || client.journal.failure) throw Error("owner_unavailable"); },
+                    allowed: async path => await client.io.referenceAllowed?.(path) ?? false,
+                    readText: path => client.io.read(path) } }));
+        } catch { /* Optional desktop metadata must not prevent native sync startup. */ }
+    }
     const status = plugin.addStatusBarItem();
     status.setAttribute("aria-label", "Review LOOM Notes status");
     status.setAttribute("title", "Review LOOM Notes status");

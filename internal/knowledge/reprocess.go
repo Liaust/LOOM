@@ -223,6 +223,7 @@ func (s *Service) listReprocessCandidates(ctx context.Context, input ReprocessIn
 		visibleNotesKnowledgeRelativePathSQL("o.relative_path"),
 	}
 	args := []any{}
+	clauses = append(clauses, notesSelectedObjectSQL(ctx, "o", &args))
 	add := func(condition string, value any) {
 		args = append(args, value)
 		clauses = append(clauses, fmt.Sprintf(condition, len(args)))

@@ -1,0 +1,23 @@
+:root,[data-preview-theme="graphite-jade"] {
+  --bg:#171a19;--surface:#1b201e;--raised:#232926;--field:#1c211f;
+  --chrome:#161a18;--rail:#131615;--navigation:#1b201e;--frame-line:#2c3530;--line:#2c3530;--border:#414e46;
+  --text:#dde3de;--heading:#e8ede9;--muted:#9ba79f;--subtle:#839187;
+  --accent:#98c3af;--focus:#7da991;--link:#93bccd;--link-line:#4d7180;
+  --hover:#262f2a;--selected:#2b3b32;--selected-inactive:#252f29;--text-selection:#3a5144;
+  --danger:#dfa4a6;--warning:#d7b278;--success:#9bbfa4;--info:#93bccd;
+  --chip:#263831;--chip-text:#b3d6c2;--code-bg:#1c2420;--code-text:#bdcfc3;
+  --primary-bg:#2b4035;--primary-border:#4e6a59;--primary-hover:#344e40;
+  --scrollbar:#46564b;--chart-grid:#8da89816;--chart-neutral:#8d9e92;
+  --md-strong:#e7b778;--md-emphasis:#a7c7a5;--md-strong-emphasis:#c8b0d5;
+}
+:root[data-theme="coffee-cream"],[data-preview-theme="coffee-cream"] {
+  --bg:#241714;--surface:#1c0c09;--raised:#2a1613;--field:#21100c;
+  --chrome:#120302;--rail:#120302;--navigation:#120302;--frame-line:transparent;--line:#3b2420;--border:#65463a;
+  --text:#e0c5a9;--heading:#f2ddc5;--muted:#b59a82;--subtle:#a48973;
+  --accent:#ff9500;--focus:#d6a069;--link:#8fbfda;--link-line:#6c8fa1;
+  --hover:#35201a;--selected:#412822;--selected-inactive:#2e1b17;--text-selection:#5b3530;
+  --danger:#e4a0a0;--warning:#e8b56e;--success:#91bd9e;--info:#8fbfda;
+  --chip:#3c261b;--chip-text:#f0c38a;--code-bg:#21100d;--code-text:#d8bd9f;
+  --primary-bg:#483020;--primary-border:#7f5938;--primary-hover:#563a26;
+  --scrollbar:#65483a;--chart-grid:#caa88818;--chart-neutral:#b59a82;
+}

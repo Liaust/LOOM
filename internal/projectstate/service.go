@@ -131,6 +131,11 @@ func (s Service) observeProjectMode(ctx context.Context, ref string, inspectRepo
 	if developmentState == nil {
 		developmentState = FileDevelopmentStateInspector{Paths: paths}
 	}
+	location := RepositoryReadLocation{Source: model.Source}
+	var locationErr error
+	if inspectRepositories && model.Source.OwnerNode == localNode {
+		location, locationErr = s.repositoryReadLocation(ctx, model)
+	}
 	members := append([]projects.ProjectRepositoryReadMember(nil), model.Members...)
 	sort.Slice(members, func(i, j int) bool { return members[i].RepositoryID < members[j].RepositoryID })
 	for _, member := range members {
@@ -162,11 +167,18 @@ func (s Service) observeProjectMode(ctx context.Context, ref string, inspectRepo
 			projection.Members = append(projection.Members, item)
 			continue
 		}
+		if locationErr != nil {
+			item.ReasonCode = "archive_source_unverified"
+			item.Problems = append(item.Problems, Problem{Code: item.ReasonCode, Severity: ProblemSeverityWarning, Summary: "Retained repository membership or archive custody could not be verified."})
+			projection.Members = append(projection.Members, item)
+			continue
+		}
+		item.Archive = location.Archive
 
-		physicalMemberPath, pathErr := repositorySourceLocation(model.Source, member.Path)
+		physicalMemberPath, pathErr := repositorySourceLocation(location.Source, member.Path)
 		var resolved ResolvedPath
 		if pathErr == nil {
-			resolved, pathErr = paths.ResolveWithin(model.Source.ProjectRoot, physicalMemberPath)
+			resolved, pathErr = paths.ResolveWithin(location.Source.ProjectRoot, physicalMemberPath)
 		}
 		if pathErr != nil {
 			item.ReasonCode = pathObservationReason(pathErr)
@@ -196,6 +208,11 @@ func (s Service) observeProjectMode(ctx context.Context, ref string, inspectRepo
 		if item.DevelopmentState.Posture == DevelopmentStateInvalid || item.DevelopmentState.Posture == DevelopmentStateMismatch {
 			item.Problems = append(item.Problems, Problem{Code: item.DevelopmentState.ReasonCode, Severity: ProblemSeverityError, Summary: "Repository development-state backlink is invalid or mismatched."})
 		}
+		if location.Archive != nil {
+			item.ReasonCode = "verified_archive_context"
+			projection.Members = append(projection.Members, item)
+			continue // Captured state is historical, never live Git/service health.
+		}
 
 		gitProjection, gitErr := git.Observe(ctx, resolved.Path)
 		if gitErr != nil {
@@ -214,6 +231,11 @@ func (s Service) observeProjectMode(ctx context.Context, ref string, inspectRepo
 		observedAt := now
 		item.ObservedAt = &observedAt
 		projection.Members = append(projection.Members, item)
+	}
+	if location.Revalidate != nil {
+		if err := location.Revalidate(ctx); err != nil {
+			return ProjectProjection{}, projects.ProjectRepositoryReadModel{}, fmt.Errorf("%w: archive_source_changed", ErrProjectStateUnavailable)
+		}
 	}
 	projection.Observation = summarizeObservations(projection.Members)
 	return projection, model, nil

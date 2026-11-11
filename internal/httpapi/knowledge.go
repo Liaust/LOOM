@@ -15,8 +15,10 @@ import (
 	"loom.local/loom/internal/box"
 	loomerrors "loom.local/loom/internal/errors"
 	"loom.local/loom/internal/idempotency"
+	"loom.local/loom/internal/ids"
 	"loom.local/loom/internal/knowledge"
 	"loom.local/loom/internal/notesprojection"
+	"loom.local/loom/internal/notesworkspacesync"
 	"loom.local/loom/internal/requestctx"
 	"loom.local/loom/internal/response"
 	"loom.local/loom/internal/workers"
@@ -261,7 +263,8 @@ func (s Server) handleKnowledgeNotesSearch(w http.ResponseWriter, r *http.Reques
 	}
 	results, err := s.knowledgeService().SearchNotes(ctx, input)
 	if err != nil {
-		s.writeError(w, correlationID, http.StatusBadRequest, "knowledge.notes_search_failed", "knowledge", input.Query, notesSearchFailureSummary(err), err)
+		status, code, summary := notesSearchFailure(err, "knowledge.notes_search_failed")
+		s.writeError(w, correlationID, status, code, "knowledge", input.Query, summary, err)
 		return
 	}
 	response.WriteJSON(w, http.StatusOK, response.Success(correlationID, results))
@@ -288,17 +291,49 @@ func notesSearchFailureSummary(err error) string {
 	}
 }
 
+func notesSearchFailure(err error, fallbackCode string) (int, string, string) {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return http.StatusGatewayTimeout, "knowledge.notes_search_timeout", "Notes search exceeded its request deadline; no complete result was returned."
+	case errors.Is(err, context.Canceled):
+		return http.StatusRequestTimeout, "knowledge.notes_search_canceled", "Notes search was canceled; no complete result was returned."
+	default:
+		return http.StatusBadRequest, fallbackCode, notesSearchFailureSummary(err)
+	}
+}
+
 func (s Server) handleKnowledgeNotesPipelinesStatus(w http.ResponseWriter, r *http.Request) {
 	correlationID, ctx := requestMeta(r)
 	if r.Method != http.MethodGet {
 		s.writeError(w, correlationID, http.StatusMethodNotAllowed, "method.not_allowed", "knowledge", r.URL.Path, "Method is not allowed.", nil)
 		return
 	}
-	status, err := s.knowledgeService().GetPipelineOverallStatus(ctx)
+	inspect := false
+	if raw := r.URL.Query().Get("inspect_integrity"); raw != "" {
+		var err error
+		inspect, err = strconv.ParseBool(raw)
+		if err != nil {
+			s.writeError(w, correlationID, http.StatusBadRequest, "request.invalid", "knowledge", "notes_pipelines", "inspect_integrity must be a boolean.", nil)
+			return
+		}
+	}
+	service := s.knowledgeService()
+	status, err := service.GetPipelineOverallStatus(ctx)
 	if err != nil {
 		s.writeError(w, correlationID, http.StatusInternalServerError, "knowledge.notes_pipelines_status_failed", "knowledge", "notes_pipelines", "Could not read Notes pipeline status.", err)
 		return
 	}
+	if inspect {
+		status.Operations, err = service.InspectPipelineIntegrity(ctx)
+		if err != nil {
+			status.Progress.PartialErrors = append(status.Progress.PartialErrors, "integrity_inspection_incomplete")
+		}
+	}
+	native, nativeErr := notesworkspacesync.ReadWorkspaceProgress(ctx, s.services.DB, time.Now().UTC())
+	if nativeErr != nil {
+		native.PartialErrors = append(native.PartialErrors, "workspace_receipt_unavailable")
+	}
+	status.NativePublication, _ = json.Marshal(native)
 	response.WriteJSON(w, http.StatusOK, response.Success(correlationID, status))
 }
 
@@ -606,11 +641,156 @@ func (s Server) notesProjectionService() notesprojection.Service {
 }
 
 func (s Server) knowledgeService() *knowledge.Service {
-	options := []knowledge.Option{}
+	options := []knowledge.Option{knowledge.WithNotesSearchBackend(s.services.RuntimeConfig.NotesSearchBackend)}
+	if s.services.NotesFileSourceReader != nil {
+		options = append(options, knowledge.WithFileSourceReader(s.services.NotesFileSourceReader))
+	}
 	if s.services.EmbeddingRuntime != nil {
 		options = append(options, knowledge.WithEmbeddingRuntime(s.services.EmbeddingRuntime))
 	}
 	return knowledge.NewService(s.services.DB, options...)
+}
+
+func (s Server) handleKnowledgeFilesSearch(w http.ResponseWriter, r *http.Request) {
+	correlationID, ctx := requestMeta(r)
+	if r.Method != http.MethodPost {
+		s.writeError(w, correlationID, http.StatusMethodNotAllowed, "method.not_allowed", "knowledge", r.URL.Path, "Method is not allowed.", nil)
+		return
+	}
+	var input knowledge.NotesSearchInput
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		s.writeError(w, correlationID, http.StatusBadRequest, "request.invalid_json", "knowledge", "files_search", "Request body is not valid file search JSON.", err)
+		return
+	}
+	result, err := s.knowledgeService().SearchFiles(ctx, input)
+	if err != nil {
+		status, code, summary := notesSearchFailure(err, "knowledge.files_search_failed")
+		s.writeError(w, correlationID, status, code, "knowledge", input.Query, summary, err)
+		return
+	}
+	response.WriteJSON(w, http.StatusOK, response.Success(correlationID, result))
+}
+
+func (s Server) handleKnowledgeFileRead(w http.ResponseWriter, r *http.Request) {
+	correlationID, ctx := requestMeta(r)
+	if r.Method != http.MethodPost {
+		s.writeError(w, correlationID, http.StatusMethodNotAllowed, "method.not_allowed", "knowledge", r.URL.Path, "Method is not allowed.", nil)
+		return
+	}
+	var input knowledge.FileReadInput
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		s.writeError(w, correlationID, http.StatusBadRequest, "request.invalid_json", "knowledge", "file_read", "Request body is not valid file read JSON.", err)
+		return
+	}
+	result, err := s.knowledgeService().ReadFile(ctx, input)
+	if err != nil {
+		status, code, summary := knowledgeFileReadFailure(err)
+		s.writeError(w, correlationID, status, code, "knowledge", knowledgeFileReadFailureTarget(err, input.Ref), summary, nil)
+		return
+	}
+	response.WriteJSON(w, http.StatusOK, response.Success(correlationID, result))
+}
+
+func knowledgeFileReadFailure(err error) (int, string, string) {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusGatewayTimeout, "knowledge.file_read_timeout", "Managed-file reading exceeded its request deadline; no complete result was returned."
+	}
+	if errors.Is(err, context.Canceled) {
+		return http.StatusRequestTimeout, "knowledge.file_read_canceled", "Managed-file reading was canceled."
+	}
+	var admission *knowledge.FileAdmissionError
+	if errors.As(err, &admission) && admission != nil {
+		switch admission.Reason {
+		case "custody_projection_pending":
+			return http.StatusServiceUnavailable, "knowledge.file_custody_pending", "Notes archive/restore projection is still converging. Retry this exact reference shortly; reindexing is not required."
+		case "source_root_blocked":
+			return http.StatusConflict, "knowledge.file_source_root_blocked", "The managed source root is blocked; its current configuration has not been admitted."
+		case "source_root_disabled":
+			return http.StatusNotFound, "knowledge.file_source_root_disabled", "The managed source root is disabled."
+		case "source_authority_unavailable":
+			return http.StatusServiceUnavailable, "knowledge.file_source_authority_unavailable", "Current authority for the managed source is unavailable."
+		case "source_not_published":
+			return http.StatusNotFound, "knowledge.file_source_not_published", "No readable current content is published for the managed source."
+		default:
+			return http.StatusNotFound, "knowledge.file_not_found", "No readable managed file matches that reference."
+		}
+	}
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return http.StatusNotFound, "knowledge.file_not_found", "No readable managed file matches that reference."
+	case errors.Is(err, knowledge.ErrInvalid):
+		return http.StatusBadRequest, "knowledge.invalid_file_read", "The managed-file reference or read range is invalid."
+	case errors.Is(err, knowledge.ErrFileSourceUnavailable):
+		return http.StatusServiceUnavailable, "knowledge.file_source_unavailable", "The current source is unavailable on this node."
+	case errors.Is(err, knowledge.ErrFileSourceMissing):
+		return http.StatusNotFound, "knowledge.file_source_missing", "The managed current source file is missing on this node."
+	case errors.Is(err, knowledge.ErrFileSourceNotRegular):
+		return http.StatusConflict, "knowledge.file_source_not_regular", "The managed current source is not a regular file."
+	case errors.Is(err, knowledge.ErrFileSourceChanged):
+		return http.StatusConflict, "knowledge.file_source_changed", "The current source changed during reading; retry the read."
+	default:
+		return http.StatusInternalServerError, "knowledge.file_read_failed", "Could not read the current file."
+	}
+}
+
+func knowledgeFileReadFailureTarget(err error, ref string) string {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return ref
+	}
+	var admission *knowledge.FileAdmissionError
+	if errors.As(err, &admission) && admission != nil && ids.Validate(ids.NotesSourceRootPrefix, admission.SourceRootID) == nil {
+		switch admission.Reason {
+		case "source_root_blocked", "source_root_disabled", "source_authority_unavailable", "source_not_published":
+			return admission.SourceRootID
+		}
+	}
+	return ref
+}
+
+func (s Server) handleKnowledgeFilesReconcile(w http.ResponseWriter, r *http.Request) {
+	correlationID, ctx := requestMeta(r)
+	if r.Method != http.MethodPost {
+		s.writeError(w, correlationID, http.StatusMethodNotAllowed, "method.not_allowed", "knowledge", r.URL.Path, "Method is not allowed.", nil)
+		return
+	}
+	var input knowledge.FileIdentityReconcileInput
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		s.writeError(w, correlationID, http.StatusBadRequest, "request.invalid_json", "knowledge", r.URL.Path, "Invalid file reconciliation request.", err)
+		return
+	}
+	out, err := s.knowledgeService().ReconcileFileIdentities(ctx, input)
+	if err != nil {
+		s.writeError(w, correlationID, http.StatusBadRequest, "knowledge.file_reconcile_failed", "knowledge", r.URL.Path, "Could not reconcile file metadata.", err)
+		return
+	}
+	response.WriteJSON(w, http.StatusOK, response.Success(correlationID, out))
+}
+
+func (s Server) handleKnowledgeFilesRetained(w http.ResponseWriter, r *http.Request) {
+	correlationID, ctx := requestMeta(r)
+	if r.Method != http.MethodPost {
+		s.writeError(w, correlationID, http.StatusMethodNotAllowed, "method.not_allowed", "knowledge", r.URL.Path, "Method is not allowed.", nil)
+		return
+	}
+	var input knowledge.RetainedFileOutputsInput
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		s.writeError(w, correlationID, http.StatusBadRequest, "request.invalid_json", "knowledge", r.URL.Path, "Invalid retained-output inventory request.", err)
+		return
+	}
+	out, err := s.knowledgeService().ListRetainedFileOutputs(ctx, input)
+	if err != nil {
+		s.writeError(w, correlationID, http.StatusBadRequest, "knowledge.retained_inventory_failed", "knowledge", r.URL.Path, "Could not inventory retained outputs.", err)
+		return
+	}
+	response.WriteJSON(w, http.StatusOK, response.Success(correlationID, out))
 }
 
 func (s Server) handleKnowledgeNotesIndexerRun(w http.ResponseWriter, r *http.Request) {

@@ -23,6 +23,14 @@ import (
 )
 
 func TestQueueWatchedRootBackupActionStagesArtifactAndAvoidsDuplicates(t *testing.T) {
+	testQueueWatchedRootBackupActionStagesArtifactAndAvoidsDuplicates(t, false)
+}
+
+func TestQueueRecordsQueueWatchedRootBackupActionStagesArtifactAndAvoidsDuplicates(t *testing.T) {
+	testQueueWatchedRootBackupActionStagesArtifactAndAvoidsDuplicates(t, true)
+}
+
+func testQueueWatchedRootBackupActionStagesArtifactAndAvoidsDuplicates(t *testing.T, records bool) {
 	t.Parallel()
 	dir := t.TempDir()
 	sourcePath := filepath.Join(dir, "Project.md")
@@ -31,6 +39,11 @@ func TestQueueWatchedRootBackupActionStagesArtifactAndAvoidsDuplicates(t *testin
 		t.Fatalf("write source: %v", err)
 	}
 	store := Store{DataDir: filepath.Join(dir, "data")}
+	if records {
+		if _, err := store.MigrateQueueRecords(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
 	config := Config{NodeKey: "workspace-test"}
 	state := State{NodeID: "node_test"}
 	modified := time.Now().UTC()
@@ -490,6 +503,14 @@ func TestQueueWatchedRootBackupActionEnforcesPendingLimits(t *testing.T) {
 }
 
 func TestFlushWatchedRootBackupsUploadsArtifactAndRecordsBatch(t *testing.T) {
+	testFlushWatchedRootBackupsUploadsArtifactAndRecordsBatch(t, false)
+}
+
+func TestQueueRecordsFlushWatchedRootBackupsUploadsArtifactAndRecordsBatch(t *testing.T) {
+	testFlushWatchedRootBackupsUploadsArtifactAndRecordsBatch(t, true)
+}
+
+func testFlushWatchedRootBackupsUploadsArtifactAndRecordsBatch(t *testing.T, records bool) {
 	t.Parallel()
 	dir := t.TempDir()
 	sourcePath := filepath.Join(dir, "Project.md")
@@ -498,6 +519,11 @@ func TestFlushWatchedRootBackupsUploadsArtifactAndRecordsBatch(t *testing.T) {
 		t.Fatalf("write source: %v", err)
 	}
 	store := Store{DataDir: filepath.Join(dir, "data")}
+	if records {
+		if _, err := store.MigrateQueueRecords(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
 	config := Config{NodeKey: "workspace-test"}
 	state := State{NodeID: "node_test", CredentialToken: "node_cred_secret"}
 	hashURI := "sha256:" + rawBytesHashHex(content)
@@ -615,6 +641,14 @@ func TestFlushWatchedRootBackupsUploadsArtifactAndRecordsBatch(t *testing.T) {
 }
 
 func TestFlushWatchedRootBackupsRecoversLegacyDirectOperationBinding(t *testing.T) {
+	testFlushWatchedRootBackupsRecoversLegacyDirectOperationBinding(t, false)
+}
+
+func TestQueueRecordsFlushWatchedRootBackupsRecoversLegacyDirectOperationBinding(t *testing.T) {
+	testFlushWatchedRootBackupsRecoversLegacyDirectOperationBinding(t, true)
+}
+
+func testFlushWatchedRootBackupsRecoversLegacyDirectOperationBinding(t *testing.T, records bool) {
 	t.Parallel()
 	dir := t.TempDir()
 	sourcePath := filepath.Join(dir, "renamed.txt")
@@ -623,6 +657,11 @@ func TestFlushWatchedRootBackupsRecoversLegacyDirectOperationBinding(t *testing.
 		t.Fatalf("write source: %v", err)
 	}
 	store := Store{DataDir: filepath.Join(dir, "data")}
+	if records {
+		if _, err := store.MigrateQueueRecords(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
 	config := Config{NodeKey: "workspace-test"}
 	state := State{NodeID: "node_test", CredentialToken: "node_cred_secret"}
 	now := time.Now().UTC()
@@ -809,9 +848,22 @@ func TestFlushWatchedRootBackupsUploadsLargeFileViaTransfer(t *testing.T) {
 }
 
 func TestFlushWatchedRootBackupsDoesNotBlockSmallFileAfterPermanentFailure(t *testing.T) {
+	testFlushWatchedRootBackupsDoesNotBlockSmallFileAfterPermanentFailure(t, false)
+}
+
+func TestQueueRecordsFlushWatchedRootBackupsDoesNotBlockSmallFileAfterPermanentFailure(t *testing.T) {
+	testFlushWatchedRootBackupsDoesNotBlockSmallFileAfterPermanentFailure(t, true)
+}
+
+func testFlushWatchedRootBackupsDoesNotBlockSmallFileAfterPermanentFailure(t *testing.T, records bool) {
 	t.Parallel()
 	dir := t.TempDir()
 	store := Store{DataDir: filepath.Join(dir, "data")}
+	if records {
+		if _, err := store.MigrateQueueRecords(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
 	config := Config{
 		NodeKey: "workspace-test",
 		BackupTransport: BackupTransportConfig{
@@ -1001,6 +1053,14 @@ func TestFlushWatchedRootBackupsDoesNotBlockSmallFileAfterPermanentFailure(t *te
 }
 
 func TestFlushWatchedRootBackupsResumesInterruptedFileTransfer(t *testing.T) {
+	testFlushWatchedRootBackupsResumesInterruptedFileTransfer(t, false)
+}
+
+func TestQueueRecordsFlushWatchedRootBackupsResumesInterruptedFileTransfer(t *testing.T) {
+	testFlushWatchedRootBackupsResumesInterruptedFileTransfer(t, true)
+}
+
+func testFlushWatchedRootBackupsResumesInterruptedFileTransfer(t *testing.T, records bool) {
 	t.Parallel()
 	dir := t.TempDir()
 	sourcePath := filepath.Join(dir, "video.mov")
@@ -1009,6 +1069,11 @@ func TestFlushWatchedRootBackupsResumesInterruptedFileTransfer(t *testing.T) {
 		t.Fatalf("write source: %v", err)
 	}
 	store := Store{DataDir: filepath.Join(dir, "data")}
+	if records {
+		if _, err := store.MigrateQueueRecords(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
 	config := Config{
 		NodeKey: "workspace-test",
 		BackupTransport: BackupTransportConfig{
@@ -1113,6 +1178,14 @@ func TestFlushWatchedRootBackupsResumesInterruptedFileTransfer(t *testing.T) {
 }
 
 func TestFlushWatchedRootBackupsKeepsTransientUploadErrorRetryable(t *testing.T) {
+	testFlushWatchedRootBackupsKeepsTransientUploadErrorRetryable(t, false)
+}
+
+func TestQueueRecordsFlushWatchedRootBackupsKeepsTransientUploadErrorRetryable(t *testing.T) {
+	testFlushWatchedRootBackupsKeepsTransientUploadErrorRetryable(t, true)
+}
+
+func testFlushWatchedRootBackupsKeepsTransientUploadErrorRetryable(t *testing.T, records bool) {
 	t.Parallel()
 	dir := t.TempDir()
 	sourcePath := filepath.Join(dir, "retry.txt")
@@ -1121,6 +1194,11 @@ func TestFlushWatchedRootBackupsKeepsTransientUploadErrorRetryable(t *testing.T)
 		t.Fatalf("write source: %v", err)
 	}
 	store := Store{DataDir: filepath.Join(dir, "data")}
+	if records {
+		if _, err := store.MigrateQueueRecords(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
 	config := Config{NodeKey: "workspace-test"}
 	state := State{NodeID: "node_test", CredentialToken: "node_cred_secret"}
 	hashURI := "sha256:" + rawBytesHashHex(content)
@@ -1385,4 +1463,149 @@ func parseFakeChunkIndex(value string) (int64, error) {
 
 func stringPtrForTest(value string) *string {
 	return &value
+}
+
+func TestWatchedRootBackupQueueBatchMixedAcknowledgements(t *testing.T) {
+	testWatchedRootBackupQueueBatchMixedAcknowledgements(t, false)
+}
+
+func TestQueueRecordsWatchedRootBackupQueueBatchMixedAcknowledgements(t *testing.T) {
+	testWatchedRootBackupQueueBatchMixedAcknowledgements(t, true)
+}
+
+func testWatchedRootBackupQueueBatchMixedAcknowledgements(t *testing.T, records bool) {
+	store := Store{DataDir: t.TempDir()}
+	if records {
+		if _, err := store.MigrateQueueRecords(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	config := Config{NodeKey: "fixture"}
+	state := State{NodeID: "fixture-node", CredentialToken: "fixture-token"}
+	for i := 0; i < 4; i++ {
+		if _, _, err := store.QueueWatchedRootBackupAction(config, state, watchedroots.OutputAction{
+			ActionKind: watchedroots.OutputActionBackupMetadata, RootKey: "notes", RelativePath: fmt.Sprintf("folder-%d", i),
+			BackupMode: watchedroots.BackupModeIncrementalRaw, BackupItemKind: mainwatchedroots.BackupItemKindDirectory,
+		}, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/node-agent/watched-roots/backup-batches" {
+			t.Error("unexpected transport")
+			w.WriteHeader(400)
+			return
+		}
+		var input mainwatchedroots.BackupBatchInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Error(err)
+			return
+		}
+		status, batchStatus := mainwatchedroots.BackupItemStatusAccepted, mainwatchedroots.BackupBatchStatusAccepted
+		if input.Items[0].RelativePath == "folder-1" {
+			status, batchStatus = mainwatchedroots.BackupItemStatusFailed, mainwatchedroots.BackupBatchStatusFailed
+		}
+		_ = json.NewEncoder(w).Encode(response.Success("fixture", mainwatchedroots.BackupBatchResult{
+			Batch: mainwatchedroots.BackupBatch{WatchedRootBackupBatchID: "main-" + input.Items[0].LocalItemRef, Status: batchStatus},
+			Items: []mainwatchedroots.BackupItem{{LocalItemRef: input.Items[0].LocalItemRef, WatchedRootBackupItemID: "main-item-" + input.Items[0].LocalItemRef, Status: status}},
+		}))
+	}))
+	defer server.Close()
+	config.MainURL = server.URL
+	run, err := pushLocalWatchedRootBackupsOnce(context.Background(), store, config, state, "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.SubmittedItems != 4 || run.LocalStatus.Counts.Accepted != 3 || run.LocalStatus.Counts.Failed != 1 {
+		t.Fatalf("mixed receipts lost: %+v", run)
+	}
+	if !records && (run.Persistence.SnapshotReads != 4 || run.Persistence.SnapshotWrites != 3 || run.Persistence.CommitPages != 1) {
+		t.Fatalf("backup acks still rewrite per item: %+v", run.Persistence)
+	}
+	if records && (run.Persistence.SnapshotReads != 0 || run.Persistence.SnapshotWrites != 0 || run.Persistence.RecordWrites != 12 || run.Persistence.CommitPages != 1) {
+		t.Fatalf("backup acknowledgements lost record-level persistence: %+v", run.Persistence)
+	}
+	items, err := store.LoadWatchedRootBackupItems()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outbox, err := store.LoadWatchedRootBackupOutbox()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if item.MainBackupItemID != "main-item-"+item.LocalItemID {
+			t.Fatal("exact retained item binding lost")
+		}
+		if item.RelativePath == "folder-1" && item.Status != localBackupStatusFailed {
+			t.Fatal("failed receipt hidden")
+		}
+	}
+	before, _ := os.Stat(store.watchedRootBackupOutboxPath())
+	if err := store.ApplyWatchedRootBackupBatchResult(outbox[0], run.Batches[0]); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.Stat(store.watchedRootBackupOutboxPath())
+	if !os.SameFile(before, after) {
+		t.Fatal("unchanged terminal backup ack rewrote state")
+	}
+	t.Logf("4 mixed backup acks: records=%t, persistence=%+v", records, run.Persistence)
+}
+
+func TestWatchedRootBackupQueueBatchKeepsEarlierAckOnTransportFailure(t *testing.T) {
+	testWatchedRootBackupQueueBatchKeepsEarlierAckOnTransportFailure(t, false)
+}
+
+func TestQueueRecordsWatchedRootBackupQueueBatchKeepsEarlierAckOnTransportFailure(t *testing.T) {
+	testWatchedRootBackupQueueBatchKeepsEarlierAckOnTransportFailure(t, true)
+}
+
+func testWatchedRootBackupQueueBatchKeepsEarlierAckOnTransportFailure(t *testing.T, records bool) {
+	store := Store{DataDir: t.TempDir()}
+	if records {
+		if _, err := store.MigrateQueueRecords(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	config := Config{NodeKey: "fixture"}
+	state := State{NodeID: "fixture-node", CredentialToken: "fixture-token"}
+	for i := 0; i < 2; i++ {
+		if _, _, err := store.QueueWatchedRootBackupAction(config, state, watchedroots.OutputAction{
+			ActionKind: watchedroots.OutputActionBackupMetadata, RootKey: "notes", RelativePath: fmt.Sprintf("folder-%d", i),
+			BackupMode: watchedroots.BackupModeIncrementalRaw, BackupItemKind: mainwatchedroots.BackupItemKindDirectory,
+		}, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input mainwatchedroots.BackupBatchInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Error(err)
+			return
+		}
+		if input.Items[0].RelativePath == "folder-1" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(response.Success("fixture", mainwatchedroots.BackupBatchResult{
+			Batch: mainwatchedroots.BackupBatch{WatchedRootBackupBatchID: "accepted-before-failure", Status: mainwatchedroots.BackupBatchStatusAccepted},
+			Items: []mainwatchedroots.BackupItem{{LocalItemRef: input.Items[0].LocalItemRef, WatchedRootBackupItemID: "retained-receipt", Status: mainwatchedroots.BackupItemStatusAccepted}},
+		}))
+	}))
+	defer server.Close()
+	config.MainURL = server.URL
+	run, err := pushLocalWatchedRootBackupsOnce(context.Background(), store, config, state, "fixture")
+	if err == nil {
+		t.Fatal("transport failure hidden")
+	}
+	if run.Persistence.CommitPages != 1 {
+		t.Fatalf("prior transitions not committed: %+v", run.Persistence)
+	}
+	items, err := store.LoadWatchedRootBackupItems()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items[0].Status != localBackupStatusAccepted || items[0].MainBackupItemID != "retained-receipt" || items[1].Status != localBackupStatusPending || items[1].LastErrorCode == "" {
+		t.Fatalf("partial turn lost truth: %+v", items)
+	}
 }

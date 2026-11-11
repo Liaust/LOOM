@@ -393,6 +393,10 @@ func testNotesArchiveProjectCompletionMode(t *testing.T, material, declaration b
 }
 
 func testNotesArchiveProjectCompletionBoundMode(t *testing.T, material, declaration, bound bool, observe func(*notesArchivePostgresFixture, KnowledgeObject, SourceLifecycle)) {
+	testNotesArchiveProjectCompletionPrepared(t, material, declaration, bound, nil, observe)
+}
+
+func testNotesArchiveProjectCompletionPrepared(t *testing.T, material, declaration, bound bool, prepare func(*notesArchivePostgresFixture, SourceRoot), observe func(*notesArchivePostgresFixture, KnowledgeObject, SourceLifecycle)) {
 	f := notesArchiveTestFixture(t)
 	mainID := ids.NewNodeID()
 	if _, err := f.s.store.db.Exec(`INSERT INTO nodes.nodes(node_id,node_key,display_name,node_kind,node_role,runtime_class,status)
@@ -509,6 +513,9 @@ func testNotesArchiveProjectCompletionBoundMode(t *testing.T, material, declarat
 		t.Fatalf("project admission: %d", len(objects))
 	}
 	advanceBoxSyncedFixture(t, f.s)
+	if prepare != nil {
+		prepare(f, root)
+	}
 	before := f.processingSnapshot(t)
 	review, err := service.ReviewProjectPhysicalArchive(t.Context(), req, projectID, storagearchive.ProjectPhysicalArchivePlanInput{Reason: "Notes project custody proof"})
 	if err != nil {

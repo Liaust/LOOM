@@ -84,6 +84,33 @@ func TestApplicationPrerequisitesAbsentAndReadOnly(t *testing.T) {
 		t.Fatal("query created state directory")
 	}
 }
+
+func TestApplicationPrerequisitesPreparingInstallationIsReadable(t *testing.T) {
+	r, q, _ := applicationPrerequisitesFixture(t)
+	installation := ApplicationInstallation{Owner: q.Owner, UID: applicationAccountUID(q.Owner), Data: map[string]ApplicationDataIdentity{}}
+	path := filepath.Join(r.Store.Root, "installation-"+q.Owner.Instance()+".json")
+	applicationPrerequisitesWrite(t, path, installation)
+	before := applicationPrerequisitesTree(t, filepath.Dir(r.PolicyPath))
+	snapshot, err := r.QueryPrerequisites(t.Context(), 1234, q)
+	if err != nil || snapshot.Installation.Present || snapshot.Installation.Revision != "" {
+		t.Fatalf("legitimate preparing installation became corrupt: %#v %v", snapshot.Installation, err)
+	}
+	if !reflect.DeepEqual(before, applicationPrerequisitesTree(t, filepath.Dir(r.PolicyPath))) {
+		t.Fatal("inspection changed preparing state")
+	}
+	for _, mutate := range []func(*ApplicationInstallation){
+		func(v *ApplicationInstallation) { v.Committed = true },
+		func(v *ApplicationInstallation) { v.Applied = true },
+		func(v *ApplicationInstallation) { v.UID++ },
+	} {
+		changed := installation
+		mutate(&changed)
+		applicationPrerequisitesWrite(t, path, changed)
+		if _, err := r.QueryPrerequisites(t.Context(), 1234, q); err == nil {
+			t.Fatal("invalid empty-revision installation accepted")
+		}
+	}
+}
 func TestApplicationPrerequisitesScopedAdmission(t *testing.T) {
 	for _, name := range []string{"publisher", "other_peer", "wrong_node", "invalid_schema", "invalid_owner"} {
 		t.Run(name, func(t *testing.T) {

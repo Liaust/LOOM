@@ -2,6 +2,7 @@ package watchedroots
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -44,15 +45,29 @@ func Reconcile(ctx context.Context, store Store, req ScanRequest) (ScanResult, e
 	if err != nil {
 		return ScanResult{}, err
 	}
+	observedHints := dirtyHints
 	dirtyHints, ignoredHintPaths := effectiveDirtyHints(root, dirtyHints)
 	if len(ignoredHintPaths) > 0 {
-		if err := store.ClearDirtyHints(root.Config.RootKey, ignoredHintPaths); err != nil {
+		ignored := []DirtyHint{}
+		for _, hint := range observedHints {
+			for _, path := range ignoredHintPaths {
+				if hint.RelativePath == path {
+					ignored = append(ignored, hint)
+					break
+				}
+			}
+		}
+		if _, err := store.ClearObservedDirtyHints(root.Config.RootKey, ignored); err != nil {
 			return ScanResult{}, err
 		}
 	}
 	checkpoint, checkpointErr := store.LoadCheckpoint(root.Config.RootKey)
 	if checkpointErr != nil && !IsNotExist(checkpointErr) {
 		return ScanResult{}, checkpointErr
+	}
+	consumedHints := dirtyHints
+	for _, path := range checkpoint.DeferredHashPaths {
+		dirtyHints = append(dirtyHints, DirtyHint{RelativePath: path, HintKind: DirtyHintModified, Source: "deferred_hash"})
 	}
 	if mode == ScanModeAuto {
 		mode = autoScanMode(root, checkpoint, dirtyHints, started)
@@ -65,16 +80,42 @@ func Reconcile(ctx context.Context, store Store, req ScanRequest) (ScanResult, e
 	}
 
 	result := ScanResult{
-		forceHash: req.Force || req.Mode == ScanModeFull || mode == ScanModeDirty,
-		RootKey:   root.Config.RootKey,
-		Mode:      mode,
-		Status:    RunStatusHealthy,
-		StartedAt: started,
+		OutputsPreviouslyCurrent: coverageConfigMatches(root, checkpoint) && checkpoint.OutputsCurrent && !checkpoint.PendingRescan,
+		forceHash:                req.Force || req.Mode == ScanModeFull || mode == ScanModeDirty,
+		RootKey:                  root.Config.RootKey,
+		Mode:                     mode,
+		Status:                   RunStatusHealthy,
+		StartedAt:                started,
 		Counts: ScanCounts{
 			DirtyHintsBefore:  len(dirtyHints),
 			IgnoredDirtyHints: len(ignoredHintPaths),
 			IgnoredBySource:   map[string]int{},
 		},
+	}
+	result.stabilityHints = map[string]DirtyHint{}
+	result.subtreeScans = map[string]SubtreeScan{}
+	if coverageConfigMatches(root, checkpoint) {
+		for path, scan := range checkpoint.SubtreeScans {
+			for _, hint := range dirtyHints {
+				if hint.RelativePath == path && hint.Generation == scan.Generation {
+					result.subtreeScans[path] = scan
+				}
+			}
+		}
+	}
+	if mode == ScanModeFull {
+		result.fullScanID = checkpoint.FullScanID
+		if !coverageConfigMatches(root, checkpoint) || req.Force || normalizeScanMode(req.Mode) == ScanModeFull {
+			result.fullScanID = ""
+		}
+		if result.fullScanID == "" {
+			result.fullScanID = rand.Text()
+		} else {
+			result.fullScanAfter, result.fullScanResumed = checkpoint.FullScanAfter, checkpoint.FullScanAfter != ""
+		}
+	}
+	for _, hint := range consumedHints {
+		result.stabilityHints[hint.RelativePath] = hint
 	}
 	if root.PolicyResolver != nil {
 		result.PolicyVersion = filePolicyVersion(root)
@@ -130,7 +171,7 @@ func Reconcile(ctx context.Context, store Store, req ScanRequest) (ScanResult, e
 	if result.Message == "" {
 		result.Message = "reconciliation completed"
 	}
-	return finishScan(store, root, workerKey, result, checkpoint, dirtyHints, result.Message)
+	return finishScan(store, root, workerKey, result, checkpoint, consumedHints, result.Message)
 }
 
 func reconcileFull(ctx context.Context, store Store, root ValidatedRoot, result *ScanResult, started time.Time) error {
@@ -143,6 +184,11 @@ func reconcileFull(ctx context.Context, store Store, root ValidatedRoot, result 
 		previousByPath[state.RelativePath] = state
 	}
 	observed := map[string]struct{}{}
+	for _, state := range previousStates {
+		if state.FullScanID == result.fullScanID {
+			observed[state.RelativePath] = struct{}{}
+		}
+	}
 	casefoldSeen := map[string]string{}
 	limits := scanLimits(root, started, result)
 	err = filepath.WalkDir(root.RootPath, func(path string, entry os.DirEntry, walkErr error) error {
@@ -169,6 +215,16 @@ func reconcileFull(ctx context.Context, store Store, root ValidatedRoot, result 
 			return ctx.Err()
 		default:
 		}
+		relativePath := relativeFromPath(root.RootPath, path)
+		if relativePath == "." {
+			return nil
+		}
+		if result.fullScanAfter != "" && !walkPathAfter(relativePath, result.fullScanAfter) {
+			if entry.IsDir() && !strings.HasPrefix(result.fullScanAfter, relativePath+"/") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		if limits.exhausted() {
 			finding := budgetFinding(root.Config.RootKey, result.Counts)
 			result.Findings = append(result.Findings, finding)
@@ -176,10 +232,6 @@ func reconcileFull(ctx context.Context, store Store, root ValidatedRoot, result 
 			result.Counts.BudgetExhausted++
 			result.Status = RunStatusDegraded
 			return filepath.SkipAll
-		}
-		relativePath := relativeFromPath(root.RootPath, path)
-		if relativePath == "." {
-			return nil
 		}
 		obs := ObservePath(root, relativePath)
 		observed[relativePath] = struct{}{}
@@ -199,7 +251,11 @@ func reconcileFull(ctx context.Context, store Store, root ValidatedRoot, result 
 		if change != nil {
 			result.ChangedPaths = append(result.ChangedPaths, *change)
 		}
+		result.fullScanAfter = relativePath
 		if obs.Kind == PathKindDirectory && !state.Classification.Included {
+			if !mayMatchDescendant(root.Config.Include, relativePath) {
+				return filepath.SkipDir
+			}
 			switch state.Classification.ReasonCode {
 			case ReasonExcludedFilePolicy:
 				if root.PolicyResolver == nil || !root.PolicyResolver.MayIncludeDescendant(relativePath) {
@@ -219,6 +275,20 @@ func reconcileFull(ctx context.Context, store Store, root ValidatedRoot, result 
 		return err
 	}
 	if result.Counts.BudgetExhausted > 0 {
+		// Only interrupted sweeps need durable visit markers. A normal complete
+		// no-change scan must not rewrite every otherwise-current path record.
+		for relative := range observed {
+			state, err := store.LoadPathState(root.Config.RootKey, relative)
+			if err != nil {
+				return err
+			}
+			if state.FullScanID != result.fullScanID {
+				state.FullScanID = result.fullScanID
+				if err := store.SavePathState(state); err != nil {
+					return err
+				}
+			}
+		}
 		return nil
 	}
 	if err := markExcludedByCurrentPolicy(store, root, previousStates, observed, started, result); err != nil {
@@ -233,7 +303,8 @@ func markExcludedByCurrentPolicy(store Store, root ValidatedRoot, previousStates
 			continue
 		}
 		excluded, decision := excludedByCurrentFilePolicy(root, previousState.RelativePath, previousState.Kind == PathKindDirectory)
-		if !excluded {
+		included, _ := MatchAny(root.Config.Include, previousState.RelativePath)
+		if !excluded && included {
 			continue
 		}
 		observed[previousState.RelativePath] = struct{}{}
@@ -247,6 +318,10 @@ func markExcludedByCurrentPolicy(store Store, root ValidatedRoot, previousStates
 		if root.PolicyResolver == nil {
 			reasonCode = ReasonExcludedByPattern
 			reason = "excluded by pattern " + decision.Pattern
+		}
+		if !excluded {
+			reasonCode = ReasonExcludedNoInclude
+			reason = "path did not match any include pattern"
 		}
 		next.Classification = Classification{
 			Included:       false,
@@ -282,6 +357,7 @@ func markExcludedByCurrentPolicy(store Store, root ValidatedRoot, previousStates
 
 func reconcileDirty(ctx context.Context, store Store, root ValidatedRoot, result *ScanResult, hints []DirtyHint, started time.Time) error {
 	seen := map[string]struct{}{}
+	limits := scanLimits(root, started, result)
 	for _, hint := range hints {
 		select {
 		case <-ctx.Done():
@@ -296,12 +372,27 @@ func reconcileDirty(ctx context.Context, store Store, root ValidatedRoot, result
 			continue
 		}
 		seen[relativePath] = struct{}{}
+		if limits.exhausted() {
+			result.Counts.BudgetExhausted++
+			break
+		}
+		if hint.HintKind == DirtyHintSubtree {
+			complete, err := reconcileSubtree(ctx, store, root, result, hint, started)
+			if err != nil {
+				return err
+			}
+			if complete {
+				result.dirtyConsumed = append(result.dirtyConsumed, hint)
+			}
+			continue
+		}
+		result.dirtyConsumed = append(result.dirtyConsumed, hint)
 		previous, prevErr := store.LoadPathState(root.Config.RootKey, relativePath)
 		if prevErr != nil && !IsNotExist(prevErr) {
 			return prevErr
 		}
 		obs := ObservePath(root, relativePath)
-		if !obs.Exists {
+		if !obs.Exists && obs.Safe && obs.ErrorCode == "" {
 			if prevErr == nil && previous.Status != PathStatusDeleted {
 				deleted := deletedState(previous, time.Now().UTC(), false)
 				if err := store.SavePathState(deleted); err != nil {
@@ -341,6 +432,7 @@ func reconcileObservation(store Store, root ValidatedRoot, previous PathState, o
 	now := time.Now().UTC()
 	classification := ClassifyPath(obs, root)
 	state := PathState{
+		FullScanID:       previous.FullScanID,
 		SchemaVersion:    PathStateSchemaVersion,
 		RootKey:          root.Config.RootKey,
 		PathKey:          PathKey(root.Config.RootKey, obs.RelativePath),
@@ -371,6 +463,11 @@ func reconcileObservation(store Store, root ValidatedRoot, previous PathState, o
 	preserveOutputState(previous, &state)
 	if state.Status == PathStatusIncluded && obs.Kind == PathKindFile {
 		state.HashObservedAt = hashObservationSince(previous, obs, now)
+		if hint, ok := result.stabilityHints[obs.RelativePath]; ok {
+			if observed := stableNativeObservation(hint, obs, now); observed != nil {
+				state.HashObservedAt = observed
+			}
+		}
 		state.HashVerifiedAt = previous.HashVerifiedAt
 		hashURI, hashStatus, err := hashStableFile(root, obs.RelativePath, previous, &state, result)
 		if err != nil {
@@ -392,12 +489,22 @@ func reconcileObservation(store Store, root ValidatedRoot, previous PathState, o
 	}
 	countState(result, state)
 	change := stateChange(previous, state)
+	if change == nil && root.Config.SchemaVersion == IndependentConfigSchemaVersion && previous.Classification.Policies != state.Classification.Policies {
+		change = &PathChange{
+			RelativePath:   state.RelativePath,
+			ChangeKind:     "policy_changed",
+			PreviousHash:   previous.ContentHashURI,
+			CurrentHash:    state.ContentHashURI,
+			PreviousStatus: previous.Status,
+			CurrentStatus:  state.Status,
+		}
+	}
 	if change != nil {
 		result.Counts.Changed++
 	} else {
 		result.Counts.Unchanged++
 	}
-	if change == nil && state.HashStatus == HashStatusUnchanged && state.HashVerifiedAt == previous.HashVerifiedAt {
+	if change == nil && state.FullScanID == previous.FullScanID && state.HashStatus == HashStatusUnchanged && state.HashVerifiedAt == previous.HashVerifiedAt {
 		return previous, nil, nil
 	}
 	if err := store.SavePathState(state); err != nil {
@@ -423,6 +530,8 @@ func preserveOutputState(previous PathState, state *PathState) {
 	state.LastSyncedModifiedAt = previous.LastSyncedModifiedAt
 	state.LastQueuedMetadataMtime = previous.LastQueuedMetadataMtime
 	state.LastSyncedMetadataSequence = previous.LastSyncedMetadataSequence
+	state.LastQueuedFileObservation = previous.LastQueuedFileObservation
+	state.LastFileObservationSequence = previous.LastFileObservationSequence
 	state.LastQueuedBackupHashURI = previous.LastQueuedBackupHashURI
 	state.LastBackedUpHashURI = previous.LastBackedUpHashURI
 	state.MainObjectID = previous.MainObjectID
@@ -573,20 +682,26 @@ func finishScan(store Store, root ValidatedRoot, workerKey string, result ScanRe
 		result.Status = statusFromResult(result)
 	}
 	if result.Status != RunStatusBlocked {
-		if result.Mode == ScanModeFull {
-			result.Counts.DirtyHintsCleared = len(dirtyHints)
-			if err := store.ClearDirtyHints(root.Config.RootKey, nil); err != nil {
+		if result.Mode == ScanModeFull || result.Mode == ScanModeDirty {
+			if result.Mode == ScanModeDirty {
+				dirtyHints = result.dirtyConsumed
+			}
+			if result.Mode == ScanModeFull && result.fullScanID != "" {
+				var consumed []DirtyHint
+				if result.Counts.BudgetExhausted == 0 {
+					for _, hint := range dirtyHints {
+						if !result.fullScanResumed || hint.HintKind == DirtyHintRescanRequired {
+							consumed = append(consumed, hint)
+						}
+					}
+				}
+				dirtyHints = consumed
+			}
+			cleared, err := store.ClearObservedDirtyHints(root.Config.RootKey, dirtyHints)
+			if err != nil {
 				return ScanResult{}, err
 			}
-		} else if result.Mode == ScanModeDirty {
-			paths := make([]string, 0, len(dirtyHints))
-			for _, hint := range dirtyHints {
-				paths = append(paths, hint.RelativePath)
-			}
-			result.Counts.DirtyHintsCleared = len(paths)
-			if err := store.ClearDirtyHints(root.Config.RootKey, paths); err != nil {
-				return ScanResult{}, err
-			}
+			result.Counts.DirtyHintsCleared = cleared
 		}
 	}
 	findings, err := store.ListFindings(root.Config.RootKey, 0)
@@ -594,7 +709,10 @@ func finishScan(store Store, root ValidatedRoot, workerKey string, result ScanRe
 		return ScanResult{}, err
 	}
 	var states []PathState
-	if result.Status == RunStatusSkipped || result.Mode == RunStatusSkipped {
+	result.InventoryUnchanged = result.Mode == ScanModeDirty && coverageConfigMatches(root, previous) &&
+		previous.StoredCounts != nil && !previous.PendingRescan && result.Counts.Changed == 0 &&
+		result.Counts.Errors == 0 && result.Counts.BudgetExhausted == 0 && result.Counts.HashDeferred == 0
+	if result.Status == RunStatusSkipped || result.Mode == RunStatusSkipped || result.InventoryUnchanged {
 		if previous.StoredCounts != nil {
 			counts := *previous.StoredCounts
 			result.Counts.Files, result.Counts.Directories = counts.Files, counts.Directories
@@ -652,6 +770,21 @@ func hashObservationSince(previous PathState, obs PathObservation, now time.Time
 	return &now
 }
 
+func stableNativeObservation(hint DirtyHint, current PathObservation, now time.Time) *time.Time {
+	if hint.Source != "native" || hint.Observation == nil || hint.LastSeenAt.IsZero() || hint.LastSeenAt.After(now) {
+		return nil
+	}
+	observed := hint.Observation
+	if !observed.Exists || !observed.Safe || observed.RelativePath != current.RelativePath {
+		return nil
+	}
+	previous := PathState{Kind: observed.Kind, Mode: observed.Mode, SizeBytes: observed.SizeBytes, ModifiedAt: &observed.ModifiedAt, Fidelity: observed.Fidelity}
+	if !sameHashObservation(previous, current) {
+		return nil
+	}
+	return &hint.LastSeenAt
+}
+
 func sameHashObservation(previous PathState, obs PathObservation) bool {
 	if previous.Kind != PathKindFile || obs.Kind != PathKindFile || !obs.Exists || !obs.Safe ||
 		previous.Mode != obs.Mode || previous.SizeBytes != obs.SizeBytes || previous.ModifiedAt == nil || !previous.ModifiedAt.Equal(obs.ModifiedAt) {
@@ -691,10 +824,7 @@ func hashStableFile(root ValidatedRoot, relativePath string, previous PathState,
 	if err != nil {
 		return "", HashStatusError, err
 	}
-	delay, err := time.ParseDuration(root.Config.Scan.StabilityWindow)
-	if err != nil {
-		return "", HashStatusError, err
-	}
+	delay := effectiveHashStability(root.Config.Scan, relativePath, current.SizeBytes, current.Kind)
 	// Stability is observed across ordinary scans, never by sleeping while the
 	// caller owns the shared sync queue lock. Keep the prior hash until eligible.
 	if delay > 0 && (current.HashObservedAt == nil || time.Since(*current.HashObservedAt) < delay) {
@@ -782,12 +912,20 @@ func buildCheckpoint(root ValidatedRoot, workerKey string, previous RootCheckpoi
 	checkpoint.SchemaVersion = CheckpointSchemaVersion
 	checkpoint.RootKey = root.Config.RootKey
 	checkpoint.WorkerKey = workerKey
+	compatible := coverageConfigMatches(root, previous)
+	checkpoint.ContentConfigHash = ContentConfigHash(root.Config)
+	if !compatible || checkpoint.ObservationConfigHash == "" {
+		checkpoint.ObservationConfigHash = root.ConfigHash
+		if compatible && previous.ConfigHash != "" {
+			checkpoint.ObservationConfigHash = previous.ConfigHash
+		}
+	}
 	checkpoint.ConfigHash = root.ConfigHash
 	checkpoint.LastSequence++
 	checkpoint.LastStartedAt = &result.StartedAt
 	checkpoint.LastFinishedAt = &result.FinishedAt
 	checkpoint.RootReachable = result.Status != RunStatusBlocked
-	if result.Mode != RunStatusSkipped {
+	if result.Mode != RunStatusSkipped && !result.InventoryUnchanged {
 		checkpoint.PathStateCount = len(states)
 		checkpoint.PathStateSnapshotHash = pathStateSnapshotHash(states)
 		inventory := ScanResult{}
@@ -797,18 +935,41 @@ func buildCheckpoint(root ValidatedRoot, workerKey string, previous RootCheckpoi
 	}
 	if result.Status != RunStatusBlocked {
 		checkpoint.LastSuccessfulReconcileAt = &result.FinishedAt
-		if result.Mode == ScanModeFull {
+		if result.Mode == ScanModeFull && result.Counts.BudgetExhausted == 0 {
 			checkpoint.LastFullRescanAt = &result.FinishedAt
 		}
-		if result.Mode != RunStatusSkipped {
-			checkpoint.PendingRescan = false
+		if result.Mode == ScanModeFull {
+			checkpoint.FullScanID, checkpoint.FullScanAfter = "", ""
+			if result.Counts.BudgetExhausted > 0 {
+				checkpoint.FullScanID, checkpoint.FullScanAfter = result.fullScanID, result.fullScanAfter
+			}
+		}
+		if result.Mode == ScanModeDirty {
+			checkpoint.SubtreeScans = result.subtreeScans
+		}
+		if result.Mode == ScanModeFull && result.Counts.BudgetExhausted == 0 {
+			checkpoint.SubtreeScans = nil
+		}
+		if result.Mode != RunStatusSkipped && !result.InventoryUnchanged {
+			checkpoint.PendingRescan = result.Mode == ScanModeFull && result.Counts.BudgetExhausted > 0
+			checkpoint.DeferredHashPaths = nil
+			checkpoint.NextHashReadyAt = nil
 		}
 		for _, state := range states {
 			// An input beyond the configured hash budget needs policy/operator
 			// attention, not an immediate full rescan on every ordinary tick.
 			if state.Status == PathStatusIncluded && state.Kind == PathKindFile && state.HashStatus == HashStatusDeferred && state.SizeBytes <= root.Config.Scan.MaxHashBytesPerRun && state.SizeBytes <= root.Config.Scan.MaxHashFileBytes {
 				checkpoint.PendingRescan = true
-				break
+				if result.Counts.BudgetExhausted == 0 {
+					checkpoint.DeferredHashPaths = append(checkpoint.DeferredHashPaths, state.RelativePath)
+				}
+				if state.HashObservedAt != nil {
+					stability := effectiveHashStability(root.Config.Scan, state.RelativePath, state.SizeBytes, state.Kind)
+					due := state.HashObservedAt.Add(stability)
+					if checkpoint.NextHashReadyAt == nil || due.Before(*checkpoint.NextHashReadyAt) {
+						checkpoint.NextHashReadyAt = &due
+					}
+				}
 			}
 		}
 		checkpoint.LastErrorCode = ""
@@ -1043,6 +1204,9 @@ func effectiveDirtyHints(root ValidatedRoot, hints []DirtyHint) ([]DirtyHint, []
 }
 
 func excludedByCurrentFilePolicy(root ValidatedRoot, relativePath string, isDir bool) (bool, filepolicy.Decision) {
+	if IsNotesRecoveryPath(relativePath) {
+		return true, filepolicy.Decision{Path: relativePath, Included: false, RuleCategory: filepolicy.RuleCategoryMandatorySafety, Pattern: "owned-notes-recovery-journal"}
+	}
 	if root.PolicyResolver != nil {
 		resolution, err := root.PolicyResolver.Resolve(relativePath, isDir)
 		if err == nil {
@@ -1110,10 +1274,10 @@ func normalizeScanMode(mode string) string {
 }
 
 func autoScanMode(root ValidatedRoot, checkpoint RootCheckpoint, hints []DirtyHint, now time.Time) string {
-	if checkpoint.ConfigHash != root.ConfigHash || checkpoint.StoredCounts == nil || !root.RootReachable {
+	if !coverageConfigMatches(root, checkpoint) || checkpoint.StoredCounts == nil || !root.RootReachable {
 		return ScanModeFull
 	}
-	if checkpoint.PendingRescan {
+	if checkpoint.PendingRescan && len(checkpoint.DeferredHashPaths) == 0 {
 		return ScanModeFull
 	}
 	if len(hints) > 0 {

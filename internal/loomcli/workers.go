@@ -454,6 +454,9 @@ func renderWorkerRuns(cmd *cobra.Command, runs []workers.WorkerRun) {
 		)
 	}
 	_ = writer.Flush()
+	for _, run := range runs {
+		renderWorkerAdmissionWarning(cmd, run)
+	}
 }
 
 func renderWorkerRunOnce(cmd *cobra.Command, result workers.RunOnceResult) {
@@ -463,6 +466,10 @@ func renderWorkerRunOnce(cmd *cobra.Command, result workers.RunOnceResult) {
 	fmt.Fprintf(cmd.OutOrStdout(), "Started: %s\n", result.Run.StartedAt.UTC().Format(time.RFC3339))
 	fmt.Fprintf(cmd.OutOrStdout(), "Finished: %s\n", timePtrOrDash(result.Run.FinishedAt))
 	fmt.Fprintf(cmd.OutOrStdout(), "Health: %s\n", result.Health.HealthStatus)
+	if summary := humanCLIErrorHint(result.Health.Summary); summary != "" && result.Health.HealthStatus != workers.HealthHealthy {
+		fmt.Fprintf(cmd.OutOrStdout(), "Summary: %s\n", summary)
+	}
+	renderWorkerAdmissionWarning(cmd, result.Run)
 	if counters := workerCountersText(result.Run.CountersJSON); counters != "-" {
 		fmt.Fprintf(cmd.OutOrStdout(), "Counters: %s\n", counters)
 	}
@@ -473,6 +480,42 @@ func renderWorkerRunOnce(cmd *cobra.Command, result workers.RunOnceResult) {
 			fmt.Fprintf(writer, "%s\t%s\n", checkpoint.CheckpointKey, checkpoint.UpdatedAt.UTC().Format(time.RFC3339))
 		}
 		_ = writer.Flush()
+	}
+}
+
+func renderWorkerAdmissionWarning(cmd *cobra.Command, run workers.WorkerRun) {
+	var summary struct {
+		Warning *struct {
+			Phase     string `json:"phase"`
+			Reason    string `json:"reason"`
+			ElapsedMS int64  `json:"elapsed_ms"`
+			BudgetMS  int64  `json:"budget_ms"`
+			Retryable bool   `json:"retryable"`
+		} `json:"admission_warning"`
+	}
+	if json.Unmarshal(run.ResultSummaryJSON, &summary) != nil || summary.Warning == nil {
+		return
+	}
+	warning := summary.Warning
+	switch warning.Phase {
+	case "source_root_reconciliation", "source_root_listing", "source_generation",
+		"priority_selection", "priority_reconciliation", "catalog_selection", "catalog_hydration",
+		"inventory_selection", "candidate_reconciliation":
+	default:
+		warning.Phase = "unknown"
+	}
+	switch warning.Reason {
+	case "deadline_exceeded", "canceled", "operation_failed":
+	default:
+		warning.Reason = "operation_failed"
+	}
+	if id := humanCLIErrorHint(run.WorkerRunID); id != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "Run: %s\n", id)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Notes admission: phase=%s reason=%s elapsed=%dms budget=%dms retryable=%t\n",
+		warning.Phase, warning.Reason, max(0, warning.ElapsedMS), max(0, warning.BudgetMS), warning.Retryable)
+	if cid := humanCLIErrorHint(run.CorrelationID); cid != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "Correlation: %s\n", cid)
 	}
 }
 

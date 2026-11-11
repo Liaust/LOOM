@@ -102,6 +102,32 @@ func TestApplicationPlan(t *testing.T) {
 	}
 }
 
+func TestApplicationPlanFilesystemRootKnowledge(t *testing.T) {
+	in := applicationFixture(t)
+	root := in.Sources[pc.CanonicalRootContractPath]
+	d, err := pc.ParseProjectDeclaration(root.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.SchemaVersion = pc.ProjectSchemaV06
+	d.Resources["reading"].Knowledge.Path = "."
+	raw, err := yaml.Marshal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applicationSetSource(&in, pc.CanonicalRootContractPath, pc.ProjectSchemaV06, raw)
+	plan := CompileApplicationPlan(in)
+	if !plan.Ready {
+		t.Fatalf("root observer conflicts with application: %+v", plan.Errors)
+	}
+	root = in.Sources[pc.CanonicalRootContractPath]
+	root.Source.SchemaVersion = pc.ProjectSchemaV05
+	in.Sources[pc.CanonicalRootContractPath] = root
+	if CompileApplicationPlan(in).Ready {
+		t.Fatal("mixed version identity accepted")
+	}
+}
+
 func TestApplicationPrerequisites(t *testing.T) {
 	cases := map[string]func(*ApplicationPlanInput){
 		"missing-policy": func(i *ApplicationPlanInput) { delete(i.Sources, ".loom/policies/backup.yaml") },

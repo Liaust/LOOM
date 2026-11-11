@@ -29,7 +29,7 @@ func TestSearchProjectSlugResolution(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &Store{q: queryAdapter{queryRow: func(_ context.Context, sql string, args ...any) pgx.Row {
-				if len(args) != 1 || args[0] != "atlas" || !strings.Contains(sql, "projection_revision DESC") || !strings.Contains(sql, "LIMIT 2") {
+				if len(args) != 2 || args[0] != "atlas" || !strings.Contains(sql, "projection_revision DESC") || !strings.Contains(sql, "LIMIT 2") {
 					t.Fatalf("unbounded or historical slug lookup: %s %#v", sql, args)
 				}
 				return projectProjectionTestRow(func(out ...any) error { *out[0].(*[]string) = tc.matches; return nil })
@@ -307,6 +307,68 @@ func TestSearchCompactResultAndResponseBoundsUseUnicodeCodePoints(t *testing.T) 
 	}
 }
 
+func TestSearchCompactReadablePreviewsAndProtectedScope(t *testing.T) {
+	project := ProjectContextProjection{ProjectID: projectionTestProjectID, Name: "Main WebDAV", Lifecycle: "active",
+		Development: &projectstate.ProjectDevelopmentState{Purpose: "Replace the Rclone WebDAV backend", CurrentFocus: "Review Apache", Posture: projectstate.ProjectDevelopmentPartial}}
+	card := RepositoryCard{RepositoryID: projectionTestRepoOne, Name: "WebDAV service", Purpose: "Serve retained files", OwningProject: RepositoryOwningProject{ProjectID: projectionTestProjectID}, ActiveFocus: []string{"Review Apache"}}
+	for _, row := range []searchQueryRow{
+		{ID: project.ProjectID, Collection: SearchCollectionProjectState, ProjectContext: &project, ProjectSnapshotID: stableProjectionID("readable-preview"), SearchableSummary: "legacy IDs first"},
+		{ID: card.RepositoryID, Collection: SearchCollectionRepositoryState, RepositoryCard: &card, SearchableSummary: "legacy IDs first"},
+	} {
+		item, err := (&FoundationAPI{}).materializeSearchResult(context.Background(), []string{"webdav"}, row)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var match SearchCompactMatch
+		if item.project != nil {
+			match = item.project.Match
+		} else {
+			match = item.repository.Match
+		}
+		if match.Summary.Text == "" || strings.Contains(match.Summary.Text, "legacy IDs") || strings.Contains(match.Summary.Text, "project_") || strings.Contains(match.Summary.Text, "repo_") || !strings.Contains(strings.ToLower(match.Summary.Text), "webdav") {
+			t.Fatalf("unreadable preview: %#v", match)
+		}
+		if !reflect.DeepEqual(match.ProjectIDs, []string{project.ProjectID}) {
+			t.Fatalf("scope removed: %#v", match)
+		}
+	}
+}
+
+func TestSearchCompactResponseBudgetKeepsUsefulHitsAndTruthfulCursor(t *testing.T) {
+	request, err := normalizeSearchRequest(SearchRequest{Query: "WebDAV", IncludePending: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var items []materializedSearchResult
+	for i := 0; i < 8; i++ {
+		id := SemanticID(fmt.Sprintf("11111111-1111-4111-8111-%012d", i))
+		row := searchQueryRow{ID: string(id), Collection: SearchCollectionAcceptedRecords, CollectionPriority: searchAcceptedRecordPriority, Score: 8 - i, SortTime: time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC)}
+		match := newSearchCompactMatch([]string{"webdav"}, []searchField{{name: "claim", value: "WebDAV"}}, "WebDAV: "+strings.Repeat("界", 500), "accepted_record", nil, false, "source_claim", "Historical; not current deployment", row.SortTime, &row.SortTime, nil, nil, []string{projectionTestProjectID}, []string{projectionTestRepoOne})
+		item := AcceptedRecordSearchResult{RecordID: id, Match: match, ExactGet: SearchExactGet{Resource: "record", ID: string(id), Path: "/v1/provenance/records/" + string(id)}}
+		if err := fitSearchCompactResult(&item.Match, func() any { return item }); err != nil {
+			t.Fatal(err)
+		}
+		items = append(items, materializedSearchResult{row: row, record: &item})
+	}
+	response, err := fitSearchResponse(request, items, map[SearchCollection]bool{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Returned < 1 || response.Returned >= len(items) || !response.Truncated || !response.AcceptedRecords.Truncated || searchResponseRuneCount(response) > MaximumSearchCompactResponse {
+		t.Fatalf("untruthful response bound: %#v", response)
+	}
+	cursor, err := decodeSearchCursor(response.NextCursor, request.Digest, request.Collections)
+	if err != nil || cursor.ID != items[response.Returned-1].row.ID {
+		t.Fatalf("cursor skipped a removed hit: %#v %v", cursor, err)
+	}
+	for _, item := range response.AcceptedRecords.Items {
+		if !strings.HasPrefix(item.Match.Summary.Text, "WebDAV:") || !reflect.DeepEqual(item.Match.ProjectIDs, []string{projectionTestProjectID}) || !reflect.DeepEqual(item.Match.RepositoryIDs, []string{projectionTestRepoOne}) {
+			t.Fatalf("hit meaning/scope lost: %#v", item)
+		}
+	}
+	t.Logf("response budget fixture: returned=%d/%d; response=%d code points; cursor is last returned hit", response.Returned, len(items), searchResponseRuneCount(response))
+}
+
 func TestSearchCompactAcceptedFixtureResultsFitWithoutChangingIdentityOrPosture(t *testing.T) {
 	timestamp := time.Date(2026, 8, 31, 8, 0, 0, 0, time.UTC)
 	tests := []struct {
@@ -380,11 +442,15 @@ func TestSearchCompactLongTemporalQualification(t *testing.T) {
 		if err := fitSearchCompactResult(&item.Match, func() any { return item }); err != nil {
 			t.Fatal(err)
 		}
-		if jsonRuneCount(item) > MaximumSearchCompactResult || !item.Match.CompactTruncated || !item.Match.Freshness.CurrentnessTruncated {
+		if jsonRuneCount(item) > MaximumSearchCompactResult {
 			t.Fatalf("unbounded or unmarked temporal preview: %#v", item)
 		}
 		preview := item.Match.Freshness.Currentness
-		if !strings.HasSuffix(preview, "…") || !strings.HasPrefix(qualification, strings.TrimSuffix(preview, "…")) || utf8.RuneCountInString(preview) < 32 {
+		if item.Match.Freshness.CurrentnessTruncated {
+			if !item.Match.CompactTruncated || !strings.HasSuffix(preview, "…") || !strings.HasPrefix(qualification, strings.TrimSuffix(preview, "…")) || utf8.RuneCountInString(preview) < 96 {
+				t.Fatalf("qualification erased or reinterpreted: %q", preview)
+			}
+		} else if preview != qualification {
 			t.Fatalf("qualification erased or reinterpreted: %q", preview)
 		}
 		if item.RecordID != id || item.ExactGet != exact || item.Match.AssertionPosture != "source_claim" || !item.Match.Freshness.ObservedAt.Equal(observed) {
@@ -448,7 +514,7 @@ func TestSearchCompactTypedShapesFitAtAndBeyondBoundaryDeterministically(t *test
 		{name: "accepted record", collection: SearchCollectionAcceptedRecords, summary: strings.Repeat("界", 80), explanation: strings.Repeat("e", 96)},
 		{name: "pending candidate", collection: SearchCollectionPendingCandidates, summary: strings.Repeat("候", 80), explanation: strings.Repeat("e", 96)},
 		{name: "unresolved case explanation", collection: SearchCollectionUnresolvedCases, explanation: strings.Repeat("説明", 48)},
-		{name: "repository state", collection: SearchCollectionRepositoryState, summary: strings.Repeat("🧭", 80)},
+		{name: "repository state", collection: SearchCollectionRepositoryState, summary: strings.Repeat("🧭", 80), explanation: strings.Repeat("e", 96)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -490,10 +556,10 @@ func TestSearchCompactTypedShapesFitAtAndBeyondBoundaryDeterministically(t *test
 					if afterOptionalRunes >= beforeOptionalRunes {
 						t.Fatalf("beyond-boundary %s did not consume optional text: before=%d after=%d", test.collection, beforeOptionalRunes, afterOptionalRunes)
 					}
-					if test.summary != "" && !match.Summary.Truncated {
-						t.Fatalf("beyond-boundary %s omitted summary truncation truth", test.collection)
+					if match.Summary.Text != test.summary || match.Summary.Truncated {
+						t.Fatalf("beyond-boundary %s removed meaning before diagnostics", test.collection)
 					}
-					if test.summary == "" && test.explanation != "" && !match.MatchExplanation.Truncated {
+					if test.explanation != "" && !match.MatchExplanation.Truncated {
 						t.Fatalf("beyond-boundary %s omitted explanation truncation truth", test.collection)
 					}
 
@@ -575,8 +641,8 @@ func TestSearchCompactSliceSixPendingCandidatePostgres(t *testing.T) {
 		t.Fatalf("Slice 6 pending compact result has %d code points, maximum %d", compactRunes, MaximumSearchCompactResult)
 	}
 	t.Logf("Slice 6 pending compact result fits at %d Unicode code points", compactRunes)
-	if !item.Match.CompactTruncated || !item.Match.Summary.Truncated {
-		t.Fatalf("Slice 6 pending compact result omitted truncation truth: %#v", item.Match)
+	if item.Match.Summary.Text != registration.Claim || item.Match.Summary.Truncated {
+		t.Fatalf("Slice 6 pending compact result lost its useful claim: %#v", item.Match)
 	}
 	exact, err := api.GetCandidate(context.Background(), receipt.CandidateID, searchExactProjectionLimit)
 	if err != nil {

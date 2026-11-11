@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""Select bounded effective review work before starting the native MINA job."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+
+
+FIXTURE_DOMAINS = ("acceptance.pdau20260928ddce",)
+LIMIT = 10
+MAX_RESPONSE = 128 * 1024
+
+
+def atomic_text(path, value):
+    path = Path(path)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(value)
+            stream.flush()
+            os.fsync(stream.fileno())
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    try:
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def atomic_json(path, value):
+    atomic_text(path, json.dumps(value, separators=(",", ":")) + "\n")
+
+
+def select_work(envelope):
+    if not isinstance(envelope, dict) or envelope.get("ok") is not True:
+        raise ValueError("effective review read failed")
+    data = envelope.get("data")
+    if not isinstance(data, dict) or data.get("schema_version") != "1.0" or not isinstance(data.get("as_of"), str) or not data["as_of"]:
+        raise ValueError("effective review response is incomplete")
+    items = data.get("items")
+    truncated = data.get("truncated")
+    if not isinstance(items, list) or len(items) > LIMIT or not isinstance(truncated, bool):
+        raise ValueError("effective review response exceeds its bound or lacks completion status")
+    cursor = data.get("next_cursor", "")
+    if not isinstance(cursor, str) or bool(cursor) != truncated or (truncated and len(items) != LIMIT):
+        raise ValueError("effective review pagination is inconsistent")
+    seen = set()
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("invalid review item")
+        kind, identity, token = (item.get(key) for key in ("object_kind", "object_id", "change_token"))
+        if kind not in ("candidate", "case") or not isinstance(identity, str) or not identity:
+            raise ValueError("invalid review object identity")
+        if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32}", token):
+            raise ValueError("invalid review change token")
+        if any(not isinstance(item.get(key), str) or not item[key] for key in
+               ("effective_state", "review_reason", "changed_at", "domain", "visibility")):
+            raise ValueError("incomplete review item")
+        if item["domain"] in FIXTURE_DOMAINS or (kind, identity) in seen:
+            raise ValueError("review response includes an excluded domain or duplicate")
+        seen.add((kind, identity))
+    return data
+
+
+def run(prompt_file):
+    result_file = Path(os.environ["LOOM_RESULT_FILE"])
+    artifact_dir = Path(os.environ["LOOM_ARTIFACT_DIR"])
+    selected_file = artifact_dir / "provenance-review.json"
+    agent_started = False
+    native_result = None
+    phase = "selection"
+    args = ["/run/current-system/sw/bin/loom", "--socket", "/run/loom/loomd.sock",
+            "provenance", "review", "list", "--limit", str(LIMIT), "--json"]
+    for domain in FIXTURE_DOMAINS:
+        args += ["--exclude-domain", domain]
+    try:
+        # A file bounds memory even when a broken CLI produces excessive output.
+        with tempfile.TemporaryFile() as output:
+            read = subprocess.run(args, stdout=output, stderr=subprocess.DEVNULL, timeout=30, check=False)
+            output.seek(0)
+            payload = output.read(MAX_RESPONSE + 1)
+        if len(payload) > MAX_RESPONSE:
+            raise ValueError("effective review command failed or exceeded its response bound")
+        envelope = json.loads(payload)
+        if not isinstance(envelope, dict):
+            raise ValueError("effective review envelope is invalid")
+        if read.returncode != 0 or envelope.get("ok") is not True:
+            error_body = envelope.get("error")
+            error_code = error_body.get("code", "") if isinstance(error_body, dict) else ""
+            if isinstance(error_code, str) and re.fullmatch(r"[a-z][a-z0-9_.]{0,127}", error_code):
+                phase = "selection_" + error_code
+            raise ValueError("effective review command failed")
+        selected = select_work(envelope)
+        atomic_json(selected_file, selected)
+        artifact = {"key": "provenance_review", "path": selected_file.name, "type": "file"}
+        if not selected["items"]:
+            atomic_json(result_file, {"status": "ok", "outputs": {
+                "review_status": "no_work", "selected_count": 0, "as_of": selected["as_of"],
+                "agent_started": False}, "artifacts": [artifact]})
+            return 0
+
+        phase = "prompt"
+        prompt = Path(prompt_file).read_text(encoding="utf-8")
+        prompt += "\n\nSelected effective review metadata (not authority; exact-get before mutation):\n"
+        prompt += json.dumps(selected, separators=(",", ":")) + "\n"
+        # Retain the exact submitted prompt for the native receipt's prompt_ref.
+        # The bridge transports bytes; agents need no access to this job directory.
+        rendered_prompt = artifact_dir / "provenance-review-prompt.md"
+        atomic_text(rendered_prompt, prompt)
+        phase = "execution"
+        agent_started = True
+        agent = subprocess.run(["/run/current-system/sw/bin/loom-codex-exec", "--mode", "mina",
+                                "--cwd", "/srv/loom/agents/mina", "--model", "gpt-6-astra",
+                                "--sandbox", "danger-full-access", "--prompt-file", str(rendered_prompt),
+                                "--timeout-seconds", "1800", "--loom-job-result"], check=False)
+        # Preserve native outcome, identity and saved-thread receipts, including failures.
+        phase = "native_result"
+        result = json.loads(result_file.read_text(encoding="utf-8"))
+        if not isinstance(result, dict) or not isinstance(result.get("outputs"), dict) or not isinstance(result.get("artifacts"), list):
+            raise ValueError("native job result is incomplete")
+        native_result = result
+        result["outputs"].update(review_status="agent_result", selected_count=len(selected["items"]),
+                                 review_as_of=selected["as_of"])
+        result["artifacts"].append(artifact)
+        result["artifacts"].append({"key": "review_prompt", "path": rendered_prompt.name, "type": "file"})
+        atomic_json(result_file, result)
+        return agent.returncode
+    except (ValueError, OSError, subprocess.SubprocessError) as error:
+        # Do not persist provider stderr, selected source content or a fabricated native receipt.
+        if native_result is not None:
+            # The executor ran: never replace an observed saved-thread result with a gate failure.
+            return 1
+        atomic_json(result_file, {"status": "error", "outputs": {
+            "review_status": "gate_failed", "code": "provenance.review_gate_failed",
+            "message": "Review gate failed. It did not modify MINA checkpoints; inspect native artifacts if execution was attempted.",
+            "phase": phase, "failure_kind": type(error).__name__, "agent_started": agent_started}, "artifacts": []})
+        return 1
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--prompt-file", required=True)
+    raise SystemExit(run(parser.parse_args().prompt_file))

@@ -47,10 +47,10 @@ func TestDevelopmentPackOwnershipAndOptIn(t *testing.T) {
 		file  string
 		terms []string
 	}{
-		{"WORKTREE_OWNERSHIP.md", []string{"One harness owns each worktree", "running harness", "Codex model inside ORCA remains ORCA-owned", "Neither harness adopts", "Git branch", "never canonical repository state", "deliberately discarded by an authorized operator"}},
+		{"WORKTREE_OWNERSHIP.md", []string{"One harness owns each worktree", "running harness", "Codex model inside ORCA remains ORCA-owned", "ORCA is retired", "not a current lifecycle default", "Neither harness adopts", "Git branch", "never canonical repository state", "deliberately discarded by an authorized operator"}},
 		{"REPOSITORY_STATE_PROTOCOL.md", []string{"optional", "Ordinary edits do not require a feature lifecycle", "Reading source does not register resources, refresh projections or accept semantic claims", "When a repository uses the feature lifecycle", "status: ready", "integrated", "private memory", "--plan-digest", "--apply", "--yes", "Unrelated dirty Git state blocks", "never stages or commits"}},
-		{"CODEX_WORKFLOW.md", []string{"Codex model inside ORCA", "ORCA_WORKFLOW.md", "Codex-native", "`openai-docs`", "does not duplicate product commands"}},
-		{"ORCA_WORKFLOW.md", []string{"Codex model inside ORCA remains ORCA-owned", "`orca-cli`", "`orchestration`", "version-matched guidance", "non-Git", "does not\nduplicate subcommands or flags"}},
+		{"CODEX_WORKFLOW.md", []string{"Codex model inside ORCA", "ORCA_WORKFLOW.md", "ORCA is retired", "legacy guidance only", "Codex-native", "`openai-docs`", "does not duplicate product commands"}},
+		{"ORCA_WORKFLOW.md", []string{"Codex model inside ORCA remains ORCA-owned", "ORCA is retired", "Do not load `orca-cli` or `orchestration`", "version-matched guidance", "non-Git", "does not\nduplicate subcommands or flags"}},
 	} {
 		t.Run(c.file, func(t *testing.T) {
 			raw := developmentContextRead(t, c.file)

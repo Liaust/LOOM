@@ -13,16 +13,20 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"loom.local/loom/internal/objectstore"
+
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 )
 
 const MaxContentBytes = 8 << 20
 const MaxReferenceBytes = 64 << 20
+const MaxStreamReferenceBytes int64 = 2 << 30
 const (
 	KindEdit   = "edit"
 	KindRename = "rename"
 	KindDelete = "delete"
+	KindImport = "import"
 	Pending    = "pending"
 	Accepted   = "accepted"
 	Conflict   = "conflict"
@@ -37,6 +41,7 @@ var (
 	ErrPathBusy            = errors.New("notes workspace path reserved by pending operation")
 	ErrStalePath           = errors.New("notes workspace file path version changed or deleted")
 	ErrUnsafePath          = errors.New("notes workspace unsafe source path")
+	ErrReferenceLimit      = errors.New("notes workspace reference exceeds supported size")
 )
 
 type Source struct{ CollectionID, Generation, Path string }
@@ -48,6 +53,14 @@ type Resolver interface {
 }
 type PathResolver interface {
 	WithPaths(context.Context, string, []string, func(Source) error) error
+}
+type DirectoryResolver interface {
+	// An empty list admits only the writable collection scope, not a mutable root.
+	WithDirectoryPaths(context.Context, string, []string, func(Source) error) error
+}
+
+type DirectoryReadResolver interface {
+	WithReadDirectoryPaths(context.Context, string, []string, func(Source) error) error
 }
 
 // RetainedResolver permits observation of finalized journals across an explicit
@@ -63,17 +76,31 @@ type File struct {
 	PathKey      string `json:"path_key"`
 	PathVersion  uint64 `json:"path_version,omitempty"`
 	Deleted      bool   `json:"deleted,omitempty"`
+	EntryKind    string `json:"entry_kind,omitempty"`
+	// Deleted releases the writable binding; Retained distinguishes custody from deletion.
+	Retained *RetainedLocation `json:"retained,omitempty"`
+}
+
+type RetainedLocation struct {
+	OperationID string `json:"operation_id"`
+	ScopeID     string `json:"scope_id"`
+	Root        string `json:"root"`
+	Path        string `json:"path"`
 }
 type Base struct {
-	ID          string `json:"base_id"`
-	FileID      string `json:"file_id"`
-	Generation  string `json:"membership_generation"`
-	Hash        string `json:"hash"`
-	PathVersion uint64 `json:"path_version,omitempty"`
-	Exists      bool   `json:"exists"`
-	Content     []byte `json:"content"`
+	ID                string                  `json:"base_id"`
+	FileID            string                  `json:"file_id"`
+	Generation        string                  `json:"membership_generation"`
+	Hash              string                  `json:"hash"`
+	PathVersion       uint64                  `json:"path_version,omitempty"`
+	Exists            bool                    `json:"exists"`
+	Content           []byte                  `json:"content"`
+	ReferenceSize     int64                   `json:"reference_size,omitempty"`
+	DirectoryIdentity *inodeIdentity          `json:"directory_identity,omitempty"`
+	MetadataAction    *MetadataActionIdentity `json:"metadata_action,omitempty"`
 }
 type Request struct {
+	BoxID           string `json:"box_id,omitempty"`
 	OperationID     string `json:"operation_id"`
 	FileID          string `json:"file_id"`
 	Generation      string `json:"membership_generation"`
@@ -81,23 +108,38 @@ type Request struct {
 	Content         []byte `json:"content"`
 	Kind            string `json:"kind,omitempty"`
 	DestinationPath string `json:"destination_path,omitempty"`
+	// DirectoryTargets lists collection-relative acknowledged destination children,
+	// including their parent directories, for a rename after child operations.
+	DirectoryTargets []string `json:"directory_targets,omitempty"`
+	ImportHash       string   `json:"import_hash,omitempty"`
+	ImportSize       int64    `json:"import_size,omitempty"`
 }
 type Operation struct {
-	Request        Request        `json:"request"`
-	File           File           `json:"file"`
-	Base           Base           `json:"base"`
-	State          string         `json:"state"`
-	Reason         string         `json:"reason,omitempty"`
-	ResultBaseID   string         `json:"result_base_id,omitempty"`
-	ResultFile     *File          `json:"result_file,omitempty"`
-	PathStage      string         `json:"path_stage,omitempty"`
-	DestinationKey string         `json:"destination_key,omitempty"`
-	MoveIdentity   *inodeIdentity `json:"move_identity,omitempty"`
+	Request                 Request        `json:"request"`
+	File                    File           `json:"file"`
+	Base                    Base           `json:"base"`
+	State                   string         `json:"state"`
+	Reason                  string         `json:"reason,omitempty"`
+	ResultBaseID            string         `json:"result_base_id,omitempty"`
+	ResultFile              *File          `json:"result_file,omitempty"`
+	PathStage               string         `json:"path_stage,omitempty"`
+	DestinationKey          string         `json:"destination_key,omitempty"`
+	MoveIdentity            *inodeIdentity `json:"move_identity,omitempty"`
+	DirectoryTargetIdentity *inodeIdentity `json:"directory_target_identity,omitempty"`
 	// Journal is relative to the source file's parent, never a client destination.
-	Journal        string `json:"journal,omitempty"`
-	Observed       []byte `json:"observed_content,omitempty"`
-	ObservedExists bool   `json:"observed_exists"`
-	RetainedHash   string `json:"retained_hash,omitempty"`
+	Journal string `json:"journal,omitempty"`
+	// Relocation changes only journal custody, never the original intent/receipt.
+	JournalLocation *JournalLocation        `json:"journal_location,omitempty"`
+	Observed        []byte                  `json:"observed_content,omitempty"`
+	ObservedExists  bool                    `json:"observed_exists"`
+	RetainedHash    string                  `json:"retained_hash,omitempty"`
+	ImportBlob      *objectstore.StoredBlob `json:"import_blob,omitempty"`
+	ImportParent    *inodeIdentity          `json:"import_parent,omitempty"`
+}
+
+type JournalLocation struct {
+	ScopeID      string `json:"scope_id"`
+	RelativePath string `json:"relative_path"`
 }
 
 // Recovery is append-only evidence; it never changes an accepted operation's
@@ -122,17 +164,20 @@ type DiscoveryPage struct {
 }
 
 type PathChange struct {
-	FileID      string `json:"file_id"`
-	OperationID string `json:"operation_id"`
-	Version     uint64 `json:"path_version"`
-	FromPath    string `json:"from_path"`
-	ToPath      string `json:"to_path,omitempty"`
-	Deleted     bool   `json:"deleted"`
+	FileID      string            `json:"file_id"`
+	OperationID string            `json:"operation_id"`
+	Version     uint64            `json:"path_version"`
+	FromPath    string            `json:"from_path"`
+	ToPath      string            `json:"to_path,omitempty"`
+	Deleted     bool              `json:"deleted"`
+	Retained    *RetainedLocation `json:"retained,omitempty"`
 }
 
 type ReadResult struct {
 	File File `json:"file"`
 	Base Base `json:"base"`
+	// Transient I/O accounting, including a failed streamed read. Not history.
+	ReferenceReadBytes int64 `json:"-"`
 }
 
 // All methods must be durable before returning success. WithLock serializes
@@ -168,13 +213,38 @@ func validatePath(p string) error {
 
 func IsReferencePath(p string) bool {
 	switch strings.ToLower(path.Ext(p)) {
-	case ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".canvas", ".wav", ".svg", ".csv", ".xlsx", ".dat", ".json":
+	case ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".wav", ".svg", ".csv", ".xlsx", ".dat", ".json":
 		return validateSourcePath(p, true) == nil
 	}
 	return false
 }
 
 func validateSourcePath(p string, reference bool) error {
+	if err := validateDirectoryPath(p); err != nil {
+		return err
+	}
+	if IsEditableTextPath(p) {
+		return nil
+	}
+	switch strings.ToLower(path.Ext(p)) {
+	case ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".wav", ".svg", ".xlsx", ".dat":
+		if reference {
+			return nil
+		}
+	}
+	return ErrReferenceOnly
+}
+
+func IsEditableTextPath(p string) bool {
+	base := strings.ToLower(path.Base(p))
+	if base == "makefile" || base == "dockerfile" {
+		return true
+	}
+	ext := strings.TrimPrefix(strings.ToLower(path.Ext(p)), ".")
+	return ext != "" && strings.Contains(" md markdown mdown mkd mkdn mdwn txt text log csv tsv rst adoc asciidoc json jsonc jsonl ndjson geojson canvas yaml yml base toml ini cfg conf config properties env js mjs cjs jsx ts mts cts tsx mdx py pyi pyw go rs java kt kts scala sc swift c h cpp cc cxx hpp hxx hh m mm cs fs fsx rb rake gemspec php r rmd lua pl pm sh bash zsh fish ps1 psm1 psd1 bat cmd sql graphql gql proto nix mk make cmake dockerfile html htm xhtml css scss sass less xml svg xsd xsl xslt plist vue svelte astro tex sty cls bib typ diff patch lock ", " "+ext+" ")
+}
+
+func validateDirectoryPath(p string) error {
 	if p == "" || !utf8.ValidString(p) || !norm.NFC.IsNormalString(p) || path.IsAbs(p) || path.Clean(p) != p || strings.ContainsAny(p, "\\\x00") {
 		return ErrUnsafePath
 	}
@@ -183,17 +253,7 @@ func validateSourcePath(p string, reference bool) error {
 			return ErrUnsafePath
 		}
 	}
-	switch strings.ToLower(path.Ext(p)) {
-	case ".md", ".markdown", ".txt":
-		return nil
-	case ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".canvas", ".wav", ".svg", ".csv", ".xlsx", ".dat", ".json":
-		if reference {
-			return nil
-		}
-		return ErrReferenceOnly
-	default:
-		return ErrReferenceOnly
-	}
+	return nil
 }
 func validateContent(b []byte) error {
 	if len(b) > MaxContentBytes || !utf8.Valid(b) || strings.ContainsRune(string(b), 0) {

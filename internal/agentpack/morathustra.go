@@ -1,6 +1,7 @@
 package agentpack
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -13,10 +14,16 @@ import (
 var morathustraPrivateContent = regexp.MustCompile(`(?i)(/(?:Users|home|srv|etc|Volumes|private|tmp)/|/var/(?:lib|run)/|[a-z]:[\\/]|\\\\[a-z0-9_.-]+\\|(?:postgres(?:ql)?|sqlite|mysql|mongodb|pass|file)://|LOOM_PROVENANCE_DB_URL|\b(?:DATABASE_URL|PGHOST|PGPASSWORD)\s*[:=]|-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:password|passwd|token|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token)\s*["']?\s*[:=]\s*\S+|\b(?:sk-[a-z0-9_-]{16,}|gh[pousr]_[a-z0-9]{16,}|xox[baprs]-[a-z0-9-]{16,})|\.loom/state|checkpoint\.json)`)
 var soulComments = regexp.MustCompile(`(?s)<!--.*?(?:-->|$)`)
 
-// Both named personas share one scaffold contract. Selecting a template never
-// provisions a live profile or changes the compatibility default.
+// Selecting a persona template never provisions a live runtime.
 func isNamedPersonaTemplate(name string) bool {
 	return name == "morathustra" || name == "mina"
+}
+
+func personaSoulPath(name string) string {
+	if name == "mina" {
+		return "SOUL.md"
+	}
+	return ".hermes/SOUL.md"
 }
 
 func substantiveSoul(payload []byte) bool {
@@ -30,6 +37,11 @@ func substantiveSoul(payload []byte) bool {
 }
 
 func validateMorathustraPath(relative string, directory bool) error {
+	return validatePersonaPath("morathustra", relative, directory)
+}
+
+func validatePersonaPath(template, relative string, directory bool) error {
+	soul := personaSoulPath(template)
 	lower := strings.ToLower(relative)
 	if relative == "." {
 		return nil
@@ -41,16 +53,19 @@ func validateMorathustraPath(relative string, directory bool) error {
 		}
 	}
 	base := strings.ToLower(filepath.Base(relative))
-	if relative != ".hermes/SOUL.md" && (strings.Contains(base, "soul") || strings.Contains(base, "personality") || strings.HasPrefix(base, "mora.") || strings.HasPrefix(base, "mina.") || base == "identity.md") {
-		return fmt.Errorf("only .hermes/SOUL.md may define personality: %s", relative)
+	if relative != soul && (strings.Contains(base, "soul") || strings.Contains(base, "personality") || strings.HasPrefix(base, "mora.") || strings.HasPrefix(base, "mina.") || base == "identity.md") {
+		return fmt.Errorf("only %s may define personality: %s", soul, relative)
 	}
-	if relative == ".hermes" && directory || relative == ".hermes/SOUL.md" && !directory {
+	if template == "morathustra" && relative == ".hermes" && directory || relative == soul && !directory {
 		return nil
 	}
 	if strings.HasPrefix(lower, ".hermes") || strings.HasPrefix(base, ".env") || strings.HasSuffix(base, ".db") || strings.Contains(base, ".db-") || strings.HasSuffix(base, ".sqlite") || strings.HasSuffix(base, ".sqlite3") || (strings.Contains(base, "credential") || strings.Contains(base, "secret") || strings.Contains(base, "token")) && relative != "protocols/CREDENTIALS.md" {
 		return fmt.Errorf("profile, credential or database state is not scaffold material: %s", relative)
 	}
 	if relative == "skills" && directory || relative == "skills/installed" && directory || strings.HasPrefix(relative, "skills/installed/") {
+		return nil
+	}
+	if template == "mina" && (relative == ".agents" && directory || relative == ".agents/skills" && directory || strings.HasPrefix(relative, ".agents/skills/")) {
 		return nil
 	}
 	if strings.HasPrefix(lower, "skills/") {
@@ -62,13 +77,18 @@ func validateMorathustraPath(relative string, directory bool) error {
 	return nil
 }
 
-func validateMorathustraContent(relative string, payload []byte) error {
-	if !utf8.Valid(payload) || strings.ContainsRune(string(payload), '\x00') || morathustraPrivateContent.Match(payload) {
+func validatePersonaContent(template, relative string, payload []byte) error {
+	checked := payload
+	if template == "mina" && (relative == "protocols/BASECAMP.md" || relative == "protocols/GITHUB.md") {
+		// This fixed public locator is instruction text, never exported binding data.
+		checked = bytes.ReplaceAll(payload, []byte("`/etc/loom-mina-accounts.json`"), []byte("`MINA_PUBLIC_ACCOUNT_BINDING`"))
+	}
+	if !utf8.Valid(payload) || strings.ContainsRune(string(payload), '\x00') || morathustraPrivateContent.Match(checked) {
 		// Never include the matched value in an error or validation report.
 		return fmt.Errorf("host path, credential, database locator or non-text state in scaffold file: %s", relative)
 	}
-	if relative == ".hermes/SOUL.md" && !substantiveSoul(payload) {
-		return fmt.Errorf(".hermes/SOUL.md requires substantive personality content")
+	if (relative == ".hermes/SOUL.md" || relative == "SOUL.md") && !substantiveSoul(payload) {
+		return fmt.Errorf("%s requires substantive personality content", relative)
 	}
 	return nil
 }
@@ -104,7 +124,7 @@ func inspectWorkspaceTemplate(pack *Pack, template ManifestTemplate) (map[string
 		}
 	}
 	if isNamedPersonaTemplate(template.Name) {
-		for _, required := range []string{".hermes/SOUL.md", "protocols/BASECAMP.md", "protocols/GITHUB.md"} {
+		for _, required := range []string{personaSoulPath(template.Name), "protocols/BASECAMP.md", "protocols/GITHUB.md"} {
 			if !declared[required] {
 				return nil, fmt.Errorf("named persona %q requires the source contract: %s", template.Name, required)
 			}
@@ -127,7 +147,7 @@ func inspectWorkspaceTemplate(pack *Pack, template ManifestTemplate) (map[string
 			if !entry.IsDir() && filepath.Ext(relative) != ".md" {
 				return fmt.Errorf("scaffold entries must be portable Markdown instructions: %s", relative)
 			}
-			if err := validateMorathustraPath(relative, entry.IsDir()); err != nil {
+			if err := validatePersonaPath(template.Name, relative, entry.IsDir()); err != nil {
 				return err
 			}
 		}
@@ -145,7 +165,7 @@ func inspectWorkspaceTemplate(pack *Pack, template ManifestTemplate) (map[string
 			return err
 		}
 		if isNamedPersonaTemplate(template.Name) {
-			if err := validateMorathustraContent(relative, payload); err != nil {
+			if err := validatePersonaContent(template.Name, relative, payload); err != nil {
 				return err
 			}
 		}
@@ -165,7 +185,7 @@ func inspectWorkspaceTemplate(pack *Pack, template ManifestTemplate) (map[string
 
 // A scaffold is not a live provisioner or migration command. Inspect names and
 // types only here: unrelated user-file contents must never be loaded as input.
-func inspectMorathustraDestination(root string) error {
+func inspectMorathustraDestination(root, template string) error {
 	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if os.IsNotExist(walkErr) && path == root {
 			return nil
@@ -183,7 +203,7 @@ func inspectMorathustraDestination(root string) error {
 		}
 		// Only scaffold/profile ownership boundaries are reserved at a destination;
 		// ordinary user notes and arbitrary task artifacts are preserved unread.
-		if err := validateMorathustraPath(relative, entry.IsDir()); err != nil {
+		if err := validatePersonaPath(template, relative, entry.IsDir()); err != nil {
 			return fmt.Errorf("scaffolding cannot migrate legacy or runtime state; operator review required: %w", err)
 		}
 		if relative == "skills" || relative == "skills/installed" || strings.HasPrefix(relative, "skills/installed/") {

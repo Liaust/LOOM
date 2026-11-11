@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'nonce-LOOM_EDITOR_STYLE_NONCE'; font-src 'self' blob:; img-src 'self' loom-file: data: blob:; frame-src loom-file:; object-src loom-file:; connect-src 'self' loom-file:; base-uri 'none'; form-action 'none'">
+  <title>Loom</title>
+  <script src="theme-bootstrap.js"></script>
+  <link rel="stylesheet" href="themes.css">
+  <link rel="stylesheet" href="pdf-viewer.css">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="katex.css">
+  <script defer src="../node_modules/lucide/dist/umd/lucide.js"></script>
+  <script defer src="../node_modules/marked/lib/marked.umd.js"></script>
+  <script defer src="../node_modules/dompurify/dist/purify.min.js"></script>
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="titlebar">
+    <div class="titlebar-navigation">
+      <div class="window-controls-space" aria-hidden="true"></div>
+      <div class="titlebar-tools">
+        <button class="icon" id="search-files" data-tooltip="Search contents" aria-label="Search contents"><i data-lucide="search"></i></button>
+        <button class="icon" id="navigation-toggle" data-tooltip="Toggle left sidebar" aria-label="Toggle left sidebar" aria-controls="navigation" aria-expanded="true"><i data-lucide="panel-left"></i></button>
+      </div>
+    </div>
+    <div class="titlebar-workspace">
+      <button class="icon tab-edge" id="tabs-previous" data-tooltip="Scroll tabs left" aria-label="Scroll tabs left" hidden><i data-lucide="chevron-left"></i></button>
+      <div id="document-tabs" class="document-tabs" role="tablist" aria-label="Open files"></div>
+      <button class="icon tab-edge" id="tabs-next" data-tooltip="Scroll tabs right" aria-label="Scroll tabs right" hidden><i data-lucide="chevron-right"></i></button>
+      <button class="icon" id="new-tab" data-tooltip="New tab" aria-label="New tab"><i data-lucide="plus"></i></button>
+      <div class="titlebar-drag-space" aria-hidden="true"></div>
+    </div>
+    <button class="icon" id="details-toggle" data-tooltip="Toggle right sidebar" aria-label="Toggle right sidebar" aria-controls="details" aria-expanded="false"><i data-lucide="panel-right"></i></button>
+  </header>
+  <div class="shell">
+    <nav class="rail" aria-label="Workspace">
+      <button class="icon selected" id="files" data-tooltip="Files" aria-label="Files"><i data-lucide="folder-open"></i></button>
+      <button class="icon" data-section="projects" data-tooltip="Projects" aria-label="Projects"><i data-lucide="blocks"></i></button>
+      <button class="icon" data-section="activity" data-tooltip="Activity" aria-label="Activity"><i data-lucide="activity"></i></button>
+      <button class="icon" data-section="schedules" data-tooltip="Schedules" aria-label="Schedules"><i data-lucide="calendar-clock"></i></button>
+      <button class="icon" data-section="system" data-tooltip="System" aria-label="System"><i data-lucide="server-cog"></i></button>
+      <div class="rail-bottom">
+        <button class="icon" id="update-button" hidden data-tooltip="Workspace update" aria-label="Workspace update"><i data-lucide="download"></i></button>
+        <button class="icon" id="palette-button" data-tooltip="Command palette" aria-label="Command palette"><i data-lucide="command"></i></button>
+        <button class="icon" id="refresh" data-tooltip="Refresh view" aria-label="Refresh view"><i data-lucide="refresh-cw"></i></button>
+        <button class="icon" id="settings-button" data-tooltip="Settings" aria-label="Settings"><i data-lucide="settings"></i></button>
+        <button class="icon" id="connection-button" data-tooltip="Reconnect to Main" aria-label="Reconnect to Main"><i data-lucide="server"></i><span id="connection-dot" class="dot offline"></span></button>
+      </div>
+    </nav>
+    <aside class="navigation" id="navigation">
+      <header><span id="navigation-title" hidden></span><div id="tree-tools"><button class="icon" id="new-note" data-tooltip="New note" aria-label="New note"><i data-lucide="square-pen"></i></button><button class="icon" id="new-folder" data-tooltip="New folder" aria-label="New folder"><i data-lucide="folder-plus"></i></button><button class="icon" id="collapse-tree" data-tooltip="Collapse all folders" aria-label="Collapse all folders"><i data-lucide="fold-vertical"></i></button><button class="icon" id="hide-readme-agents" data-tooltip="Hide README.md and AGENTS.md" aria-label="Hide README.md and AGENTS.md" aria-pressed="false"><i data-lucide="eye-off"></i></button></div></header>
+      <div id="explorer-modes" role="tablist" aria-label="Explorer mode"><button class="icon" id="explorer-global" role="tab" aria-label="All files" data-tooltip="All files"><i data-lucide="folders"></i></button><button class="icon" id="explorer-focus" role="tab" aria-label="Focused folder" data-tooltip="Focused folder"><i data-lucide="focus"></i></button><button class="icon" id="explorer-knowledge" role="tab" aria-label="Knowledge" data-tooltip="Knowledge"><i data-lucide="library"></i></button><button id="explorer-scope" class="explorer-scope" hidden></button></div>
+      <div id="file-tree" role="tree" aria-label="File explorer"></div>
+      <div id="knowledge-navigation" hidden></div>
+      <div id="section-navigation" hidden></div>
+      <div id="navigation-resize" role="separator" aria-label="Resize left sidebar" aria-orientation="vertical" tabindex="0"></div>
+    </aside>
+    <main>
+      <header class="toolbar">
+        <button class="icon" id="back" data-tooltip="Back" aria-label="Back"><i data-lucide="arrow-left"></i></button>
+        <button class="icon" id="forward" data-tooltip="Forward" aria-label="Forward"><i data-lucide="arrow-right"></i></button>
+        <button class="icon" id="up" data-tooltip="Parent folder" aria-label="Parent folder" hidden><i data-lucide="arrow-up"></i></button>
+        <div id="breadcrumbs" class="breadcrumbs"></div>
+        <div class="document-actions" id="document-actions" hidden><span id="document-name" class="sr-only"></span><span id="document-dirty" hidden>●</span><span id="availability"></span><button class="icon" id="file-actions" data-tooltip="File actions" aria-label="File actions"><i data-lucide="ellipsis"></i></button><button class="icon" id="pin" data-tooltip="Keep offline" aria-label="Keep offline"><i data-lucide="pin"></i></button><button class="icon" id="edit" data-tooltip="Markdown source" aria-label="Markdown source"><i data-lucide="code-2"></i></button><button class="icon" id="save" data-tooltip="Save local file" aria-label="Save local file" hidden><i data-lucide="save"></i></button></div>
+      </header>
+      <div class="work-area">
+        <section id="section-pane" class="section-pane" hidden></section>
+        <section id="empty-pane" class="empty-pane" aria-label="New tab">
+          <div class="empty-actions">
+            <button id="empty-new-note"><i data-lucide="square-pen"></i><span>New note</span><kbd>⌘ N</kbd></button>
+            <button id="empty-new-base"><i data-lucide="list-tree"></i><span>New base</span></button>
+            <button id="empty-new-canvas"><i data-lucide="layout-dashboard"></i><span>New canvas</span></button>
+            <button id="empty-go-file"><i data-lucide="search"></i><span>Go to file</span><kbd>⌘ O</kbd></button>
+          </div>
+        </section>
+        <section id="directory-pane" class="directory-pane" hidden>
+          <div class="list-heading"><span>Name</span><span>Modified</span><span>Size</span></div>
+          <div id="entries" role="listbox" aria-label="Folder contents" tabindex="0"></div>
+          <button id="load-more" class="load-more" hidden><i data-lucide="chevrons-down"></i><span>Load more</span></button>
+        </section>
+        <section id="document-pane" class="document-pane" hidden>
+          <div id="document-content" class="document-content"></div>
+        </section>
+        <section id="unavailable-pane" class="source-unavailable" hidden><h2 id="unavailable-title"></h2><p id="unavailable-reason"></p><div><button id="unavailable-retry"><i data-lucide="refresh-cw"></i><span>Retry</span></button><button id="unavailable-folder"><i data-lucide="folder"></i><span>Show folder</span></button></div></section>
+        <section id="knowledge-pane" hidden></section>
+      </div>
+      <div id="document-status" class="document-status" aria-label="Document status" hidden><button id="status-backlinks" data-tooltip="Known backlinks">Backlinks</button><button id="status-links" data-tooltip="Forward links in this document">Links</button><button id="status-properties" data-tooltip="YAML properties">Properties</button><span id="status-words"></span><span id="status-characters"></span><span id="latency"></span></div>
+    </main>
+    <aside id="details" class="details" hidden><header><span>Context</span><button class="icon" id="details-close" data-tooltip="Close context" aria-label="Close context"><i data-lucide="x"></i></button></header><div id="details-body"></div></aside>
+  </div>
+  <div id="notice" role="status" hidden></div>
+  <div id="file-context-menu" class="file-context-menu" role="menu" aria-label="File actions" hidden></div>
+  <dialog id="palette"><div class="palette-heading"><button class="icon" id="palette-back" data-tooltip="Back to commands" aria-label="Back to commands" hidden><i data-lucide="arrow-left"></i></button><i data-lucide="search"></i><input id="palette-input" aria-label="Open file or run command" placeholder="Open file or run command" autocomplete="off" spellcheck="false"><button class="icon" id="palette-close" aria-label="Close command palette" data-tooltip="Close"><i data-lucide="x"></i></button></div><div id="palette-kind" role="group" aria-label="Search mode" hidden></div><div id="palette-scope" hidden></div><div id="palette-hint" hidden></div><div id="palette-results" role="listbox"></div></dialog>
+  <dialog id="action-dialog"></dialog>
+  <dialog id="settings-dialog"></dialog>
+</body>
+</html>

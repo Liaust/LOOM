@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	pc "loom.local/loom/internal/projectcontracts"
 )
 
 func applicationPeerUID(fd int) (uint32, error) {
@@ -35,6 +36,39 @@ func (c ApplicationHelperClient) Execute(ctx context.Context, q ApplicationRunti
 		return ApplicationRuntimeReceipt{}, e
 	}
 	return *response.Receipt, e
+}
+
+func (c ApplicationHelperClient) ImportCredential(ctx context.Context, q ApplicationCredentialImport) (ApplicationCredentialImportReceipt, error) {
+	response, err := c.exchange(ctx, ApplicationHelperEnvelope{CredentialImport: &q})
+	if err != nil {
+		return ApplicationCredentialImportReceipt{}, err
+	}
+	if response.CredentialImport == nil || response.CredentialImport.Owner != q.Owner || !pc.ValidApplicationRuntimeCredentialReference(response.CredentialImport.Reference) {
+		return ApplicationCredentialImportReceipt{}, applicationError("credential.import_receipt_invalid")
+	}
+	return *response.CredentialImport, nil
+}
+
+func (c ApplicationHelperClient) RunAction(ctx context.Context, q ApplicationActionRequest) (ApplicationActionReceipt, error) {
+	response, err := c.exchange(ctx, ApplicationHelperEnvelope{Action: &q})
+	if response.Action != nil {
+		return *response.Action, err
+	}
+	if err == nil {
+		err = applicationError("action.receipt_missing")
+	}
+	return ApplicationActionReceipt{}, err
+}
+
+func (c ApplicationHelperClient) InspectAction(ctx context.Context, q ApplicationActionRequest) (ApplicationActionReceipt, error) {
+	response, err := c.exchange(ctx, ApplicationHelperEnvelope{ActionStatus: &q})
+	if response.Action != nil {
+		return *response.Action, err
+	}
+	if err == nil {
+		err = applicationError("action.receipt_missing")
+	}
+	return ApplicationActionReceipt{}, err
 }
 func (c ApplicationHelperClient) Publish(ctx context.Context, p ApplicationPublication) error {
 	_, e := c.exchange(ctx, ApplicationHelperEnvelope{Publication: &p})
@@ -132,7 +166,10 @@ func applicationHelperRuntime(configPath string, fixture bool) (ApplicationRunti
 			return ApplicationRuntime{}, applicationError("helper.path")
 		}
 	}
-	for _, p := range []string{cfg.Systemctl, cfg.Sysusers, cfg.Nix} {
+	for _, p := range []string{cfg.Systemctl, cfg.Sysusers, cfg.Nix, cfg.Getfacl, cfg.Setfacl, cfg.IPTables, cfg.IP6Tables, cfg.SystemdRun} {
+		if p == "" {
+			continue
+		} // Old immutable helper configurations remain readable.
 		resolved, e := filepath.EvalSymlinks(p)
 		if e != nil || applicationImmutableParents(resolved, 0) != nil || applicationCustody(resolved, 0, false) != nil {
 			return ApplicationRuntime{}, applicationError("helper.tool_custody")
@@ -184,7 +221,42 @@ func ServeApplicationHelper(configPath string, fixture bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Second)
 	defer cancel()
 	response := ApplicationHelperResponse{}
-	if envelope.Prepared != nil {
+	if envelope.Action != nil {
+		receipt, err := runtime.RunAction(ctx, peer, *envelope.Action)
+		e = err
+		response.Action = &receipt
+	} else if envelope.ActionStatus != nil {
+		receipt, err := runtime.InspectAction(ctx, peer, *envelope.ActionStatus)
+		e = err
+		response.Action = &receipt
+	} else if envelope.CredentialImport != nil {
+		receipt, err := runtime.ImportCredential(ctx, peer, *envelope.CredentialImport)
+		e = err
+		if err == nil {
+			response.CredentialImport = &receipt
+		}
+	} else if envelope.BrowseRead != nil {
+		result, file, err := runtime.BrowseRead(ctx, peer, *envelope.BrowseRead)
+		response.BrowseResult = &result
+		if err != nil {
+			response.ErrorCode = applicationSafeError(err)
+		}
+		if envelope.BrowseRead.Operation == "open" {
+			var rights []byte
+			if file != nil {
+				defer file.Close()
+				rights = unix.UnixRights(int(file.Fd()))
+			}
+			if err := unix.Sendmsg(1, []byte{0}, rights, nil, 0); err != nil {
+				return err
+			}
+		}
+		return json.NewEncoder(os.Stdout).Encode(response)
+	} else if envelope.Browse != nil {
+		receipt, err := runtime.BrowseControl(ctx, peer, *envelope.Browse)
+		e = err
+		response.Browse = &receipt
+	} else if envelope.Prepared != nil {
 		e = runtime.PublishPrepared(ctx, peer, *envelope.Prepared)
 	} else if envelope.ProvisionPlan != nil {
 		plan, err := runtime.PlanProvision(ctx, peer, *envelope.ProvisionPlan)
@@ -369,6 +441,9 @@ func (h *ApplicationHostSystem) EnsureAccount(ctx context.Context, o Application
 }
 
 func (h *ApplicationHostSystem) EnsureData(ctx context.Context, p ApplicationDataPolicy, uid uint32, prior *ApplicationDataIdentity) (ApplicationDataIdentity, error) {
+	if p.StorageClass == ApplicationProjectStateStorageClass {
+		return h.ensureProjectState(ctx, p, uid, prior)
+	}
 	if applicationCheckTrustedParents(p.Path, 0, h.Config.TrustedParentOwners) != nil {
 		return ApplicationDataIdentity{}, applicationError("data.parent_custody")
 	}

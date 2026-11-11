@@ -1,0 +1,27 @@
+diff --git a/nix/pythonLock.nix b/nix/pythonLock.nix
+--- a/nix/pythonLock.nix
++++ b/nix/pythonLock.nix
+@@ -39,5 +39,22 @@ in
+ 
+   inherit family;
+ 
+-  interpreter = selectPython family pkgs;
++  interpreter = let
++    python = (selectPython family pkgs).override {
++      self = python;
++      sqlite = pkgs.callPackage ./loom-sqlite.nix { };
++      # Nixpkgs filters derivation overrides out of build-role interpreters.
++      __splices = lib.genAttrs [
++        "pythonOnBuildForBuild"
++        "pythonOnBuildForHost"
++        "pythonOnBuildForTarget"
++        "pythonOnHostForHost"
++        "pythonOnTargetForTarget"
++      ] (_: python);
++    };
++  in
++    assert lib.assertMsg (pkgs.stdenv.buildPlatform.system == pkgs.stdenv.hostPlatform.system) "LOOM Hermes SQLite override requires a native build";
++    assert python.pkgs.python.outPath == python.outPath;
++    assert python.pythonOnBuildForHost.outPath == python.outPath;
++    python;
+ }

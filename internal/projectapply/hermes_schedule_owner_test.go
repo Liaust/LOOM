@@ -3,10 +3,31 @@ package projectapply
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	hs "loom.local/loom/internal/hermesschedules"
 	pc "loom.local/loom/internal/projectcontracts"
 	"testing"
 )
+
+type unavailableHermesOwner struct{ calls int }
+
+func (h *unavailableHermesOwner) Call(context.Context, hs.ProjectRequest) (hs.ProjectResponse, error) {
+	h.calls++
+	return hs.ProjectResponse{}, errors.New("offline")
+}
+
+func TestUnrelatedHermesAvailabilityDoesNotBlockApplicationWork(t *testing.T) {
+	h := &unavailableHermesOwner{}
+	r := LocalResolver{Hermes: h}
+	x := localDeclaration{Analysis: pc.Analysis{Loaded: &pc.LoadedProject{Declaration: &pc.ProjectDeclaration{Resources: map[pc.ResourceKey]pc.ResourceDeclaration{"worker": {Kind: pc.DeclarationApplication}}}}}}
+	if err := r.readHermesSchedules(t.Context(), &x); err != nil || h.calls != 0 {
+		t.Fatalf("unrelated owner was consulted: %v calls=%d", err, h.calls)
+	}
+	x.Analysis.Loaded.Declaration.Resources["review"] = pc.ResourceDeclaration{Kind: pc.DeclarationHermesSchedule, HermesSchedule: &pc.HermesScheduleDeclaration{Profile: "mina"}}
+	if err := r.readHermesSchedules(t.Context(), &x); err == nil || h.calls != 1 {
+		t.Fatal("a declared Hermes owner was silently skipped")
+	}
+}
 
 func TestHermesReceiptRetainsCommittedRevisionAfterManualPause(t *testing.T) {
 	call := ActionCall{Token: "token", Action: pc.DeclarationAction{ID: "reconcile_hermes_schedule:review", Resource: "review", InputHash: "hash"}, Expected: Prerequisites{Revisions: map[string]string{"hermesschedules:review": "absent"}, Bindings: map[pc.ResourceKey]pc.DeclarationBinding{"review": {Kind: pc.DeclarationHermesSchedule}}}}
@@ -89,5 +110,14 @@ func TestHermesPlanNeverAddsLOOMTimer(t *testing.T) {
 	}
 	if payload.Spec.Workdir != "/owned/project" || payload.Spec.Status != "paused" {
 		t.Fatalf("lost bound context/default pause: %+v", payload)
+	}
+}
+
+func TestDeclaredAgentBindingReceipt(t *testing.T) {
+	call := ActionCall{Token: "token", Action: pc.DeclarationAction{ID: "reconcile_agent:researcher", Resource: "researcher", InputHash: "hash"}, Expected: Prerequisites{Revisions: map[string]string{"hermesschedules:researcher": "absent"}, Bindings: map[pc.ResourceKey]pc.DeclarationBinding{"researcher": {Kind: pc.DeclarationAgent}}}}
+	j := hs.ProjectJob{Kind: "agent", ID: pc.AgentProfileID("project_test", "researcher"), Token: "token", InputHash: "hash", BeforeRevision: "absent", CommittedRevision: "after"}
+	out, err := hermesReceipt(call, j)
+	if err != nil || out.Receipt.Bindings["researcher"].After.Kind != pc.DeclarationAgent {
+		t.Fatalf("%+v %v", out, err)
 	}
 }

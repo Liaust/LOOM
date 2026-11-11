@@ -12,8 +12,6 @@ hash_policy:
 harnesses:
   codex:
     mechanism: native-skills
-  orca:
-    mechanism: native-skills-or-plugins
   hermes:
     mechanism: native-skills-and-read-only-external-dirs
 recommended_skill_sets:
@@ -42,7 +40,7 @@ compatibility:
   root_agent_entry: AGENTS.md
   project_guidance: .loom/agents/project.md
   credential_references: .loom/contracts/credentials.yaml
-  worktree_authority: orca
+  worktree_authority: native-harness
   credential_authority: proton-pass
 skills:
   - name: search-loom-knowledge
@@ -56,7 +54,7 @@ skills:
     visibility: shared_core
     hash: release-generated
   - name: manage-loom-projects
-    version: 0.1.0
+    version: 0.2.0
     path: skills/manage-loom-projects
     visibility: shared_core
     hash: release-generated
@@ -76,7 +74,7 @@ skills:
     visibility: morathustra_operations
     hash: release-generated
   - name: orchestrate-loom-work
-    version: 0.2.0
+    version: 0.3.0
     path: skills/orchestrate-loom-work
     visibility: morathustra_operations
     hash: release-generated
@@ -86,7 +84,7 @@ skills:
     visibility: shared_core
     hash: release-generated
   - name: use-loom-provenance
-    version: 0.2.0
+    version: 0.3.0
     path: skills/use-loom-provenance
     visibility: shared_provenance
     hash: release-generated
@@ -130,9 +128,10 @@ templates:
   - name: mina
     path: templates/mina
     files:
-      - .hermes/SOUL.md
+      - .agents/skills/README.md
       - AGENTS.md
       - OPERATING-POLICY.md
+      - SOUL.md
       - TOOLING.md
       - WORKFLOW.md
       - WORKSPACE-MAP.md
@@ -143,6 +142,7 @@ templates:
       - protocols/DEVICE-AND-TOOL-ROUTING.md
       - protocols/EXTERNAL-MESSAGING.md
       - protocols/GITHUB.md
+      - protocols/HERMES-RUNTIME.md
       - protocols/LOOM-ROUTING.md
       - protocols/MAC-COMPUTER-USE.md
       - protocols/PROJECT-DELEGATION.md

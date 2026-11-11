@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -17,24 +18,62 @@ import (
 
 // This is a bounded CLI projection, not a new service or declaration schema.
 type projectContext struct {
-	Development         *pc.DeclarationDevelopmentContext `json:"development,omitempty"`
-	SchemaVersion       string                            `json:"schema_version"`
-	Target              *pc.DeclarationTarget             `json:"target,omitempty"`
-	Revision            string                            `json:"revision,omitempty"`
-	Readiness           pc.DeclarationReadiness           `json:"readiness"`
-	HistoricalOperation *contextOperation                 `json:"historical_operation,omitempty"`
-	Source              *contextSource                    `json:"source,omitempty"`
-	Sources             []pc.DeclarationSource            `json:"sources,omitempty"`
-	SourceStatus        string                            `json:"source_status"`
-	Causes              []contextCause                    `json:"causes"`
-	NextAction          declarationNextAction             `json:"next_action"`
-	Omitted             map[string]int                    `json:"omitted"`
+	Lifecycle           string                  `json:"lifecycle,omitempty"`
+	WorkState           string                  `json:"work_state,omitempty"`
+	Development         *contextDevelopment     `json:"development,omitempty"`
+	SchemaVersion       string                  `json:"schema_version"`
+	Target              *pc.DeclarationTarget   `json:"target,omitempty"`
+	Revision            string                  `json:"revision,omitempty"`
+	Readiness           pc.DeclarationReadiness `json:"readiness"`
+	ObservedAt          string                  `json:"read_at,omitempty"`
+	Repositories        []contextRepository     `json:"repositories,omitempty"`
+	Resources           []contextResource       `json:"resources,omitempty"`
+	DetailCommand       string                  `json:"detail_command"`
+	HistoricalOperation *contextOperation       `json:"historical_operation,omitempty"`
+	Source              *contextSource          `json:"source,omitempty"`
+	Sources             []pc.DeclarationSource  `json:"sources,omitempty"`
+	SourceStatus        string                  `json:"source_status"`
+	Causes              []contextCause          `json:"causes"`
+	NextAction          declarationNextAction   `json:"next_action"`
+	Omitted             map[string]int          `json:"omitted"`
 }
+
+type contextDevelopment struct {
+	pc.DeclarationDevelopmentContext
+	PurposeStatus string `json:"purpose_status"`
+}
+
+const projectPurposeScaffold = "Describe the project's intended outcome and who it serves as work begins."
+
 type contextOperation struct {
-	OperationID string                       `json:"operation_id"`
-	PlanID      string                       `json:"plan_id"`
-	Revision    string                       `json:"revision"`
-	State       pc.DeclarationOperationState `json:"state"`
+	OperationID      string                       `json:"operation_id"`
+	PlanID           string                       `json:"plan_id"`
+	Revision         string                       `json:"revision"`
+	State            pc.DeclarationOperationState `json:"state"`
+	CompletedEffects []string                     `json:"completed_effects,omitempty"`
+}
+type contextRepository struct {
+	Key  string `json:"key"`
+	ID   string `json:"id,omitempty"`
+	Path string `json:"path,omitempty"`
+}
+type contextFact struct {
+	pc.DeclarationFact
+	Coverage      string `json:"coverage"`
+	RevisionBasis string `json:"revision_basis"`
+	ReadAt        string `json:"read_at,omitempty"`
+	EvidenceTime  string `json:"evidence_time"`
+}
+type contextResource struct {
+	Key                 string                        `json:"key"`
+	Kind                pc.DeclarationResourceKind    `json:"kind"`
+	DesiredRevision     string                        `json:"desired_revision,omitempty"`
+	Applied             contextFact                   `json:"applied"`
+	Healthy             contextFact                   `json:"healthy"`
+	Protected           contextFact                   `json:"protected"`
+	Verified            contextFact                   `json:"verified"`
+	Endpoint            *pc.ApplicationEndpointStatus `json:"publication,omitempty"`
+	PublicationCoverage string                        `json:"publication_coverage,omitempty"`
 }
 type contextSource struct {
 	OwnerNodeID string `json:"owner_node_id"`
@@ -62,12 +101,16 @@ func addProjectContextCommand(parent *cobra.Command, opts *options) {
 		if err != nil {
 			return err
 		}
-		env, err := client.GetProjectDeclarationStatus(ctx, cid, args[0], node)
+		projectRef, err := declarationReadProjectRef(args[0], node)
 		if err != nil {
-			return renderDeclarationFailure(cmd, opts, cid, err, nil)
+			return err
+		}
+		env, err := client.GetProjectDeclarationStatus(ctx, cid, projectRef, node)
+		if err != nil {
+			return renderDeclarationFailure(cmd, opts, cid, err, nil, args[0])
 		}
 		view := newProjectContext(env.Data)
-		if verbose || opts.verboseOutput {
+		if (verbose || opts.verboseOutput) && env.Data.Lifecycle != "archived" {
 			view.SourceStatus = "unavailable"
 			target := env.Data.Target
 			// Never replace a missing owner with caller-local state or a guessed node.
@@ -119,6 +162,12 @@ func declarationDisplay(s string) string {
 	}
 	return s
 }
+
+func conversationExcerptSafe(value string) bool {
+	return len(value) <= 1200 && utf8.ValidString(value) && !strings.ContainsFunc(value, func(r rune) bool {
+		return r != '\n' && r != '\t' && (unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp))
+	})
+}
 func (v projectContext) fits() bool {
 	b, err := json.Marshal(v)
 	// Reserve 1 KiB for the finite set of omission counters and the newline.
@@ -132,30 +181,32 @@ var declarationFactNames = []string{"Desired", "Queued", "Applied", "Processing"
 
 func newProjectContext(status pc.DeclarationStatus) projectContext {
 	v := projectContext{SchemaVersion: "loom.project.context.v1", Readiness: status.Readiness, SourceStatus: "not_requested", Causes: []contextCause{}, Omitted: map[string]int{}}
-	if d := status.Development; d != nil {
-		if declarationDisplayText(d.Posture, d.SourceDigest, d.Purpose, d.CurrentFocus, d.Progress, d.Blockers, d.NextAction, d.SnapshotRef) {
-			copy := *d
-			v.Development = &copy
-		}
-		if v.Development == nil || !v.fits() {
-			v.Development = nil
-			v.Omitted["development"]++
-		}
+	if pc.ValidProjectWorkState(status.WorkState) {
+		v.WorkState = status.WorkState
+	} else if status.WorkState != "" {
+		v.Omitted["work_state"]++
 	}
-	// Operation history contributes neither current readiness nor current causes.
 	v.NextAction = declarationStatusNextAction(status)
+	v.DetailCommand = declarationInspectAction(status.Target, "", "").Command
+	v.ObservedAt = contextReadAt(status.ObservedAt)
+	if status.ObservedAt != "" && v.ObservedAt == "" {
+		v.Omitted["read_time"]++
+	}
 	original := status.Readiness
+	v.Readiness.Endpoint = nil
 	for _, fact := range declarationFacts(&v.Readiness) {
 		fact.Revision, fact.EvidenceRef = "", ""
-		switch fact.State {
-		case pc.DeclarationUnknown, pc.DeclarationNotApplicable, pc.DeclarationPending, pc.DeclarationSatisfied, pc.DeclarationFailed:
-		default:
-			if fact.State != "" {
-				v.Omitted["readiness_state"]++
-			}
-			fact.State = pc.DeclarationUnknown
+		fact.State = contextFactState(fact.State, v.Omitted)
+	}
+	if status.Lifecycle == "archived" {
+		v.Lifecycle = "archived"
+		v.SourceStatus = "historical_unavailable"
+		candidate := "loom project archive inspect " + quoteDeclarationArg(status.Target.ProjectID) + " --json"
+		if declarationSelector(status.Target.ProjectID) && declarationSafeCommand(candidate) {
+			v.DetailCommand = candidate
 		}
 	}
+	// Navigation precedes optional prose, resource detail and operation history.
 	if declarationDisplayText(status.Target.ProjectID, status.Target.OwnerNodeID, status.Target.ProjectRoot, status.Target.LocationRevision) {
 		target := status.Target
 		v.Target = &target
@@ -175,25 +226,144 @@ func newProjectContext(status pc.DeclarationStatus) projectContext {
 	if v.Revision == "" && status.Revision != "" {
 		v.Omitted["revision"]++
 	}
-	if v.Target != nil && path.IsAbs(v.Target.ProjectRoot) && v.Target.OwnerNodeID != "" {
+	keys := make([]string, 0, len(status.Resources))
+	for key := range status.Resources {
+		keys = append(keys, string(key))
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		resource := status.Resources[pc.ResourceKey(key)]
+		if resource.Binding.Kind != pc.DeclarationRepository {
+			continue
+		}
+		if len(v.Repositories) >= 4 || !declarationDisplayText(key, resource.Binding.RepositoryID, resource.Path) {
+			v.Omitted["repositories"]++
+			continue
+		}
+		v.Repositories = append(v.Repositories, contextRepository{Key: key, ID: resource.Binding.RepositoryID, Path: resource.Path})
+		if !v.fits() {
+			v.Repositories = v.Repositories[:len(v.Repositories)-1]
+			v.Omitted["repositories"]++
+		}
+	}
+	if d := status.Development; d != nil {
+		if declarationDisplayText(d.Posture, d.SourceDigest, d.Purpose, d.CurrentFocus, d.Progress, d.Blockers, d.NextAction, d.SnapshotRef) {
+			v.Development = &contextDevelopment{DeclarationDevelopmentContext: pc.DeclarationDevelopmentContext{Posture: d.Posture}, PurposeStatus: "unset"}
+			for _, field := range []string{"purpose", "current_focus", "progress", "blockers", "next_action"} {
+				if slices.Contains(d.TruncatedFields, field) {
+					v.Development.TruncatedFields = append(v.Development.TruncatedFields, field)
+				}
+			}
+		}
+		if v.Development == nil || !v.fits() {
+			v.Development = nil
+			v.Omitted["development"]++
+		}
+		if v.Development != nil {
+			if index := d.Conversations; index != nil && index.Path == ".project/CONVERSATIONS.md" && index.Hash != "" && declarationDisplayText(index.Hash) {
+				copy := *index
+				if !conversationExcerptSafe(copy.Excerpt) {
+					copy.Excerpt, copy.Truncated = "", true
+					v.Omitted["conversation_excerpt"]++
+				}
+				v.Development.Conversations = &copy
+				if !v.fits() {
+					copy.Excerpt, copy.Truncated = "", true
+					v.Omitted["conversation_excerpt"]++
+				}
+				if !v.fits() {
+					v.Development.Conversations = nil
+					v.Omitted["conversations"]++
+				}
+			}
+		}
+	}
+	// Reserve current source context before repeated optional resource evidence.
+	if d := status.Development; d != nil && v.Development != nil {
+		purpose := d.Purpose
+		if strings.TrimSpace(purpose) == projectPurposeScaffold {
+			purpose = ""
+			v.Development.PurposeStatus = "unset_scaffold"
+		} else if purpose != "" {
+			v.Development.PurposeStatus = "source_declared"
+		}
+		for _, field := range []struct {
+			name  string
+			dst   *string
+			value string
+			limit int
+		}{
+			{"", &v.Development.SourceDigest, d.SourceDigest, 0},
+			{"current_focus", &v.Development.CurrentFocus, d.CurrentFocus, 512},
+			{"progress", &v.Development.Progress, d.Progress, 768},
+			{"blockers", &v.Development.Blockers, d.Blockers, 384},
+			{"next_action", &v.Development.NextAction, d.NextAction, 512},
+			{"purpose", &v.Development.Purpose, purpose, 384},
+			{"", &v.Development.SnapshotRef, d.SnapshotRef, 0},
+		} {
+			if !declarationDisplayText(field.value) {
+				v.Omitted["development_detail"]++
+				continue
+			}
+			value, truncated := projectContextExcerpt(field.value, field.limit)
+			if truncated {
+				v.Omitted["development_excerpt"]++
+				if !slices.Contains(v.Development.TruncatedFields, field.name) {
+					v.Development.TruncatedFields = append(v.Development.TruncatedFields, field.name)
+				}
+			}
+			*field.dst = value
+			if !v.fits() {
+				*field.dst = ""
+				v.Omitted["development_detail"]++
+			}
+		}
+	}
+	for _, key := range keys {
+		resource := status.Resources[pc.ResourceKey(key)]
+		if len(v.Resources) >= 4 || !declarationDisplayText(key, string(resource.Binding.Kind)) {
+			v.Omitted["resources"]++
+			continue
+		}
+		summary := projectResourceContext(key, resource, status, v.Omitted)
+		v.Resources = append(v.Resources, summary)
+		if !v.fits() {
+			v.Resources = v.Resources[:len(v.Resources)-1]
+			v.Omitted["resources"]++
+		}
+	}
+	if d := status.Development; d != nil && v.Development != nil {
+		if a := d.Archive; a != nil {
+			if declarationDisplayText(a.OperationID, a.ManifestDigest, a.ArchivedAt) && len(a.MissingDocuments) <= 32 && declarationDisplayText(a.MissingDocuments...) {
+				copy := *a
+				copy.ReadOnlyRoot = ""
+				v.Development.Archive = &copy
+			}
+			if v.Development.Archive == nil || !v.fits() {
+				v.Development.Archive = nil
+				v.Omitted["archive"]++
+			} else if status.Lifecycle == "archived" {
+				v.SourceStatus = "verified_historical"
+			}
+			if v.Development.Archive != nil && a.ReadOnlyRoot != "" {
+				if declarationDisplayText(a.ReadOnlyRoot) && path.IsAbs(a.ReadOnlyRoot) && path.Clean(a.ReadOnlyRoot) == a.ReadOnlyRoot {
+					v.Development.Archive.ReadOnlyRoot = a.ReadOnlyRoot
+				}
+				if v.Development.Archive.ReadOnlyRoot == "" || !v.fits() {
+					v.Development.Archive.ReadOnlyRoot = ""
+					v.Omitted["archive_root"]++
+				}
+			}
+		}
+	}
+	if status.Lifecycle != "archived" && v.Target != nil && path.IsAbs(v.Target.ProjectRoot) && v.Target.OwnerNodeID != "" {
 		v.Source = &contextSource{OwnerNodeID: v.Target.OwnerNodeID, Ref: path.Join(v.Target.ProjectRoot, pc.CanonicalRootContractPath)}
 		if !v.fits() {
 			v.Source = nil
 		}
 	}
-	if v.Source == nil {
+	if v.Source == nil && status.Lifecycle != "archived" {
 		v.Omitted["source"]++
-	}
-	if op := status.Operation; op != nil {
-		if declarationDisplayText(op.OperationID, op.PlanID, op.Revision, string(op.State)) {
-			v.HistoricalOperation = &contextOperation{op.OperationID, op.PlanID, op.Revision, op.State}
-			if !v.fits() {
-				v.HistoricalOperation = nil
-			}
-		}
-		if v.HistoricalOperation == nil {
-			v.Omitted["historical_operation"]++
-		}
 	}
 	for i, fact := range declarationFacts(&v.Readiness) {
 		old := declarationFacts(&original)[i]
@@ -216,9 +386,13 @@ func newProjectContext(status pc.DeclarationStatus) projectContext {
 			}
 		}
 	}
-	for i, failure := range status.Errors {
+	failures := append([]pc.DeclarationError(nil), status.Errors...)
+	for _, key := range keys {
+		failures = append(failures, status.Resources[pc.ResourceKey(key)].Errors...)
+	}
+	for i, failure := range failures {
 		if i >= 3 {
-			v.Omitted["causes"] += len(status.Errors) - i
+			v.Omitted["causes"] += len(failures) - i
 			break
 		}
 		if !declarationDisplayText(string(failure.Code), failure.CauseCode) {
@@ -249,10 +423,91 @@ func newProjectContext(status pc.DeclarationStatus) projectContext {
 			}
 		}
 	}
-	if len(status.Resources) > 0 {
-		v.Omitted["resources"] = len(status.Resources)
+	if op := status.Operation; op != nil {
+		if declarationDisplayText(op.OperationID, op.PlanID, op.Revision, string(op.State)) {
+			v.HistoricalOperation = &contextOperation{OperationID: op.OperationID, PlanID: op.PlanID, Revision: op.Revision, State: op.State}
+			if !v.fits() {
+				v.HistoricalOperation = nil
+			}
+		}
+		if v.HistoricalOperation == nil {
+			v.Omitted["historical_operation"]++
+		} else {
+			for _, effect := range declarationCompletedEffects(*op) {
+				if len(v.HistoricalOperation.CompletedEffects) >= 4 || !declarationDisplayText(effect) {
+					v.Omitted["operation_effects"]++
+					continue
+				}
+				v.HistoricalOperation.CompletedEffects = append(v.HistoricalOperation.CompletedEffects, effect)
+				if !v.fits() {
+					v.HistoricalOperation.CompletedEffects = v.HistoricalOperation.CompletedEffects[:len(v.HistoricalOperation.CompletedEffects)-1]
+					v.Omitted["operation_effects"]++
+				}
+			}
+		}
 	}
 	return v
+}
+
+func projectContextExcerpt(value string, limit int) (string, bool) {
+	raw, _ := json.Marshal(value)
+	if limit <= 0 || len(raw) <= limit {
+		return value, false
+	}
+	runes := []rune(value)
+	low, high := 0, len(runes)
+	for low < high {
+		mid := (low + high + 1) / 2
+		raw, _ = json.Marshal(string(runes[:mid]) + "... [excerpt]")
+		if len(raw) <= limit {
+			low = mid
+		} else {
+			high = mid - 1
+		}
+	}
+	return string(runes[:low]) + "... [excerpt]", true
+}
+
+func contextFactState(state pc.DeclarationFactState, omitted map[string]int) pc.DeclarationFactState {
+	switch state {
+	case pc.DeclarationUnknown, pc.DeclarationNotApplicable, pc.DeclarationPending, pc.DeclarationSatisfied, pc.DeclarationFailed:
+		return state
+	default:
+		if state != "" {
+			omitted["readiness_state"]++
+		}
+		return pc.DeclarationUnknown
+	}
+}
+
+func contextResourceFact(fact pc.DeclarationFact, status pc.DeclarationStatus, omitted map[string]int) contextFact {
+	fact.State = contextFactState(fact.State, omitted)
+	if !declarationDisplayText(fact.Revision, fact.EvidenceRef) {
+		fact = pc.DeclarationFact{State: pc.DeclarationUnknown}
+		omitted["resource_detail"]++
+	}
+	out := contextFact{DeclarationFact: fact, Coverage: "resource_only", RevisionBasis: "owner_revision_not_declaration", EvidenceTime: "not_reported"}
+	out.ReadAt = contextReadAt(status.ObservedAt)
+	if fact.Revision == "" {
+		out.RevisionBasis = "not_reported"
+	} else if status.Revision != "" && fact.Revision == status.Revision {
+		out.RevisionBasis = "current_declaration"
+	}
+	if fact.State == pc.DeclarationUnknown {
+		out.Coverage = "unknown"
+	} else if fact.State == pc.DeclarationNotApplicable {
+		out.Coverage = "not_applicable"
+	} else if fact.State == pc.DeclarationFailed {
+		out.Coverage = "blocked_resource_only"
+	}
+	return out
+}
+
+func contextReadAt(value string) string {
+	if _, err := time.Parse(time.RFC3339Nano, value); err != nil {
+		return ""
+	}
+	return value
 }
 
 func renderProjectContext(cmd *cobra.Command, opts *options, v projectContext) error {
@@ -267,55 +522,116 @@ func renderProjectContext(cmd *cobra.Command, opts *options, v projectContext) e
 		_, err = fmt.Fprintln(cmd.OutOrStdout(), string(data))
 		return err
 	}
-	lines := []string{}
-	if d := v.Development; d != nil {
-		lines = append(lines, "Development: "+d.Posture)
-		for _, field := range []struct{ name, value string }{{"Purpose", d.Purpose}, {"Focus", d.CurrentFocus}, {"Progress", d.Progress}, {"Blockers", d.Blockers}, {"Next project action", d.NextAction}} {
-			if field.value != "" {
-				lines = append(lines, field.name+": "+field.value)
-			}
-		}
-	}
 	omitted := make(map[string]int, len(v.Omitted))
 	for key, count := range v.Omitted {
 		omitted[key] = count
 	}
 	v.Omitted = omitted
-	// Reserve every current readiness dimension and verbose drift information
-	// before optional long identity/source lines can consume the human budget.
-	mandatory := []string{}
-	for i, fact := range declarationFacts(&v.Readiness) {
-		mandatory = append(mandatory, declarationFactNames[i]+": "+string(fact.State))
+	// Navigation comes first; reserve compact current readiness before optional
+	// prose/history. Each resource remains qualified, not project-wide green.
+	mandatory := []string{
+		fmt.Sprintf("Desired: %s | Queued: %s | Applied: %s", v.Readiness.Desired.State, v.Readiness.Queued.State, v.Readiness.Applied.State),
+		fmt.Sprintf("Processing: %s | Healthy: %s | Protected: %s | Verified: %s", v.Readiness.Processing.State, v.Readiness.Healthy.State, v.Readiness.Protected.State, v.Readiness.Verified.State),
+	}
+	if v.WorkState != "" {
+		mandatory = append(mandatory, "Work state: "+v.WorkState+" (independent of runtime status)")
 	}
 	if v.SourceStatus != "not_requested" {
 		mandatory = append(mandatory, "Source detail: "+v.SourceStatus)
 	}
+	if len(v.Resources) > 0 {
+		mandatory = append(mandatory, projectResourceEvidenceLine(v.ObservedAt))
+	}
+	lines := []string{}
 	if v.Target != nil {
-		lines = append(lines, "Project: "+v.Target.ProjectID, "Node: "+v.Target.OwnerNodeID, "Root: "+v.Target.ProjectRoot)
+		label := "Root: "
+		if v.Lifecycle == "archived" {
+			label = "Root (historical registration): "
+		}
+		lines = append(lines, label+v.Target.ProjectRoot, "Project: "+v.Target.ProjectID+"; Node: "+v.Target.OwnerNodeID)
+	}
+	if d := v.Development; d != nil && d.Archive != nil && d.Archive.ReadOnlyRoot != "" {
+		lines = append(lines, "Retained root (read-only; verified custody): "+d.Archive.ReadOnlyRoot)
+	}
+	for _, repository := range v.Repositories {
+		lines = append(lines, "Repository: "+repository.Key+"; path "+repository.Path+"; id "+repository.ID)
+	}
+	lines = append(lines, mandatory...)
+	if d := v.Development; d != nil {
+		development := "Development: " + d.Posture + " (independent of deployment)"
+		if d.PurposeStatus == "unset_scaffold" {
+			development += "; purpose unset (unchanged OVERVIEW scaffold)"
+		}
+		if len(d.TruncatedFields) > 0 {
+			development += "; excerpts: " + strings.Join(d.TruncatedFields, ", ") + " (read .project sources for full text)"
+		}
+		lines = append(lines, development)
+		for _, field := range []struct{ name, value string }{{"Focus", d.CurrentFocus}, {"Progress", d.Progress}} {
+			if field.value != "" {
+				lines = append(lines, field.name+": "+field.value)
+			}
+		}
+		if index := d.Conversations; index != nil {
+			lines = append(lines, fmt.Sprintf("Conversation index: %s; hash=%s; excerpt truncated=%t", index.Path, index.Hash, index.Truncated))
+			if index.Excerpt != "" {
+				lines = append(lines, strings.Join(strings.Fields(index.Excerpt), " "))
+			}
+		}
 	}
 	if v.Revision != "" {
 		lines = append(lines, "Current revision: "+v.Revision)
 	}
-	lines = append(lines, mandatory...)
+	for _, resource := range v.Resources {
+		lines = append(lines, projectResourceSummaryLines(resource)...)
+	}
+	for _, cause := range v.Causes {
+		lines = append(lines, fmt.Sprintf("Cause: %s (%s); retryable=%t", cause.CauseCode, cause.Code, cause.Retryable))
+		for _, effect := range cause.CompletedEffects {
+			lines = append(lines, "Completed effect: "+effect)
+		}
+	}
+	if d := v.Development; d != nil {
+		if d.Archive != nil {
+			lines = append(lines, "Archive: "+d.Archive.OperationID+"; manifest "+d.Archive.ManifestDigest)
+		}
+		purpose := d.Purpose
+		for _, field := range []struct{ name, value string }{{"Blockers", d.Blockers}, {"Next project action", d.NextAction}, {"Purpose", purpose}} {
+			if field.value != "" {
+				lines = append(lines, field.name+": "+field.value)
+			}
+		}
+	}
 	if op := v.HistoricalOperation; op != nil {
 		lines = append(lines, fmt.Sprintf("Historical operation: %s (%s); revision %s; plan %s", op.OperationID, op.State, op.Revision, op.PlanID))
+		for _, effect := range op.CompletedEffects {
+			lines = append(lines, "Completed effect: "+effect)
+		}
 	}
 	if v.Source != nil {
 		lines = append(lines, "Source: "+v.Source.OwnerNodeID+":"+v.Source.Ref)
 	}
-	for _, cause := range v.Causes {
-		lines = append(lines, fmt.Sprintf("Cause: %s (%s); retryable=%t", cause.CauseCode, cause.Code, cause.Retryable))
-		if len(cause.CompletedEffects) > 0 {
-			v.Omitted["human_effects"] += len(cause.CompletedEffects)
-		}
-	}
 	for _, source := range v.Sources {
 		lines = append(lines, "Source detail: "+source.Ref+"; hash "+source.Hash+"; revision "+source.Revision)
 	}
-	// Reserve the final two lines for omissions and one whole next action.
-	next := "Next: " + v.NextAction.Reason + " " + v.NextAction.Command
+	// Reserve the final two lines for an exact detail command and next action.
+	next := strings.TrimSpace("Next: " + v.NextAction.Reason + " " + v.NextAction.Command)
+	omissionLine := func() string {
+		keys := make([]string, 0, len(v.Omitted))
+		for key := range v.Omitted {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		parts := []string{}
+		for _, key := range keys {
+			parts = append(parts, fmt.Sprintf("%s=%d", key, v.Omitted[key]))
+		}
+		return "Omitted: " + strings.Join(parts, ", ") + "; detail: " + v.DetailCommand
+	}
+	// Allow growth of counts and the three human-only omission keys.
+	omissionBudget := len(omissionLine()) + 128 + 1
 	kept := []string{}
 	bytes := len(next) + 1
+	keptLines := 0
 	reservedBytes := 0
 	for _, line := range mandatory {
 		reservedBytes += len(line) + 1
@@ -333,24 +649,24 @@ func renderProjectContext(cmd *cobra.Command, opts *options, v projectContext) e
 			reservedBytes -= len(line) + 1
 			reservedLines--
 		}
-		if len(kept)+reservedLines >= 14 || bytes+len(line)+1+reservedBytes > 3584 {
+		lineCount := strings.Count(line, "\n") + 1
+		if keptLines+lineCount+reservedLines > 14 || bytes+len(line)+1+reservedBytes+omissionBudget > 4096 {
 			v.Omitted["human_lines"]++
+			if strings.HasPrefix(line, "Resource: ") {
+				v.Omitted["human_resources"]++
+			} else if strings.HasPrefix(line, "Repository: ") {
+				v.Omitted["human_repositories"]++
+			} else if strings.HasPrefix(line, "Retained root ") {
+				v.Omitted["archive_root"]++
+			}
 			continue
 		}
 		kept = append(kept, line)
+		keptLines += lineCount
 		bytes += len(line) + 1
 	}
 	if len(v.Omitted) > 0 {
-		keys := make([]string, 0, len(v.Omitted))
-		for k := range v.Omitted {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		parts := []string{}
-		for _, k := range keys {
-			parts = append(parts, fmt.Sprintf("%s=%d", k, v.Omitted[k]))
-		}
-		kept = append(kept, "Omitted: "+strings.Join(parts, ", ")+"; inspect full status/operation JSON.")
+		kept = append(kept, omissionLine())
 	}
 	kept = append(kept, next)
 	_, err := fmt.Fprintln(cmd.OutOrStdout(), strings.Join(kept, "\n"))

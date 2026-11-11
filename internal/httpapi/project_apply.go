@@ -15,6 +15,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"loom.local/loom/internal/boxregistry"
 	"loom.local/loom/internal/ids"
 	"loom.local/loom/internal/projectapply"
 	pc "loom.local/loom/internal/projectcontracts"
@@ -117,8 +118,14 @@ func validateDeclarationPlan(r pc.DeclarationPlanRequest) error {
 		}
 	}
 	if r.Effects != nil {
+		if _, selected := pc.ApplicationDeployResource(r.Effects); selected {
+			return nil
+		}
 		if len(r.Effects) == 0 {
 			return declarationFailure(pc.DeclarationInvalid, "effects_required")
+		}
+		if len(r.Effects) == 1 && r.Effects[0] == pc.DeclarationWatches {
+			return nil
 		}
 		seen := map[pc.DeclarationEffect]bool{}
 		for _, x := range r.Effects {
@@ -167,7 +174,8 @@ func (s Server) declarationAdmission(w http.ResponseWriter, r *http.Request, met
 		s.writeError(w, cid, http.StatusMethodNotAllowed, "method.not_allowed", "projects", "declaration", "Method is not allowed.", nil)
 		return false
 	}
-	if !queryAllowed && (r.URL.RawQuery != "" || r.URL.ForceQuery) {
+	query, err := declarationQueryValues(r)
+	if !queryAllowed && (err != nil || len(query) != 0 || r.URL.ForceQuery) {
 		s.writeDeclarationError(w, r, declarationFailure(pc.DeclarationInvalid, "unexpected_query"), nil, false)
 		return false
 	}
@@ -176,6 +184,18 @@ func (s Server) declarationAdmission(w http.ResponseWriter, r *http.Request, met
 		return false
 	}
 	return true
+}
+
+// Box selectors are transport context already checked by middleware, not
+// declaration payload fields. Unbound callers retain the strict query contract.
+func declarationQueryValues(r *http.Request) (url.Values, error) {
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if _, bound := boxregistry.FromContext(r.Context()); bound {
+		for _, key := range []string{"box", "box_id", "all_boxes"} {
+			query.Del(key)
+		}
+	}
+	return query, err
 }
 func (s Server) handleProjectDeclarationPlans(w http.ResponseWriter, r *http.Request) {
 	if !s.declarationAdmission(w, r, http.MethodPost, false) {
@@ -224,7 +244,7 @@ func (s Server) handleProjectDeclarationApply(w http.ResponseWriter, r *http.Req
 	cid, ctx := requestMeta(r)
 	result, err := s.services.ProjectDeclaration.Apply(ctx, p, input)
 	var failure *projectapply.Failure
-	if errors.As(err, &failure) && failure.Code == pc.DeclarationOwnerFailed && failure.Cause == "owner_pending" && result.OperationID != "" { // Accepted asynchronous work, not an effect failure.
+	if errors.As(err, &failure) && pc.DeclarationWaitingForOwner(failure.Code, failure.Cause) && result.OperationID != "" {
 		response.WriteJSON(w, http.StatusAccepted, response.SuccessWithIdempotency(cid, input.IdempotencyKey, result))
 		return
 	}
@@ -274,7 +294,7 @@ func (s Server) handleProjectDeclarationStatus(w http.ResponseWriter, r *http.Re
 	if !s.declarationAdmission(w, r, http.MethodGet, true) {
 		return
 	}
-	query, err := url.ParseQuery(r.URL.RawQuery)
+	query, err := declarationQueryValues(r)
 	invalidQuery := err != nil
 	for key, values := range query {
 		if len(values) != 1 || (key != "node_ref" && key != "conversion_preview") || values[0] == "" {
@@ -343,7 +363,7 @@ func (s Server) writeDeclarationError(w http.ResponseWriter, r *http.Request, er
 		if cause == "operation_missing" || cause == "project_missing" {
 			status = http.StatusNotFound
 		}
-	case pc.DeclarationTargetUnavailable, pc.DeclarationOwnerFailed:
+	case pc.DeclarationTargetUnavailable, pc.DeclarationOwnerFailed, pc.DeclarationOwnerPending:
 		status = http.StatusServiceUnavailable
 	default:
 		code, cause, status = pc.DeclarationTargetUnavailable, "declaration_service_unavailable", http.StatusServiceUnavailable
@@ -387,17 +407,17 @@ func (s Server) writeDeclarationError(w http.ResponseWriter, r *http.Request, er
 	case pc.DeclarationPlanStale, pc.DeclarationIdentityConflict:
 		hint = "Resolve source/identity drift and review a new project plan on the same owner; do not reuse a stale plan."
 	default:
-		canResume := detail.Retryable || (code == pc.DeclarationOwnerFailed && (cause == "owner_pending" || cause == "observation_uncertain"))
+		canResume := detail.Retryable || pc.DeclarationWaitingForOwner(code, cause) || (code == pc.DeclarationOwnerFailed && cause == "observation_uncertain")
 		if result != nil {
 			for _, failure := range result.Errors {
-				pending := failure.Code == pc.DeclarationOwnerFailed && (failure.CauseCode == "owner_pending" || failure.CauseCode == "observation_uncertain")
+				pending := pc.DeclarationWaitingForOwner(failure.Code, failure.CauseCode) || (failure.Code == pc.DeclarationOwnerFailed && failure.CauseCode == "observation_uncertain")
 				if !failure.Retryable && !pending || failure.Code == pc.DeclarationUnauthorized || failure.Code == pc.DeclarationApprovalRequired || failure.Code == pc.DeclarationUnsupported || failure.Code == pc.DeclarationPlanStale || failure.Code == pc.DeclarationIdentityConflict {
 					canResume = false
 				}
 			}
 			for _, action := range result.Actions {
 				if failure := action.Error; failure != nil {
-					pending := failure.Code == pc.DeclarationOwnerFailed && (failure.CauseCode == "owner_pending" || failure.CauseCode == "observation_uncertain")
+					pending := pc.DeclarationWaitingForOwner(failure.Code, failure.CauseCode) || (failure.Code == pc.DeclarationOwnerFailed && failure.CauseCode == "observation_uncertain")
 					if !failure.Retryable && !pending || failure.Code == pc.DeclarationUnauthorized || failure.Code == pc.DeclarationApprovalRequired || failure.Code == pc.DeclarationUnsupported || failure.Code == pc.DeclarationPlanStale || failure.Code == pc.DeclarationIdentityConflict {
 						canResume = false
 					}
@@ -407,6 +427,10 @@ func (s Server) writeDeclarationError(w http.ResponseWriter, r *http.Request, er
 				hint = "Inspect this operation; if retry is still needed, resume with the original project, node, effects, plan ID, idempotency key and approval references."
 			}
 		}
+	}
+	if code == pc.DeclarationPlanStale && (cause == "watch_configuration_binding_changed" || cause == "watch_configuration_policy_changed") {
+		detail.Message = "The watches-only plan cannot accept changed enrollment policy or a mismatched source binding."
+		hint = "Review a normal loom project plan without --watches-only on the same owner for selection, path or policy changes; do not reuse an old plan or retry registration alone."
 	}
 	meta := response.NewMeta(cid)
 	if len(detail.Preflight) > 0 {

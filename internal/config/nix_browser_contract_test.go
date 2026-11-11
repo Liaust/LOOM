@@ -93,7 +93,7 @@ func TestNixAgentBrowserPackageAndSkill(t *testing.T) {
 		}
 	}
 	skill := readRepoFile(t, "nix/files/agent-browser/SKILL.md")
-	for _, want := range []string{"name: agent-browser", "native browser tools", "snapshot -i", "fill @e1", "screenshot", "close", "do not inherit Safari/Chrome logins", "Nix"} {
+	for _, want := range []string{"name: agent-browser", "Native Hermes normally uses browser_exec", "snapshot -i", "fill @e1", "screenshot", "close", "do not inherit Safari/Chrome logins", "Nix"} {
 		requireContains(t, skill, want)
 	}
 	for _, forbidden := range []string{"hidden: true", "close --all", "npm i -g", "--no-sandbox"} {

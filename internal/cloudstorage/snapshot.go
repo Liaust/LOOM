@@ -136,6 +136,7 @@ const (
 type SnapshotVerifyOptions struct {
 	Profile            SnapshotVerifyProfile `json:"profile,omitempty"`
 	MaxDurationSeconds int64                 `json:"max_duration_seconds,omitempty"`
+	RootEvidence       bool                  `json:"root_evidence,omitempty"`
 }
 
 // SnapshotVerifyLiveInput is the typed request used by the existing live
@@ -157,21 +158,24 @@ type SnapshotVerifyInput struct {
 }
 
 type SnapshotVerifyResult struct {
-	Status             string                 `json:"status"`
-	Profile            SnapshotVerifyProfile  `json:"profile"`
-	Coverage           SnapshotVerifyCoverage `json:"coverage,omitempty"`
-	MaxDurationSeconds int64                  `json:"max_duration_seconds,omitempty"`
-	Ref                string                 `json:"ref"`
-	Backend            string                 `json:"backend,omitempty"`
-	Repository         string                 `json:"repository,omitempty"`
-	Archive            string                 `json:"archive,omitempty"`
-	RemotePrefix       string                 `json:"remote_prefix"`
-	RemoteURI          string                 `json:"remote_uri"`
-	Manifest           SnapshotUploadManifest `json:"manifest,omitempty"`
-	ManifestPath       string                 `json:"manifest_path,omitempty"`
-	CheckedAt          time.Time              `json:"checked_at"`
-	Checks             map[string]string      `json:"checks"`
-	Errors             []string               `json:"errors,omitempty"`
+	RecoveryEvidence     *SnapshotRecoveryEvidence          `json:"recovery_evidence,omitempty"`
+	RootCoverage         []backupcoverage.CloudRootEvidence `json:"root_coverage,omitempty"`
+	SourceManifestSHA256 string                             `json:"source_manifest_sha256,omitempty"`
+	Status               string                             `json:"status"`
+	Profile              SnapshotVerifyProfile              `json:"profile"`
+	Coverage             SnapshotVerifyCoverage             `json:"coverage,omitempty"`
+	MaxDurationSeconds   int64                              `json:"max_duration_seconds,omitempty"`
+	Ref                  string                             `json:"ref"`
+	Backend              string                             `json:"backend,omitempty"`
+	Repository           string                             `json:"repository,omitempty"`
+	Archive              string                             `json:"archive,omitempty"`
+	RemotePrefix         string                             `json:"remote_prefix"`
+	RemoteURI            string                             `json:"remote_uri"`
+	Manifest             SnapshotUploadManifest             `json:"manifest,omitempty"`
+	ManifestPath         string                             `json:"manifest_path,omitempty"`
+	CheckedAt            time.Time                          `json:"checked_at"`
+	Checks               map[string]string                  `json:"checks"`
+	Errors               []string                           `json:"errors,omitempty"`
 }
 
 type SnapshotFetchInput struct {
@@ -271,7 +275,7 @@ func VerifySnapshot(ctx context.Context, input SnapshotVerifyInput) (SnapshotVer
 }
 
 func ValidateSnapshotVerifyBackend(backend string, options SnapshotVerifyOptions) error {
-	if backend != SnapshotBackendBorg && options.Profile != SnapshotVerifyProfileMetadata {
+	if backend != SnapshotBackendBorg && (options.Profile != SnapshotVerifyProfileMetadata || options.RootEvidence) {
 		return fmt.Errorf("cloud snapshot verify profile %q requires the Borg backend", options.Profile)
 	}
 	return nil
@@ -280,6 +284,9 @@ func ValidateSnapshotVerifyBackend(backend string, options SnapshotVerifyOptions
 func NormalizeSnapshotVerifyOptions(ref string, options SnapshotVerifyOptions) (SnapshotVerifyOptions, error) {
 	if options.Profile == "" {
 		options.Profile = SnapshotVerifyProfileMetadata
+	}
+	if options.RootEvidence && options.Profile != SnapshotVerifyProfileMetadata {
+		return SnapshotVerifyOptions{}, fmt.Errorf("root_evidence is only valid for the metadata profile")
 	}
 	switch options.Profile {
 	case SnapshotVerifyProfileMetadata:

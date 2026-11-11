@@ -2,6 +2,7 @@ package loomdapp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,6 +23,7 @@ import (
 	"loom.local/loom/internal/backupcoverage"
 	"loom.local/loom/internal/bootstrap"
 	"loom.local/loom/internal/box"
+	"loom.local/loom/internal/boxregistry"
 	"loom.local/loom/internal/capabilities"
 	"loom.local/loom/internal/cloudstorage"
 	"loom.local/loom/internal/communication"
@@ -42,7 +45,9 @@ import (
 	"loom.local/loom/internal/migrations"
 	"loom.local/loom/internal/minidashboard"
 	"loom.local/loom/internal/modules"
+	noderuntime "loom.local/loom/internal/nodeagent/runtime"
 	"loom.local/loom/internal/nodes"
+	"loom.local/loom/internal/notesworkspace"
 	"loom.local/loom/internal/notesworkspacesync"
 	"loom.local/loom/internal/objects"
 	"loom.local/loom/internal/objectstore"
@@ -68,6 +73,7 @@ import (
 	mainwatchedroots "loom.local/loom/internal/watchedroots"
 	"loom.local/loom/internal/workers"
 	workerruntimes "loom.local/loom/internal/workers/runtimes"
+	"loom.local/loom/internal/workspacefiles"
 )
 
 type options struct {
@@ -131,10 +137,12 @@ func workspaceArchiveRuntime(cfg config.Config, catalog storagecatalog.Service, 
 			BoxRoot:     filepath.Clean(strings.TrimSpace(cfg.BoxPath)),
 			StorageRoot: filepath.Clean(strings.TrimSpace(cfg.StorageRoot)),
 		},
-		Catalog:       catalog,
-		Journal:       catalog,
-		ManifestKeyID: cfg.WorkspaceArchiveManifestKeyID,
-		ManifestKey:   provider.Lookup,
+		Catalog:         catalog,
+		Journal:         catalog,
+		ManifestKeyID:   cfg.WorkspaceArchiveManifestKeyID,
+		ManifestKey:     provider.Lookup,
+		NamedPlacement:  true,
+		CurrentLocation: catalog.ResolveCustodyLocation,
 	}, nil
 }
 
@@ -340,8 +348,11 @@ func newServeCommand(opts *options) *cobra.Command {
 			healthService := health.NewService(cfg, version.Current())
 			store := objectstore.New(cfg.ObjectStore)
 			objectService := objects.NewService(sqlDB, store)
-			searchService := search.NewService(sqlDB, store)
-			knowledgeService := knowledge.NewService(sqlDB)
+			searchService := search.NewService(sqlDB, store, knowledge.CurrentFileBodyDocumentSQL())
+			knowledgeService := knowledge.NewService(sqlDB, knowledge.WithNotesSearchBackend(cfg.NotesSearchBackend))
+			if err := knowledgeService.PrepareNotesSearchBackend(ctx); err != nil {
+				return err
+			}
 			storageCatalogService := storagecatalog.NewService(sqlDB)
 			workspaceArchiveService, workspaceArchiveErr := workspaceArchiveRuntime(cfg, storageCatalogService, os.Getenv("CREDENTIALS_DIRECTORY"))
 			if workspaceArchiveErr != nil {
@@ -380,9 +391,30 @@ func newServeCommand(opts *options) *cobra.Command {
 			jobService := jobs.NewService(sqlDB, cfg.DataDir, scriptService, objectService, artifactService)
 			capabilityService := capabilities.NewService(sqlDB)
 			eventService := events.NewService(sqlDB)
+			var boxes *boxregistry.Catalog
+			if cfg.BoxesFile != "" {
+				catalog, catalogErr := cfg.BoxCatalog()
+				if catalogErr != nil {
+					return fmt.Errorf("load workspace Boxes: %w", catalogErr)
+				}
+				boxes = &catalog
+			}
 			projectService := projects.NewService(sqlDB)
+			primaryWorkspaceRoots := storagearchive.TrustedWorkspaceRoots{Primary: true, BoxRoot: cfg.BoxPath, StorageRoot: cfg.StorageRoot}
+			if boxes != nil {
+				projectService = projectService.WithBoxCatalog(*boxes)
+				primaryWorkspaceRoots, err = storagearchive.WorkspaceRootsForBox(*boxes, "box")
+				if err != nil {
+					return fmt.Errorf("bind primary workspace lifecycle: %w", err)
+				}
+				if workspaceArchiveService != nil {
+					workspaceArchiveService.Roots = primaryWorkspaceRoots
+				}
+			}
+			wireWorkspaceActiveLocation(sqlDB, primaryWorkspaceRoots, workspaceArchiveService)
 			policyService := policy.NewService(sqlDB)
 			maintenanceService := maintenance.NewService(sqlDB)
+			maintenanceService.RecoveryDataDir = cfg.DataDir
 			seedReq, err := requestctx.ResolveBootstrap(ctx, sqlDB, "corr_bootstrap_capabilities")
 			if err != nil {
 				logger.Error("capability registry seed context failed",
@@ -409,7 +441,9 @@ func newServeCommand(opts *options) *cobra.Command {
 			)
 			statusService := loomstatus.NewService(sqlDB, healthService)
 			runtimeRegistry := routing.NewProviderRuntimeRegistry()
-			if err := runtimeRegistry.Register("main@system", routing.NewSystemAdapter(healthService, statusService)); err != nil {
+			systemAdapter := routing.NewSystemAdapter(healthService, statusService)
+			systemAdapter.AgentEvents = hermesEventAdapter{DB: sqlDB, Config: cfg}
+			if err := runtimeRegistry.Register("main@system", systemAdapter); err != nil {
 				return err
 			}
 			if err := runtimeRegistry.Register("main@script-runner", routing.NewScriptRunnerAdapter(jobService, version.Current().Version)); err != nil {
@@ -431,6 +465,15 @@ func newServeCommand(opts *options) *cobra.Command {
 				return err
 			}
 			routingService := routing.NewServiceWithRuntime(sqlDB, policyService, runtimeRegistry)
+			if localNode, err := nodes.NewService(sqlDB).GetNode(ctx, cfg.NodeID); err == nil {
+				routingService.RemoteDispatchQueued = func(target string) {
+					if target == localNode.NodeID {
+						if err := noderuntime.NewStore(filepath.Join(cfg.DataDir, "node-agent")).RequestPoll(); err != nil {
+							logger.Warn("local dispatch wake unavailable; periodic delivery remains enabled")
+						}
+					}
+				}
+			}
 			automationService := automation.NewService(sqlDB, routingService)
 			communicationService := communication.NewService(sqlDB)
 			syncService := loomsync.NewServiceWithPrivateBackupRoot(sqlDB, storageRoots.UserBackups)
@@ -449,6 +492,11 @@ func newServeCommand(opts *options) *cobra.Command {
 			mainBoxRuntimeState, err := box.ResolveRuntimeState(mainBoxResolved)
 			if err != nil {
 				return err
+			}
+			if cfg.NodeRole == "main" {
+				if err := storagearchive.PrepareRetainedRoots(cfg.StorageRoot); err != nil {
+					return fmt.Errorf("prepare named retained roots: %w", err)
+				}
 			}
 			dropzoneService := dropzone.NewInspectionService(mainBoxResolved.RootPath, mainBoxRuntimeState.ReadRoot)
 			realtimeService := realtime.NewService(sqlDB)
@@ -473,7 +521,7 @@ func newServeCommand(opts *options) *cobra.Command {
 				StorageArchive:       storageArchiveService,
 				WorkspaceMove:        projectWorkspaceMove,
 				RuntimeQuiescence:    projectArchiveQuiescenceRuntime(routingService),
-				WorkspaceRoots:       storagearchive.TrustedWorkspaceRoots{BoxRoot: cfg.BoxPath, StorageRoot: cfg.StorageRoot},
+				WorkspaceRoots:       primaryWorkspaceRoots,
 				RuntimeManifestRoot:  projectRuntimeArchiveRoot,
 				Now:                  func() time.Time { return time.Now().UTC() },
 			})
@@ -496,13 +544,20 @@ func newServeCommand(opts *options) *cobra.Command {
 			if err := workerRegistry.Register(workerruntimes.NewDBMaintenanceRuntime(sqlDB, maintenanceService, cfg.DBURL, cfg.MigrationsDir)); err != nil {
 				return err
 			}
-			if err := workerRegistry.Register(workerruntimes.NewMainBackupRuntime(sqlDB, maintenanceService, healthService, cfg.DBURL, cfg.DataDir, cfg.ObjectStore, version.Current().Version).WithProvenance(provenanceRuntime, cfg.ProvenanceDBURL)); err != nil {
+			custodyRead := func(ctx context.Context) (func(), error) {
+				return storagecatalog.AcquireWorkspaceCustodyReader(ctx, sqlDB)
+			}
+			mainBackupRuntime := workerruntimes.NewMainBackupRuntime(sqlDB, maintenanceService, healthService, cfg.DBURL, cfg.DataDir, cfg.ObjectStore, version.Current().Version).WithProvenance(provenanceRuntime, cfg.ProvenanceDBURL).WithBoxCatalog(cfg.BoxCatalog)
+			mainBackupRuntime.CustodyRead = custodyRead
+			if err := workerRegistry.Register(mainBackupRuntime); err != nil {
 				return err
 			}
 			if err := workerRegistry.Register(workerruntimes.NewProvenanceArchivistRuntime(provenanceFoundation)); err != nil {
 				return err
 			}
-			if err := workerRegistry.Register(workerruntimes.NewCloudSnapshotUploadRuntime(maintenanceService, cfg.DataDir, cfg.NodeID, backupcoverage.OptionsFromConfig(cfg))); err != nil {
+			cloudRuntime := workerruntimes.NewCloudSnapshotUploadRuntime(maintenanceService, cfg.DataDir, cfg.NodeID, backupcoverage.OptionsFromConfig(cfg))
+			cloudRuntime.CustodyRead = custodyRead
+			if err := workerRegistry.Register(cloudRuntime); err != nil {
 				return err
 			}
 			if err := workerRegistry.Register(workerruntimes.NewObjectStoreIntegrityRuntime(sqlDB, maintenanceService, cfg.ObjectStore)); err != nil {
@@ -512,7 +567,23 @@ func newServeCommand(opts *options) *cobra.Command {
 				return err
 			}
 			if err := workerRegistry.Register(workerruntimes.NewKnowledgeIndexerRuntime(knowledgeService).
-				WithProjectionRoot(cfg.NotesProjectionRoot()).WithArchiveService(workspaceArchiveService, cfg.NodeID)); err != nil {
+				WithArchiveService(workspaceArchiveService, cfg.NodeID)); err != nil {
+				return err
+			}
+			if err := workerRegistry.Register(workerruntimes.NewKnowledgeRootsRuntime(knowledgeService)); err != nil {
+				return err
+			}
+			// Keep the low-frequency projection reader's large prepared plans on
+			// one stable connection instead of churning with general worker traffic.
+			projectionDB, err := db.OpenSQL(ctx, cfg.DBURL)
+			if err != nil {
+				return err
+			}
+			defer projectionDB.Close()
+			projectionDB.SetMaxOpenConns(1)
+			projectionDB.SetMaxIdleConns(1)
+			projectionDB.SetConnMaxLifetime(0)
+			if err := registerNotesProjection(sqlDB, cfg, knowledgeService, knowledge.NewStore(projectionDB), workerRegistry); err != nil {
 				return err
 			}
 			var visionRuntime knowledge.VisionRuntime
@@ -535,12 +606,19 @@ func newServeCommand(opts *options) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				notesWorkspace = &notesworkspacesync.Runtime{Config: workspaceConfig, DB: sqlDB, Knowledge: knowledgeService, NodeKey: cfg.NodeID}
+				notesWorkspace = &notesworkspacesync.Runtime{Config: workspaceConfig, DB: sqlDB, Knowledge: knowledgeService, NodeKey: cfg.NodeID, Lifetime: ctx}
+				if workspaceArchiveService != nil {
+					notesWorkspace.Archives = &knowledge.WorkspaceArchiveSourceReader{Knowledge: knowledgeService, Workspace: *workspaceArchiveService, NodeKey: cfg.NodeID}
+				}
 			}
 			if err := workerRegistry.Register(workerruntimes.NotesWorkspaceRuntime{Runtime: notesWorkspace}); err != nil {
 				return err
 			}
 			if err := workerRegistry.Register(workerruntimes.NewKnowledgeEmbedderRuntime(knowledgeService, embeddingRuntime)); err != nil {
+				return err
+			}
+			projectDeclarations := newProjectDeclarationService(sqlDB, func() (config.Config, error) { return config.Load(opts.config) })
+			if err := workerRegistry.Register(workerruntimes.ApplicationBuilderRuntime{Coordinator: projectDeclarations.ApplicationBuilds}); err != nil {
 				return err
 			}
 			if err := workerRegistry.Register(workerruntimes.NewJobRunnerRuntime(jobService, version.Current().Version)); err != nil {
@@ -586,11 +664,23 @@ func newServeCommand(opts *options) *cobra.Command {
 				slog.Int("instances_updated", workerSeedResult.InstancesUpdated),
 				slog.Int("health_created", workerSeedResult.HealthCreated),
 			)
-			if err := seedProjectContextRefresh(ctx, sqlDB, cfg, provenanceFoundation, workerRegistry, logger, workerSeedReq, projectArchiveService); err != nil {
-				return fmt.Errorf("seed project context refresh: %w", err)
+			workerWakes := workers.NewQueueWakes()
+			workerWakes.NodeDeliveryQueued = routingService.RemoteDispatchQueued
+			if notesWorkspace != nil {
+				notesWorkspace.Wake = func() { workerWakes.SignalLocal("notes_workspace_sync") }
+				workerWakes.NotesWorkspaceQueued = notesWorkspace.InvalidateEnrollment
+				workerWakes.NotesDependencyChanged = notesWorkspace.DependencyChanged
+				if err := notesWorkspace.WatchRecovery(ctx); err != nil {
+					return err
+				}
+				notesWorkspace.OpenSourceWatch = func(scope notesworkspacesync.InventoryScope, persist func(context.Context, string) error) (notesworkspacesync.SourceWatch, error) {
+					return notesworkspacesync.StartSharedSourceWatch(ctx, filepath.Join(cfg.DataDir, "node-agent"), scope, persist)
+				}
+				notesWorkspace.SourceRepairInterval = func(scope notesworkspacesync.InventoryScope) time.Duration {
+					return notesworkspacesync.SharedSourceRepairInterval(filepath.Join(cfg.DataDir, "node-agent"), scope)
+				}
+				defer notesWorkspace.CloseSourceWatches()
 			}
-			workerSupervisor := workers.NewSupervisor(workerService, logger)
-			go workerSupervisor.Run(ctx, workerSeedReq)
 			nodeService := nodes.NewService(sqlDB)
 			miniDashboardService := minidashboard.DomainService{
 				Node: minidashboard.NodeIdentity{Key: cfg.NodeID, Label: "MAIN"},
@@ -613,26 +703,185 @@ func newServeCommand(opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			originalFiles := &workspacefiles.Service{Applications: serviceregistry.ApplicationHelperClient{SocketPath: serviceregistry.ApplicationSocketPath}, ApplicationProjectBoxes: projectService.ApplicationProjectBoxes}
+			if boxes != nil {
+				for _, b := range boxes.Boxes {
+					if b.Available && b.RootRef != "" {
+						originalFiles.Roots = append(originalFiles.Roots, workspacefiles.Root{Ref: b.RootRef, BoxID: b.ID, BoxKey: b.Key, Label: b.Label, Node: b.Node, SourceKind: "box", SourcePath: b.RootPath, Writable: true, Verification: "not_checked"})
+					}
+				}
+			}
+			for _, root := range []workspacefiles.Root{
+				{Ref: "box", Label: "Workspace", Node: cfg.NodeID, SourcePath: mainBoxResolved.RootPath, Verification: "not_checked"},
+				{Ref: "storage", Label: "Storage", Node: cfg.NodeID, SourcePath: cfg.StorageRoot, ReadOnly: true, Verification: "not_checked"},
+				// Retain the old reference for already-open previews and offline pins.
+				{Ref: "archive", Label: "Storage / Archive", Node: cfg.NodeID, SourcePath: cfg.ArchiveRoot, ReadOnly: true, Verification: "not_checked"},
+			} {
+				if root.Ref == "box" && boxes != nil {
+					continue
+				}
+				if filepath.IsAbs(root.SourcePath) {
+					originalFiles.Roots = append(originalFiles.Roots, root)
+				}
+			}
+			defer originalFiles.Close()
+			workspaceHost := minidashboard.NewHostCollector(cfg.StorageRoot)
+			retainedRelocations := &storagearchive.RetainedRelocationService{Roots: storagearchive.TrustedWorkspaceRoots{BoxRoot: mainBoxResolved.RootPath, StorageRoot: cfg.StorageRoot}, Catalog: storageCatalogService}
+			retainedRelocations.Prove = func(ctx context.Context, ref storagearchive.WorkspacePathRef, bound string, inventory storagearchive.NoFollowInventory) (storagearchive.RetainedCustodyProof, error) {
+				return retainedRelocations.ProveSupported(ctx, workspaceArchiveService, ref, bound, inventory)
+			}
+			retainedRelocations.ReadersReady = func(ctx context.Context, plan storagearchive.RetainedRelocationPlan) error {
+				if cfg.NodeRole != "main" {
+					return fmt.Errorf("retained relocation is owned by Main")
+				}
+				if !strings.HasPrefix(plan.CustodyID, "legacy-import:") && !strings.HasPrefix(plan.CustodyID, "lane:") && !(strings.HasPrefix(plan.CustodyID, "workspace:") && workspaceArchiveService != nil && workspaceArchiveService.NamedPlacement) {
+					return fmt.Errorf("this custody kind still requires its compatible restore/member reader")
+				}
+				backup, err := workerService.InspectWorker(ctx, "main.main_backup")
+				if err != nil {
+					return err
+				}
+				var settings struct {
+					Producer string `json:"producer_mode"`
+				}
+				if json.Unmarshal(backup.Instance.ConfigJSON, &settings) != nil || settings.Producer != "recovery_packages_v1" {
+					return fmt.Errorf("legacy retained relocation requires the current operational-package backup owner")
+				}
+				cloud, err := workerService.InspectWorker(ctx, "main.cloud_snapshot_upload")
+				if err != nil {
+					return err
+				}
+				return cloudRuntime.RetainedStorageReady(ctx, cloud.Instance.ConfigJSON, plan.Destination.AbsolutePath)
+			}
+			workspacePaths := workspacePathRuntime(sqlDB, originalFiles, primaryWorkspaceRoots, cfg.NodeID, projectService, storageCatalogService, workspaceArchiveService)
+			if workspacePaths != nil {
+				workspacePaths.ReadersReady = func(ctx context.Context, plan storagearchive.WorkspacePathPlan) error {
+					if plan.Kind == "relocate_project" {
+						return nil
+					}
+					backup, err := workerService.InspectWorker(ctx, "main.main_backup")
+					if err != nil {
+						return err
+					}
+					var settings struct {
+						Producer string `json:"producer_mode"`
+					}
+					if json.Unmarshal(backup.Instance.ConfigJSON, &settings) != nil || settings.Producer != "recovery_packages_v1" {
+						return fmt.Errorf("current operational-package backup owner required")
+					}
+					cloud, err := workerService.InspectWorker(ctx, "main.cloud_snapshot_upload")
+					if err != nil {
+						return err
+					}
+					return cloudRuntime.RetainedStorageReady(ctx, cloud.Instance.ConfigJSON, plan.Move.Destination.AbsolutePath)
+				}
+			}
+			boxWorkspacePaths := map[string]*storagearchive.WorkspacePathService{}
+			boxWorkspaceArchives := map[string]httpapi.WorkspaceArchiveLifecycleService{}
+			boxProjectArchives := map[string]storagearchive.ProjectRuntimeService{}
+			if boxes != nil && workspaceArchiveService != nil {
+				additionalRoots := additionalBoxArchiveRoots(*boxes, func(binding boxregistry.Box, err error) {
+					logger.Warn("additional Box archive lifecycle unavailable", "box_id", binding.ID, "error", err)
+				})
+				for _, binding := range boxes.Boxes {
+					if !binding.Available || binding.ID == "" {
+						continue
+					}
+					if binding.Primary {
+						boxWorkspacePaths[binding.ID] = workspacePaths
+						boxWorkspaceArchives[binding.ID] = workspaceArchiveService
+						boxProjectArchives[binding.ID] = projectArchiveService
+						continue
+					}
+					boundRoots, available := additionalRoots[binding.ID]
+					if !available {
+						continue
+					}
+					boundArchive := *workspaceArchiveService
+					boundArchive.Roots = boundRoots
+					wireWorkspaceActiveLocation(sqlDB, boundRoots, &boundArchive)
+					boundPaths := workspacePathRuntime(sqlDB, originalFiles, boundRoots, cfg.NodeID, projectService, storageCatalogService, &boundArchive)
+					if boundPaths != nil && workspacePaths != nil {
+						boundPaths.ReadersReady = workspacePaths.ReadersReady
+					}
+					boundProjects := projectArchiveService
+					boundProjects.WorkspaceMove = &boundArchive
+					boundProjects.WorkspaceRoots = boundRoots
+					boundProjects.RuntimeManifestRoot = filepath.Join(projectRuntimeArchiveRoot, "boxes", binding.ID)
+					boxWorkspacePaths[binding.ID] = boundPaths
+					boxWorkspaceArchives[binding.ID] = &boundArchive
+					boxProjectArchives[binding.ID] = boundProjects
+				}
+			}
+			var contextArchiveResolvers []projectContextArchiveForBox
+			if boxes != nil {
+				contextArchiveResolvers = append(contextArchiveResolvers, func(ctx context.Context, id string) (storagearchive.ProjectRuntimeService, error) {
+					if _, err := boxes.Get(id); err != nil {
+						return storagearchive.ProjectRuntimeService{}, err
+					}
+					owner, ok := boxProjectArchives[id]
+					if !ok {
+						return storagearchive.ProjectRuntimeService{}, fmt.Errorf("archive Box owner is unavailable")
+					}
+					return owner, nil
+				})
+			}
+			if err := seedProjectContextRefresh(ctx, sqlDB, cfg, provenanceFoundation, workerRegistry, logger, workerSeedReq, projectArchiveService, workerWakes, contextArchiveResolvers...); err != nil {
+				return fmt.Errorf("seed project context refresh: %w", err)
+			}
+			workerSupervisor := workers.NewSupervisor(workerService, logger)
+			workerSupervisor.Wakes = workerWakes
+			go workerSupervisor.Wakes.Listen(ctx, cfg.DBURL, logger)
+			go workerSupervisor.Run(ctx, workerSeedReq)
+			workspaceSystemDisk := minidashboard.NewHostCollector(cfg.DataDir)
+			workspaceHostConfig := minidashboard.DefaultConfig()
+			workspaceHostConfig.HostStaleAfter = 30 * time.Second
+			var workspaceHostMu sync.Mutex
+			var lastWorkspaceHost minidashboard.HostSnapshot
+			var lastWorkspaceDisk minidashboard.Metric
 			server := httpapi.NewServer(httpapi.Services{
-				DB:                sqlDB,
-				Health:            healthService,
-				Status:            statusService,
-				Bootstrap:         bootstrapService,
-				Box:               boxService,
-				Dropzone:          dropzoneService,
-				FileTransfer:      fileTransferService,
-				Idempotency:       idempotency.NewService(sqlDB),
-				Identity:          identity.NewService(sqlDB),
-				Nodes:             nodeService,
-				Scopes:            scopes.NewService(sqlDB),
-				Events:            eventService,
-				Projects:          projectService,
-				ProjectActivation: projectActivationService,
-				ProjectWatch:      projectWatchService,
-				ProjectArchive:    projectArchiveService,
-				Objects:           objectService,
-				Search:            searchService,
-				StorageArchive:    storageArchiveService,
+				DB:                   sqlDB,
+				Health:               healthService,
+				Status:               statusService,
+				Bootstrap:            bootstrapService,
+				Box:                  boxService,
+				Dropzone:             dropzoneService,
+				FileTransfer:         fileTransferService,
+				Files:                originalFiles,
+				Boxes:                boxes,
+				RetainedRelocations:  retainedRelocations,
+				WorkspacePaths:       workspacePaths,
+				BoxWorkspacePaths:    boxWorkspacePaths,
+				BoxWorkspaceArchives: boxWorkspaceArchives,
+				BoxProjectArchives:   boxProjectArchives,
+				WorkspaceHost: func(ctx context.Context) (minidashboard.HostSnapshot, minidashboard.Metric, error) {
+					workspaceHostMu.Lock()
+					defer workspaceHostMu.Unlock()
+					if err := ctx.Err(); err != nil {
+						return minidashboard.HostSnapshot{}, minidashboard.Metric{}, err
+					}
+					// On-demand, shared sampling; a cold CPU delta is unavailable until the next real sample.
+					if lastWorkspaceHost.GeneratedAt.IsZero() || time.Since(lastWorkspaceHost.GeneratedAt) >= time.Second {
+						lastWorkspaceHost = workspaceHost.Collect(workspaceHostConfig)
+						lastWorkspaceDisk = workspaceSystemDisk.StorageMetric(workspaceHostConfig)
+					}
+					return lastWorkspaceHost, lastWorkspaceDisk, nil
+				},
+				Idempotency:           idempotency.NewService(sqlDB),
+				Identity:              identity.NewService(sqlDB),
+				Nodes:                 nodeService,
+				Scopes:                scopes.NewService(sqlDB),
+				Events:                eventService,
+				Projects:              projectService,
+				ProjectActivation:     projectActivationService,
+				ProjectWatch:          projectWatchService,
+				ProjectArchive:        projectArchiveService,
+				NotesRecovery:         notesWorkspace.RecoveryInventory,
+				NotesRecoveryPrepare:  notesWorkspace.PrepareRecoveryInventory,
+				Objects:               objectService,
+				Search:                searchService,
+				NotesFileSourceReader: notesworkspace.FileReader{NodeKey: cfg.NodeID},
+				StorageArchive:        storageArchiveService,
 
 				WorkspaceArchive:           workspaceArchiveLifecycle,
 				WorkspaceArchiveAuthorizer: httpapi.NewPolicyWorkspaceArchiveAuthorizer(policyService),
@@ -667,7 +916,7 @@ func newServeCommand(opts *options) *cobra.Command {
 				EmbeddingRuntime:     embeddingRuntime,
 				RuntimeConfig:        cfg,
 
-				ProjectDeclaration: newProjectDeclarationService(sqlDB, func() (config.Config, error) { return config.Load(opts.config) }),
+				ProjectDeclaration: projectDeclarations,
 			}, logger)
 
 			if err := serveConfiguredListeners(ctx, cfg, server.Handler(), logger); err != nil {

@@ -77,12 +77,15 @@ func (s Store) ListDerivedArtifacts(ctx context.Context, pipelineRunID string, a
 	if s.db == nil {
 		return nil, fmt.Errorf("knowledge store is not configured")
 	}
+	args := []any{pipelineRunID}
+	selection := notesSelectedPipelineRunSQL(ctx, "derived_artifacts", &args)
 	query := `SELECT ` + derivedArtifactColumns() + ` FROM knowledge.derived_artifacts WHERE knowledge_pipeline_run_id = $1`
+	query += " AND " + selection
 	if activeOnly {
 		query += ` AND active = true`
 	}
 	query += ` ORDER BY created_at, knowledge_derived_artifact_id`
-	rows, err := s.db.QueryContext(ctx, query, pipelineRunID)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -14,6 +14,11 @@ let
   embeddingsCfg = cfg.embeddings;
   notesAICfg = cfg.notesAI;
   workspaceArchiveCfg = cfg.workspaceArchive;
+  applicationCfg = cfg.projectApplications or { enable = false; };
+  applicationDataBackupRoot =
+    if applicationCfg.enable && applicationCfg.provisioning.enable && applicationCfg.provisioning.cloudBackup
+    then applicationCfg.provisioning.dataRoot
+    else "";
   serviceManagerCfg = cfg.serviceManager or {
     enable = false;
     allowlistPath = "";
@@ -24,6 +29,18 @@ let
   systemdPath = path: ''"${path}"'';
   boxDocumentsPath = if cfg.boxPath == null then "" else "${cfg.boxPath}/Documents";
   boxNotesPath = if cfg.boxPath == null then "" else "${cfg.boxPath}/Notes";
+  extraBoxes = lib.mapAttrsToList (key: value: {
+    inherit key;
+    inherit (value) label;
+    node = cfg.nodeId;
+    root_path = value.rootPath;
+  }) cfg.boxes;
+  boxesEnabled = extraBoxes != [] && cfg.boxPath != null;
+  boxesDocument = {
+    schema_version = "loom.box_catalog.v1";
+    default_box = "personal";
+    boxes = [{ key = "personal"; label = "Personal"; node = cfg.nodeId; root_path = cfg.boxPath; }] ++ extraBoxes;
+  };
   pathInside = parent: child: child == parent || lib.hasPrefix "${parent}/" child;
   nodeAgentMainURL =
     if nodeAgentCfg.mainURL != null then
@@ -56,7 +73,10 @@ let
       ${pkgs.jq}/bin/jq \
         --arg box ${lib.escapeShellArg cfg.boxPath} \
         --arg state ${lib.escapeShellArg cfg.boxStateRoot} \
-        '.box_root_path = $box | .box_state_root = $state' \
+        --arg boxes ${lib.escapeShellArg (if boxesEnabled then "/etc/loom-boxes.json" else "")} \
+        --arg catalogData ${lib.escapeShellArg cfg.dataDir} \
+        --arg catalogStorage ${lib.escapeShellArg cfg.storageRoot} \
+        '.box_root_path = $box | .box_state_root = $state | .boxes_file = $boxes | .box_catalog_data_root = $catalogData | .box_catalog_storage_root = $catalogStorage' \
         "$config_path" > "$pending"
       ${pkgs.coreutils}/bin/chmod --reference="$config_path" "$pending"
       ${pkgs.coreutils}/bin/mv -f "$pending" "$config_path"
@@ -78,7 +98,7 @@ let
     ]);
   # Each ReadWritePaths entry is a bind mount, even under ProtectSystem=full.
   # The move endpoints must remain on their common writable /srv mount.
-  workspaceArchiveMoveRoots = [ "${cfg.storageRoot}/archive" ]
+  workspaceArchiveMoveRoots = [ "${cfg.storageRoot}/archive" cfg.importsRoot ]
     ++ lib.optionals (cfg.boxPath != null) (map
       (kind: "${cfg.boxPath}/${kind}") [ "Topics" "Projects" "Library" ]);
   loomRuntimeWritePaths = lib.filter
@@ -130,6 +150,7 @@ let
     LOOM_NODE_ROLE=${cfg.nodeRole}
     LOOM_RUNTIME_CLASS=${cfg.runtimeClass}
     LOOM_DATA_DIR=${cfg.dataDir}
+    LOOM_APPLICATION_DATA_BACKUP_ROOT=${applicationDataBackupRoot}
     LOOM_OBJECT_STORE=${cfg.objectStoreDir}
     LOOM_SERVICE_ROOT=${cfg.serviceRoot}
     LOOM_STORAGE_ROOT=${cfg.storageRoot}
@@ -155,6 +176,7 @@ let
     LOOM_LEGACY_SPLIT_ROOTS=${if cfg.filesystemCutoverEnabled then "false" else "true"}
     LOOM_WORKSPACE_ARCHIVE_ENABLED=${if workspaceArchiveCfg.enable then "true" else "false"}
     LOOM_WORKSPACE_ARCHIVE_MANIFEST_KEY_ID=${workspaceArchiveCfg.manifestKeyId}
+    LOOM_NOTES_SEARCH_BACKEND=${cfg.notesSearchBackend}
     LOOM_EMBEDDINGS_ENABLED=${if embeddingsCfg.enable then "true" else "false"}
     LOOM_EMBEDDING_RUNTIME=${embeddingsCfg.runtime}
     LOOM_EMBEDDING_MODEL=${embeddingsCfg.model}
@@ -173,6 +195,8 @@ let
     LOOM_CLOUD_STATE_DIR=${cloudCfg.stateDir}
   '' + lib.optionalString (cfg.boxPath != null) ''
     LOOM_BOX_PATH=${cfg.boxPath}
+  '' + lib.optionalString boxesEnabled ''
+    LOOM_BOXES_FILE=/etc/loom-boxes.json
   '' + lib.optionalString (cfg.boxProfile != "") ''
     LOOM_BOX_PROFILE=${cfg.boxProfile}
   '' + lib.optionalString serviceManagerCfg.enable ''
@@ -297,6 +321,42 @@ in
     ] ++ lib.optionals nodeAgentCfg.enable [
       nodeAgentCfg.package
     ] ++ cloudRuntimePackages ++ embeddingRuntimePackages;
+
+    environment.etc."loom-boxes.json" = lib.mkIf boxesEnabled {
+      text = builtins.toJSON boxesDocument;
+      mode = "0444";
+    };
+
+    # Native agents need client paths and socket routing, never daemon credentials.
+    environment.etc."loom-client.env" = {
+      mode = "0444";
+      text = ''
+        LOOM_NODE_ID=${cfg.nodeId}
+        LOOM_NODE_KIND=${cfg.nodeKind}
+        LOOM_NODE_ROLE=${cfg.nodeRole}
+        LOOM_RUNTIME_CLASS=${cfg.runtimeClass}
+        LOOM_SOCKET_PATH=${cfg.socketPath}
+        LOOM_DATA_DIR=${cfg.dataDir}
+        LOOM_OBJECT_STORE=${cfg.objectStoreDir}
+        LOOM_SERVICE_ROOT=${cfg.serviceRoot}
+        LOOM_STORAGE_ROOT=${cfg.storageRoot}
+        LOOM_CANONICAL_USER_BACKUPS_ROOT=${cfg.canonicalUserBackupsRoot}
+        LOOM_IMPORTS_ROOT=${cfg.importsRoot}
+        LOOM_USER_BACKUPS_ROOT=${cfg.userBackupsRoot}
+        LOOM_ARCHIVE_ROOT=${cfg.archiveRoot}
+        LOOM_GENERATED_ROOT=${cfg.generatedRoot}
+        LOOM_BOX_STATE_ROOT=${cfg.boxStateRoot}
+        LOOM_MAIN_DOCUMENTS_ROOT=${cfg.mainDocumentsDir}
+        LOOM_NOTES_PROJECTION_ROOT=${cfg.notesProjectionRoot}
+        LOOM_STORAGE_EXPORT_ROOT=${cfg.storageExportRoot}
+        LOOM_STORAGE_RETENTION_ROOT=${cfg.storageRetentionRoot}
+        LOOM_LEGACY_SPLIT_ROOTS=${if cfg.filesystemCutoverEnabled then "false" else "true"}
+      '' + lib.optionalString (cfg.boxPath != null) ''
+        LOOM_BOX_PATH=${cfg.boxPath}
+      '' + lib.optionalString boxesEnabled ''
+        LOOM_BOXES_FILE=/etc/loom-boxes.json
+      '';
+    };
 
     systemd.services."loom-box-layout-preflight" = lib.mkIf (cfg.boxPath != null) {
       description = "Validate the LOOM Box layout before starting loomd";

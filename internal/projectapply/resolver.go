@@ -7,7 +7,6 @@ import (
 	"errors"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	"loom.local/loom/internal/config"
 	hs "loom.local/loom/internal/hermesschedules"
@@ -22,15 +21,47 @@ import (
 // owners. It does not maintain another project/root inventory. Before initial
 // registration, the caller must select an explicit path under the configured Box.
 type LocalResolver struct {
-	Hermes       hs.ProjectNative
-	HermesSource hs.Source
-	DB           *sql.DB
-	Config       func() (config.Config, error)
-	Applications ApplicationPrerequisiteReader
+	Hermes             hs.ProjectNative
+	HermesSource       hs.Source
+	DB                 *sql.DB
+	Config             func() (config.Config, error)
+	Applications       ApplicationPrerequisiteReader
+	SourceApplications *SourceApplicationAdapter
+	NotesPlacement     func(context.Context, config.Config, string, string, string, string, string, pc.ProjectDeclaration) ([]pc.DeclarationNotesPlacement, error)
 }
 
 func NewLocalResolver(db *sql.DB, currentConfig func() (config.Config, error)) *LocalResolver {
 	return &LocalResolver{DB: db, Config: currentConfig}
+}
+
+// ArchivedTarget reads registry identity only. Retained content remains owned
+// by the authenticated archive inspector; Resolve and Current stay live-only.
+func (r *LocalResolver) ArchivedTarget(ctx context.Context, _ Principal, req pc.DeclarationPlanRequest) (*pc.DeclarationTarget, error) {
+	if filepath.IsAbs(req.ProjectRef) {
+		return nil, nil
+	}
+	if r == nil || r.DB == nil || r.Config == nil {
+		return nil, fail(pc.DeclarationTargetUnavailable, "local_source_not_configured")
+	}
+	project, err := projects.NewService(r.DB).ResolveProjectRef(ctx, req.ProjectRef)
+	if err != nil {
+		return nil, projectReferenceLookupError(err)
+	}
+	if project.Status != "archived" {
+		return nil, nil
+	}
+	cfg, err := r.Config()
+	if err != nil {
+		return nil, fail(pc.DeclarationTargetUnavailable, "local_config_unavailable")
+	}
+	local, err := nodes.NewService(r.DB).GetNode(ctx, cfg.NodeID)
+	if err != nil || local.Status != "active" {
+		return nil, fail(pc.DeclarationTargetUnavailable, "configured_node_unavailable")
+	}
+	if project.HomeNodeID == nil || *project.HomeNodeID != local.NodeID || (req.NodeRef != "" && req.NodeRef != local.NodeID && req.NodeRef != local.NodeKey) {
+		return nil, fail(pc.DeclarationTargetUnavailable, "remote_source_owner_required")
+	}
+	return &pc.DeclarationTarget{ProjectID: project.ProjectID, OwnerNodeID: local.NodeID}, nil
 }
 
 // RemoteDeclarationSource describes the required future owner boundary. No
@@ -40,6 +71,7 @@ type RemoteDeclarationSource interface {
 }
 
 type localDeclaration struct {
+	NotesWorkspace []pc.DeclarationNotesPlacement
 	HermesStates   map[pc.ResourceKey]hs.ProjectJob
 	Analysis       pc.Analysis
 	Input          projects.RegisterProjectContractInput
@@ -86,17 +118,9 @@ func (r *LocalResolver) load(ctx context.Context, p Principal, projectRef, nodeR
 	if filepath.Clean(root) != root || !filepath.IsAbs(root) || cfg.BoxPath == "" {
 		return out, fail(pc.DeclarationTargetUnavailable, "configured_project_root_required")
 	}
-	trusted, err := filepath.EvalSymlinks(cfg.BoxPath)
+	binding, physical, err := selectedProjectBox(ctx, cfg, root)
 	if err != nil {
-		return out, fail(pc.DeclarationTargetUnavailable, "configured_box_unavailable")
-	}
-	physical, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		return out, fail(pc.DeclarationTargetUnavailable, "project_source_unavailable")
-	}
-	rel, err := filepath.Rel(trusted, physical)
-	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return out, fail(pc.DeclarationUnauthorized, "source_outside_configured_box")
+		return out, err
 	}
 	out.Analysis = pc.Analyze(root)
 	if out.Analysis.Loaded != nil && out.Analysis.Loaded.Declaration != nil && out.Analysis.Loaded.Declaration.LegacyContracts != nil {
@@ -133,6 +157,9 @@ func (r *LocalResolver) load(ctx context.Context, p Principal, projectRef, nodeR
 		if readErr != nil {
 			return out, fail(pc.DeclarationTargetUnavailable, "project_lifecycle_unavailable")
 		}
+		if err = validateProjectHomeBox(currentProject.Metadata, binding); err != nil {
+			return out, err
+		}
 		if projects.EnsureProjectMutable(currentProject, "project_declaration", projectID) != nil {
 			if state, ok := projects.ParseProjectPhysicalArchiveState(currentProject.ArchiveState); ok && state.Restore != nil && state.Restore.Phase == projects.ProjectRestorePhaseComplete {
 				return out, fail(pc.DeclarationTargetUnavailable, "project_restored_inactive")
@@ -140,8 +167,7 @@ func (r *LocalResolver) load(ctx context.Context, p Principal, projectRef, nodeR
 			return out, fail(pc.DeclarationTargetUnavailable, "project_archive_recovery_required")
 		}
 	}
-	location, _ := canonicalValue(map[string]string{"node_id": local.NodeID, "box": trusted, "project_root": root, "physical_root": physical})
-	out.Target = pc.DeclarationTarget{ProjectID: projectID, OwnerNodeID: local.NodeID, ProjectRoot: root, LocationRevision: hashBytes(location)}
+	out.Target = pc.DeclarationTarget{ProjectID: projectID, OwnerNodeID: local.NodeID, ProjectRoot: root, LocationRevision: projectLocationRevision(local.NodeID, binding, root, physical)}
 	out.PhysicalRoot = physical
 	repositoryIDs := []string{}
 	for _, m := range out.Analysis.Plan.Declaration.Repositories {
@@ -170,6 +196,16 @@ func (r *LocalResolver) load(ctx context.Context, p Principal, projectRef, nodeR
 	out.ScheduleStates, err = readDeclarationSchedules(ctx, r.DB, projectID)
 	if err != nil {
 		return out, err
+	}
+	if cfg.NotesWorkspaceConfig != "" && r.NotesPlacement != nil {
+		out.NotesWorkspace, err = r.NotesPlacement(ctx, cfg, local.NodeKey, projectID, out.Input.Project.Name, root, out.Input.Project.WorkState, *out.Analysis.Loaded.Declaration)
+		if err != nil {
+			var placement interface{ PlacementCode() string }
+			if errors.As(err, &placement) {
+				return out, fail(pc.DeclarationInvalid, placement.PlacementCode())
+			}
+			return out, fail(pc.DeclarationInvalid, "notes_workspace_placement_unavailable_or_conflicting")
+		}
 	}
 	return out, nil
 }
@@ -278,7 +314,16 @@ func (r *LocalResolver) Current(ctx context.Context, p Principal, original Resol
 	if err != nil {
 		return Prerequisites{}, err
 	}
-	return localPrerequisitesFor(p, x, original.Plan.Basis.Bindings), nil
+	return r.currentPrerequisitesFor(ctx, p, x, prerequisites(original.Plan.Basis))
+}
+
+func (r *LocalResolver) currentPrerequisitesFor(ctx context.Context, p Principal, x localDeclaration, reviewed Prerequisites) (Prerequisites, error) {
+	current := localPrerequisitesFor(p, x, reviewed.Bindings)
+	if err := r.currentApplicationSources(ctx, x, reviewed.Sources, &current); err != nil {
+		return Prerequisites{}, err
+	}
+	sort.Slice(current.Sources, func(i, j int) bool { return current.Sources[i].Ref < current.Sources[j].Ref })
+	return current, nil
 }
 func (r *LocalResolver) Resolve(ctx context.Context, p Principal, request pc.DeclarationPlanRequest) (Resolution, error) {
 	x, err := r.load(ctx, p, request.ProjectRef, request.NodeRef)
@@ -290,10 +335,15 @@ func (r *LocalResolver) Resolve(ctx context.Context, p Principal, request pc.Dec
 	if effects == nil {
 		effects = []pc.DeclarationEffect{pc.DeclarationReconcile}
 	}
+	watchesOnly := len(effects) == 1 && effects[0] == pc.DeclarationWatches
+	deployResource, deployOnly := pc.ApplicationDeployResource(effects)
 	for _, effect := range effects {
-		if effect != pc.DeclarationReconcile {
+		if effect != pc.DeclarationReconcile && !watchesOnly && !deployOnly {
 			return Resolution{}, fail(pc.DeclarationUnsupported, "projection_owner_required")
 		}
+	}
+	if watchesOnly && (x.LegacyContract != nil || x.State.RegistryRevision == "absent") {
+		return Resolution{}, fail(pc.DeclarationUnsupported, "registered_declaration_required_for_watch_configuration")
 	}
 	var predecessor *projects.DeclarationLegacyPredecessor
 	var desired projects.DeclarationRegistrationPayload
@@ -316,9 +366,26 @@ func (r *LocalResolver) Resolve(ctx context.Context, p Principal, request pc.Dec
 	action := pc.DeclarationAction{ID: "register_project:project", Kind: pc.DeclarationRegisterProject, Owner: pc.DeclarationOwnerProjects, TargetRef: x.Target.ProjectID, InputHash: hashBytes(payload), DependsOn: []string{}, Authorization: pc.DeclarationAuthorization{ActorID: p.ActorID, NodeID: x.Target.OwnerNodeID, Level: 3, PolicyRevision: x.Authority.Revision}}
 	basis := pc.DeclarationPlanBasis{SchemaVersion: pc.DeclarationPlanSchemaV05, Target: prereq.Target, Sources: prereq.Sources, Bindings: prereq.Bindings, Revisions: prereq.Revisions, Effects: effects, Actions: []pc.DeclarationAction{action}}
 	payloads := map[string]json.RawMessage{action.ID: payload}
+	if deployOnly {
+		selected, exists := x.Analysis.Loaded.Declaration.Resources[deployResource]
+		if !exists || selected.Kind != pc.DeclarationApplication {
+			return Resolution{}, fail(pc.DeclarationInvalid, "application_resource_required")
+		}
+		if err := r.appendApplications(ctx, x, &basis, payloads); err != nil {
+			return Resolution{}, err
+		}
+		return Resolution{Plan: pc.DeclarationPlan{SchemaVersion: pc.DeclarationPlanSchemaV05, Basis: basis, Errors: []pc.DeclarationError{}}, Payloads: payloads}, nil
+	}
+	if watchesOnly {
+		basis.Actions = []pc.DeclarationAction{}
+		payloads = map[string]json.RawMessage{}
+	}
 	contributors, err := declarationWatchContributors(x)
 	if err != nil {
 		return Resolution{}, err
+	}
+	if watchesOnly && len(contributors) == 0 {
+		return Resolution{}, fail(pc.DeclarationUnsupported, "existing_watch_configuration_required")
 	}
 	if len(contributors) > 0 {
 		group, err := projectwatch.BuildDeclarationWatchGroup(x.Analysis, x.Target.OwnerNodeID, x.Input.Project.OwnerNode, contributors)
@@ -332,11 +399,23 @@ func (r *LocalResolver) Resolve(ctx context.Context, p Principal, request pc.Dec
 		if err = projectwatch.ValidateDeclarationWatchGroup(group); err != nil {
 			return Resolution{}, fail(pc.DeclarationInvalid, "watch_group_invalid")
 		}
+		if watchesOnly {
+			rows, err := projects.NewService(r.DB).ListProjectWatchedRootRegistrations(ctx, x.Target.ProjectID)
+			if err != nil {
+				return Resolution{}, fail(pc.DeclarationTargetUnavailable, "watch_configuration_state_unavailable")
+			}
+			if err = validateWatchConfigurationOnly(group, rows); err != nil {
+				return Resolution{}, err
+			}
+		}
 		groupHash, err := projectwatch.DeclarationGroupHash(group)
 		if err != nil {
 			return Resolution{}, err
 		}
 		previous := action.ID
+		if watchesOnly {
+			previous = ""
+		}
 		for _, c := range contributors {
 			desired := projects.DeclarationWatchIntentPayload{Group: group, GroupHash: groupHash, Owner: c.Owner, Resource: c.Resource, Retire: c.Retire}
 			raw, err := canonicalValue(desired)
@@ -351,10 +430,16 @@ func (r *LocalResolver) Resolve(ctx context.Context, p Principal, request pc.Dec
 				kind = pc.DeclarationRetireResource
 			}
 			next := pc.DeclarationAction{ID: c.ActionID, Kind: kind, Owner: pc.DeclarationOwner(c.Owner), Resource: pc.ResourceKey(c.Resource), TargetRef: x.Target.ProjectID + "/" + c.Resource, InputHash: hashBytes(raw), DependsOn: []string{previous}, Authorization: action.Authorization}
+			if previous == "" {
+				next.DependsOn = []string{}
+			}
 			basis.Actions = append(basis.Actions, next)
 			payloads[next.ID] = raw
 			previous = next.ID
 		}
+	}
+	if watchesOnly {
+		return Resolution{Plan: pc.DeclarationPlan{SchemaVersion: pc.DeclarationPlanSchemaV05, Basis: basis, Errors: []pc.DeclarationError{}, NotesWorkspace: x.NotesWorkspace}, Payloads: payloads}, nil
 	}
 	if err := r.appendApplications(ctx, x, &basis, payloads); err != nil {
 		return Resolution{}, err
@@ -365,7 +450,7 @@ func (r *LocalResolver) Resolve(ctx context.Context, p Principal, request pc.Dec
 	if err := r.appendSchedules(ctx, p, x, &basis, payloads); err != nil {
 		return Resolution{}, err
 	}
-	return Resolution{Plan: pc.DeclarationPlan{SchemaVersion: pc.DeclarationPlanSchemaV05, Basis: basis, Errors: []pc.DeclarationError{}}, Payloads: payloads}, nil
+	return Resolution{Plan: pc.DeclarationPlan{SchemaVersion: pc.DeclarationPlanSchemaV05, Basis: basis, Errors: []pc.DeclarationError{}, NotesWorkspace: x.NotesWorkspace}, Payloads: payloads}, nil
 }
 
 // Only the authoritative project lookup can establish absence. A registration

@@ -195,6 +195,10 @@ func ingestObjectMetadataTx(ctx context.Context, tx *sql.Tx, req requestctx.Cont
 			"source_node_id": nodeID, "sequence": item.LocalSequence, "observation_hash": digest}}); err != nil {
 		return SyncItemResult{}, nil, err
 	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO knowledge.pending_source_admissions(object_version_id) VALUES($1)
+	 ON CONFLICT(object_version_id) DO UPDATE SET revision=nextval('knowledge.source_admission_revision'),received_at=clock_timestamp(),next_attempt_at=clock_timestamp()`, p.VersionID); err != nil {
+		return SyncItemResult{}, nil, err
+	}
 	r, err := insertBatchItemTx(ctx, tx, batchID, nodeID, item, ItemStatusAccepted, p.ObjectID, "", "", digest)
 	return r, nil, err
 }

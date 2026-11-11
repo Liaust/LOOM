@@ -304,8 +304,8 @@ func TestApplyWorkspaceCreatesBoxNodeAgentRuntimeAndManifest(t *testing.T) {
 	if err := json.Unmarshal(documentsWorker.ConfigJSON, &documentsConfig); err != nil {
 		t.Fatalf("decode documents worker config: %v", err)
 	}
-	if documentsConfig.Scan.FullRescanInterval != "1m" || documentsConfig.Scan.MaxHashFileBytes != boxSafeRootMaxFileBytes || documentsConfig.BackupPolicy.MaxFileBytes != boxSafeRootMaxFileBytes {
-		t.Fatalf("documents watched-root config not responsive/high-ceiling enough: %#v", documentsConfig)
+	if documentsConfig.Scan.FullRescanInterval != "6h" || documentsConfig.Watch.DebounceWindow != "2s" || documentsConfig.Scan.MaxHashFileBytes != boxSafeRootMaxFileBytes || documentsConfig.BackupPolicy.MaxFileBytes != boxSafeRootMaxFileBytes {
+		t.Fatalf("documents watched-root config lost event-driven responsiveness or bounded fallback: %#v", documentsConfig)
 	}
 
 	second, err := Apply(ApplyInput{

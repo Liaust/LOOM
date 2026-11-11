@@ -17,13 +17,18 @@ import (
 	"unicode"
 
 	"gopkg.in/yaml.v3"
+	"loom.local/loom/internal/filepolicy"
 	"loom.local/loom/internal/ids"
+	"loom.local/loom/internal/nodeagent/watchedroots"
 )
 
 // ParseProjectDeclaration strictly decodes the frozen v0.5 source contract.
 // It does not resolve target ownership or grant execution authority.
 func ParseProjectDeclaration(raw []byte) (ProjectDeclaration, error) {
 	d, code := parseDeclarationShape(raw)
+	if invalidProjectWorkState(raw, d.Project.WorkState) {
+		return d, fmt.Errorf("project.work_state must be working or passive; omit the field for legacy working selection")
+	}
 	if code == "declaration.knowledge_policy" {
 		for _, key := range declarationKeys(d.Resources) {
 			if source := d.Resources[key].Knowledge; source != nil {
@@ -84,8 +89,18 @@ func parseDeclarationShape(raw []byte) (ProjectDeclaration, string) {
 	if d.Kind != ProjectKind {
 		return d, "declaration.kind"
 	}
-	if d.SchemaVersion != ProjectSchemaV05 {
+	if !IsDeclarationSchemaVersion(d.SchemaVersion) {
 		return d, "declaration.schema"
+	}
+	if d.Files != nil {
+		if d.SchemaVersion != ProjectSchemaV06 {
+			return d, "declaration.files_version"
+		}
+		policy, err := filepolicy.NormalizeFolderPolicy(*d.Files)
+		if err != nil {
+			return d, "declaration.files: " + err.Error()
+		}
+		d.Files = &policy
 	}
 	if ids.Validate(ids.ProjectPrefix, d.Project.ID) != nil {
 		return d, "declaration.identity"
@@ -105,13 +120,13 @@ func parseDeclarationShape(raw []byte) (ProjectDeclaration, string) {
 			return d, "declaration.key"
 		}
 		payloads := 0
-		for _, present := range []bool{r.Repository != nil, r.Knowledge != nil, r.Protection != nil, r.Application != nil, r.Schedule != nil, r.HermesSchedule != nil} {
+		for _, present := range []bool{r.Repository != nil, r.Knowledge != nil, r.Protection != nil, r.Application != nil, r.Schedule != nil, r.HermesSchedule != nil, r.Agent != nil} {
 			if present {
 				payloads++
 			}
 		}
 		switch r.Kind {
-		case DeclarationRepository, DeclarationKnowledge, DeclarationProtection, DeclarationApplication, DeclarationSchedule, DeclarationHermesSchedule:
+		case DeclarationRepository, DeclarationKnowledge, DeclarationProtection, DeclarationApplication, DeclarationSchedule, DeclarationHermesSchedule, DeclarationAgent:
 		default:
 			return d, "declaration.kind"
 		}
@@ -121,12 +136,19 @@ func parseDeclarationShape(raw []byte) (ProjectDeclaration, string) {
 		var p string
 		var protection ResourceKey
 		switch r.Kind {
+		case DeclarationAgent:
+			if key == "mina" || r.Agent == nil || !ValidAgentDeclaration(*r.Agent) {
+				return d, "declaration.agent: instructions_ref, explicit model/provider and safe workdir required; mina is reserved"
+			}
 		case DeclarationHermesSchedule:
 			if r.HermesSchedule == nil {
 				return d, "declaration.hermes_schedule: payload required"
 			}
 			if _, err := HermesScheduleInput(*r.HermesSchedule, "/project"); err != nil {
 				return d, "declaration.hermes_schedule: " + err.Error()
+			}
+			if r.HermesSchedule.Profile != "mina" && !declarationRef(d, ResourceKey(r.HermesSchedule.Profile), DeclarationAgent) {
+				return d, "declaration.hermes_schedule: profile must name mina or a declared agent resource"
 			}
 		case DeclarationSchedule:
 			if r.Schedule == nil {
@@ -181,6 +203,16 @@ func parseDeclarationShape(raw []byte) (ProjectDeclaration, string) {
 			if _, err := NormalizeKnowledgeSourcePolicy(*r.Knowledge); err != nil {
 				return d, "declaration.knowledge_policy"
 			}
+			// Empty selectors have the same defaults as omitted selectors. Keep
+			// captured source and JSON-cloned plan evidence structurally equal.
+			if w := r.Knowledge.Workspace; w != nil {
+				if len(w.Include) == 0 {
+					w.Include = nil
+				}
+				if len(w.Exclude) == 0 {
+					w.Exclude = nil
+				}
+			}
 			switch r.Knowledge.Category {
 			case KnowledgeCategoryNotes, KnowledgeCategoryDocs, KnowledgeCategoryResearch:
 			default:
@@ -199,6 +231,20 @@ func parseDeclarationShape(raw []byte) (ProjectDeclaration, string) {
 				return d, "declaration.union"
 			}
 			a := r.Application
+			if a.Source != nil {
+				if code := ValidateApplicationSource(*a); code != "" {
+					return d, code
+				}
+				for _, data := range a.Data {
+					if data.Path != "" {
+						paths[DeclarationApplication] = append(paths[DeclarationApplication], data.Path)
+					}
+				}
+				continue
+			}
+			if a.Run != nil || a.Config != nil || a.Network != "" || len(a.Actions) != 0 {
+				return d, "declaration.application_source_required"
+			}
 			if !declarationRef(d, a.Repository, DeclarationRepository) {
 				return d, "declaration.reference"
 			}
@@ -249,6 +295,9 @@ func parseDeclarationShape(raw []byte) (ProjectDeclaration, string) {
 			}
 			for _, dataKey := range declarationKeys(a.Data) {
 				v := a.Data[dataKey]
+				if v.Browse != nil && (v.BindingRef == "" || v.Path != "" || !v.Browse.Valid()) {
+					return d, "declaration.application_browse"
+				}
 				if v.Backup != "" && (v.Backup != "cloud_history" || v.BindingRef == "" || v.Protection != "" || a.ArtifactDescriptor == "") {
 					return d, "declaration.application_backup"
 				}
@@ -279,10 +328,12 @@ func parseDeclarationShape(raw []byte) (ProjectDeclaration, string) {
 			return d, "declaration.reference"
 		}
 		if r.Kind == DeclarationRepository || r.Kind == DeclarationKnowledge || p != "" {
-			if !declarationPath(p, false) && !(r.Kind == DeclarationProtection && p == ".") {
+			if !declarationPath(p, false) && !(r.Kind == DeclarationProtection && p == ".") && !(d.SchemaVersion == ProjectSchemaV06 && r.Kind == DeclarationKnowledge && p == ".") {
 				return d, "declaration.path"
 			}
-			paths[r.Kind] = append(paths[r.Kind], p)
+			if d.SchemaVersion != ProjectSchemaV06 || r.Knowledge == nil || r.Knowledge.ApplicationData == nil {
+				paths[r.Kind] = append(paths[r.Kind], p)
+			}
 		}
 	}
 	if primary > 1 {
@@ -307,7 +358,7 @@ func parseDeclarationShape(raw []byte) (ProjectDeclaration, string) {
 					for _, q := range paths[other] {
 						// Knowledge is a read-only consumer, not a competing data owner.
 						// Require explicit selection of the data root or a descendant.
-						if other == DeclarationKnowledge && (q == p || strings.HasPrefix(q, p+"/")) {
+						if other == DeclarationKnowledge && (q == p || strings.HasPrefix(q, p+"/") || d.SchemaVersion == ProjectSchemaV06 && q == ".") {
 							continue
 						}
 						if declarationOverlap(p, q) {
@@ -343,6 +394,10 @@ func declarationNodeShape(n *yaml.Node, typ reflect.Type) bool {
 	}
 	if typ.Kind() == reflect.Pointer {
 		typ = typ.Elem()
+	}
+	if typ == reflect.TypeOf(ApplicationArgument{}) {
+		var argument ApplicationArgument
+		return argument.UnmarshalYAML(n) == nil
 	}
 	switch typ.Kind() {
 	case reflect.String:
@@ -499,7 +554,7 @@ func parseProjectSource(raw []byte, absolutePath, displayPath string) (ProjectCo
 	if err := yaml.Unmarshal(raw, &version); err != nil {
 		return ProjectContract{}, nil, LoadError{Code: "contract.parse_failed", File: absolutePath, Err: err}
 	}
-	if version.SchemaVersion != ProjectSchemaV05 {
+	if !IsDeclarationSchemaVersion(version.SchemaVersion) {
 		c, err := parseProjectContract(raw, absolutePath, displayPath)
 		return c, nil, err
 	}
@@ -624,7 +679,7 @@ func validateDeclaration(loaded LoadedProject) ValidationReport {
 		fail("", "project", fmt.Errorf("project source changed or is unsafe; reload before analysis"))
 		return finish()
 	}
-	c.Sources = append(c.Sources, declarationSnapshot(rootRef, ProjectSchemaV05, raw))
+	c.Sources = append(c.Sources, declarationSnapshot(rootRef, d.SchemaVersion, raw))
 	if loaded.Layout == ProjectLayoutCanonicalWithLegacy {
 		other, err := declarationReadSource(root, LegacyRootContractPath)
 		if err != nil {
@@ -632,7 +687,7 @@ func validateDeclaration(loaded LoadedProject) ValidationReport {
 		} else if duplicate, err := ParseProjectDeclaration(other); err != nil || !reflect.DeepEqual(d, duplicate) {
 			fail("", "project", fmt.Errorf("project declaration layout conflict"))
 		} else {
-			c.Sources = append(c.Sources, declarationSnapshot(LegacyRootContractPath, ProjectSchemaV05, other))
+			c.Sources = append(c.Sources, declarationSnapshot(LegacyRootContractPath, d.SchemaVersion, other))
 		}
 	}
 	seenSources := map[string][]byte{}
@@ -682,6 +737,21 @@ func validateDeclaration(loaded LoadedProject) ValidationReport {
 			}
 		}
 		switch r.Kind {
+		case DeclarationAgent:
+			if r.Agent.Workdir != "" && r.Agent.Workdir != "." {
+				checkPath(r.Agent.Workdir)
+			}
+			raw, err := declarationReadSource(root, r.Agent.InstructionsRef)
+			if err != nil {
+				fail(key, field+".agent.instructions_ref", err)
+			} else {
+				snapshot := declarationSnapshot(r.Agent.InstructionsRef, AgentInstructionsSchema, raw)
+				if _, err := AgentInput(*r.Agent, loaded.RootPath, []DeclarationSourceSnapshot{snapshot}); err != nil {
+					fail(key, field+".agent.instructions_ref", err)
+				} else {
+					addSource(snapshot)
+				}
+			}
 		case DeclarationRepository:
 			v := r.Repository
 			checkPath(v.Path)
@@ -717,6 +787,12 @@ func validateDeclaration(loaded LoadedProject) ValidationReport {
 			}
 
 		case DeclarationApplication:
+			if r.Application.Source != nil {
+				if sourcePath := r.Application.Source.Path; sourcePath != "" && sourcePath != "." {
+					checkPath(sourcePath)
+				}
+				continue
+			}
 			for _, dataKey := range declarationKeys(r.Application.Data) {
 				v := r.Application.Data[dataKey]
 				if v.Path != "" {
@@ -839,11 +915,17 @@ func cloneDeclarationCompilation(c *DeclarationCompilation) *DeclarationCompilat
 
 func declarationPlanActions(c *DeclarationCompilation) ([]PlanAction, []PlanUnsupportedFeature) {
 	actions := []PlanAction{{Action: "would_register_project", Status: "ready", TargetKind: "project", TargetRef: c.Document.Project.ID, Description: "Register the preserved declaration through the existing project registration path."}}
+	if c.Document.Project.WorkState != "" {
+		actions[0].Description += " Record project.work_state=" + c.Document.Project.WorkState + " as metadata only; runtime status and owners are unchanged."
+	}
 	unsupported := []PlanUnsupportedFeature{}
 	for _, key := range declarationKeys(c.Document.Resources) {
 		r := c.Document.Resources[key]
 		action, status, reason := "", "pending", ""
 		switch r.Kind {
+		case DeclarationAgent:
+			action = "would_reconcile_agent"
+			reason = "Reconcile this project's optional native Hermes profile, preserving its memory/history and refusing configuration drift."
 		case DeclarationHermesSchedule:
 			action = "would_reconcile_hermes_schedule"
 			reason = "Reconcile only this project-owned native Hermes timer; default paused."
@@ -1108,7 +1190,7 @@ func CompileDeclarationEnrollment(loaded LoadedProject, c DeclarationCompilation
 		sources[source.Ref] = source
 	}
 	rootSource, ok := sources[filepath.ToSlash(ref)]
-	if !ok || rootSource.SchemaVersion != ProjectSchemaV05 || !bytes.Equal(rootSource.Raw, loaded.Raw) {
+	if !ok || rootSource.SchemaVersion != d.SchemaVersion || !bytes.Equal(rootSource.Raw, loaded.Raw) {
 		return nil, fmt.Errorf("declaration enrollment root source mismatch")
 	}
 	var compileErr error
@@ -1196,6 +1278,9 @@ func CompileDeclarationEnrollment(loaded LoadedProject, c DeclarationCompilation
 		knowledgePath := KnowledgeLogicalPath(key, *knowledge)
 		include := normalizePolicyPatterns(firstNonEmptyStrings(knowledge.Include, defaultNotesIncludes))
 		exclude := normalizePolicyPatterns(firstNonEmptyStrings(knowledge.Exclude, defaultNotesExcludes))
+		if d.SchemaVersion == ProjectSchemaV06 && knowledge.Exclude == nil {
+			exclude = normalizePolicyPatterns(DefaultDeviceFileExcludes())
+		}
 		for _, selection := range selections {
 			if !selection.Enabled {
 				continue
@@ -1213,11 +1298,13 @@ func CompileDeclarationEnrollment(loaded LoadedProject, c DeclarationCompilation
 				localKey = spec.Key
 				// A shared watcher must not silently narrow backup coverage or ignore
 				// explicit Notes selection. Omitted fields retain policy inheritance.
-				if (len(knowledge.Include) > 0 && !stringSlicesEqual(include, spec.Include)) ||
-					(len(knowledge.Exclude) > 0 && !stringSlicesEqual(exclude, spec.Exclude)) {
+				if d.SchemaVersion != ProjectSchemaV06 && ((len(knowledge.Include) > 0 && !stringSlicesEqual(include, spec.Include)) ||
+					(len(knowledge.Exclude) > 0 && !stringSlicesEqual(exclude, spec.Exclude))) {
 					return nil, fmt.Errorf("declaration.enrollment_protection_conflict: knowledge filters for %s must match its shared protection root", key)
 				}
-				include, exclude = append([]string{}, spec.Include...), append([]string{}, spec.Exclude...)
+				if d.SchemaVersion != ProjectSchemaV06 {
+					include, exclude = append([]string{}, spec.Include...), append([]string{}, spec.Exclude...)
+				}
 			}
 		}
 		// Resource keys are stable identity; normalization must never collapse two
@@ -1225,13 +1312,63 @@ func CompileDeclarationEnrollment(loaded LoadedProject, c DeclarationCompilation
 		if existing := builder.roots[localKey]; existing != nil && (existing.path != knowledgePath || existing.metadata["knowledge_source"] != nil) {
 			return nil, fmt.Errorf("declaration.enrollment_key_conflict: %s", key)
 		}
-		builder.addNotes(NotesFacetItem{RootKey: localKey, ProjectPath: knowledgePath, Status: "active", Sync: true, Index: true, Include: include, Exclude: exclude, MaterialCategory: string(knowledge.Category), ContractPath: loaded.ContractPath})
+		policy, err := DeclarationKnowledgePolicy(d, key)
+		if err != nil {
+			return nil, err
+		}
+		watchInclude, watchExclude := include, exclude
+		if policy != nil && policy.Workspace != nil {
+			if knowledge.Protection != "" && d.SchemaVersion != ProjectSchemaV06 {
+				return nil, fmt.Errorf("declaration.enrollment_protection_conflict: independent workspace selection for %s needs a separate protection owner", key)
+			}
+			watchInclude = normalizePolicyPatterns(append(append([]string{}, include...), policy.Workspace.Include...))
+			sort.Strings(watchInclude)
+			unique := watchInclude[:0]
+			for _, pattern := range watchInclude {
+				if len(unique) == 0 || unique[len(unique)-1] != pattern {
+					unique = append(unique, pattern)
+				}
+			}
+			watchInclude = unique
+			watchExclude = nil
+			for _, pattern := range exclude {
+				for _, other := range policy.Workspace.Exclude {
+					if pattern == other {
+						watchExclude = append(watchExclude, pattern)
+						break
+					}
+				}
+			}
+		}
+		builder.addNotes(NotesFacetItem{RootKey: localKey, ProjectPath: knowledgePath, Status: "active", Sync: true, Index: true, Include: watchInclude, Exclude: watchExclude, MaterialCategory: string(knowledge.Category), ContractPath: loaded.ContractPath})
 		acc := builder.roots[localKey]
 		if acc == nil {
 			return nil, fmt.Errorf("declaration.enrollment_key_conflict: resource key %s is not a portable owner key", key)
 		}
+		if d.SchemaVersion == ProjectSchemaV06 {
+			acc.selections.Index = &watchedroots.PathSelection{Include: include, Exclude: exclude}
+			acc.selections.Sync = &watchedroots.PathSelection{Include: include, Exclude: exclude}
+			if policy != nil {
+				if policy.Files != nil {
+					consumer := filepolicy.FolderPolicy{Rules: []filepolicy.FolderRule{}}
+					for _, rule := range policy.Files.Rules {
+						if rule.Search != "" || rule.Protect != nil {
+							rule.Enrichment = nil
+							consumer.Rules = append(consumer.Rules, rule)
+						}
+					}
+					if len(consumer.Rules) > 0 {
+						acc.files = &consumer
+					}
+				}
+				if policy.Workspace != nil {
+					acc.selections.Sync = &watchedroots.PathSelection{Include: policy.Workspace.Include, Exclude: policy.Workspace.Exclude}
+				}
+			}
+			acc.include, acc.exclude = observationEnvelope(acc.selections)
+		}
 		acc.metadata["knowledge_source"] = map[string]any{
-			"schema_version": ProjectSchemaV05, "root_kind": "project_material", "category": "projects", "declaration": string(knowledge.Category),
+			"schema_version": d.SchemaVersion, "root_kind": "project_material", "category": "projects", "declaration": string(knowledge.Category),
 			"enabled": true, "root_relative_path": knowledgePath, "include": include, "exclude": exclude,
 			"project_id": d.Project.ID, "project_root": loaded.RootPath, "owner_node": d.Project.OwnerNode,
 			"resource_key": string(key), "local_root_key": localKey, "backend_root_key": ProjectWatchedRootKey(d.Project.Slug, localKey),
@@ -1239,10 +1376,6 @@ func CompileDeclarationEnrollment(loaded LoadedProject, c DeclarationCompilation
 		}
 		if knowledge.ApplicationData != nil {
 			acc.metadata["knowledge_source"].(map[string]any)["application_data"] = knowledge.ApplicationData
-		}
-		policy, err := NormalizeKnowledgeSourcePolicy(*knowledge)
-		if err != nil {
-			return nil, err
 		}
 		if policy != nil {
 			acc.metadata["knowledge_source"].(map[string]any)["policy"] = policy

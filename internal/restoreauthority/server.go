@@ -36,6 +36,7 @@ type ServerConfig struct {
 	Provenance              DatabasePolicy
 	CreatedbPath            string
 	PGRestorePath           string
+	PsqlPath                string
 	DropdbPath              string
 	PostgresSocketDirectory string
 	PostgresPort            uint16
@@ -81,6 +82,9 @@ func NewServer(config ServerConfig) (*Server, error) {
 		if strings.TrimSpace(path) == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 			return nil, fmt.Errorf("%s path must be an exact absolute path", label)
 		}
+	}
+	if config.PsqlPath != "" && (!filepath.IsAbs(config.PsqlPath) || filepath.Clean(config.PsqlPath) != config.PsqlPath) {
+		return nil, fmt.Errorf("psql path must be an exact absolute path")
 	}
 	config.PostgresSocketDirectory = strings.TrimSpace(config.PostgresSocketDirectory)
 	if config.PostgresSocketDirectory == "" {
@@ -279,11 +283,18 @@ func (server *Server) restore(ctx context.Context, dump *os.File, request reques
 		_ = cleanup()
 		return response
 	}
-	filteredTOC, err := filterRestoreTOC(toc)
+	filteredTOC, err := filterRestoreTOC(toc, request.Extensions...)
 	if err != nil {
 		response.setFailure(ErrorArchiveTOCRefused)
 		_ = cleanup()
 		return response
+	}
+	if len(request.Extensions) != 0 {
+		if err := server.provisionPGSearch(ctx, request); err != nil {
+			response.setFailure(ErrorExtensionProvisionFailed)
+			_ = cleanup()
+			return response
+		}
 	}
 	restoreList, err := server.createUnlinkedFile(".loom-restore-list-*", filteredTOC)
 	if err != nil {
@@ -312,6 +323,45 @@ func (server *Server) restore(ctx context.Context, dump *os.File, request reques
 	}
 	response.Status = "succeeded"
 	return response
+}
+
+// No archive bytes, owner names, or requested versions enter privileged SQL.
+// The connection target is the already validated, newly created disposable DB.
+// Installation is atomic with schema creation; no session can populate the
+// owner-writable schema before the privileged extension install finishes.
+const provisionPGSearchSQL = `BEGIN;
+SET LOCAL search_path = pg_catalog;
+CREATE SCHEMA paradedb AUTHORIZATION loom;
+CREATE EXTENSION pg_search VERSION '0.25.11';
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT FROM pg_catalog.pg_extension
+                 WHERE extname = 'pg_search' AND extversion = '0.25.11'
+                   AND extnamespace = 'paradedb'::regnamespace
+                   AND extowner = (SELECT oid FROM pg_catalog.pg_roles WHERE rolname = 'postgres')) THEN
+    RAISE EXCEPTION 'pinned extension identity mismatch';
+  END IF;
+END $$;
+GRANT SELECT, INSERT ON TABLE paradedb._typmod_cache TO loom;
+GRANT UPDATE ON SEQUENCE paradedb._typmod_cache_id_seq TO loom;
+COMMIT;
+`
+
+func (server *Server) provisionPGSearch(ctx context.Context, request requestHeader) error {
+	if server.config.PsqlPath == "" || len(request.Extensions) != 1 || server.config.Operational.Owner != "loom" {
+		return fmt.Errorf("pinned extension provisioning is unavailable")
+	}
+	if err := ValidateExtensionRequirements(request.Kind, request.Extensions); err != nil {
+		return err
+	}
+	if err := server.validateConfiguredTarget(request.Kind, request.Database); err != nil {
+		return err
+	}
+	return server.config.Executor.Run(ctx, server.config.PsqlPath, []string{
+		"--host", server.config.PostgresSocketDirectory,
+		"--port", strconv.FormatUint(uint64(server.config.PostgresPort), 10),
+		"--username", "postgres", "--no-password", "--no-psqlrc",
+		"--set", "ON_ERROR_STOP=1", "--dbname", request.Database,
+	}, strings.NewReader(provisionPGSearchSQL))
 }
 
 func (server *Server) drop(ctx context.Context, request requestHeader) responseHeader {
@@ -398,24 +448,69 @@ func (server *Server) createUnlinkedFile(pattern string, contents []byte) (*os.F
 	return file, nil
 }
 
-func filterRestoreTOC(raw []byte) ([]byte, error) {
+func filterRestoreTOC(raw []byte, extensions ...ExtensionRequirement) ([]byte, error) {
+	if err := ValidateExtensionRequirements(KindOperational, extensions); err != nil {
+		return nil, err
+	}
 	if len(raw) == 0 || int64(len(raw)) > maxRestoreTOCBytes {
 		return nil, fmt.Errorf("restore archive table of contents is outside its bound")
 	}
 	var filtered bytes.Buffer
 	extensionCount := 0
 	commentCount := 0
+	searchExtensionCount := 0
+	searchCommentCount := 0
+	searchSchemaCount := 0
+	seenIDs := make(map[uint64]bool)
 	for _, line := range strings.SplitAfter(string(raw), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, ";") {
 			filtered.WriteString(line)
 			continue
 		}
-		_, body, ok := strings.Cut(trimmed, ";")
+		idText, body, ok := strings.Cut(trimmed, ";")
 		if !ok {
 			return nil, fmt.Errorf("restore archive table of contents entry is malformed")
 		}
+		id, err := strconv.ParseUint(idText, 10, 32)
+		if err != nil || id == 0 || seenIDs[id] {
+			return nil, fmt.Errorf("restore archive table of contents ID is invalid or duplicated")
+		}
+		seenIDs[id] = true
 		fields := strings.Fields(strings.TrimSpace(body))
+		if len(fields) < 4 {
+			return nil, fmt.Errorf("restore archive table of contents entry is incomplete")
+		}
+		for _, oid := range fields[:2] {
+			if _, err := strconv.ParseUint(oid, 10, 32); err != nil {
+				return nil, fmt.Errorf("restore archive table of contents OID is invalid")
+			}
+		}
+		if len(extensions) != 0 && fields[2] == "SCHEMA" && len(fields) >= 5 && fields[4] == "paradedb" {
+			if len(fields) != 6 || fields[3] != "-" || (fields[5] != "postgres" && fields[5] != "loom") {
+				return nil, fmt.Errorf("pg_search schema table of contents entry is not exact")
+			}
+			searchSchemaCount++
+			continue
+		}
+		if fields[2] == "EXTENSION" {
+			if len(fields) != 5 || fields[3] != "-" {
+				return nil, fmt.Errorf("extension table of contents entry is not exact")
+			}
+			if fields[4] == "pg_search" {
+				searchExtensionCount++
+				continue
+			}
+		}
+		if fields[2] == "COMMENT" && fields[3] == "-" && len(fields) >= 5 && fields[4] == "EXTENSION" {
+			if len(fields) != 6 {
+				return nil, fmt.Errorf("extension comment table of contents entry is not exact")
+			}
+			if fields[5] == "pg_search" {
+				searchCommentCount++
+				continue
+			}
+		}
 		if len(fields) >= 5 && fields[2] == "EXTENSION" && fields[3] == "-" && fields[4] == "vector" {
 			if len(fields) != 5 {
 				return nil, fmt.Errorf("vector extension table of contents entry is not exact")
@@ -433,6 +528,9 @@ func filterRestoreTOC(raw []byte) ([]byte, error) {
 	}
 	if extensionCount > 1 || commentCount > 1 || (commentCount == 1 && extensionCount != 1) {
 		return nil, fmt.Errorf("vector extension table of contents entries are ambiguous")
+	}
+	if searchExtensionCount != len(extensions) || searchSchemaCount != len(extensions) || searchCommentCount > 1 || (searchCommentCount == 1 && searchExtensionCount != 1) {
+		return nil, fmt.Errorf("pg_search table of contents does not match authenticated extension metadata")
 	}
 	return filtered.Bytes(), nil
 }

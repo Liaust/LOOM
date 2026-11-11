@@ -20,14 +20,8 @@ func (s Server) handleNotesWorkspaceNavigation(w http.ResponseWriter, r *http.Re
 		s.writeError(w, correlationID, http.StatusMethodNotAllowed, "method.not_allowed", "knowledge", "notes_navigation", "Method is not allowed.", nil)
 		return
 	}
-	values, err := url.ParseQuery(r.URL.RawQuery)
-	valid := err == nil && (len(values) == 3 || (len(values) == 4 && len(values["source_lifecycle"]) == 1))
-	for _, key := range []string{"object_id", "version_id", "source_hash"} {
-		valid = valid && len(values[key]) == 1
-	}
-	input := knowledge.NotesPassageInput{KnowledgeChunkID: strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/knowledge/notes/passages/"), "/workspace"),
-		KnowledgeObjectID: values.Get("object_id"), KnowledgeObjectVersionID: values.Get("version_id"), SourceHash: values.Get("source_hash"), SourceLifecycle: knowledge.SourceLifecycleFilter(values.Get("source_lifecycle"))}
-	if !valid || knowledge.ValidateNotesPassageInput(input) != nil {
+	input, err := notesNavigationInput(ctx, r)
+	if err != nil {
 		s.writeError(w, correlationID, http.StatusBadRequest, "knowledge.invalid_passage", "knowledge", "notes_navigation", "An exact object, version, chunk and source hash are required.", nil)
 		return
 	}
@@ -50,4 +44,22 @@ func (s Server) handleNotesWorkspaceNavigation(w http.ResponseWriter, r *http.Re
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	response.WriteJSON(w, http.StatusOK, response.Success(correlationID, result))
+}
+
+func notesNavigationInput(ctx context.Context, r *http.Request) (knowledge.NotesPassageInput, error) {
+	values, err := url.ParseQuery(r.URL.RawQuery)
+	values = withoutBoundBoxSelectors(ctx, values)
+	valid := err == nil && (len(values) == 3 || (len(values) == 4 && len(values["source_lifecycle"]) == 1))
+	for _, key := range []string{"object_id", "version_id", "source_hash"} {
+		valid = valid && len(values[key]) == 1
+	}
+	input := knowledge.NotesPassageInput{KnowledgeChunkID: strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/knowledge/notes/passages/"), "/workspace"),
+		KnowledgeObjectID: values.Get("object_id"), KnowledgeObjectVersionID: values.Get("version_id"), SourceHash: values.Get("source_hash"), SourceLifecycle: knowledge.SourceLifecycleFilter(values.Get("source_lifecycle"))}
+	if !valid {
+		return knowledge.NotesPassageInput{}, errors.New("exact passage citation is required")
+	}
+	if err := knowledge.ValidateNotesPassageInput(input); err != nil {
+		return knowledge.NotesPassageInput{}, err
+	}
+	return input, nil
 }

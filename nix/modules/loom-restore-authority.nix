@@ -153,6 +153,7 @@ in
           "--provenance-owner ${lib.escapeShellArg cfg.postgres.provenance.user}"
           "--createdb-path ${postgresPackage}/bin/createdb"
           "--pg-restore-path ${postgresPackage}/bin/pg_restore"
+          "--psql-path ${postgresPackage}/bin/psql"
           "--dropdb-path ${postgresPackage}/bin/dropdb"
           "--postgres-socket-directory /run/postgresql"
           "--postgres-port 5432"

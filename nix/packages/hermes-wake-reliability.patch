@@ -1,0 +1,81 @@
+--- a/tools/wake_word_engines.py
++++ b/tools/wake_word_engines.py
+@@ -15,6 +15,7 @@
+ from __future__ import annotations
+ 
+ import logging
++import math
+ import os
+ from contextlib import suppress
+ from pathlib import Path
+@@ -109,21 +110,21 @@
+         # frame is a 1-D int16 ndarray; the features pipeline consumes int16
+         # bytes. process_streaming() yields embeddings as the window fills and
+         # the model yields one 0..1 score per completed window.
+-        over = False
++        fired = False
+         for emb in self._features.process_streaming(frame.tobytes()):
+             for score in self._model.process_streaming(emb):
+-                if score >= self._threshold:
+-                    over = True
+-        # Require N consecutive over-threshold frames: a real phrase holds the
+-        # score high across frames, a stray ambient phoneme spikes just one.
+-        if over:
+-            self._confirm_streak += 1
+-            if self._confirm_streak >= self._confirm_needed:
+-                self._confirm_streak = 0
+-                return True
+-            return False
+-        self._confirm_streak = 0
+-        return False
++                # Confirm consecutive model windows, not an OR of all scores
++                # returned in a capture frame (startup may return many).
++                if not math.isfinite(score) or not 0.0 <= score <= 1.0 or score < self._threshold:
++                    self._confirm_streak = 0
++                    continue
++                self._confirm_streak += 1
++                if self._confirm_streak >= self._confirm_needed:
++                    self._confirm_streak = 0
++                    fired = True
++        # Fully consume both generators even after detection: they advance the
++        # rolling buffers. No completed window means no new score to count.
++        return fired
+ 
+     def reset(self) -> None:
+         # Clears pyopen-wakeword's rolling feature/prediction buffer so stale
+--- a/tools/wake_word.py
++++ b/tools/wake_word.py
+@@ -716,6 +716,7 @@
+         # Bound the whole arm, not just consecutive open failures: a device can
+         # reopen successfully and fail its very next read forever.
+         retries = iter((0.5, 1.0, 2.0))
++        audio_gap = True  # startup already reset; reset once per later discontinuity
+         silent_alert_frames = max(1, int(_SILENCE_ALERT_SECONDS * SAMPLE_RATE / max(1, frame_length)))
+         try:
+             while not self._stop.is_set():
+@@ -736,7 +737,15 @@
+                     break
+                 if data is None:  # no client frames yet — counts as silence for status
+                     self._note_silence(None, silent_alert_frames)
++                    if not audio_gap:
++                        # A client timeout is missing PCM, not continuous silence.
++                        # Never splice pre-gap speech into post-gap features or
++                        # confirmation. Keep the current listener/owner armed.
++                        with suppress(Exception):
++                            self.engine.reset()
++                        audio_gap = True
+                     continue
++                audio_gap = False
+                 frame = data[:, 0] if getattr(data, "ndim", 1) == 2 else data
+                 if cap.rate != SAMPLE_RATE:
+                     frame = _resample_audio_frame(cap.np, frame, frame_length)
+@@ -746,6 +755,9 @@
+                         self._fire()
+                 except Exception as e:
+                     logger.debug("wake word: engine error: %s", e)
++                    with suppress(Exception):
++                        self.engine.reset()
++                    audio_gap = True
+         finally:
+             if cap is not None:
+                 cap.close()

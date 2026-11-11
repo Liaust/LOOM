@@ -5,7 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
+
+	"loom.local/loom/internal/storagecatalog"
+	"loom.local/loom/internal/workers"
 )
 
 type SourceRootFilter struct {
@@ -43,6 +47,7 @@ func (s Store) listSourceRoots(ctx context.Context, filter SourceRootFilter, rea
 	}
 	clauses := []string{"1 = 1"}
 	args := []any{}
+	clauses = append(clauses, notesSelectedRootSQL(notesBoxSelection(ctx), "notes_source_roots", &args))
 	if filter.SourceCategory != "" {
 		args = append(args, filter.SourceCategory)
 		clauses = append(clauses, fmt.Sprintf("(%s) = $%d", sourceCategorySQL("root_kind"), len(args)))
@@ -69,15 +74,12 @@ func (s Store) listSourceRoots(ctx context.Context, filter SourceRootFilter, rea
 	} else if !readable && !filter.IncludeInactive {
 		clauses = append(clauses, "status = 'active'")
 	}
-	columns := sourceRootColumns()
+	query := `SELECT ` + sourceRootColumns() + ` FROM knowledge.notes_source_roots
+	 WHERE ` + strings.Join(clauses, " AND ") + ` ORDER BY root_kind,node_key,project_id NULLS FIRST,backend_root_key`
 	if readable {
-		clauses = append(clauses, notesReadableRootSQL("notes_source_roots", filter.SourceLifecycle, filter.IncludeInactive))
-		columns += `, ` + notesRootLifecycleCountsSQL("notes_source_roots")
+		query = notesReadableRootsQuerySQL(strings.Join(clauses, " AND "), filter.SourceLifecycle, filter.IncludeInactive)
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT `+columns+`
-		FROM knowledge.notes_source_roots
-		WHERE `+strings.Join(clauses, " AND ")+`
-		ORDER BY root_kind, node_key, project_id NULLS FIRST, backend_root_key`, args...)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -153,6 +155,7 @@ func (s Store) ListProjectWatchedRootRegistrations(ctx context.Context) ([]Proje
 		       pwr.project_contract_registration_id,
 		       pwr.project_id,
 		       pcr.project_root,
+		       COALESCE(p.metadata->>'home_box_id',''),
 		       pwr.node_id,
 		       pwr.owner_node_key,
 		       pwr.local_root_key,
@@ -165,6 +168,7 @@ func (s Store) ListProjectWatchedRootRegistrations(ctx context.Context) ([]Proje
 		FROM projects.project_watched_root_registrations pwr
 		JOIN projects.project_contract_registrations pcr
 		  ON pcr.project_contract_registration_id = pwr.project_contract_registration_id
+		JOIN projects.projects p ON p.project_id=pwr.project_id
 		WHERE pwr.local_root_key = 'notes'
 		   OR pwr.source_kinds_json ? 'notes_contract'
 		   OR pwr.source_kinds_json ? 'project_material'
@@ -182,6 +186,7 @@ func (s Store) ListProjectWatchedRootRegistrations(ctx context.Context) ([]Proje
 			&registration.ProjectContractRegistrationID,
 			&registration.ProjectID,
 			&registration.ProjectRoot,
+			&registration.HomeBoxID,
 			&registration.NodeID,
 			&registration.OwnerNodeKey,
 			&registration.LocalRootKey,
@@ -208,15 +213,44 @@ func (s Store) UpsertSourceRoot(ctx context.Context, root SourceRoot) (SourceRoo
 	if err := ValidateSourceRoot(root); err != nil {
 		return SourceRoot{}, err
 	}
-	row := s.db.QueryRowContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return SourceRoot{}, err
+	}
+	defer tx.Rollback()
+	if err := storagecatalog.LockWorkspaceCustodyReaderTx(ctx, tx); err != nil {
+		return SourceRoot{}, err
+	}
+	previous, err := scanSourceRoot(tx.QueryRowContext(ctx, `SELECT `+sourceRootColumns()+`
+		FROM knowledge.notes_source_roots
+		WHERE root_kind=$1 AND node_key=$2 AND COALESCE(project_id,'')=$3 AND backend_root_key=$4
+		FOR UPDATE`, root.RootKind, root.NodeKey, valueOrEmpty(root.ProjectID), root.BackendRootKey))
+	if err != nil && err != sql.ErrNoRows {
+		return SourceRoot{}, err
+	}
+	found := err == nil
+	if found {
+		root.NotesSourceRootID = previous.NotesSourceRootID
+	}
+	root.WorkspaceAuthority, err = prepareWorkspaceAuthorityTx(ctx, tx, root, previous)
+	if err != nil {
+		return SourceRoot{}, err
+	}
+	if found && sourceRootUnchanged(previous, root) {
+		if err := tx.Commit(); err != nil {
+			return SourceRoot{}, err
+		}
+		return previous, nil
+	}
+	row := tx.QueryRowContext(ctx, `
 		INSERT INTO knowledge.notes_source_roots (
 			notes_source_root_id, root_kind, node_id, node_key, project_id,
 			box_watch_root_registration_id, project_watched_root_registration_id,
 			backend_root_key, display_name, source_path, root_relative_path,
-			status, authorization_metadata, metadata, created_at, updated_at
+			status, authorization_metadata, metadata, created_at, updated_at, workspace_authority
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
-		        $9, $10, $11, $12, $13, $14, $15, $16)
+		        $9, $10, $11, $12, $13, $14, $15, $16, $17)
 		ON CONFLICT (root_kind, node_key, (COALESCE(project_id, '')), backend_root_key) DO UPDATE
 		SET node_id = EXCLUDED.node_id,
 		    box_watch_root_registration_id = EXCLUDED.box_watch_root_registration_id,
@@ -227,6 +261,7 @@ func (s Store) UpsertSourceRoot(ctx context.Context, root SourceRoot) (SourceRoo
 		    status = EXCLUDED.status,
 		    authorization_metadata = EXCLUDED.authorization_metadata,
 		    metadata = EXCLUDED.metadata,
+		    workspace_authority = EXCLUDED.workspace_authority,
 		    updated_at = now()
 		RETURNING `+sourceRootColumns(),
 		root.NotesSourceRootID,
@@ -245,15 +280,55 @@ func (s Store) UpsertSourceRoot(ctx context.Context, root SourceRoot) (SourceRoo
 		root.Metadata,
 		root.CreatedAt,
 		root.UpdatedAt,
+		nullableWorkspaceAuthority(root.WorkspaceAuthority),
 	)
-	return scanSourceRoot(row)
+	out, err := scanSourceRoot(row)
+	if err != nil {
+		return SourceRoot{}, err
+	}
+	bindingsChanged := false
+	if found && sourceAuditRefreshEligible(previous, out) {
+		bindingsChanged, err = refreshSourceAuditBindingsTx(ctx, tx, out)
+		if err != nil {
+			return SourceRoot{}, err
+		}
+	}
+	if bindingsChanged || found && knowledgeProjectionRootChanged(previous, out) {
+		if err = MarkProjectionDirtyTx(ctx, tx, ProjectionDirtyInput{RootID: out.NotesSourceRootID}); err != nil {
+			return SourceRoot{}, err
+		}
+	}
+	if err = workers.NotifyQueueTx(ctx, tx, workers.KindKnowledgeIndexer); err != nil {
+		return SourceRoot{}, err
+	}
+	if err = workers.NotifyQueueTx(ctx, tx, "notes_workspace_sync"); err != nil {
+		return SourceRoot{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return SourceRoot{}, err
+	}
+	return out, nil
 }
 
 func sourceRootColumns() string {
 	return `notes_source_root_id, root_kind, node_id, node_key, project_id,
 	        box_watch_root_registration_id, project_watched_root_registration_id,
 	        backend_root_key, display_name, source_path, root_relative_path,
-	        status, authorization_metadata, metadata, created_at, updated_at`
+	        status, authorization_metadata, metadata, created_at, updated_at, workspace_authority`
+}
+
+func sourceRootUnchanged(previous, next SourceRoot) bool {
+	if !pipelinePlanSnapshotsEqual(previous.Metadata, next.Metadata) ||
+		!pipelinePlanSnapshotsEqual(previous.AuthorizationMetadata, next.AuthorizationMetadata) {
+		return false
+	}
+	previous.Metadata, next.Metadata = nil, nil
+	previous.AuthorizationMetadata, next.AuthorizationMetadata = nil, nil
+	previous.SourceContext, next.SourceContext = SourceContext{}, SourceContext{}
+	previous.LifecycleCounts, next.LifecycleCounts = nil, nil
+	next.NotesSourceRootID = previous.NotesSourceRootID
+	next.CreatedAt, next.UpdatedAt = previous.CreatedAt, previous.UpdatedAt
+	return reflect.DeepEqual(previous, next)
 }
 
 type sourceRootScanner interface {
@@ -263,7 +338,7 @@ type sourceRootScanner interface {
 func scanSourceRoot(scanner sourceRootScanner) (SourceRoot, error) {
 	var root SourceRoot
 	var nodeID, projectID, boxRegistrationID, projectRegistrationID sql.NullString
-	var authorizationMetadata, metadata []byte
+	var authorizationMetadata, metadata, authority []byte
 	if err := scanner.Scan(
 		&root.NotesSourceRootID,
 		&root.RootKind,
@@ -281,6 +356,7 @@ func scanSourceRoot(scanner sourceRootScanner) (SourceRoot, error) {
 		&metadata,
 		&root.CreatedAt,
 		&root.UpdatedAt,
+		&authority,
 	); err != nil {
 		return SourceRoot{}, err
 	}
@@ -290,6 +366,7 @@ func scanSourceRoot(scanner sourceRootScanner) (SourceRoot, error) {
 	root.ProjectWatchedRootRegistrationID = nullStringPtr(projectRegistrationID)
 	root.AuthorizationMetadata = jsonObjectOrEmpty(authorizationMetadata)
 	root.Metadata = jsonObjectOrEmpty(metadata)
+	root.WorkspaceAuthority = authority
 	root.SourceContext = sourceContextForRoot(root, "")
 	return root, nil
 }

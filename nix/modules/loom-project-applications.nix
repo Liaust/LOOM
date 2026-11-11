@@ -6,6 +6,8 @@ let
   credentialRoot = "/var/lib/loom-project-application-credentials";
   protonEnabled = cfg.provisioning.enable && cfg.provisioning.protonShareIDs != [];
   backupEnabled = cfg.provisioning.enable && cfg.provisioning.cloudBackup;
+  sourceEnabled = cfg.provisioning.enable && cfg.provisioning.projectRoot != "";
+  importEnabled = sourceEnabled && cfg.provisioning.runtimeCredentialImportRoots != [];
   policy = {
     schema_version = "application.policy.v1";
     node_id = cfg.nodeID;
@@ -18,6 +20,17 @@ let
       data_root = cfg.provisioning.dataRoot;
       max_memory_bytes = cfg.provisioning.maxMemoryBytes;
       max_planned_bytes = cfg.provisioning.maxPlannedBytes;
+    } // lib.optionalAttrs sourceEnabled {
+      project_root = cfg.provisioning.projectRoot;
+      project_roots = cfg.provisioning.projectRoots;
+      network = {
+        profiles = cfg.provisioning.networkProfiles;
+        resolvers = cfg.provisioning.resolvers;
+        denied_cidrs = cfg.provisioning.deniedCIDRs;
+      };
+    } // lib.optionalAttrs importEnabled {
+      runtime_credential_root = credentialRoot;
+      runtime_credential_import_roots = cfg.provisioning.runtimeCredentialImportRoots;
     } // lib.optionalAttrs (cfg.edge.enable && cfg.edge.publicSuffix != "") {
       public_endpoints = { suffix = cfg.edge.publicSuffix; ingress_ipv4 = cfg.edge.ingressIPv4; };
     } // lib.optionalAttrs backupEnabled {
@@ -29,6 +42,7 @@ let
   };
   helperConfig = {
     trusted_parent_owners = cfg.trustedParentOwners;
+    trusted_parent_groups = cfg.trustedParentGroups;
     policy_path = "/etc/loom/project-applications.json";
     state_root = stateRoot;
     config_root = "/var/lib/loom-project-application-configs";
@@ -37,10 +51,15 @@ let
     systemctl = "${pkgs.systemd}/bin/systemctl";
     sysusers = "${pkgs.systemd}/bin/systemd-sysusers";
     nix = "${pkgs.nix}/bin/nix";
+    systemd_run = "${pkgs.systemd}/bin/systemd-run";
+    getfacl = "${pkgs.acl}/bin/getfacl";
+    setfacl = "${pkgs.acl}/bin/setfacl";
+    iptables = "${pkgs.iptables}/bin/iptables";
+    ip6tables = "${pkgs.iptables}/bin/ip6tables";
     edge_root = if cfg.edge.enable then edgeRoot else "";
     caddy = if cfg.edge.enable then "${pkgs.caddy}/bin/caddy" else "";
     caddy_config = if cfg.edge.enable then cfg.edge.composedConfig else "";
-    pass_cli = if protonEnabled then "${config.loom.orca.protonPassPackage}/bin/pass-cli" else "";
+    pass_cli = if protonEnabled then "${config.loom.agents.protonPassPackage}/bin/pass-cli" else "";
     pass_session_ensure = if protonEnabled then "/run/current-system/sw/bin/pass-session-ensure" else "";
   };
   dataPaths = lib.unique (lib.concatMap (g: map (d: d.pool) (builtins.attrValues (g.data or {}))) cfg.grants
@@ -63,10 +82,10 @@ let
         ProtectSystem = "strict";
         # sysusers publishes account DB files atomically in /etc. The helper
         # accepts only derived identities and fixed sysusers input.
-        ReadWritePaths = [ stateRoot "/var/lib/loom-project-application-configs" "/run/systemd/system" "/run" "/etc" "/nix/var/nix/gcroots/loom-project-applications" ] ++ dataPaths ++ lib.optional cfg.edge.enable edgeRoot ++ lib.optional protonEnabled credentialRoot;
+        ReadWritePaths = [ stateRoot "/var/lib/loom-project-application-configs" "/run/systemd/system" "/run" "/etc" "/nix/var/nix/gcroots/loom-project-applications" ] ++ dataPaths ++ lib.optional sourceEnabled cfg.provisioning.projectRoot ++ cfg.provisioning.projectRoots ++ lib.optional cfg.edge.enable edgeRoot ++ lib.optional (protonEnabled || importEnabled) credentialRoot;
         # The child runs as agents, reusing only its existing Proton session.
         BindPaths = lib.optionals protonEnabled [ "/home/agents/.config/proton-pass-cli" "/home/agents/.local/state/proton-pass-cli" "/home/agents/.local/share/proton-pass-cli" ];
-        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
+        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ] ++ lib.optional sourceEnabled "AF_NETLINK";
         UMask = "0077";
       };
 in {
@@ -79,7 +98,18 @@ in {
     publisherUID = lib.mkOption { type = lib.types.ints.unsigned; default = 0; description = "Independent reviewed artifact producer UID; installation UID cannot publish."; };
     grants = lib.mkOption { type = lib.types.listOf (lib.types.attrsOf lib.types.anything); default = []; description = "Root-owned typed project/node/resource trust, data and credential policy. Validated fail-closed by the helper; no credential values."; };
     trustedParentOwners = lib.mkOption { type = lib.types.attrsOf lib.types.ints.unsigned; default = {}; description = "Exact host-managed ancestor paths and operator UIDs. Other ancestors and allocation roots retain root custody; symlinks and group/world writes remain rejected."; };
+    trustedParentGroups = lib.mkOption { type = lib.types.attrsOf lib.types.ints.unsigned; default = {}; description = "Exact existing shared project-parent groups for traversal-only state adoption. Does not broaden allocated data or credential custody."; };
     provisioning.enable = lib.mkEnableOption "node-policy-managed application grants";
+    provisioning.projectRoot = lib.mkOption { type = lib.types.str; default = ""; description = "Trusted Box Projects parent for in-place state adoption. Does not enroll or expose project data."; };
+    provisioning.projectRoots = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = lib.mapAttrsToList (_: box: "${box.rootPath}/Projects") config.loom.boxes;
+      description = "Additional exact configured Box Projects parents; existing project/resource custody still applies.";
+    };
+    provisioning.runtimeCredentialImportRoots = lib.mkOption { type = lib.types.listOf lib.types.str; default = []; description = "Host-approved private runtime OAuth source directories. File custody, current account and exact scopes are verified before protected import; values never enter declarations."; };
+    provisioning.networkProfiles = lib.mkOption { type = lib.types.listOf (lib.types.enum [ "loopback" "outbound_https" ]); default = [ "loopback" ]; description = "Source-mode outbound profiles; no inbound exposure. Existing prepared applications remain unchanged."; };
+    provisioning.resolvers = lib.mkOption { type = lib.types.listOf lib.types.str; default = []; description = "Exact DNS resolver IPs allowed by source-mode egress policy."; };
+    provisioning.deniedCIDRs = lib.mkOption { type = lib.types.listOf lib.types.str; default = []; description = "Additional control-plane destination networks denied before DNS/HTTPS exceptions."; };
     provisioning.cloudBackup = lib.mkOption { type = lib.types.bool; default = false; description = "Include the entire allocation pool in the existing cloud-history worker. Explicitly grants loomd daemon-wide CAP_DAC_READ_SEARCH so private application files retain their modes; not path-scoped, no write bypass, no new schedule, and not application-consistent database recovery."; };
     provisioning.notesSources = lib.mkOption { type = lib.types.bool; default = false; description = "Allow declared application-data Notes sources. Grants the node agent daemon-wide CAP_DAC_READ_SEARCH, not path-scoped authority; no write bypass or application mode/ACL change. Declaration and current allocation custody still gate intake."; };
     provisioning.dataRoot = lib.mkOption { type = lib.types.str; default = ""; description = "Dedicated persistent application allocation root; never an agent-supplied path."; };
@@ -99,7 +129,7 @@ in {
       { assertion = cfg.installerUID != cfg.publisherUID; message = "Application publisher and installer identities must be distinct."; }
       { assertion = !cfg.edge.enable || (cfg.provisioning.enable && cfg.edge.publicSuffix != "" && builtins.match "[a-z0-9.-]+" cfg.edge.publicSuffix != null && builtins.match "[0-9.]+" cfg.edge.ingressIPv4 != null && builtins.match "10\\.44\\.0\\.[0-9]+" cfg.edge.listenAddress != null && builtins.match "10\\.44\\.0\\.[0-9]+" cfg.edge.forwarderIPv4 != null); message = "Public applications require a suffix, public ingress address, allocation pool and WireGuard-only listeners/forwarder."; }
       { assertion = lib.hasPrefix "node_" cfg.nodeID; message = "Applications require an exact registered node ID."; }
-      { assertion = !protonEnabled || config.loom.orca.enable; message = "Application Proton materialization requires the existing agents Proton session integration."; }
+      { assertion = !protonEnabled || config.loom.agents.enable; message = "Application Proton materialization requires the existing agents Proton session integration."; }
       { assertion = !backupEnabled || config.loom.service.enable; message = "Application cloud history requires the existing LOOM daemon backup worker."; }
       { assertion = !cfg.provisioning.enable || (builtins.match "/[A-Za-z0-9_/-]+" cfg.provisioning.dataRoot != null && !(lib.hasSuffix "/" cfg.provisioning.dataRoot) && !(lib.hasInfix "//" cfg.provisioning.dataRoot) && cfg.provisioning.maxMemoryBytes > 0 && cfg.provisioning.maxPlannedBytes > 0); message = "Application provisioning requires a dedicated absolute data root and positive memory/planned-capacity ceilings."; }
     ];
@@ -109,21 +139,32 @@ in {
       serviceConfig.AmbientCapabilities = [ "CAP_DAC_READ_SEARCH" ];
       unitConfig.RequiresMountsFor = [ cfg.provisioning.dataRoot ];
     };
-    systemd.services.loomd = lib.mkIf backupEnabled {
+    systemd.services.loomd = lib.mkMerge [ (lib.mkIf backupEnabled {
       environment.LOOM_APPLICATION_DATA_BACKUP_ROOT = cfg.provisioning.dataRoot;
       # Reading private application data is a node-level authority decision.
       # Keep application modes/ACLs and the existing single Borg pipeline intact.
       serviceConfig.AmbientCapabilities = [ "CAP_DAC_READ_SEARCH" ];
       unitConfig.RequiresMountsFor = [ cfg.provisioning.dataRoot ];
       after = [ "systemd-tmpfiles-setup.service" ];
-    };
+    }) (lib.mkIf sourceEnabled {
+      environment = {
+        LOOM_APPLICATION_BUILD_NIXPKGS = "${pkgs.path}";
+        LOOM_APPLICATION_BUILD_PLATFORM = pkgs.stdenv.hostPlatform.system;
+        LOOM_APPLICATION_BUILD_NIX = "${pkgs.nix}/bin/nix";
+        LOOM_APPLICATION_BUILD_LAUNCHER = "${self.packages.${pkgs.stdenv.hostPlatform.system}.loom-application-launcher}";
+        LOOM_APPLICATION_BUILD_RUST_VERSION = pkgs.rustc.version;
+        LOOM_APPLICATION_BUILD_PREFETCH_GIT = "${pkgs.nix-prefetch-git}/bin/nix-prefetch-git";
+      };
+      serviceConfig.ReadWritePaths = [ "/var/lib/loom/application-builds" ];
+    }) ];
     systemd.tmpfiles.rules = [
       "d /run/loom-project-applications 0750 root ${cfg.installerGroup} -"
       "d ${stateRoot} 0700 root root -"
       "d /var/lib/loom-project-application-configs 0711 root root -"
       "d /nix/var/nix/gcroots/loom-project-applications 0755 root root -"
     ] ++ lib.optional cfg.edge.enable "d ${edgeRoot} 0755 root root -"
-      ++ lib.optional protonEnabled "d ${credentialRoot} 0700 root root -";
+      ++ lib.optional (protonEnabled || importEnabled) "d ${credentialRoot} 0700 root root -"
+      ++ lib.optional sourceEnabled "d /var/lib/loom/application-builds 0700 loom loom -";
     # tmpfiles refuses the intentional operator -> root ownership transition
     # below the mounted service root. Create only these fixed module-owned dirs.
     systemd.services.loom-project-application-directories = lib.mkIf cfg.provisioning.enable {
@@ -174,7 +215,7 @@ in {
       requires = lib.optional cfg.provisioning.enable "loom-project-application-directories.service";
       description = "Restore permitted committed LOOM applications";
       wantedBy = [ "multi-user.target" ];
-      after = [ "local-fs.target" "systemd-sysusers.service" "systemd-tmpfiles-setup.service" ] ++ lib.optional cfg.edge.enable "caddy.service" ++ lib.optional cfg.provisioning.enable "loom-project-application-directories.service";
+      after = [ "local-fs.target" "systemd-sysusers.service" "systemd-tmpfiles-setup.service" "firewall.service" ] ++ lib.optional cfg.edge.enable "caddy.service" ++ lib.optional cfg.provisioning.enable "loom-project-application-directories.service";
       serviceConfig = helperSandbox // {
         ExecStart = "${cfg.package}/bin/loom-service-manager --application-restore";
         StandardInput = "null";

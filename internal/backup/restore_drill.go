@@ -208,6 +208,9 @@ func PlanOperationalRestoreDrill(ctx context.Context, input OperationalRestoreDr
 	if verification.Status != "succeeded" || verification.Manifest == nil {
 		return OperationalRestoreDrillPlan{}, loomerrors.New("backup.operational_verification_failed", "backup", input.PackageDir, "Operational recovery package verification failed.")
 	}
+	if len(verification.Manifest.PostgresExtensions) != 0 && strings.TrimSpace(input.ExpectedManifestSHA256) == "" {
+		return OperationalRestoreDrillPlan{}, loomerrors.New("backup.extension_manifest_identity_required", "backup", "manifest_sha256", "Pinned extension recovery requires an independently authenticated manifest identity.")
+	}
 	input.ActiveDatabase = strings.TrimSpace(input.ActiveDatabase)
 	if input.ActiveDatabase == "" {
 		input.ActiveDatabase = "loom_main"
@@ -232,7 +235,19 @@ func PlanOperationalRestoreDrill(ctx context.Context, input OperationalRestoreDr
 }
 
 func RunOperationalRestoreDrill(ctx context.Context, input OperationalRestoreDrillInput) (OperationalRestoreDrillResult, error) {
+	return runOperationalRestoreDrill(ctx, input, true)
+}
+
+func runOperationalRestoreDrill(ctx context.Context, input OperationalRestoreDrillInput, liveStoreLease bool) (OperationalRestoreDrillResult, error) {
 	startedAt := currentTime(input.Now)
+	packageDir := filepath.Clean(strings.TrimSpace(input.PackageDir))
+	if liveStoreLease && strings.HasPrefix(filepath.Base(packageDir), "operational-") {
+		lease, err := backupstrategy.LockOperationalPackages(filepath.Dir(packageDir), false)
+		if err != nil {
+			return OperationalRestoreDrillResult{}, err
+		}
+		defer lease.Close()
+	}
 	plan, err := PlanOperationalRestoreDrill(ctx, input)
 	if err != nil {
 		return OperationalRestoreDrillResult{}, err
@@ -287,6 +302,7 @@ func RunOperationalRestoreDrill(ctx context.Context, input OperationalRestoreDri
 	authorityResult, restoreErr := input.Authority.Restore(ctx, restoreauthority.RestoreRequest{
 		Kind: restoreauthority.KindOperational, Database: plan.TargetDatabase,
 		DumpSize: dumpArtifact.SizeBytes, DumpSHA256: strings.ToLower(strings.TrimSpace(dumpArtifact.SHA256)), Dump: dump.Reader(),
+		Extensions: append([]restoreauthority.ExtensionRequirement(nil), plan.Verification.Manifest.PostgresExtensions...),
 	})
 	driftErr := dump.VerifySource()
 	if restoreErr == nil {
@@ -663,12 +679,14 @@ func RunDirectArchiveRestoreDrill(ctx context.Context, input DirectArchiveRestor
 	operationalStep := input.OperationalRestore
 	if operationalStep == nil {
 		operationalStep = func(ctx context.Context, step DirectArchiveRecoveryStepInput) (DirectArchiveRecoveryStepResult, error) {
-			restored, err := RunOperationalRestoreDrill(ctx, OperationalRestoreDrillInput{
+			// This authenticated isolated extraction is not the live retention
+			// store. Creating its store lock would mutate the verified archive.
+			restored, err := runOperationalRestoreDrill(ctx, OperationalRestoreDrillInput{
 				PackageDir: step.PackageDir, ExpectedManifestSHA256: step.ManifestSHA256, ExpectedPackageID: step.PackageID,
 				TargetDatabase: plan.OperationalRestorePlan.TargetDatabase, ActiveDatabase: plan.OperationalRestorePlan.ActiveDatabase,
 				Owner: plan.OperationalRestorePlan.Owner, KeepDatabase: plan.OperationalRestorePlan.KeepDatabase,
 				Runner: input.Runner, Authority: input.Authority, Now: input.Now,
-			})
+			}, false)
 			if err != nil {
 				return DirectArchiveRecoveryStepResult{}, err
 			}
@@ -1141,6 +1159,9 @@ func RunRestoreDrill(ctx context.Context, input RestoreDrillInput) (RestoreDrill
 	normalized, verification, manifest, err := normalizeRestoreDrillInput(ctx, &input)
 	if err != nil {
 		return RestoreDrillResult{}, err
+	}
+	if len(manifest.Database.Extensions) != 0 {
+		return RestoreDrillResult{}, loomerrors.New("backup.restore_authority_required", "backup", "restore_authority", "Pinned extension recovery requires the authenticated operational package and typed restore authority.")
 	}
 	if err := requireBackupArtifactsForRestoreDrill(ctx, normalized.BackupDir, manifest); err != nil {
 		return RestoreDrillResult{}, err

@@ -15,11 +15,33 @@ type NotesSearchLifecycleGroup struct {
 	ResultCount     int             `json:"result_count"`
 }
 
-// This cache belongs to one sequential search request, never the service.
+// The embedding worker never receives the SQL transaction. Its result is read
+// only after done closes, and every request joins it even on an early SQL error.
 type notesQueryEmbedding struct {
 	loaded bool
 	vector []float32
 	err    error
+	done   chan struct{}
+}
+
+func (q *notesQueryEmbedding) wait() {
+	if q != nil && q.done != nil {
+		<-q.done
+	}
+}
+
+func (s *Service) startNotesQueryEmbedding(ctx context.Context, query string, settings EmbeddingSettings) (*notesQueryEmbedding, func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	q := &notesQueryEmbedding{done: make(chan struct{})}
+	go func() {
+		defer close(q.done)
+		q.vector, q.err = s.notesSearchQueryVector(ctx, NotesSearchInput{Query: query}, settings)
+		q.loaded = true
+	}()
+	return q, func() {
+		cancel()
+		q.wait()
+	}
 }
 
 type notesSearchPartition struct {
@@ -34,9 +56,9 @@ type notesSearchPartition struct {
 func (s *Service) searchNotesLifecycles(ctx context.Context, input NotesSearchInput, mode, requested string, semanticAvailable bool, fallback string, settings EmbeddingSettings) (NotesSearchResultSet, error) {
 	input.queryEmbedding = &notesQueryEmbedding{}
 	if mode != NotesSearchModeLexical && fallback == "" {
-		if _, err := s.notesSearchQueryVector(ctx, input, settings); err != nil && (mode != NotesSearchModeHybrid || !semanticSearchFallbackAllowed(err)) {
-			return NotesSearchResultSet{}, err
-		}
+		var finish func()
+		input.queryEmbedding, finish = s.startNotesQueryEmbedding(ctx, input.Query, settings)
+		defer finish()
 	}
 	tx, err := s.store.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
@@ -48,13 +70,26 @@ func (s *Service) searchNotesLifecycles(ctx context.Context, input NotesSearchIn
 	if err := s.prepareIndexedNotesSearch(ctx, &input, mode, fallback, settings); err != nil {
 		return NotesSearchResultSet{}, err
 	}
+	// Also join for the pre-index compatibility reader, which has no candidate
+	// phase at which to await the vector.
+	if mode != NotesSearchModeLexical && fallback == "" {
+		if _, err := s.notesSearchQueryVector(ctx, input, settings); err != nil && (mode != NotesSearchModeHybrid || !semanticSearchFallbackAllowed(err)) {
+			return NotesSearchResultSet{}, err
+		}
+	}
+	now := s.currentTime()
+	if input.fileView && input.indexed != nil {
+		if err := s.selectIndexedNotesFiles(ctx, input, mode, now); err != nil {
+			return NotesSearchResultSet{}, err
+		}
+	}
 	if input.indexed == nil && mode == NotesSearchModeHybrid && fallback == "" && input.queryEmbedding.err == nil {
 		input.visibleObjectIDsJSON, err = s.loadNotesVisibleObjectIDs(ctx, input)
 		if err != nil {
 			return NotesSearchResultSet{}, err
 		}
 	}
-	if mode != NotesSearchModeLexical && fallback == "" && input.queryEmbedding.err == nil {
+	if mode != NotesSearchModeLexical && fallback == "" && input.queryEmbedding.err == nil && notesFileHydratesLane(input, true) {
 		semanticInput := input
 		semanticInput.Mode = mode
 		input.semanticBatch, err = s.loadNotesSemanticBatch(ctx, semanticInput, settings, input.queryEmbedding.vector)
@@ -62,13 +97,12 @@ func (s *Service) searchNotesLifecycles(ctx context.Context, input NotesSearchIn
 			return NotesSearchResultSet{}, err
 		}
 	}
-	if mode != NotesSearchModeSemantic {
+	if mode != NotesSearchModeSemantic && notesFileHydratesLane(input, false) {
 		input.lexicalBatch, err = s.loadNotesLexicalBatch(ctx, input)
 		if err != nil {
 			return NotesSearchResultSet{}, err
 		}
 	}
-	now := s.currentTime()
 	active, archived := notesSearchPartition{}, notesSearchPartition{}
 	if input.SourceLifecycle != SourceLifecycleFilterArchived {
 		activeInput := input
@@ -84,9 +118,11 @@ func (s *Service) searchNotesLifecycles(ctx context.Context, input NotesSearchIn
 	if input.SourceLifecycle == SourceLifecycleFilterActive {
 		archiveInput.Limit = 50
 	}
-	archived, err = s.searchNotesPartition(ctx, archiveInput, mode, settings, fallback, now)
-	if err != nil {
-		return NotesSearchResultSet{}, err
+	if !input.fileView || input.SourceLifecycle != SourceLifecycleFilterActive {
+		archived, err = s.searchNotesPartition(ctx, archiveInput, mode, settings, fallback, now)
+		if err != nil {
+			return NotesSearchResultSet{}, err
+		}
 	}
 	out := NotesSearchResultSet{Query: notesSearchDisplayQuery(input), Mode: mode, RequestedMode: requested,
 		SemanticAvailable: semanticAvailable, FallbackReason: firstNonEmpty(fallback, active.fallback, archived.fallback),
@@ -107,6 +143,7 @@ func (s *Service) searchNotesLifecycles(ctx context.Context, input NotesSearchIn
 		out.ArchivedMatchesOmitted, out.ArchivedMatchesOmittedTruncated = archived.matches, archived.truncated
 	}
 	out.ResultCount = len(out.Results)
+	out.Coverage = notesSearchReturnedCoverage(out.Results)
 	out.CandidateRetrievalTruncated = active.truncated || archived.truncated
 	if input.SourceLifecycle != SourceLifecycleFilterArchived {
 		out.RefreshingMatchesOmitted += active.omitted
@@ -115,6 +152,11 @@ func (s *Service) searchNotesLifecycles(ctx context.Context, input NotesSearchIn
 	if input.SourceLifecycle != SourceLifecycleFilterActive {
 		out.RefreshingMatchesOmitted += archived.omitted
 		out.RefreshingMatchesOmittedTruncated = out.RefreshingMatchesOmittedTruncated || archived.omittedTruncated
+	}
+	if input.fileView {
+		if err := s.loadNotesFileIdentities(ctx, input, out.Results); err != nil {
+			return NotesSearchResultSet{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return NotesSearchResultSet{}, err
@@ -137,6 +179,15 @@ func (s *Service) loadNotesVisibleObjectIDs(ctx context.Context, input NotesSear
 	}
 	input.SourceLifecycle = SourceLifecycleFilterAll
 	input.visibleObjectIDsJSON = ""
+	input.indexedNoCustody = false
+	if input.candidateObjectIDsJSON != "" {
+		if err := input.readTx.QueryRowContext(ctx, `SELECT NOT EXISTS (
+ SELECT 1 FROM jsonb_array_elements_text($1::jsonb) requested(id)
+ JOIN knowledge.notes_custody_transitions history ON history.knowledge_object_id=requested.id)`,
+			input.candidateObjectIDsJSON).Scan(&input.indexedNoCustody); err != nil {
+			return "", err
+		}
+	}
 	var args []any
 	query := "SELECT knowledge_object_id FROM (" + notesSearchObjectsSQL(input, &args) + ") visible_objects"
 	rows, err := input.readTx.QueryContext(ctx, query, args...)
@@ -168,7 +219,7 @@ func notesLifecycleGroupLimits(active, archived, limit int) (int, int) {
 
 func (s *Service) searchNotesPartition(ctx context.Context, input NotesSearchInput, mode string, settings EmbeddingSettings, fallback string, now time.Time) (notesSearchPartition, error) {
 	part := notesSearchPartition{results: []NotesSearchResult{}, fallback: fallback}
-	if input.RequireCurrent {
+	if input.RequireCurrent && !input.fileView {
 		all := input
 		all.RequireCurrent = false
 		all.Limit = 50
@@ -184,6 +235,9 @@ func (s *Service) searchNotesPartition(ctx context.Context, input NotesSearchInp
 		part.omittedTruncated = unrestricted.truncated || len(unrestricted.results) == 50
 	}
 	input.Mode = mode
+	if input.fileView && input.indexed != nil && input.indexed.filePartitions != nil {
+		return selectedNotesFilePartition(input, fallback), nil
+	}
 	var lexicalResults, semanticResults []NotesSearchResult
 	var err error
 	if mode != NotesSearchModeSemantic {

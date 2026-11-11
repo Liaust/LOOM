@@ -1,0 +1,117 @@
+--- a/hermes_cli/mcp_startup.py
++++ b/hermes_cli/mcp_startup.py
+@@ -90,7 +90,8 @@
+     return pending if _mcp_server_filter is None else [n for n in pending if n in _mcp_server_filter]
+ 
+ 
+-def start_background_mcp_discovery(*, logger, thread_name: str) -> None:
++def start_background_mcp_discovery(*, logger, thread_name: str,
++                                   allowed_mcp_names: Optional[list[str]] = None) -> None:
+     """Spawn one background MCP discovery thread per profile home.
+ 
+     If the first run exits without connecting any server (e.g. startup cancellation / OOM restart),
+@@ -109,7 +110,8 @@
+                 connected = _any_mcp_connected()
+                 pending = _servers_awaiting_connect() if connected else []
+             except Exception:
+-                return
++                logger.warning("MCP discovery status failed; retrying discovery", exc_info=True)
++                connected, pending = False, []
+             if connected and not pending:
+                 return
+             if connected:
+@@ -134,14 +136,17 @@
+         # The config gate above already runs on the caller's thread, so it sees the same context.
+         def _discover() -> None:
+             try:
+-                _discover_mcp_tools_without_interactive_oauth()
++                if allowed_mcp_names is None:
++                    _discover_mcp_tools_without_interactive_oauth()
++                else:
++                    _discover_mcp_tools_without_interactive_oauth(allowed_mcp_names=allowed_mcp_names)
+                 try:
+                     if not _any_mcp_connected():
+                         logger.warning("Background MCP discovery completed with zero connected servers")
+                 except Exception:
+                     logger.debug("Failed to inspect MCP status after background discovery", exc_info=True)
+             except Exception:
+-                logger.debug("Background MCP tool discovery failed", exc_info=True)
++                logger.warning("Background MCP tool discovery failed", exc_info=True)
+             finally:
+                 with _mcp_discovery_lock:
+                     _mcp_discovery_thread.pop(home_key, None)
+@@ -195,7 +200,7 @@
+         sys.setswitchinterval(prev)
+ 
+ 
+-def _discover_mcp_tools_without_interactive_oauth() -> None:
++def _discover_mcp_tools_without_interactive_oauth(*, allowed_mcp_names: Optional[list[str]] = None) -> None:
+     """Run MCP discovery without letting OAuth read from the user's stdin."""
+     try:
+         from tools.mcp_oauth import suppress_interactive_oauth
+@@ -208,12 +213,48 @@
+         # Only pass the kwarg when a filter is set: many tests (and any
+         # out-of-tree caller) stub discover_mcp_tools with a zero-arg
+         # callable, and the unfiltered call shape is unchanged.
+-        if _mcp_server_filter is None:
++        allowed = allowed_mcp_names
++        if _mcp_server_filter is not None:
++            allowed = list(_mcp_server_filter) if allowed is None else [
++                name for name in allowed if name in _mcp_server_filter]
++        if allowed is None:
+             discover_mcp_tools()
+         else:
+-            discover_mcp_tools(allowed_mcp_names=_mcp_server_filter)
++            discover_mcp_tools(allowed_mcp_names=allowed)
+ 
+ 
++def ensure_mcp_discovery_for_tool_lookup(*, enabled_toolsets=None, disabled_toolsets=None) -> None:
++    """Recover missing MCP registrations when the agent actually requests its catalogue.
++
++    Startup is deliberately deferred and bounded; a failed/slow first pass must not
++    leave an existing conversation permanently tool-less. Reuse its profile-scoped
++    discovery owner, not a standalone probe or an unbounded reconnect worker.
++    """
++    from tools.mcp_tool_discovery import get_mcp_status
++    import logging
++
++    enabled = None if enabled_toolsets is None else set(enabled_toolsets)
++    disabled = set(disabled_toolsets or [])
++    names = []
++    for entry in get_mcp_status() or []:
++        name = entry["name"]
++        aliases = {name, "mcp-" + name}
++        if (not entry.get("enabled", True) or entry.get("status") == "disabled"
++                or aliases & disabled or (enabled is not None and not aliases & enabled)
++                or (_mcp_server_filter is not None and name not in _mcp_server_filter)):
++            continue
++        if (entry.get("connected") or entry.get("status") == "lazy") and entry.get("tools", 0):
++            continue
++        names.append(name)
++    if not names:
++        return
++    start_background_mcp_discovery(logger=logging.getLogger(__name__),
++                                   thread_name="mcp-tool-lookup", allowed_mcp_names=names)
++    # Explicit lookups, unlike startup hydration, need a usable answer on this call.
++    # Join only this profile's thread; never fire an unrelated deferred startup here.
++    join_mcp_discovery(timeout=_resolve_discovery_timeout(None, single_query=True))
++
++
+ def defer_background_mcp_discovery(*, logger, thread_name: str, delay: float | None) -> None:
+     """Arm ``start_background_mcp_discovery`` to run ``delay`` seconds from now.
+ 
+--- a/model_tools.py
++++ b/model_tools.py
+@@ -715,6 +715,12 @@
+         return None
+     # Un-collapsed catalog scoped to the session's toolsets, so a restricted
+     # session (subagent, kanban worker) can't reach the whole registry via the bridge.
++    try:
++        from hermes_cli.mcp_startup import ensure_mcp_discovery_for_tool_lookup
++        ensure_mcp_discovery_for_tool_lookup(enabled_toolsets=enabled_toolsets,
++                                              disabled_toolsets=disabled_toolsets)
++    except Exception:
++        logger.warning("MCP lookup readiness failed", exc_info=True)
+     try:
+         current_defs = get_tool_definitions(enabled_toolsets=enabled_toolsets, disabled_toolsets=disabled_toolsets,
+                                             quiet_mode=True, skip_tool_search_assembly=True) or []

@@ -93,7 +93,11 @@ func scaffoldDeclarationProject(input ScaffoldOptions) (result ScaffoldResult, e
 			return result, fmt.Errorf("create conflicts with existing project identity; source preserved")
 		}
 		// Creation is a replay of the constructor, not a declaration update.
-		if len(d.Resources) > 0 || (d.Project.Status != "" && d.Project.Status != ProjectStatusDraft) {
+		constructorResources := map[ResourceKey]ResourceDeclaration{}
+		if d.SchemaVersion == ProjectSchemaV06 {
+			constructorResources = defaultFilesystemResources()
+		}
+		if !reflect.DeepEqual(d.Resources, constructorResources) || d.Files != nil || (d.Project.Status != "" && d.Project.Status != ProjectStatusDraft) {
 			return result, fmt.Errorf("create conflicts with an evolved declaration; source preserved")
 		}
 		result.ProjectID = d.Project.ID
@@ -105,7 +109,7 @@ func scaffoldDeclarationProject(input ScaffoldOptions) (result ScaffoldResult, e
 			result.Files = append(result.Files, ScaffoldFileResult{Path: CanonicalRootContractPath, Kind: "root_contract", Action: "planned"})
 		} else {
 			result.ProjectID = ids.NewProjectID()
-			d := ProjectDeclaration{Kind: ProjectKind, SchemaVersion: ProjectSchemaV05, Project: ProjectSpec{ID: result.ProjectID, Name: options.Name, Slug: options.Slug, OwnerNode: options.OwnerNode}, Resources: map[ResourceKey]ResourceDeclaration{}}
+			d := ProjectDeclaration{Kind: ProjectKind, SchemaVersion: ProjectSchemaV06, Project: ProjectSpec{ID: result.ProjectID, Name: options.Name, Slug: options.Slug, OwnerNode: options.OwnerNode}, Resources: defaultFilesystemResources()}
 			raw, err = yaml.Marshal(d)
 			if err != nil {
 				return result, err
@@ -168,4 +172,12 @@ func scaffoldDeclarationProject(input ScaffoldOptions) (result ScaffoldResult, e
 		return result, fmt.Errorf("published project failed validation")
 	}
 	return result, nil
+}
+
+func defaultFilesystemResources() map[ResourceKey]ResourceDeclaration {
+	return map[ResourceKey]ResourceDeclaration{"files": {Kind: DeclarationKnowledge, Knowledge: &KnowledgeDeclaration{Path: ".", Category: KnowledgeCategoryNotes}}}
+}
+
+func IsDefaultFilesystemDeclaration(d ProjectDeclaration) bool {
+	return d.SchemaVersion == ProjectSchemaV06 && d.Files == nil && d.LegacyContracts == nil && reflect.DeepEqual(d.Resources, defaultFilesystemResources())
 }

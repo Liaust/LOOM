@@ -196,7 +196,12 @@ EOF
 cmd_sudo() {
   [[ $# -gt 0 ]] || fail "sudo requires a remote command"
   if ssh_remote sudo -n true >/dev/null 2>&1; then
-    ssh_remote sudo -n -- "$@"
+    local remote_command="sudo -n --"
+    local arg
+    for arg in "$@"; do
+      remote_command+=" $(printf '%q' "$arg")"
+    done
+    ssh_remote "$remote_command"
     return $?
   fi
 
@@ -392,6 +397,57 @@ cmd_safe_check() {
   '
 }
 
+require_recovery_idle() {
+  local state
+  if ! state="$(ssh_remote systemctl show --property=ActiveState --value loom-notes-recovery.service)"; then
+    fail "could not inspect Main Notes recovery; do not start an update with unknown capture activity"
+  fi
+  case "$state" in
+    inactive|failed) ;;
+    active|activating|deactivating)
+      fail "Main Notes recovery is $state; wait for capture/resumption before updating (a loomd restart would interrupt it)" ;;
+    *) fail "unknown Main Notes recovery state: $state" ;;
+  esac
+
+  local worker status
+  for worker in main.main_backup main.cloud_snapshot_upload; do
+    if ! status="$(ssh_remote loom --config /etc/loom/loom.env worker inspect "$worker" --json)"; then
+      fail "could not inspect $worker; do not update with unknown recovery activity"
+    fi
+    if ! printf '%s' "$status" | jq -e --arg worker "$worker" \
+      '.ok == true and .data.instance.worker_key == $worker' >/dev/null; then
+      fail "invalid $worker status; do not update with unknown recovery activity"
+    fi
+    if printf '%s' "$status" | jq -e \
+      '.data.current_run != null or ((.data.instance.current_run_id // "") != "")' >/dev/null; then
+      fail "$worker has an active run; wait for recovery to finish before updating"
+    fi
+  done
+
+  local builds phase
+  for phase in queued running; do
+    if ! builds="$(ssh_remote loom --config /etc/loom/loom.env --all-boxes jobs list --type application_build --status "$phase" --limit 1 --json)"; then
+      fail "could not inspect application build jobs; do not activate with unknown producer activity"
+    fi
+    if ! printf '%s' "$builds" | jq -e '.ok == true and (.data | type == "array")' >/dev/null; then
+      fail "invalid application build job response"
+    fi
+    if printf '%s' "$builds" | jq -e '.data | length > 0' >/dev/null; then
+      fail "an application build is $phase; preserve its attempt and wait before activation"
+    fi
+  done
+  if status="$(ssh_remote loom --config /etc/loom/loom.env worker inspect main.application_builder --json)"; then
+    if ! printf '%s' "$status" | jq -e '.ok == true and .data.instance.worker_key == "main.application_builder"' >/dev/null; then
+      fail "invalid application builder response"
+    fi
+    if printf '%s' "$status" | jq -e '.data.current_run != null or ((.data.instance.current_run_id // "") != "")' >/dev/null; then
+      fail "application builder has an active build/continuation; wait before activation"
+    fi
+  elif ! printf '%s' "$status" | jq -e '.ok == false and .error.code == "workers.not_found"' >/dev/null; then
+    fail "could not inspect application builder activity"
+  fi
+}
+
 cmd_update_apply() {
   local args=("$@")
 
@@ -436,6 +492,10 @@ cmd_update_apply() {
   require_remote_host
   require_remote_command_args "$release_path" "$flake_output" "${args[@]}"
 
+  if ! args_contains --dry-run "${args[@]}" && ! args_contains --skip-rebuild "${args[@]}"; then
+    require_recovery_idle
+  fi
+
   if [[ -n "$source" ]]; then
     [[ -d "$source" ]] || fail "LOOM_MAIN_UPDATE_SOURCE is not a directory: $source"
     require_command rsync
@@ -455,6 +515,18 @@ cmd_update_apply() {
     printf 'loom-main: creating production backup on %s\n' "$HOST" >&2
     local backup_json
     backup_json="$(ssh_remote loom --config /etc/loom/loom.env --json backup create --production --reason "pre-update-backup-for:$release_path")"
+    if ! printf '%s\n' "$backup_json" | jq -e '
+      .ok != false
+      and ((.data.run.run_status // "succeeded") == "succeeded")
+      and ((.data.run.result_summary_json.status // "succeeded") == "succeeded")
+    ' >/dev/null; then
+      local backup_error
+      backup_error="$(printf '%s\n' "$backup_json" | jq -r '
+        .data.run.error_json.message // .error.summary //
+        ("backup run status: " + (.data.run.run_status // .data.run.result_summary_json.status // "unknown"))
+      ')"
+      fail "production backup did not succeed: $backup_error"
+    fi
     local backup_path
     backup_path="$(printf '%s\n' "$backup_json" | jq -r '
       .data.run.result_summary_json as $summary
@@ -472,6 +544,11 @@ cmd_update_apply() {
   fi
 
   require_remote_command_args "${args[@]}"
+  # A backup/source sync may take minutes. Recheck immediately before the
+  # transaction rather than interrupting a capture that began in the meantime.
+  if ! args_contains --dry-run "${args[@]}" && ! args_contains --skip-rebuild "${args[@]}"; then
+    require_recovery_idle
+  fi
   ssh_remote_tty_keychain_sudo loom --config /etc/loom/loom.env update apply "${args[@]}"
 }
 

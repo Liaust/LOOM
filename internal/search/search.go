@@ -16,6 +16,7 @@ import (
 
 	"loom.local/loom/internal/events"
 	"loom.local/loom/internal/ids"
+	"loom.local/loom/internal/objects"
 	"loom.local/loom/internal/objectstore"
 	"loom.local/loom/internal/projects"
 	"loom.local/loom/internal/requestctx"
@@ -32,12 +33,17 @@ const (
 )
 
 type Service struct {
-	DB    *sql.DB
-	Store objectstore.Store
+	DB                      *sql.DB
+	Store                   objectstore.Store
+	notesDocumentVisibility string
 }
 
-func NewService(db *sql.DB, store objectstore.Store) Service {
-	return Service{DB: db, Store: store}
+func NewService(db *sql.DB, store objectstore.Store, notesDocumentVisibility ...string) Service {
+	s := Service{DB: db, Store: store, notesDocumentVisibility: "FALSE"}
+	if len(notesDocumentVisibility) > 0 && notesDocumentVisibility[0] != "" {
+		s.notesDocumentVisibility = notesDocumentVisibility[0]
+	}
+	return s
 }
 
 type SearchInput struct {
@@ -236,6 +242,7 @@ type IndexResult struct {
 	ChunkCount          int           `json:"chunk_count"`
 	SearchDocumentCount int           `json:"search_document_count"`
 	Status              string        `json:"status"`
+	BodyOwner           string        `json:"body_owner,omitempty"`
 	Statuses            []IndexStatus `json:"statuses,omitempty"`
 	EventIDs            []string      `json:"event_ids,omitempty"`
 }
@@ -255,6 +262,8 @@ type indexTarget struct {
 	Extension       string
 	TextExtractable bool
 	IndexPolicy     string
+	NotesBodyOwner  bool
+	CurrentVersion  bool
 }
 
 type chunkInput struct {
@@ -275,6 +284,15 @@ func (s Service) indexObjectVersionWithLimits(ctx context.Context, req requestct
 	target, err := s.resolveTarget(ctx, objectID, versionID)
 	if err != nil {
 		return IndexResult{}, err
+	}
+	if target.NotesBodyOwner || !target.CurrentVersion {
+		status, err := s.recordStatus(ctx, target, "full_text", "disabled_by_policy", "", "")
+		owner := "generic"
+		if target.NotesBodyOwner {
+			owner = "notes"
+		}
+		return IndexResult{ObjectID: target.ObjectID, ObjectVersionID: target.ObjectVersionID,
+			Status: "disabled_by_policy", BodyOwner: owner, Statuses: []IndexStatus{status}}, err
 	}
 
 	if disabledByPolicy(target.IndexPolicy) {
@@ -368,6 +386,15 @@ func (s Service) EnqueueObjectVersion(ctx context.Context, req requestctx.Contex
 		return IndexEnqueueResult{}, err
 	}
 	_ = req // reserved for enqueue events once the worker pipeline owns execution.
+	if target.NotesBodyOwner || !target.CurrentVersion {
+		status, err := s.recordStatus(ctx, target, "full_text", "disabled_by_policy", "", "")
+		reason := "Only the current file version is indexed"
+		if target.NotesBodyOwner {
+			reason = "Notes owns this file body; no generic extraction is queued"
+		}
+		return IndexEnqueueResult{ObjectID: target.ObjectID, ObjectVersionID: target.ObjectVersionID,
+			Status: "disabled_by_policy", Reason: reason, IndexStatus: status}, err
+	}
 
 	if disabledByPolicy(target.IndexPolicy) {
 		status, statusErr := s.recordStatus(ctx, target, "full_text", "disabled_by_policy", "", "")
@@ -463,6 +490,9 @@ func (s Service) EnqueueObjectVersion(ctx context.Context, req requestctx.Contex
 }
 
 func (s Service) Search(ctx context.Context, req requestctx.Context, input SearchInput) (SearchResultSet, error) {
+	if s.notesDocumentVisibility == "" {
+		s.notesDocumentVisibility = "FALSE"
+	}
 	queryText := strings.TrimSpace(input.Query)
 	if queryText == "" {
 		return SearchResultSet{}, fmt.Errorf("search query is required")
@@ -488,7 +518,16 @@ func (s Service) Search(ctx context.Context, req requestctx.Context, input Searc
 		       sd.freshness_state, sd.indexed_at
 		FROM search.search_documents sd
 		LEFT JOIN objects.objects o ON o.object_id = sd.object_id
+		LEFT JOIN files.file_metadata current_file ON current_file.object_id=sd.object_id
+		LEFT JOIN knowledge.knowledge_chunks kc ON sd.source_kind='knowledge_chunk' AND kc.knowledge_chunk_id=sd.source_id
+		LEFT JOIN knowledge.knowledge_objects ko ON ko.knowledge_object_id=COALESCE(kc.knowledge_object_id,
+		 CASE WHEN sd.source_kind='knowledge_object_metadata' THEN sd.source_id END)
+		LEFT JOIN knowledge.knowledge_object_versions kv ON kv.knowledge_object_version_id=kc.knowledge_object_version_id
 		WHERE sd.tsv @@ websearch_to_tsquery('simple', $1)
+		AND (current_file.object_id IS NULL OR sd.source_kind IN ('knowledge_chunk','knowledge_object_metadata') OR ` + objects.CurrentFileSourceSQL("current_file") + `)
+		AND (sd.source_kind NOT IN ('knowledge_chunk','knowledge_object_metadata') OR (` + s.notesDocumentVisibility + `))
+		AND (sd.source_kind<>'document_chunk' OR current_file.object_id IS NULL OR
+		 (NOT ` + objects.NotesFileBodyOwnerSQL("current_file") + ` AND sd.object_version_id=current_file.latest_version_id))
 	`
 	args := []any{queryText}
 	add := func(condition string, value any) {
@@ -864,7 +903,6 @@ func (s Service) ClaimTextWork(ctx context.Context, workerRunID string, opts Tex
 		return nil, err
 	}
 	defer tx.Rollback()
-
 	rows, err := tx.QueryContext(ctx, `
 		WITH candidates AS (
 			SELECT index_status_id AS candidate_index_status_id
@@ -1052,6 +1090,26 @@ func (s Service) writeIndex(ctx context.Context, req requestctx.Context, target 
 		return IndexResult{}, err
 	}
 	defer tx.Rollback()
+	var notesOwner, latest bool
+	if err = tx.QueryRowContext(ctx, `SELECT `+objects.NotesFileBodyOwnerSQL("f")+`, f.latest_version_id=$2
+	 FROM files.file_metadata f WHERE f.object_id=$1 FOR UPDATE OF f`, target.ObjectID, target.ObjectVersionID).Scan(&notesOwner, &latest); err != nil && err != sql.ErrNoRows {
+		return IndexResult{}, err
+	}
+	if notesOwner || (err == nil && !latest) {
+		status, err := upsertStatusTx(ctx, tx, target, "full_text", "disabled_by_policy", "", "")
+		if err != nil {
+			return IndexResult{}, err
+		}
+		if err = tx.Commit(); err != nil {
+			return IndexResult{}, err
+		}
+		owner := "generic"
+		if notesOwner {
+			owner = "notes"
+		}
+		return IndexResult{ObjectID: target.ObjectID, ObjectVersionID: target.ObjectVersionID,
+			Status: "disabled_by_policy", BodyOwner: owner, Statuses: []IndexStatus{status}}, nil
+	}
 
 	extractedTextID, err := upsertExtractedTextTx(ctx, tx, target, text)
 	if err != nil {
@@ -1408,7 +1466,8 @@ func (s Service) resolveTarget(ctx context.Context, objectID string, versionID s
 		       v.object_version_id, COALESCE(v.blob_id, ''), COALESCE(v.source_node_id, ''),
 		       COALESCE(v.mime_type, ''), COALESCE(b.storage_path, ''), COALESCE(b.hash_uri, ''),
 		       COALESCE(f.logical_name, ''), COALESCE(f.extension, ''),
-		       COALESCE(f.text_extractable, false), COALESCE(f.index_policy, 'metadata_only')
+		       COALESCE(f.text_extractable, false), COALESCE(f.index_policy, 'metadata_only'), `+objects.NotesFileBodyOwnerSQL("f")+`,
+		       (f.object_id IS NULL OR f.latest_version_id=v.object_version_id)
 		FROM objects.objects o
 		JOIN objects.object_versions v ON v.object_id = o.object_id
 		LEFT JOIN files.blobs b ON b.blob_id = v.blob_id
@@ -1432,6 +1491,8 @@ func (s Service) resolveTarget(ctx context.Context, objectID string, versionID s
 		&target.Extension,
 		&target.TextExtractable,
 		&target.IndexPolicy,
+		&target.NotesBodyOwner,
+		&target.CurrentVersion,
 	)
 	return target, err
 }

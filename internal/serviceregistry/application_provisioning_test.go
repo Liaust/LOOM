@@ -472,3 +472,42 @@ func TestApplicationProvisionHelperResponseBinding(t *testing.T) {
 		t.Fatal("ambiguous helper envelope accepted")
 	}
 }
+
+func TestApplicationProvisionHelperInitialStateObservation(t *testing.T) {
+	r, policy, request := applicationProvisionFixture(t)
+	projectsRoot := filepath.Join(filepath.Dir(r.PolicyPath), "projects")
+	projectRoot := filepath.Join(projectsRoot, "worker")
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".data"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	policy.Provisioning.ProjectRoot = projectsRoot
+	applicationPrerequisitesWrite(t, r.PolicyPath, policy)
+	request.RepositoryID = ""
+	request.SourceIdentity = request.Owner.ProjectID + "/" + request.Owner.Resource
+	request.ProjectRoot = projectRoot
+	request.ProjectState = map[string]string{"files": ".data"}
+	plan, err := r.PlanProvision(t.Context(), policy.InstallerUID, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := applicationProvisionResponse(ApplicationHelperResponse{Provision: &plan}, request, nil); err != nil {
+		t.Fatalf("root-observed initial identity refused: %v", err)
+	}
+	changed := plan
+	changed.Request.LocationRevision = "substituted"
+	changed.PlanID = applicationProvisionPlanID(changed)
+	if _, err := applicationProvisionResponse(ApplicationHelperResponse{Provision: &changed}, request, nil); err == nil {
+		t.Fatal("caller intent substitution accepted")
+	}
+	pinned := plan.Request
+	changed = plan
+	changed.Request.StateIdentities = map[string]ApplicationProjectStatePolicy{}
+	for key, state := range plan.Request.StateIdentities {
+		state.DirectoryIdentity.Inode++
+		changed.Request.StateIdentities[key] = state
+	}
+	changed.PlanID = applicationProvisionPlanID(changed)
+	if _, err := applicationProvisionResponse(ApplicationHelperResponse{Provision: &changed}, pinned, nil); err == nil {
+		t.Fatal("pinned identity substitution accepted")
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -55,6 +56,11 @@ func TestNotesOverviewUsesLatestUnifiedPipelinePostgres(t *testing.T) {
 		if len(rows) != 1 || rows[0].Count != 1 || rows[0].Status != status || rows[0].LastUpdatedAt == nil {
 			t.Fatalf("current unified trajectory missing: %#v", rows)
 		}
+		overview, err := service.GetNotesOverview(t.Context(), NotesOverviewInput{NodeKey: object.SourceNodeKey})
+		if err != nil || overview.Totals.ObjectCount != 1 || len(overview.Nodes) != 1 ||
+			len(overview.Nodes[0].Roots[0].PipelineStatuses) != 1 || overview.Nodes[0].Roots[0].PipelineStatuses[0].Status != status {
+			t.Fatalf("shared object/pipeline snapshot: %+v %v", overview, err)
+		}
 	}
 	completeRunForTest(t, db, run.KnowledgePipelineRunID)
 	next, err := service.EnsurePipelineRun(t.Context(), object, PipelinePolicy{}, true, 100)
@@ -65,11 +71,15 @@ func TestNotesOverviewUsesLatestUnifiedPipelinePostgres(t *testing.T) {
 	if err != nil || len(rows) != 1 || rows[0].Count != 1 || rows[0].Status == PipelineStatusComplete {
 		t.Fatalf("historical generation double-counted: %#v %v", rows, err)
 	}
+	other, err := service.GetNotesOverview(t.Context(), NotesOverviewInput{NodeKey: object.SourceNodeKey + "-absent"})
+	if err != nil || other.Totals.ObjectCount != 0 || other.IndexHealth.Queued != 0 {
+		t.Fatalf("selected root filter leaked objects/pipelines: %+v %v", other, err)
+	}
 }
 
 func pipelineFixture(t *testing.T, db *sql.DB, fileClass, mimeType, body string, now time.Time) (*Service, KnowledgeObject) {
 	t.Helper()
-	service := NewService(db, WithClock(func() time.Time { return now }))
+	service := NewService(db, WithClock(func() time.Time { return now }), WithSourceStagingRoot(t.TempDir()))
 	root, err := service.PrepareSourceRoot(SourceRoot{
 		RootKind: RootKindBoxNotes, NodeKey: "pipeline-test-" + ids.NewKnowledgeObjectID(),
 		BackendRootKey: "pipeline-test-" + ids.NewKnowledgeObjectID(), SourcePath: t.TempDir(),
@@ -633,12 +643,12 @@ func TestRetryPipelineFromStageReusesUpstreamOnlyPostgres(t *testing.T) {
 	if staleSourceActive != 0 {
 		t.Fatalf("retry source retained %d active artifacts after supersession", staleSourceActive)
 	}
-	status, err := service.GetPipelineOverallStatus(context.Background())
+	integrity, err := service.InspectPipelineIntegrity(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Operations.ActivationMismatches != 0 {
-		t.Fatalf("retry left %d activation mismatches", status.Operations.ActivationMismatches)
+	if integrity.IntegrityCheckedAt == nil || integrity.ActivationMismatches != 0 {
+		t.Fatalf("retry integrity = %#v", integrity)
 	}
 	if _, err = service.RetryPipeline(context.Background(), retried.KnowledgePipelineRunID, PipelineRetryInput{StageKey: "not-a-stage"}); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("invalid retry stage error = %v", err)
@@ -820,8 +830,11 @@ func stageOrdinal(stages []PipelineStageRun, key string) int {
 	return -1
 }
 
-func TestPipelineOverallStatusCountsBeyondPresentationLimitPostgres(t *testing.T) {
-	db := openPipelinePostgres(t)
+func TestPipelineOverallStatusBoundsPresentationNotTotalsPostgres(t *testing.T) {
+	db, url := boxSourcesDatabase(t)
+	if _, err := migrations.Up(t.Context(), url, filepath.Join("..", "..", "migrations")); err != nil {
+		t.Fatal(err)
+	}
 	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
 	service, first := pipelineFixture(t, db, storagecatalog.FileClassMarkdown, "text/markdown", "status-0", now)
 	objects := []KnowledgeObject{first}
@@ -851,8 +864,8 @@ func TestPipelineOverallStatusCountsBeyondPresentationLimitPostgres(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Counts[FilePipelineStatusWaitingCoordinator] < 105 {
-		t.Fatalf("waiting coordinator count = %d, want at least 105", status.Counts[FilePipelineStatusWaitingCoordinator])
+	if len(status.Counts) != 0 || status.Progress == nil || status.Progress.CountsKnown || !status.Progress.CurrentKnown || !status.Progress.WindowFull {
+		t.Fatalf("bounded queue window presented as a total: %+v", status)
 	}
 	if len(status.Current) != 100 {
 		t.Fatalf("presentation current length = %d, want 100", len(status.Current))
@@ -1283,12 +1296,12 @@ func TestPolicyDisableStalesSupersededSameVersionArtifactsPostgres(t *testing.T)
 	if activeOnStale != 0 || staleArtifact != 1 {
 		t.Fatalf("superseded artifact state: active_on_stale=%d stale_artifact=%d", activeOnStale, staleArtifact)
 	}
-	status, err := service.GetPipelineOverallStatus(context.Background())
+	status, err := service.InspectPipelineIntegrity(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Operations.ActivationMismatches != 0 {
-		t.Fatalf("derived artifact activation mismatches = %d", status.Operations.ActivationMismatches)
+	if status.IntegrityCheckedAt == nil || status.ActivationMismatches != 0 {
+		t.Fatalf("derived artifact activation mismatches = %d", status.ActivationMismatches)
 	}
 }
 
@@ -1891,4 +1904,171 @@ func (s *Service) getOrCreateKnowledgeObjectVersionTxForTest(ctx context.Context
 		return KnowledgeObjectVersion{}, err
 	}
 	return version, nil
+}
+
+func TestPipelineProgressSelectedGenerationPostgres(t *testing.T) {
+	db, url := boxSourcesDatabase(t)
+	if _, err := migrations.Up(t.Context(), url, filepath.Join("..", "..", "migrations")); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	service, object := pipelineFixture(t, db, storagecatalog.FileClassMarkdown, "text/markdown", "bounded status", now)
+	old, err := service.EnsurePipelineRun(t.Context(), object, PipelinePolicy{}, false, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeRunForTest(t, db, old.KnowledgePipelineRunID)
+	current, err := service.EnsurePipelineRun(t.Context(), object, PipelinePolicy{}, true, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Even an incorrectly retained old pending row cannot count as selected work.
+	if _, err = db.Exec(`UPDATE knowledge.pipeline_runs SET status='failed' WHERE knowledge_pipeline_run_id=$1`, old.KnowledgePipelineRunID); err != nil {
+		t.Fatal(err)
+	}
+	deadline := now.Add(time.Hour).Truncate(time.Microsecond)
+	if _, err = db.Exec(`UPDATE knowledge.pipeline_stage_runs SET status='failed_retryable',next_attempt_at=$2 WHERE knowledge_pipeline_run_id=$1 AND stage_key='metadata'`, current.KnowledgePipelineRunID, deadline); err != nil {
+		t.Fatal(err)
+	}
+	status, err := service.GetPipelineOverallStatus(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Progress == nil || !status.Progress.CurrentKnown || status.Progress.CountsKnown || len(status.Counts) != 0 || status.Operations.IntegrityCheckedAt != nil || status.Operations.Unknown["activation_mismatches"] == "" {
+		t.Fatalf("unqualified totals/integrity: %+v", status)
+	}
+	found := false
+	for _, run := range status.Progress.Runs {
+		if run.PipelineRunID == old.KnowledgePipelineRunID {
+			t.Fatal("historical run presented as selected")
+		}
+		if run.PipelineRunID != current.KnowledgePipelineRunID {
+			continue
+		}
+		found = true
+		if run.Source == nil || run.Source.ClaimSourceEligible == nil || !*run.Source.ClaimSourceEligible || run.Source.Reason != "eligible" || run.Source.RelativePath != object.RelativePath {
+			t.Fatalf("current source admission missing: %+v", run.Source)
+		}
+		if run.Publication == nil || run.Publication.BodyCurrent || run.Publication.LexicalCurrent || run.Publication.SemanticCurrent {
+			t.Fatalf("metadata-only published body: %+v", run)
+		}
+		if run.NextEligibleAt == nil || !run.NextEligibleAt.Equal(deadline) {
+			t.Fatalf("retry-not-due missing: %+v", run)
+		}
+	}
+	if !found {
+		t.Fatalf("selected run missing: %+v", status)
+	}
+	before, err := service.store.GetPipelineRun(t.Context(), current.KnowledgePipelineRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE knowledge.knowledge_objects SET deleted_at=$2 WHERE knowledge_object_id=$1`, object.KnowledgeObjectID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`UPDATE knowledge.pipeline_stage_runs SET next_attempt_at=NULL WHERE knowledge_pipeline_run_id=$1`, current.KnowledgePipelineRunID); err != nil {
+		t.Fatal(err)
+	}
+	if due, err := service.NextPipelineWorkAt(t.Context(), current.CurrentExecutionClass, now); err != nil || due != nil {
+		t.Fatalf("withdrawn source still scheduled: %v %v", due, err)
+	}
+	if claimed, err := service.ClaimPipelineRuns(t.Context(), current.CurrentExecutionClass, "fixture-worker", PipelineClaimOptions{Limit: 1, Now: now}); err != nil || len(claimed) != 0 {
+		t.Fatalf("withdrawn source still claimable: %+v %v", claimed, err)
+	}
+	detail, err := service.InspectPipeline(t.Context(), current.KnowledgePipelineRunID)
+	if err != nil || detail.Source == nil || detail.Source.ClaimSourceEligible == nil || *detail.Source.ClaimSourceEligible || detail.Source.Reason != "source_withdrawn" || detail.Source.RelativePath != "" {
+		t.Fatalf("withdrawn source reported as claimable/readable: %+v %v", detail.Source, err)
+	}
+	after, err := service.store.GetPipelineRun(t.Context(), current.KnowledgePipelineRunID)
+	if err != nil || before.Status != after.Status || !before.UpdatedAt.Equal(after.UpdatedAt) {
+		t.Fatalf("status inspection mutated pipeline: %+v %v", after, err)
+	}
+	t.Run("worker receipts", func(t *testing.T) {
+		checkPipelineWorkerProgressPostgres(t, db, service, now)
+	})
+}
+
+func checkPipelineWorkerProgressPostgres(t *testing.T, db *sql.DB, service *Service, now time.Time) {
+	t.Helper()
+	nodeID, instanceID := ids.NewNodeID(), ids.NewWorkerInstanceID()
+	if _, err := db.Exec(`INSERT INTO nodes.nodes (node_id,node_key,display_name,node_kind,node_role,runtime_class,status)
+		VALUES ($1,'pipeline-warning-main','Pipeline warning fixture','server','main','native','active')`, nodeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO workers.worker_kinds (worker_kind,display_name,runtime_owner)
+		VALUES ('knowledge_indexer','Notes indexer fixture','loomd')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO workers.worker_instances
+		(worker_instance_id,worker_key,worker_kind,display_name,owner_node_id,host_node_id,locality,enabled)
+		VALUES ($1,'main.knowledge_indexer','knowledge_indexer','Notes indexer fixture',$2,$2,'main_owned',true)`, instanceID, nodeID); err != nil {
+		t.Fatal(err)
+	}
+	currentID := ids.NewWorkerRunID()
+	if _, err := db.Exec(`INSERT INTO workers.worker_runs
+		(worker_run_id,worker_instance_id,worker_kind,run_status,trigger_kind,started_at,counters_json,result_summary_json)
+		VALUES ($1,$2,'knowledge_indexer','running','supervisor_tick',$3,'{"completed":999}',
+		'{"admission_timed_out":true,"admission_warning":{"phase":"private-sentinel","reason":"private-sentinel"}}')`, currentID, instanceID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE workers.worker_instances SET current_run_id=$2 WHERE worker_instance_id=$1`, instanceID, currentID); err != nil {
+		t.Fatal(err)
+	}
+	var historicalID string
+	for i, tc := range []struct {
+		name    string
+		summary string
+		timeout *bool
+		warning *AdmissionPhaseWarning
+	}{
+		{name: "historical unknown", summary: `{"error":"private-sentinel"}`},
+		{name: "succeeded with partial admission", summary: `{"admission_timed_out":true,"admission_warning":{"phase":"candidate_reconciliation","reason":"deadline_exceeded","elapsed_ms":800,"budget_ms":590,"retryable":true,"error":"private-sentinel"},"error":"private-sentinel","warnings":["private-sentinel"]}`,
+			timeout: boolPointer(true), warning: &AdmissionPhaseWarning{Phase: "candidate_reconciliation", Reason: "deadline_exceeded", ElapsedMS: 800, BudgetMS: 590, Retryable: true}},
+		{name: "missing phase detail", summary: `{"admission_timed_out":true}`, timeout: boolPointer(true)},
+		{name: "unsafe saved fields", summary: `{"admission_timed_out":true,"admission_warning":{"phase":"private-sentinel","reason":"private-sentinel","elapsed_ms":-8,"budget_ms":-3}}`,
+			timeout: boolPointer(true), warning: &AdmissionPhaseWarning{Phase: "unknown", Reason: "unknown"}},
+		{name: "newer complete admission", summary: `{"admission_timed_out":false}`, timeout: boolPointer(false)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runID := ids.NewWorkerRunID()
+			started := now.Add(-time.Hour + time.Duration(i)*2*time.Minute).Truncate(time.Microsecond)
+			finished := started.Add(time.Minute)
+			completed := int64(i + 3)
+			counters, err := json.Marshal(map[string]int64{"completed": completed})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO workers.worker_runs
+				(worker_run_id,worker_instance_id,worker_kind,run_status,trigger_kind,started_at,finished_at,counters_json,result_summary_json,error_json)
+				VALUES ($1,$2,'knowledge_indexer','succeeded','supervisor_tick',$3,$4,$5::jsonb,$6::jsonb,'{"message":"private-sentinel"}')`,
+				runID, instanceID, started, finished, string(counters), tc.summary); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`UPDATE workers.worker_instances SET last_run_id=$2 WHERE worker_instance_id=$1`, instanceID, runID); err != nil {
+				t.Fatal(err)
+			}
+			status, err := service.GetPipelineOverallStatus(t.Context())
+			if err != nil || status.Progress == nil || len(status.Progress.Workers) != 1 {
+				t.Fatalf("row-to-API worker missing: %+v %v", status.Progress, err)
+			}
+			worker := status.Progress.Workers[0]
+			if worker.WorkerKey != "main.knowledge_indexer" || worker.RunID != runID || worker.CurrentRunID != currentID || worker.Status != "succeeded" ||
+				worker.StartedAt == nil || !worker.StartedAt.Equal(started) || worker.FinishedAt == nil || !worker.FinishedAt.Equal(finished) ||
+				worker.Counters["completed"] != completed || worker.CounterScope != "last_finished_turn" ||
+				!reflect.DeepEqual(worker.AdmissionTimedOut, tc.timeout) || !reflect.DeepEqual(worker.AdmissionWarning, tc.warning) {
+				t.Fatalf("mixed last/current/historical receipt: %+v", worker)
+			}
+			raw, err := json.Marshal(status)
+			if err != nil || strings.Contains(string(raw), "private-sentinel") || strings.Contains(string(raw), "result_summary_json") {
+				t.Fatalf("raw saved error/summary leaked: %s %v", raw, err)
+			}
+			if i == 1 {
+				historicalID = runID
+			}
+		})
+	}
+	var retainedTimeout bool
+	if err := db.QueryRow(`SELECT (result_summary_json->>'admission_timed_out')::boolean FROM workers.worker_runs WHERE worker_run_id=$1`, historicalID).Scan(&retainedTimeout); err != nil || !retainedTimeout {
+		t.Fatalf("latest completion erased historical qualification: %t %v", retainedTimeout, err)
+	}
 }

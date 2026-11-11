@@ -42,7 +42,7 @@ func TestProjectCreateExistingScaffoldEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Declaration == nil || len(loaded.Declaration.Resources) != 0 || result.Data.ProjectID != loaded.Contract.Project.ID {
+	if loaded.Declaration == nil || !projectcontracts.IsDefaultFilesystemDeclaration(*loaded.Declaration) || result.Data.ProjectID != loaded.Contract.Project.ID {
 		t.Fatal("endpoint lost declaration identity")
 	}
 	replay, err := client.ScaffoldProject(context.Background(), "corr_create", input)

@@ -35,6 +35,7 @@ const (
 
 	OutputActionSyncObject           = "sync_object"
 	OutputActionSyncMetadata         = "sync_metadata"
+	OutputActionFileObservation      = "file_observation"
 	OutputActionDeletionRequest      = "deletion_request"
 	OutputActionBackupFile           = "backup_file"
 	OutputActionBackupMetadata       = "backup_metadata"
@@ -105,6 +106,7 @@ const (
 	FindingBackupUnsupportedByPolicy    = "backup_unsupported_by_policy"
 	FindingBackupArtifactUploadFailed   = "backup_artifact_upload_failed"
 	FindingBackupBatchUploadFailed      = "backup_batch_upload_failed"
+	FindingBackupBatchRejected          = "backup_batch_rejected"
 	FindingPathCollisionWarning         = "path_collision_warning"
 	FindingExternalSymlinkReference     = "external_symlink_reference"
 	FindingSpecialFileObserved          = "special_file_observed"
@@ -154,75 +156,80 @@ type PathObservation struct {
 }
 
 type PathState struct {
-	SchemaVersion              string                      `json:"schema_version"`
-	RootKey                    string                      `json:"root_key"`
-	PathKey                    string                      `json:"path_key"`
-	RelativePath               string                      `json:"relative_path"`
-	Status                     string                      `json:"status"`
-	Kind                       string                      `json:"kind"`
-	Classification             Classification              `json:"classification"`
-	SizeBytes                  int64                       `json:"size_bytes,omitempty"`
-	Mode                       string                      `json:"mode,omitempty"`
-	ModifiedAt                 *time.Time                  `json:"modified_at,omitempty"`
-	ContentHashURI             string                      `json:"content_hash_uri,omitempty"`
-	HashObservedAt             *time.Time                  `json:"hash_observed_at,omitempty"`
-	HashVerifiedAt             *time.Time                  `json:"hash_verified_at,omitempty"`
-	HashStatus                 string                      `json:"hash_status,omitempty"`
-	SyncStatus                 string                      `json:"sync_status,omitempty"`
-	IndexStatus                string                      `json:"index_status,omitempty"`
-	DeletionStatus             string                      `json:"deletion_status,omitempty"`
-	BackupStatus               string                      `json:"backup_status,omitempty"`
-	BackupMode                 string                      `json:"backup_mode,omitempty"`
-	LocalObjectID              string                      `json:"local_object_id,omitempty"`
-	LocalVersionID             string                      `json:"local_version_id,omitempty"`
-	LocalSyncOutboxID          string                      `json:"local_sync_outbox_id,omitempty"`
-	LocalBackupArtifactID      string                      `json:"local_backup_artifact_id,omitempty"`
-	LocalBackupOutboxID        string                      `json:"local_backup_outbox_id,omitempty"`
-	LocalBackupBatchID         string                      `json:"local_backup_batch_id,omitempty"`
-	LastQueuedHashURI          string                      `json:"last_queued_hash_uri,omitempty"`
-	LastSyncedHashURI          string                      `json:"last_synced_hash_uri,omitempty"`
-	LastSyncedModifiedAt       *time.Time                  `json:"last_synced_modified_at,omitempty"`
-	LastQueuedMetadataMtime    *time.Time                  `json:"last_queued_metadata_mtime,omitempty"`
-	LastSyncedMetadataSequence int64                       `json:"last_synced_metadata_sequence,omitempty"`
-	LastQueuedBackupHashURI    string                      `json:"last_queued_backup_hash_uri,omitempty"`
-	LastBackedUpHashURI        string                      `json:"last_backed_up_hash_uri,omitempty"`
-	MainObjectID               string                      `json:"main_object_id,omitempty"`
-	MainVersionID              string                      `json:"main_version_id,omitempty"`
-	MainBlobID                 string                      `json:"main_blob_id,omitempty"`
-	MainBackupBatchID          string                      `json:"main_backup_batch_id,omitempty"`
-	MainBackupItemID           string                      `json:"main_backup_item_id,omitempty"`
-	PrivateBackupOperationID   string                      `json:"private_backup_operation_id,omitempty"`
-	FileTransferID             string                      `json:"file_transfer_id,omitempty"`
-	FileTransferStorageEntryID string                      `json:"file_transfer_storage_entry_id,omitempty"`
-	DeletionRequestID          string                      `json:"deletion_request_id,omitempty"`
-	BackupDeletionMarkerID     string                      `json:"backup_deletion_marker_id,omitempty"`
-	LastOutputPlannedAt        *time.Time                  `json:"last_output_planned_at,omitempty"`
-	LastOutputAppliedAt        *time.Time                  `json:"last_output_applied_at,omitempty"`
-	LastBackupQueuedAt         *time.Time                  `json:"last_backup_queued_at,omitempty"`
-	LastBackedUpAt             *time.Time                  `json:"last_backed_up_at,omitempty"`
-	LastOutputErrorCode        string                      `json:"last_output_error_code,omitempty"`
-	LastOutputErrorMessage     string                      `json:"last_output_error_message,omitempty"`
-	LastBackupErrorCode        string                      `json:"last_backup_error_code,omitempty"`
-	LastBackupErrorMessage     string                      `json:"last_backup_error_message,omitempty"`
-	Fidelity                   *filesystemmeta.Observation `json:"fidelity,omitempty"`
-	FirstSeenAt                time.Time                   `json:"first_seen_at"`
-	LastSeenAt                 time.Time                   `json:"last_seen_at"`
-	LastScannedAt              time.Time                   `json:"last_scanned_at"`
-	DeletedAt                  *time.Time                  `json:"deleted_at,omitempty"`
-	LastErrorCode              string                      `json:"last_error_code,omitempty"`
-	LastErrorMessage           string                      `json:"last_error_message,omitempty"`
-	Metadata                   json.RawMessage             `json:"metadata,omitempty"`
+	FullScanID                  string                      `json:"full_scan_id,omitempty"`
+	SchemaVersion               string                      `json:"schema_version"`
+	RootKey                     string                      `json:"root_key"`
+	PathKey                     string                      `json:"path_key"`
+	RelativePath                string                      `json:"relative_path"`
+	Status                      string                      `json:"status"`
+	Kind                        string                      `json:"kind"`
+	Classification              Classification              `json:"classification"`
+	SizeBytes                   int64                       `json:"size_bytes,omitempty"`
+	Mode                        string                      `json:"mode,omitempty"`
+	ModifiedAt                  *time.Time                  `json:"modified_at,omitempty"`
+	ContentHashURI              string                      `json:"content_hash_uri,omitempty"`
+	HashObservedAt              *time.Time                  `json:"hash_observed_at,omitempty"`
+	HashVerifiedAt              *time.Time                  `json:"hash_verified_at,omitempty"`
+	HashStatus                  string                      `json:"hash_status,omitempty"`
+	SyncStatus                  string                      `json:"sync_status,omitempty"`
+	IndexStatus                 string                      `json:"index_status,omitempty"`
+	DeletionStatus              string                      `json:"deletion_status,omitempty"`
+	BackupStatus                string                      `json:"backup_status,omitempty"`
+	BackupMode                  string                      `json:"backup_mode,omitempty"`
+	LocalObjectID               string                      `json:"local_object_id,omitempty"`
+	LocalVersionID              string                      `json:"local_version_id,omitempty"`
+	LocalSyncOutboxID           string                      `json:"local_sync_outbox_id,omitempty"`
+	LocalBackupArtifactID       string                      `json:"local_backup_artifact_id,omitempty"`
+	LocalBackupOutboxID         string                      `json:"local_backup_outbox_id,omitempty"`
+	LocalBackupBatchID          string                      `json:"local_backup_batch_id,omitempty"`
+	LastQueuedHashURI           string                      `json:"last_queued_hash_uri,omitempty"`
+	LastSyncedHashURI           string                      `json:"last_synced_hash_uri,omitempty"`
+	LastSyncedModifiedAt        *time.Time                  `json:"last_synced_modified_at,omitempty"`
+	LastQueuedMetadataMtime     *time.Time                  `json:"last_queued_metadata_mtime,omitempty"`
+	LastSyncedMetadataSequence  int64                       `json:"last_synced_metadata_sequence,omitempty"`
+	LastQueuedFileObservation   string                      `json:"last_queued_file_observation,omitempty"`
+	LastFileObservationSequence int64                       `json:"last_file_observation_sequence,omitempty"`
+	LastQueuedBackupHashURI     string                      `json:"last_queued_backup_hash_uri,omitempty"`
+	LastBackedUpHashURI         string                      `json:"last_backed_up_hash_uri,omitempty"`
+	MainObjectID                string                      `json:"main_object_id,omitempty"`
+	MainVersionID               string                      `json:"main_version_id,omitempty"`
+	MainBlobID                  string                      `json:"main_blob_id,omitempty"`
+	MainBackupBatchID           string                      `json:"main_backup_batch_id,omitempty"`
+	MainBackupItemID            string                      `json:"main_backup_item_id,omitempty"`
+	PrivateBackupOperationID    string                      `json:"private_backup_operation_id,omitempty"`
+	FileTransferID              string                      `json:"file_transfer_id,omitempty"`
+	FileTransferStorageEntryID  string                      `json:"file_transfer_storage_entry_id,omitempty"`
+	DeletionRequestID           string                      `json:"deletion_request_id,omitempty"`
+	BackupDeletionMarkerID      string                      `json:"backup_deletion_marker_id,omitempty"`
+	LastOutputPlannedAt         *time.Time                  `json:"last_output_planned_at,omitempty"`
+	LastOutputAppliedAt         *time.Time                  `json:"last_output_applied_at,omitempty"`
+	LastBackupQueuedAt          *time.Time                  `json:"last_backup_queued_at,omitempty"`
+	LastBackedUpAt              *time.Time                  `json:"last_backed_up_at,omitempty"`
+	LastOutputErrorCode         string                      `json:"last_output_error_code,omitempty"`
+	LastOutputErrorMessage      string                      `json:"last_output_error_message,omitempty"`
+	LastBackupErrorCode         string                      `json:"last_backup_error_code,omitempty"`
+	LastBackupErrorMessage      string                      `json:"last_backup_error_message,omitempty"`
+	Fidelity                    *filesystemmeta.Observation `json:"fidelity,omitempty"`
+	FirstSeenAt                 time.Time                   `json:"first_seen_at"`
+	LastSeenAt                  time.Time                   `json:"last_seen_at"`
+	LastScannedAt               time.Time                   `json:"last_scanned_at"`
+	DeletedAt                   *time.Time                  `json:"deleted_at,omitempty"`
+	LastErrorCode               string                      `json:"last_error_code,omitempty"`
+	LastErrorMessage            string                      `json:"last_error_message,omitempty"`
+	Metadata                    json.RawMessage             `json:"metadata,omitempty"`
 }
 
 type DirtyHint struct {
-	RootKey       string    `json:"root_key"`
-	RelativePath  string    `json:"relative_path"`
-	HintKind      string    `json:"hint_kind"`
-	Source        string    `json:"source"`
-	Count         int       `json:"count"`
-	FirstSeenAt   time.Time `json:"first_seen_at"`
-	LastSeenAt    time.Time `json:"last_seen_at"`
-	LastErrorCode string    `json:"last_error_code,omitempty"`
+	Generation    string           `json:"generation,omitempty"`
+	RootKey       string           `json:"root_key"`
+	RelativePath  string           `json:"relative_path"`
+	HintKind      string           `json:"hint_kind"`
+	Source        string           `json:"source"`
+	Count         int              `json:"count"`
+	FirstSeenAt   time.Time        `json:"first_seen_at"`
+	LastSeenAt    time.Time        `json:"last_seen_at"`
+	LastErrorCode string           `json:"last_error_code,omitempty"`
+	Observation   *PathObservation `json:"observation,omitempty"`
 }
 
 type Finding struct {
@@ -239,25 +246,34 @@ type Finding struct {
 }
 
 type RootCheckpoint struct {
-	SchemaVersion             string      `json:"schema_version"`
-	RootKey                   string      `json:"root_key"`
-	WorkerKey                 string      `json:"worker_key"`
-	ConfigHash                string      `json:"config_hash"`
-	LastRunID                 string      `json:"last_run_id,omitempty"`
-	LastStartedAt             *time.Time  `json:"last_started_at,omitempty"`
-	LastFinishedAt            *time.Time  `json:"last_finished_at,omitempty"`
-	LastSuccessfulReconcileAt *time.Time  `json:"last_successful_reconcile_at,omitempty"`
-	LastFullRescanAt          *time.Time  `json:"last_full_rescan_at,omitempty"`
-	LastSequence              int64       `json:"last_sequence"`
-	PendingRescan             bool        `json:"pending_rescan"`
-	StoredCounts              *ScanCounts `json:"stored_counts,omitempty"`
-	OutputsCurrent            bool        `json:"outputs_current,omitempty"`
-	OutputsAlreadyCurrent     int         `json:"outputs_already_current,omitempty"`
-	RootReachable             bool        `json:"root_reachable"`
-	PathStateCount            int         `json:"path_state_count"`
-	PathStateSnapshotHash     string      `json:"path_state_snapshot_hash,omitempty"`
-	LastErrorCode             string      `json:"last_error_code,omitempty"`
-	LastErrorMessage          string      `json:"last_error_message,omitempty"`
+	SchemaVersion             string                 `json:"schema_version"`
+	RootKey                   string                 `json:"root_key"`
+	WorkerKey                 string                 `json:"worker_key"`
+	ConfigHash                string                 `json:"config_hash"`
+	ContentConfigHash         string                 `json:"content_config_hash,omitempty"`
+	ObservationConfigHash     string                 `json:"observation_config_hash,omitempty"`
+	FullScanID                string                 `json:"full_scan_id,omitempty"`
+	FullScanAfter             string                 `json:"full_scan_after,omitempty"`
+	SubtreeScans              map[string]SubtreeScan `json:"subtree_scans,omitempty"`
+	MainReportedConfigHash    string                 `json:"main_reported_config_hash,omitempty"`
+	LastRunID                 string                 `json:"last_run_id,omitempty"`
+	LastStartedAt             *time.Time             `json:"last_started_at,omitempty"`
+	LastFinishedAt            *time.Time             `json:"last_finished_at,omitempty"`
+	LastSuccessfulReconcileAt *time.Time             `json:"last_successful_reconcile_at,omitempty"`
+	LastFullRescanAt          *time.Time             `json:"last_full_rescan_at,omitempty"`
+	LastSequence              int64                  `json:"last_sequence"`
+	PendingRescan             bool                   `json:"pending_rescan"`
+	DeferredHashPaths         []string               `json:"deferred_hash_paths,omitempty"`
+	NextHashReadyAt           *time.Time             `json:"next_hash_ready_at,omitempty"`
+	StoredCounts              *ScanCounts            `json:"stored_counts,omitempty"`
+	OutputsCurrent            bool                   `json:"outputs_current,omitempty"`
+	OutputContinuationReady   bool                   `json:"output_continuation_ready,omitempty"`
+	OutputsAlreadyCurrent     int                    `json:"outputs_already_current,omitempty"`
+	RootReachable             bool                   `json:"root_reachable"`
+	PathStateCount            int                    `json:"path_state_count"`
+	PathStateSnapshotHash     string                 `json:"path_state_snapshot_hash,omitempty"`
+	LastErrorCode             string                 `json:"last_error_code,omitempty"`
+	LastErrorMessage          string                 `json:"last_error_message,omitempty"`
 }
 
 type ScanCounts struct {
@@ -296,26 +312,34 @@ type PathChange struct {
 }
 
 type ScanResult struct {
-	forceHash         bool
-	RootKey           string              `json:"root_key"`
-	Mode              string              `json:"mode"`
-	Status            string              `json:"status"`
-	Message           string              `json:"message,omitempty"`
-	StartedAt         time.Time           `json:"started_at"`
-	FinishedAt        time.Time           `json:"finished_at"`
-	DurationMS        int64               `json:"duration_ms"`
-	Counts            ScanCounts          `json:"counts"`
-	ChangedPaths      []PathChange        `json:"changed_paths,omitempty"`
-	Findings          []Finding           `json:"findings,omitempty"`
-	Checkpoint        RootCheckpoint      `json:"checkpoint"`
-	Summary           RootSummary         `json:"summary"`
-	OutputPlan        *OutputPlan         `json:"output_plan,omitempty"`
-	OutputFlush       *OutputFlush        `json:"output_flush,omitempty"`
-	BackupFlush       *BackupOutputFlush  `json:"backup_output_flush,omitempty"`
-	BackupStatus      *BackupOutputStatus `json:"backup_status,omitempty"`
-	MainReport        *MainReport         `json:"main_report,omitempty"`
-	PolicyVersion     string              `json:"policy_version,omitempty"`
-	PolicyFingerprint string              `json:"policy_fingerprint,omitempty"`
+	dirtyConsumed             []DirtyHint
+	subtreeScans              map[string]SubtreeScan
+	fullScanID, fullScanAfter string
+	fullScanResumed           bool
+	InventoryUnchanged        bool `json:"inventory_unchanged,omitempty"`
+	OutputsPreviouslyCurrent  bool `json:"-"`
+	forceHash                 bool
+	stabilityHints            map[string]DirtyHint
+	RootKey                   string              `json:"root_key"`
+	Mode                      string              `json:"mode"`
+	Status                    string              `json:"status"`
+	Message                   string              `json:"message,omitempty"`
+	StartedAt                 time.Time           `json:"started_at"`
+	FinishedAt                time.Time           `json:"finished_at"`
+	DurationMS                int64               `json:"duration_ms"`
+	Counts                    ScanCounts          `json:"counts"`
+	ChangedPaths              []PathChange        `json:"changed_paths,omitempty"`
+	Findings                  []Finding           `json:"findings,omitempty"`
+	Checkpoint                RootCheckpoint      `json:"checkpoint"`
+	Summary                   RootSummary         `json:"summary"`
+	OutputPlan                *OutputPlan         `json:"output_plan,omitempty"`
+	OutputFlush               *OutputFlush        `json:"output_flush,omitempty"`
+	BackupFlush               *BackupOutputFlush  `json:"backup_output_flush,omitempty"`
+	BackupStatus              *BackupOutputStatus `json:"backup_status,omitempty"`
+	MainReport                *MainReport         `json:"main_report,omitempty"`
+	PolicyVersion             string              `json:"policy_version,omitempty"`
+	PolicyFingerprint         string              `json:"policy_fingerprint,omitempty"`
+	Persistence               map[string]int64    `json:"persistence,omitempty"`
 }
 
 type BackupOutputStatus struct {

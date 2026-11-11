@@ -130,7 +130,7 @@ func (s *DeclarationMigrationSources) AlreadyDeclaration() bool {
 		if source.State == "absent" {
 			continue
 		}
-		if source.State != "present" || source.SchemaVersion != ProjectSchemaV05 {
+		if source.State != "present" || !IsDeclarationSchemaVersion(source.SchemaVersion) {
 			return false
 		}
 		d, err := ParseProjectDeclaration(source.Raw)

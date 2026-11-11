@@ -1,7 +1,8 @@
 # Codex Workflow
 
-This route is for the Codex running harness. A Codex model inside ORCA follows
-`ORCA_WORKFLOW.md`; the model vendor does not select worktree ownership.
+This route is for native Codex. ORCA is retired; `ORCA_WORKFLOW.md` preserves
+legacy guidance only. A Codex model inside ORCA never transferred ownership
+merely by vendor name. Do not launch retired tools as a fallback.
 
 ## Ordinary edits
 
@@ -13,16 +14,14 @@ optional `.repo/` needs no installation or administration.
 
 ## Planned features
 
-Use the repository's accepted plan and native Codex task/worktree flow when it
-requires an isolated worker. Verify scope, branch and accepted base; checkpoint
-completed slices with validation and progress, then provide the committed handoff
+Follow the accepted plan and native Codex task/worktree flow when isolation is
+required. Verify scope and base; checkpoint slices with validation and progress
 for the integrator. Workers do not merge stable or integration branches.
 
 Use Codex-native task, worktree, handoff and review controls. Load the installed
 `openai-docs` skill for current mechanics; this pack does not duplicate product commands.
-Codex Handoff moves Codex-owned task context; Git merge is separate. Keep native
-ownership through recovery and cleanup. If a required native flow is unavailable,
-report the limitation; use only an explicitly accepted fallback.
+Handoff transfers task context, not Git merges. Keep native ownership through
+cleanup. Missing native tools require reporting, not a retired-client fallback.
 
 ## Optional repository state
 

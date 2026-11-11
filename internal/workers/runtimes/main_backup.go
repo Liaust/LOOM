@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,12 +23,14 @@ import (
 
 	"loom.local/loom/internal/backupcoverage"
 	"loom.local/loom/internal/backupstrategy"
+	"loom.local/loom/internal/boxregistry"
 	"loom.local/loom/internal/config"
 	"loom.local/loom/internal/health"
 	"loom.local/loom/internal/hermesprofile"
 	"loom.local/loom/internal/ids"
 	"loom.local/loom/internal/maintenance"
 	"loom.local/loom/internal/provenance"
+	"loom.local/loom/internal/restoreauthority"
 	"loom.local/loom/internal/update"
 	"loom.local/loom/internal/workers"
 )
@@ -42,6 +45,8 @@ const (
 )
 
 type MainBackupRuntime struct {
+	BoxCatalog              func() (boxregistry.Catalog, error)
+	CustodyRead             func(context.Context) (func(), error)
 	hermesPolicy            *hermesprofile.Policy
 	DB                      *sql.DB
 	Maintenance             maintenance.Service
@@ -61,6 +66,23 @@ type MainBackupRuntime struct {
 }
 
 const boxNotesSnapshotArtifactKind = "box_notes_snapshot"
+
+func (r MainBackupRuntime) AfterRunCompletion(ctx context.Context, run workers.WorkerRun) error {
+	if run.RunStatus != workers.RunStatusSucceeded || r.DataDir == "" {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var summary struct {
+		Committed bool `json:"committed"`
+	}
+	if json.Unmarshal(run.ResultSummaryJSON, &summary) != nil || !summary.Committed {
+		return nil
+	}
+	return backupstrategy.WakePendingLocalRecoveryRetention(r.DataDir)
+}
+
 const maxUserBackupCustodyManifestBytes = int64(64 << 20)
 
 type userBackupsSnapshotLayout string
@@ -175,6 +197,11 @@ func (r MainBackupRuntime) WithProvenance(provenanceRuntime *provenance.Runtime,
 	return r
 }
 
+func (r MainBackupRuntime) WithBoxCatalog(load func() (boxregistry.Catalog, error)) MainBackupRuntime {
+	r.BoxCatalog = load
+	return r
+}
+
 func (r MainBackupRuntime) Kind() string {
 	return workers.KindMainBackup
 }
@@ -234,6 +261,13 @@ func (r MainBackupRuntime) ValidateConfig(ctx context.Context, config json.RawMe
 }
 
 func (r MainBackupRuntime) RunOnce(ctx context.Context, run workers.RunContext) (workers.RunResult, error) {
+	if r.CustodyRead != nil {
+		release, err := r.CustodyRead(ctx)
+		if err != nil {
+			return workers.RunResult{}, err
+		}
+		defer release()
+	}
 	if r.DB == nil {
 		return workers.RunResult{}, fmt.Errorf("main backup database is not configured")
 	}
@@ -244,6 +278,14 @@ func (r MainBackupRuntime) RunOnce(ctx context.Context, run workers.RunContext) 
 	if err != nil {
 		return workers.RunResult{}, err
 	}
+	if err := os.MkdirAll(config.OperationalPackagesRoot, 0750); err != nil {
+		return workers.RunResult{}, err
+	}
+	lease, err := backupstrategy.LockOperationalPackages(config.OperationalPackagesRoot, false)
+	if err != nil {
+		return workers.RunResult{}, err
+	}
+	defer lease.Close()
 
 	now := time.Now().UTC()
 	if r.Now != nil {
@@ -584,10 +626,7 @@ func (r MainBackupRuntime) createOperationalPackage(ctx context.Context, config 
 		if verification.Status != maintenance.VerificationSucceeded {
 			return backupstrategy.OperationalPackageCreateResult{}, false, fmt.Errorf("%w: existing operational package %s failed exact verification", workers.ErrConflict, packageID)
 		}
-		retention, retentionErr := backupstrategy.PlanOperationalPackageRetention(ctx, config.OperationalPackagesRoot, nil)
-		if retentionErr != nil {
-			return backupstrategy.OperationalPackageCreateResult{}, false, retentionErr
-		}
+		retention := backupstrategy.DeferredOperationalRetention(config.OperationalPackagesRoot)
 		return backupstrategy.OperationalPackageCreateResult{
 			PackageDir:     verification.PackageDir,
 			ManifestSHA256: verification.ManifestSHA256,
@@ -599,6 +638,16 @@ func (r MainBackupRuntime) createOperationalPackage(ctx context.Context, config 
 	}
 	if err := os.MkdirAll(config.OperationalPackagesRoot, 0o700); err != nil {
 		return backupstrategy.OperationalPackageCreateResult{}, false, fmt.Errorf("create operational package root: %w", err)
+	}
+	if raw := os.Getenv("LOOM_BACKUP_LOCAL_BUDGET_BYTES"); raw != "" {
+		budget, budgetErr := strconv.ParseInt(raw, 10, 64)
+		floor, floorErr := strconv.ParseInt(os.Getenv("LOOM_BACKUP_FREE_FLOOR_BYTES"), 10, 64)
+		if budgetErr != nil || floorErr != nil {
+			return backupstrategy.OperationalPackageCreateResult{}, false, fmt.Errorf("invalid host operational capacity policy")
+		}
+		if err := backupstrategy.CheckOperationalPackageAdmission(ctx, config.OperationalPackagesRoot, budget, floor); err != nil {
+			return backupstrategy.OperationalPackageCreateResult{}, false, fmt.Errorf("operational capture deferred before staging: %w", err)
+		}
 	}
 	sourceRoot, err := os.MkdirTemp(config.OperationalPackagesRoot, ".producer-state-")
 	if err != nil {
@@ -617,7 +666,11 @@ func (r MainBackupRuntime) createOperationalPackage(ctx context.Context, config 
 	}); err != nil {
 		return backupstrategy.OperationalPackageCreateResult{}, false, err
 	}
-	if err := writeOperationalProducerJSON(updatePath, update.Status(update.StatusInput{StateDir: config.UpdateStateDir, Limit: 20, Now: func() time.Time { return now }})); err != nil {
+	updateState, err := r.operationalUpdateState(config, now)
+	if err != nil {
+		return backupstrategy.OperationalPackageCreateResult{}, false, err
+	}
+	if err := writeOperationalProducerJSON(updatePath, updateState); err != nil {
 		return backupstrategy.OperationalPackageCreateResult{}, false, err
 	}
 	if err := writeOperationalProducerJSON(healthPath, healthReport); err != nil {
@@ -628,11 +681,12 @@ func (r MainBackupRuntime) createOperationalPackage(ctx context.Context, config 
 		creator = backupstrategy.CreateOperationalPackage
 	}
 	result, err := creator(ctx, backupstrategy.OperationalPackageCreateInput{
-		PackagesRoot: config.OperationalPackagesRoot,
-		PackageID:    packageID,
-		CreatedAt:    now,
-		SchemaHead:   schemaHead,
-		PostgresDump: func(ctx context.Context, destination string) error {
+		DeferRetentionPlanning: true,
+		PackagesRoot:           config.OperationalPackagesRoot,
+		PackageID:              packageID,
+		CreatedAt:              now,
+		SchemaHead:             schemaHead,
+		PostgresDumpWithExtensions: func(ctx context.Context, destination string) ([]restoreauthority.ExtensionRequirement, error) {
 			return r.runPgDump(ctx, config, destination)
 		},
 		ServiceConfig:  config.ServiceConfigPath,
@@ -649,6 +703,18 @@ func (r MainBackupRuntime) createOperationalPackage(ctx context.Context, config 
 		return result, false, fmt.Errorf("operational package producer returned unverified or mismatched evidence")
 	}
 	return result, false, nil
+}
+
+func (r MainBackupRuntime) operationalUpdateState(config mainBackupConfig, now time.Time) (json.RawMessage, error) {
+	raw, err := json.Marshal(update.Status(update.StatusInput{StateDir: config.UpdateStateDir, Limit: 20, Now: func() time.Time { return now }}))
+	if err != nil || r.BoxCatalog == nil {
+		return raw, err
+	}
+	catalog, err := r.BoxCatalog()
+	if err != nil {
+		return nil, fmt.Errorf("load Box recovery context: %w", err)
+	}
+	return backupstrategy.WithBoxRecoveryContext(raw, catalog)
 }
 
 func writeOperationalProducerJSON(path string, value any) error {
@@ -1017,8 +1083,10 @@ func (r MainBackupRuntime) createBackup(ctx context.Context, run workers.RunCont
 	}
 
 	dumpPath := filepath.Join(backupDir, config.DatabaseName+".dump")
+	var extensions []restoreauthority.ExtensionRequirement
 	if config.IncludePostgres {
-		if err := r.runPgDump(ctx, config, dumpPath); err != nil {
+		extensions, err = r.runPgDump(ctx, config, dumpPath)
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -1243,6 +1311,7 @@ func (r MainBackupRuntime) createBackup(ctx context.Context, run workers.RunCont
 	}
 
 	manifest := r.backupManifest(run, operation, config, now, hostname, &healthReport, userBackupsPlan.Layout)
+	manifest.Database.Extensions = extensions
 	if installManifestSummary.FileCount > 0 {
 		manifest.Paths.InstallManifest = "install.yaml"
 	}
@@ -1644,17 +1713,40 @@ func userBackupsMaintenanceArtifacts(operationID, backupDir, sourceRoot string, 
 	return inputs
 }
 
-func (r MainBackupRuntime) runPgDump(ctx context.Context, config mainBackupConfig, dumpPath string) error {
+func (r MainBackupRuntime) runPgDump(ctx context.Context, config mainBackupConfig, dumpPath string) ([]restoreauthority.ExtensionRequirement, error) {
+	if r.DB == nil {
+		return nil, fmt.Errorf("operational backup snapshot database is unavailable")
+	}
+	tx, err := r.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("begin operational backup snapshot: %w", err)
+	}
+	defer tx.Rollback()
+	var snapshot, rawExtensions string
+	if err := tx.QueryRowContext(ctx, `SELECT pg_export_snapshot(),
+  COALESCE((SELECT jsonb_agg(jsonb_build_object('name', extname, 'version', extversion))
+            FROM pg_catalog.pg_extension WHERE extname = 'pg_search'), '[]'::jsonb)::text`).Scan(&snapshot, &rawExtensions); err != nil {
+		return nil, fmt.Errorf("capture operational backup extension snapshot: %w", err)
+	}
+	var extensions []restoreauthority.ExtensionRequirement
+	if err := json.Unmarshal([]byte(rawExtensions), &extensions); err != nil {
+		return nil, fmt.Errorf("decode operational backup extension snapshot: %w", err)
+	}
+	if err := restoreauthority.ValidateExtensionRequirements(restoreauthority.KindOperational, extensions); err != nil {
+		return nil, err
+	}
+	if snapshot == "" {
+		return nil, fmt.Errorf("operational backup snapshot is empty")
+	}
 	command := exec.CommandContext
 	if r.ExecCommand != nil {
 		command = r.ExecCommand
 	}
-	cmd := command(ctx, config.PgDumpPath, "-Fc", "-d", r.DBURL, "-f", dumpPath)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("pg_dump failed: %w: %s", err, strings.TrimSpace(string(output)))
+	cmd := command(ctx, config.PgDumpPath, "-Fc", "--snapshot="+snapshot, "-d", r.DBURL, "-f", dumpPath)
+	if _, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("operational pg_dump failed: %w", err)
 	}
-	return nil
+	return extensions, nil
 }
 
 func (r MainBackupRuntime) runProvenancePgDump(ctx context.Context, config mainBackupConfig, dumpPath, exportedSnapshot string) error {

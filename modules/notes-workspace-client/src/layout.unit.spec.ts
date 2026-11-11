@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { IntentClient, type ClientIO } from "./client";
 import { Journal, recoveryPersistence, type State } from "./journal";
 import { layoutAlias, layoutPolicyPaths, relocateLocal } from "./layout";
-import { controlPath, decode, digest, encode, LAYOUT_PREFIX, validate, type Binding, type Layout } from "./protocol";
+import { controlPath, decode, digest, encode, LAYOUT_PREFIX, SOURCE_MOVE_PREFIX, validate, type Binding, type Layout } from "./protocol";
 
 async function fixture() {
     const previous: Binding = { version: 1, kind: "binding", id: "old", workspace: "w", collection: "c", generation: "g",
@@ -20,6 +20,10 @@ async function fixture() {
         read: async p => files.get(p) ?? null, readRevision: async () => "original", readControl: async () => layout,
         descends: async () => false, reflect: vi.fn(async () => {}), changed: vi.fn(),
         directoryExists: async p => dirs.has(p),
+        retireEmptyDirectory: vi.fn(async b => {
+            if ([...files.keys(), ...dirs].some(p => p.startsWith(b.path + "/"))) return false;
+            return dirs.delete(b.path);
+        }),
         relocate: vi.fn(async (a, b) => {
             if (a.entryKind) { dirs.add(b.path); dirs.delete(a.path); return; }
             if (files.has(a.path)) { files.set(b.path, files.get(a.path)!); files.delete(a.path); }
@@ -32,6 +36,152 @@ async function fixture() {
 }
 
 describe("source-controlled layouts", () => {
+    it("does not rewrite retained layout history when native replay repeats an identical control",async()=>{
+        const f=await fixture();
+        await f.j.update(s=>{s.layouts={[f.layout.id]:{state:"applied",control:f.layout}};});
+        const state=f.j.state;
+        await f.c.layouts.ingest(f.layout);
+        expect(f.j.state).toBe(state);
+        expect(f.c.onReflect).not.toHaveBeenCalled();
+    });
+    it("retires only empty local parents of completed source moves and preserves the bindings as history",async()=>{
+        const f=await fixture();
+        const path="Projects/Test/sub";
+        const parent:Binding={...f.previous,id:"parent",fileId:"parent_file",entryKind:"directory",path,sha256:await digest("")};
+        const directory=new Set([path,"Projects/Test/intentional-empty"]);
+        const removed:string[]=[];
+        f.io.retireEmptyDirectory=async b=>{if(directory.delete(b.path)){removed.push(b.path);return true;}return false;};
+        await f.j.update(s=>{delete s.bindings[f.previous.path];s.bindings[f.binding.path]=f.binding;
+            s.bindings[path]=parent;s.candidates[parent.id]=parent;
+            s.layouts={move:{state:"applied",control:{...f.layout,sourceMove:true}}};});
+        await f.c.layouts.retireEmptyParents();
+        expect(removed).toEqual([path]);
+        expect(directory.has("Projects/Test/intentional-empty")).toBe(true);
+        expect(f.j.state.bindings[path]).toBeUndefined();
+        expect(f.j.state.candidates[parent.id]).toEqual(parent);
+        expect(f.j.state.pathChanges?.["reviewed-source-retirement/"+parent.id]).toBe(true);
+        await f.c.reflectCandidate(parent);
+        expect(f.io.reflect).not.toHaveBeenCalled();
+        const newer={...parent,id:"recreated_parent",sourceSequence:3};
+        f.io.reflectDirectory=async()=>{directory.add(path);};
+        await f.c.reflectCandidate(newer);
+        expect(directory.has(path)).toBe(true);
+    });
+    it("does not retire a collection root, nonempty parent or parent with pending child edits",async()=>{
+        const f=await fixture(),path="Projects/Test/sub";
+        const parent:Binding={...f.previous,id:"parent",fileId:"parent_file",entryKind:"directory",path,sha256:await digest("")};
+        const remove=vi.fn(async()=>false);f.io.retireEmptyDirectory=remove;
+        await f.j.update(s=>{s.bindings[path]=parent;s.layouts={move:{state:"applied",control:{...f.layout,sourceMove:true}}};});
+        await f.c.layouts.retireEmptyParents();expect(f.j.state.bindings[path]).toEqual(parent);
+        remove.mockClear();f.files.set(f.previous.path,"new edit");f.c.capture({kind:"edit",path:f.previous.path});await f.c.settled();
+        expect(f.j.state.operations).toHaveLength(1);
+        await f.c.layouts.retireEmptyParents();expect(remove).not.toHaveBeenCalled();
+    });
+    it("retires an equivalent newer policy binding without losing its replay fence",async()=>{
+        for(const changed of [false,true]){
+            const f=await fixture();
+            const local={...f.previous,id:"policy_refresh",generation:"later_policy",sourceBase:"later_base",sourceSequence:8};
+            await f.c.install(local);
+            const b:Binding={...f.binding,id:"target",fileId:"other_file",collection:"other",generation:"target_policy",sourceSequence:1};
+            f.files.set(b.path,"original");await f.c.install(b);
+            if(changed)f.files.set(local.path,"new unsent text");
+            const l:Layout={...f.layout,id:"layout_source_move_policy",sourceMove:true,binding:b};
+            await f.c.ingest(l);await f.c.layouts.resume();
+            expect(f.j.state.layouts?.[l.id].state).toBe(changed?"pending":"applied");
+            if(changed){expect(f.files.get(local.path)).toBe("new unsent text");continue;}
+            expect(f.j.state.layouts?.[l.id].retiredPrevious).toEqual(local);
+            expect((f.c as any).cursors.has(local.path)).toBe(false);
+            expect(f.c.layouts.sourceRetired(local)).toBe(true);
+            const restart=new IntentClient(new Journal(f.persistence),f.io);await restart.ready;
+            await restart.ingest(local);await restart.reflectPath(local.path);
+            expect(f.files.has(local.path)).toBe(false);
+            expect(restart.layouts.sourceRetired(local)).toBe(true);
+        }
+    });
+    it("relocates an immutable reference without making it editable or retaining bytes in JSON", async () => {
+        const f=await fixture();
+        const a:Binding={...f.previous,id:"ref_old",fileId:"ref_file",path:"Projects/Test/old.pdf",writable:false};
+        const b:Binding={...a,id:"ref_new",fileId:"ref_target",collection:"other",collectionRoot:"Other",path:"Other/new.pdf",nativeRevision:"1-refnew",sourceSequence:1};
+        const l:Layout={...f.layout,id:"layout_source_move_reference",sourceMove:true,previous:a,binding:b};
+        expect(validate(l)).toEqual(l);
+        for(const patch of [{writable:true},{sha256:await digest("changed")},{path:"Other/new.md",writable:true}])
+            expect(()=>validate({...l,binding:{...b,...patch}})).toThrow();
+        f.files.set(a.path,"original");f.files.set(b.path,"original");
+        f.io.readReference=async p=>f.files.has(p)?new TextEncoder().encode(f.files.get(p)!):null;
+        await f.c.install(a);await f.c.install(b);await f.c.ingest(l);await f.c.layouts.resume();
+        expect(f.j.state.layouts?.[l.id].state).toBe("applied");
+        expect(f.files.has(a.path)).toBe(false);
+        expect(f.j.state.retiredLeaves?.[`${a.path}@${a.nativeRevision}`]).toBeUndefined();
+        expect(f.j.state.bindings[b.path].writable).toBe(false);
+    });
+    it("ignores delayed retirement echoes for older bindings without hiding a successor deletion", async () => {
+        const f=await fixture();
+        const earlier={...f.previous,id:"earlier_binding"};
+        await f.c.ingest(earlier);
+        const b:Binding={...f.binding,id:"destination",collection:"other",generation:"other_generation",fileId:"other_file",sourceSequence:1};
+        f.files.set(b.path,"original");await f.c.install(b);
+        await f.c.ingest({...f.layout,sourceMove:true,binding:b});await f.c.layouts.resume();
+        await f.c.mutation({kind:"delete",info:f.previous.path as any});
+        await f.c.beforeReflect({path:f.previous.path,_rev:f.previous.nativeRevision} as any);
+        expect(f.j.state.holds[f.previous.path]).toBeUndefined();
+        const successor={...f.previous,id:"successor_binding",fileId:"successor_file",nativeRevision:"1-successor"};
+        f.files.set(successor.path,"original");await f.c.install(successor);
+        await f.c.mutation({kind:"delete",info:successor.path as any});
+        expect(f.j.state.holds[successor.path]).toBe("uncaptured_delete");
+    });
+    it("reconciles a reviewed cross-source move, preserves changed local text and suppresses old replay", async () => {
+        for (const changed of [false, true]) {
+            const f = await fixture();
+            const b: Binding = { ...f.binding, id: "destination", collection: "other", generation: "other_generation", fileId: "other_file", sourceBase: "other_base", sourceSequence: 1 };
+            const l: Layout = { ...f.layout, sourceMove: true, binding: b };
+            expect(validate(l)).toEqual(l);
+            expect(controlPath({...l,id:"layout_source_move_test"})).toBe(SOURCE_MOVE_PREFIX+"layout/layout_source_move_test.md");
+            f.files.set(b.path, "original"); await f.c.install(b);
+            if (changed) f.files.set(f.previous.path, "unsent local edit");
+            await f.c.ingest(l); await f.c.layouts.resume();
+            expect(f.j.state.layouts?.[l.id].state).toBe(changed ? "pending" : "applied");
+            expect(f.files.get(b.path)).toBe("original");
+            if (changed) expect(f.files.get(f.previous.path)).toBe("unsent local edit");
+            else {
+                expect(f.files.has(f.previous.path)).toBe(false);
+                expect((f.c as any).cursors.has(f.previous.path)).toBe(false);
+                expect(f.c.layouts.suppress(f.previous)).toBe(true);
+                await f.c.ingest(f.previous); await f.c.reflectPath(f.previous.path);
+                expect(f.files.has(f.previous.path)).toBe(false);
+                expect(layoutAlias(f.j.state, f.previous.path)).toBe(b.path);
+            }
+        }
+    });
+    it("requires destination-first reflection for a reviewed move with corrected content", async () => {
+        const f = await fixture();
+        const b: Binding = { ...f.binding, id: "destination", fileId: "other_file", sourceBase: "other_base", sha256: await digest("corrected links"), sourceSequence: 1 };
+        const l: Layout = { ...f.layout, sourceMove: true, binding: b };
+        expect(validate(l)).toEqual(l);
+        f.io.reflect = vi.fn(async binding => { f.files.set(binding.path,"corrected links"); await f.c.install(binding); });
+        f.io.relocate = vi.fn(async (a,next) => {
+            expect(f.files.get(next.path)).toBe("corrected links");
+            expect(await digest(f.files.get(a.path)!)).toBe(a.sha256);
+            f.files.delete(a.path);
+        });
+        await f.c.ingest(l); await f.c.layouts.resume();
+        expect(f.j.state.layouts?.[l.id].state).toBe("applied");
+        expect(f.files.get(b.path)).toBe("corrected links");
+        expect(f.files.has(f.previous.path)).toBe(false);
+        expect(f.j.state.retiredLeaves?.[`${f.previous.path}@${f.previous.nativeRevision}`].text).toBe("original");
+    });
+    it("follows root-layout then cross-source edges instead of comparing unrelated sequence counters",async()=>{
+        const f=await fixture();
+        const a={...f.previous,sourceSequence:40},mid={...f.binding,sourceSequence:41};
+        const b:Binding={...mid,id:"cross_target",collection:"other",fileId:"other_file",generation:"other_generation",sourceBase:"other_base",collectionRoot:"Other",path:"Other/result.md",sourceSequence:1};
+        const first:Layout={...f.layout,previous:a,binding:mid};
+        const second:Layout={...f.layout,id:"layout_source_move_second",sourceMove:true,previous:mid,binding:b};
+        await f.c.install(a);f.files.set(b.path,"original");await f.c.install(b);
+        await f.c.ingest(second);await f.c.ingest(first);await f.c.layouts.resume();
+        expect(f.j.state.layouts?.[first.id].state).toBe("applied");
+        expect(f.j.state.layouts?.[second.id].state).toBe("applied");
+        expect(layoutAlias(f.j.state,a.path)).toBe(b.path);
+        expect(f.files.has(a.path)).toBe(false);expect(f.files.has(mid.path)).toBe(false);
+    });
     it("strictly validates scope, immutable content, suffix and increasing source order", async () => {
         const { layout } = await fixture();
         expect(decode(controlPath(layout), encode(layout))).toEqual(layout);
@@ -77,7 +227,7 @@ describe("source-controlled layouts", () => {
         expect(f.files.has(f.previous.path)).toBe(false);
         expect(f.files.get(f.binding.path)).toBe("original");
     });
-    it.each(["canvas", "md"])("reflects an ordinary canonical %s rename without a layout control", async extension => {
+    it.each(["canvas", "md", "base"])("reflects an ordinary canonical %s rename without a layout control", async extension => {
         const f = await fixture();
         const a = { ...f.previous, id: extension + "_old", path: "Projects/Test/sub/a." + extension };
         const b = { ...a, id: extension + "_renamed", path: "Projects/Test/sub/renamed." + extension,
@@ -99,10 +249,14 @@ describe("source-controlled layouts", () => {
         const a: Binding = { ...f.previous, id: "dir_old", path: "Projects/Test/sub", entryKind: "directory", sha256: await digest("") };
         const b: Binding = { ...a, id: "dir_renamed", path: "Projects/Test/renamed", previousPath: a.path, sourceSequence: 2 };
         await f.c.install(a); f.dirs.add(a.path);
+        f.files.delete(f.previous.path);
         await f.j.update(s => { s.holds[b.path] = "layout_waiting_for_control"; });
         f.io.reflectDirectory = vi.fn(async binding => { f.dirs.delete(binding.previousPath!); f.dirs.add(binding.path); });
         await f.c.ingest(b); await f.c.reflectPath(b.path);
-        expect(f.c.layouts.waiting(b)).toBe(false); expect(f.io.reflectDirectory).toHaveBeenCalledWith(b);
+        const { previousPath: _, ...target } = b;
+        expect(f.c.layouts.waiting(b)).toBe(false); expect(f.io.reflectDirectory).toHaveBeenCalledWith(target);
+        expect(f.io.retireEmptyDirectory).toHaveBeenCalledWith(a);
+        expect(f.dirs.has(a.path)).toBe(false);
         expect(f.j.state.layouts).toBeUndefined(); expect(f.j.state.bindings[b.path]).toEqual(b);
         expect(f.j.state.holds[b.path]).toBeUndefined();
     });
@@ -169,7 +323,8 @@ describe("source-controlled layouts", () => {
         await f.c.ingest(created); await f.c.reflectPath(created.path);
         const renamed = { ...b, id: "layout_dir_renamed", path: b.collectionRoot + "/Renamed", previousPath: b.path, sourceSequence: 4 };
         await f.c.ingest(renamed); await f.c.reflectPath(renamed.path);
-        expect(f.io.reflectDirectory).toHaveBeenCalledWith(created); expect(f.io.reflectDirectory).toHaveBeenCalledWith(renamed);
+        const { previousPath: _, ...target } = renamed;
+        expect(f.io.reflectDirectory).toHaveBeenCalledWith(created); expect(f.io.reflectDirectory).toHaveBeenCalledWith(target);
         expect(f.j.state.bindings[created.path]).toEqual(created); expect(f.j.state.bindings[renamed.path]).toEqual(renamed);
         expect(f.j.state.candidates[a.id]).toEqual(a); expect(f.c.layouts.suppress(a)).toBe(true);
         expect(f.j.state.holds).toEqual({}); expect(Object.keys(f.j.state.layouts!)).toHaveLength(1);
@@ -421,11 +576,29 @@ describe("source-controlled layouts", () => {
         const b = { ...f.binding, path: "Projects/_Passive/Test/sub", entryKind: "directory" as const };
         paths.set(a.path, "folder"); paths.set(a.path + "/unknown.txt", "file");
         const rename = vi.fn();
-        await relocateLocal(a, b, { stat: async p => paths.get(p) ?? null, hash: async () => null,
+        await expect(relocateLocal(a, b, { stat: async p => paths.get(p) ?? null, hash: async () => null,
             mkdir: async p => { paths.set(p, "folder"); }, rename, removeFile: vi.fn(),
-            removeEmpty: async p => { if (![...paths.keys()].some(x => x.startsWith(p + "/"))) paths.delete(p); } });
+            removeEmpty: async p => { if (![...paths.keys()].some(x => x.startsWith(p + "/"))) paths.delete(p); } }))
+            .rejects.toThrow("layout_preserves_local_children");
         expect(rename).not.toHaveBeenCalled(); expect(paths.has(a.path + "/unknown.txt")).toBe(true);
         expect(paths.has(b.path)).toBe(true);
+    });
+    it("retains a directory layout until its old folder is actually retired", async () => {
+        const f = await fixture();
+        const a: Binding = { ...f.previous, id: "dir_old", fileId: "dir", path: "Projects/Test/sub", entryKind: "directory", sha256: await digest("") };
+        const b: Binding = { ...a, id: "dir_new", collectionRoot: f.binding.collectionRoot, path: "Projects/_Passive/Test/sub", sourceSequence: 2 };
+        const layout: Layout = { ...f.layout, id: "layout_directory_move", previous: a, binding: b };
+        await f.c.install(a); f.dirs.add(a.path);
+        f.io.relocate = vi.fn(async () => { f.dirs.add(b.path); });
+        await f.c.ingest(layout); await f.c.layouts.resume();
+        expect(f.j.state.layouts?.[layout.id].state).toBe("moving");
+        expect(f.j.state.holds[a.path]).toBe("layout_preserves_local_children");
+        expect(f.j.state.bindings[a.path]).toEqual(a);
+        f.io.relocate = vi.fn(async () => { f.dirs.delete(a.path); });
+        await f.c.layouts.resume(a.path);
+        expect(f.j.state.layouts?.[layout.id].state).toBe("applied");
+        expect(f.j.state.bindings[a.path]).toBeUndefined();
+        expect(f.j.state.bindings[b.path]).toEqual(b);
     });
     it("trims only empty exact source ancestors and stops before Projects", async () => {
         const f = await fixture(), paths = new Map<string, "file" | "folder">();

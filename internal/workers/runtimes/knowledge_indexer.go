@@ -3,6 +3,7 @@ package runtimes
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +37,67 @@ type notesCustodyCheckpoint struct {
 
 type projectionRefreshCheckpoint struct {
 	LastSuccess time.Time `json:"last_success"`
+}
+
+type knowledgeAdmissionSweepCheckpoint struct {
+	SourceGeneration  string    `json:"source_generation"`
+	SweepStarted      bool      `json:"sweep_started"`
+	Complete          bool      `json:"complete"`
+	NextInventoryAt   time.Time `json:"next_inventory_at,omitempty"`
+	AdmissionRevision string    `json:"admission_revision,omitempty"`
+}
+
+func (r KnowledgeIndexerRuntime) AutomaticReady(ctx context.Context, instance workers.WorkerInstance, now time.Time) (bool, *time.Time, error) {
+	if r.Knowledge == nil {
+		return false, nil, fmt.Errorf("Notes indexer unavailable")
+	}
+	pendingAt, err := r.Knowledge.PendingSourceAdmissionAt(ctx)
+	if err != nil {
+		return false, nil, err
+	}
+	if pendingAt != nil && !pendingAt.After(now) {
+		return true, pendingAt, nil
+	}
+	custodyReady, custodyNext, err := r.custodyReady(ctx, instance, now)
+	if err != nil || custodyReady {
+		return custodyReady, custodyNext, err
+	}
+	var raw []byte
+	err = r.Knowledge.Store().DB().QueryRowContext(ctx, `SELECT checkpoint_json FROM workers.worker_checkpoints WHERE worker_instance_id=$1 AND checkpoint_key='admission_schedule'`, instance.WorkerInstanceID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil, nil
+	}
+	if err != nil {
+		return false, nil, err
+	}
+	var sweep knowledgeAdmissionSweepCheckpoint
+	if err = json.Unmarshal(raw, &sweep); err != nil {
+		return false, nil, err
+	}
+	if !sweep.Complete || !sweep.NextInventoryAt.After(now) {
+		return true, nil, nil
+	}
+	next, err := r.Knowledge.NextPipelineWorkAt(ctx, knowledge.PipelineExecutionCoordinator, now)
+	if err != nil {
+		return false, nil, err
+	}
+	if next != nil && !next.After(now) {
+		return true, next, nil
+	}
+	changed, err := r.Knowledge.NotesAdmissionChanged(ctx, sweep.SourceGeneration, sweep.AdmissionRevision)
+	if err != nil || changed {
+		return changed, nil, err
+	}
+	if next == nil || sweep.NextInventoryAt.Before(*next) {
+		next = &sweep.NextInventoryAt
+	}
+	if custodyNext != nil && (next == nil || custodyNext.Before(*next)) {
+		next = custodyNext
+	}
+	if pendingAt != nil && (next == nil || pendingAt.Before(*next)) {
+		next = pendingAt
+	}
+	return false, next, nil
 }
 
 func (r KnowledgeIndexerRuntime) WithArchiveService(service *storagearchive.WorkspaceMoveService, nodeKey string) KnowledgeIndexerRuntime {
@@ -166,9 +228,24 @@ func (r KnowledgeIndexerRuntime) RunOnce(ctx context.Context, run workers.RunCon
 		return workers.RunResult{}, err
 	}
 	var cursor knowledge.AdmissionCursor
-	if saved, ok := run.Checkpoints["admission"]; ok {
+	savedAdmission, existingInventory := run.Checkpoints["admission"]
+	if existingInventory {
+		saved := savedAdmission
 		if err := json.Unmarshal(saved.CheckpointJSON, &cursor); err != nil {
 			return workers.RunResult{}, fmt.Errorf("invalid Notes admission checkpoint: %w", err)
+		}
+	}
+	var sweep knowledgeAdmissionSweepCheckpoint
+	if saved, ok := run.Checkpoints["admission_schedule"]; ok {
+		if err := json.Unmarshal(saved.CheckpointJSON, &sweep); err != nil {
+			return workers.RunResult{}, fmt.Errorf("invalid Notes admission schedule checkpoint")
+		}
+	}
+	// Finish a legacy in-flight cursor before adopting scoped checkpoints.
+	if cursor.Incremental || cursor.StorageAfter == "" && cursor.SyncedAfter == [3]string{} && !cursor.StorageDone && !cursor.SyncedDone {
+		cursor.Incremental = true
+		if cursor.RootCursors == nil && sweep.Complete {
+			cursor.BaselineGeneration = sweep.SourceGeneration
 		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(config.MaxRuntimeSeconds)*time.Second)
@@ -178,6 +255,10 @@ func (r KnowledgeIndexerRuntime) RunOnce(ctx context.Context, run workers.RunCon
 		now = r.Now().UTC()
 	}
 	limit := config.BatchSize
+	admissionRevision, err := r.Knowledge.NotesAdmissionRevision(ctx)
+	if err != nil {
+		return workers.RunResult{}, err
+	}
 	if config.MaxObjectsPerRun > 0 && config.MaxObjectsPerRun < limit {
 		limit = config.MaxObjectsPerRun
 	}
@@ -185,17 +266,34 @@ func (r KnowledgeIndexerRuntime) RunOnce(ctx context.Context, run workers.RunCon
 	if err != nil {
 		return workers.RunResult{}, err
 	}
-	custody, err := r.consumeCustody(ctx, run.Checkpoints, limit)
+	custodySchedule, err := r.nextCustodySchedule(ctx, run.Checkpoints)
 	if err != nil {
 		return workers.RunResult{}, err
 	}
+	var custody *knowledge.NotesCustodyBatchResult
+	if custodySchedule.due(now) {
+		custody, err = r.consumeCustody(ctx, run.Checkpoints, limit)
+	}
+	if err != nil {
+		return workers.RunResult{}, err
+	}
+	admissionStarted := time.Now()
 	admission, admissionTimedOut, err := admitKnowledgeNotes(ctx, cursor, admissionLimit,
-		time.Duration(config.MaxRuntimeSeconds)*time.Second/3, r.Knowledge.AdmitRegisteredNotesOnce)
+		time.Duration(config.MaxRuntimeSeconds)*time.Second/3, r.Knowledge.AdmitRegisteredNotesInteractiveOnce)
+	admissionElapsed := time.Since(admissionStarted)
 	if err != nil {
 		return workers.RunResult{}, fmt.Errorf("admit registered Notes: %w", err)
 	}
 	if admissionTimedOut && run.Logger != nil {
-		run.Logger.Warn("Notes admission timed out; retaining cursor and processing existing work")
+		if warning := admission.Warning; warning != nil {
+			run.Logger.Warn("Notes admission timed out; retaining cursor and processing existing work",
+				"phase", warning.Phase, "reason", warning.Reason, "elapsed_ms", warning.ElapsedMS,
+				"budget_ms", warning.BudgetMS, "retryable", warning.Retryable,
+				"worker_run_id", run.Run.WorkerRunID, "correlation_id", run.CorrelationID)
+		} else {
+			run.Logger.Warn("Notes admission timed out; phase unavailable; retaining cursor and processing existing work",
+				"worker_run_id", run.Run.WorkerRunID, "correlation_id", run.CorrelationID)
+		}
 	}
 	// Reserve time to publish the generated view and checkpoints after a drain.
 	coordinatorCtx := ctx
@@ -206,6 +304,7 @@ func (r KnowledgeIndexerRuntime) RunOnce(ctx context.Context, run workers.RunCon
 		defer stopCoordinator()
 	}
 	result, err := r.Knowledge.RunKnowledgeIndexerOnce(coordinatorCtx, knowledge.KnowledgeIndexerRunInput{
+		PreferredRunID:        admission.PreferredPipelineRunID,
 		WorkerRunID:           run.Run.WorkerRunID,
 		Limit:                 limit,
 		LeaseDuration:         time.Duration(config.LeaseDurationSeconds) * time.Second,
@@ -238,12 +337,30 @@ func (r KnowledgeIndexerRuntime) RunOnce(ctx context.Context, run workers.RunCon
 		}
 	}
 	pipelineMore := result.MoreWork
+	sweep = knowledgeAdmissionUpgradeBaseline(sweep, admission, existingInventory, admissionTimedOut)
+	sweep, admissionFast, continuationReason := knowledgeAdmissionContinuation(cursor, sweep, admission, admissionTimedOut)
+	if !admissionTimedOut && !admission.InventoryDeferred {
+		sweep.AdmissionRevision = admissionRevision
+		sweep.NextInventoryAt = admission.Cursor.NextRepairAt
+		if sweep.NextInventoryAt.IsZero() {
+			sweep.NextInventoryAt = now.Add(6 * time.Hour)
+		}
+		if admissionFast || admission.PriorityMoreWork || custody != nil && !custody.Wrapped {
+			sweep.NextInventoryAt = now
+		} else if admission.InventoryMoreWork {
+			interval := tickPolicy.IntervalSeconds
+			if interval <= 0 {
+				interval = 60
+			}
+			sweep.NextInventoryAt = now.Add(time.Duration(interval) * time.Second)
+		}
+	}
+	if pipelineMore {
+		continuationReason = "pipeline_backlog"
+	}
 	result.MoreWork = result.MoreWork || admission.MoreWork
 	if custody != nil {
 		result.MoreWork = result.MoreWork || !custody.Wrapped
-		for _, item := range custody.Items {
-			result.MoreWork = result.MoreWork || item.Finding != ""
-		}
 	}
 	checkpoint := mustWorkerJSON(map[string]any{
 		"schema_version":           "knowledge_indexer.checkpoint.v0.8",
@@ -266,60 +383,59 @@ func (r KnowledgeIndexerRuntime) RunOnce(ctx context.Context, run workers.RunCon
 		"updated_at":               time.Now().UTC().Format(time.RFC3339Nano),
 		"admission":                admission,
 		"admission_timed_out":      admissionTimedOut,
+		"admission_warning":        admission.Warning,
 		"admission_page_limit":     admissionLimit,
+		"admission_elapsed_ms":     admissionElapsed.Milliseconds(),
+		"admission_budget_ms":      int64(config.MaxRuntimeSeconds) * 1000 / 3,
+		"admission_success_streak": knowledgeAdmissionSuccessStreak(admissionLimit, admissionTimedOut, run.Checkpoints),
 		"projection_changed":       projectionChanged,
+		"continuation_reason":      continuationReason,
 	})
 	output := workers.RunResult{
 		Status:        workers.RunStatusSucceeded,
 		ResultSummary: mustWorkerJSON(result),
 		Counters: map[string]int64{
-			"catalog_observed":         int64(admission.CatalogObserved),
-			"synced_observed":          int64(admission.SyncedObserved),
-			"priority_synced_observed": int64(admission.PrioritySyncedObserved),
-			"admission_applied":        int64(admission.Applied),
-			"admission_skipped":        int64(admission.Skipped),
-			"released_expired":         result.ReleasedExpired,
-			"claimed":                  result.Claimed,
-			"processed":                result.Processed,
-			"skipped_unsupported":      result.SkippedUnsupported,
-			"extracted":                result.Extracted,
-			"metadata_only":            result.MetadataOnly,
-			"too_large":                result.TooLarge,
-			"password_required":        result.PasswordRequired,
-			"no_embedded_text":         result.NoEmbeddedText,
-			"source_unavailable":       result.SourceUnavailable,
-			"retry_scheduled":          result.RetryScheduled,
-			"failed_terminal":          result.FailedTerminal,
-			"text_bytes_read":          result.TextBytesRead,
-			"chunks_created":           result.ChunksCreated,
-			"links_created":            result.LinksCreated,
-			"statuses_written":         result.StatusesWritten,
+			"admission_deferred_for_pipeline": boolCounter(admission.InventoryDeferred),
+			"catalog_observed":                int64(admission.CatalogObserved),
+			"synced_observed":                 int64(admission.SyncedObserved),
+			"priority_synced_observed":        int64(admission.PrioritySyncedObserved),
+			"priority_admission_applied":      int64(admission.PriorityApplied),
+			"admission_applied":               int64(admission.Applied),
+			"admission_skipped":               int64(admission.Skipped),
+			"released_expired":                result.ReleasedExpired,
+			"claimed":                         result.Claimed,
+			"processed":                       result.Processed,
+			"skipped_unsupported":             result.SkippedUnsupported,
+			"extracted":                       result.Extracted,
+			"metadata_only":                   result.MetadataOnly,
+			"too_large":                       result.TooLarge,
+			"password_required":               result.PasswordRequired,
+			"no_embedded_text":                result.NoEmbeddedText,
+			"source_unavailable":              result.SourceUnavailable,
+			"retry_scheduled":                 result.RetryScheduled,
+			"failed_terminal":                 result.FailedTerminal,
+			"text_bytes_read":                 result.TextBytesRead,
+			"chunks_created":                  result.ChunksCreated,
+			"links_created":                   result.LinksCreated,
+			"statuses_written":                result.StatusesWritten,
 		},
 		ResourceUsage: json.RawMessage(`{}`),
-		CheckpointUpdates: []workers.CheckpointUpdate{
-			{Key: "projection_refresh", SchemaVersion: "notes_projection.refresh.v1", Value: mustWorkerJSON(projectionCheckpoint), Metadata: json.RawMessage(`{}`)},
-			{Key: "admission", SchemaVersion: "knowledge_admission.cursor.v1", Value: mustWorkerJSON(admission.Cursor), Metadata: json.RawMessage(`{}`)},
-			{
+		CheckpointUpdates: append(knowledgeAdmissionCheckpoints(admission.Cursor, sweep, admissionTimedOut),
+			workers.CheckpointUpdate{Key: "projection_refresh", SchemaVersion: "notes_projection.refresh.v1", Value: mustWorkerJSON(projectionCheckpoint), Metadata: json.RawMessage(`{}`)},
+			workers.CheckpointUpdate{
 				Key:           "default",
 				SchemaVersion: "knowledge_indexer.checkpoint.v0.8",
 				Value:         checkpoint,
 				Metadata:      json.RawMessage(`{"schema_version":"worker_checkpoint.metadata.v0.2"}`),
 			},
-		},
-		NextRunAfter: knowledgeIndexerNextRun(tickPolicy, pipelineMore, admission.MoreWork, time.Now().UTC()),
+		),
+		NextRunAfter: knowledgeIndexerNextRun(tickPolicy, pipelineMore, admissionFast || custody != nil && !custody.Wrapped, time.Now().UTC()),
 		Retryable:    false,
 	}
 	if admissionTimedOut {
 		output.Counters["admission_timeouts"] = 1
 		// Processing succeeded, but admission is incomplete and must be retried.
 		output.Retryable = true
-		retained := output.CheckpointUpdates[:0]
-		for _, update := range output.CheckpointUpdates {
-			if update.Key != "admission" {
-				retained = append(retained, update)
-			}
-		}
-		output.CheckpointUpdates = retained
 	}
 	output.Counters["admission_page_limit"] = int64(admissionLimit)
 	if custody != nil {
@@ -340,33 +456,90 @@ func (r KnowledgeIndexerRuntime) RunOnce(ctx context.Context, run workers.RunCon
 			Value:    mustWorkerJSON(notesCustodyCheckpoint{SchemaVersion: notesCustodyCheckpointSchema, EventID: custody.NextCursor}),
 			Metadata: json.RawMessage(`{}`),
 		})
+		var start notesCustodyCheckpoint
+		if saved, ok := run.Checkpoints["custody"]; ok {
+			if err := json.Unmarshal(saved.CheckpointJSON, &start); err != nil {
+				return workers.RunResult{}, err
+			}
+		}
+		custodySchedule = custodySchedule.afterBatch(start.EventID, custody.Wrapped, now)
+		output.CheckpointUpdates = append(output.CheckpointUpdates, workers.CheckpointUpdate{
+			Key: "custody_schedule", SchemaVersion: "notes_custody.schedule.v1",
+			Value: mustWorkerJSON(custodySchedule), Metadata: json.RawMessage(`{}`),
+		})
+		if custodySchedule.Pending {
+			next := now
+			output.NextRunAfter = &next
+		}
 	}
-	output.ResultSummary = mustWorkerJSON(struct {
+	output.ResultSummary = knowledgeIndexerResultSummary(result, admissionTimedOut, admissionLimit, admission, continuationReason, custody)
+	return output, nil
+}
+
+func knowledgeIndexerResultSummary(result knowledge.KnowledgeIndexerRunResult, admissionTimedOut bool, admissionLimit int,
+	admission knowledge.AdmissionResult, continuationReason string, custody *knowledge.NotesCustodyBatchResult,
+) json.RawMessage {
+	return mustWorkerJSON(struct {
 		knowledge.KnowledgeIndexerRunResult
 		AdmissionTimedOut  bool                               `json:"admission_timed_out"`
+		AdmissionWarning   *knowledge.AdmissionPhaseWarning   `json:"admission_warning,omitempty"`
 		AdmissionPageLimit int                                `json:"admission_page_limit"`
+		Admission          knowledge.AdmissionResult          `json:"admission"`
+		ContinuationReason string                             `json:"continuation_reason"`
 		Custody            *knowledge.NotesCustodyBatchResult `json:"custody,omitempty"`
-	}{result, admissionTimedOut, admissionLimit, custody})
-	return output, nil
+		Warnings           []*knowledge.AdmissionPhaseWarning `json:"warnings,omitempty"`
+	}{result, admissionTimedOut, admission.Warning, admissionLimit, admission, continuationReason, custody, knowledgeAdmissionWarnings(admission)})
+}
+
+func knowledgeAdmissionWarnings(admission knowledge.AdmissionResult) []*knowledge.AdmissionPhaseWarning {
+	if admission.Warning == nil {
+		return nil
+	}
+	return []*knowledge.AdmissionPhaseWarning{admission.Warning}
 }
 
 func knowledgeAdmissionPageLimit(limit int, checkpoints map[string]workers.WorkerCheckpoint) (int, error) {
 	if saved, ok := checkpoints["default"]; ok {
 		var previous struct {
-			Limit    int  `json:"admission_page_limit"`
-			TimedOut bool `json:"admission_timed_out"`
+			Limit     int   `json:"admission_page_limit"`
+			TimedOut  bool  `json:"admission_timed_out"`
+			Successes int   `json:"admission_success_streak"`
+			ElapsedMS int64 `json:"admission_elapsed_ms"`
+			BudgetMS  int64 `json:"admission_budget_ms"`
 		}
 		if err := json.Unmarshal(saved.CheckpointJSON, &previous); err != nil {
 			return 0, fmt.Errorf("invalid Notes indexer checkpoint")
 		}
 		if previous.Limit > 0 {
-			limit = min(limit, previous.Limit)
-		}
-		if previous.TimedOut {
+			if previous.TimedOut {
+				limit = max(1, min(limit, previous.Limit)/2)
+			} else if previous.Successes >= 3 && previous.BudgetMS > 0 && previous.ElapsedMS*2 < previous.BudgetMS {
+				limit = min(limit, max(previous.Limit+1, previous.Limit*2))
+			} else {
+				limit = min(limit, previous.Limit)
+			}
+		} else if previous.TimedOut {
 			limit = max(1, limit/2)
 		}
 	}
 	return limit, nil
+}
+
+func knowledgeAdmissionSuccessStreak(limit int, timedOut bool, checkpoints map[string]workers.WorkerCheckpoint) int {
+	if timedOut {
+		return 0
+	}
+	var previous struct {
+		Limit     int `json:"admission_page_limit"`
+		Successes int `json:"admission_success_streak"`
+	}
+	if saved, ok := checkpoints["default"]; ok {
+		_ = json.Unmarshal(saved.CheckpointJSON, &previous)
+	}
+	if previous.Limit < limit {
+		return 1
+	}
+	return min(3, previous.Successes+1)
 }
 
 func admitKnowledgeNotes(ctx context.Context, cursor knowledge.AdmissionCursor, limit int, budget time.Duration,
@@ -376,17 +549,106 @@ func admitKnowledgeNotes(ctx context.Context, cursor knowledge.AdmissionCursor, 
 	defer cancel()
 	result, err := admit(admissionCtx, cursor, limit)
 	if ctx.Err() != nil {
+		if errors.Is(err, ctx.Err()) {
+			return knowledge.AdmissionResult{}, false, err
+		}
 		return knowledge.AdmissionResult{}, false, ctx.Err()
 	}
 	if err != nil && errors.Is(admissionCtx.Err(), context.DeadlineExceeded) {
-		// Partial admission is replayable; never publish its uncommitted cursor.
-		return knowledge.AdmissionResult{Cursor: cursor, MoreWork: true}, true, nil
+		// Authority reconciliation is committed before this stamp is returned.
+		// Inventory/priority positions may still be tentative and must replay.
+		if result.Cursor.RootConfigRevision != "" {
+			cursor.RootConfigRevision = result.Cursor.RootConfigRevision
+			cursor.NextRootReconcileAt = result.Cursor.NextRootReconcileAt
+		}
+		result.Cursor, result.MoreWork = cursor, true
+		var phaseErr *knowledge.AdmissionPhaseError
+		if errors.As(err, &phaseErr) {
+			result.Warning = phaseErr.Warning()
+		}
+		return result, true, nil
 	}
 	return result, false, err
 }
 
-func knowledgeIndexerNextRun(policy workers.TickPolicy, pipelineMore, admissionMore bool, now time.Time) *time.Time {
-	if (pipelineMore || admissionMore) && policy.Mode == workers.TickModeInterval && policy.IntervalSeconds > workers.MinimumIntervalSeconds {
+func knowledgeAdmissionCheckpoints(cursor knowledge.AdmissionCursor, sweep knowledgeAdmissionSweepCheckpoint, timedOut bool) []workers.CheckpointUpdate {
+	updates := []workers.CheckpointUpdate{
+		{Key: "admission", SchemaVersion: "knowledge_admission.cursor.v1", Value: mustWorkerJSON(cursor), Metadata: json.RawMessage(`{}`)},
+	}
+	if !timedOut {
+		updates = append(updates, workers.CheckpointUpdate{
+			Key: "admission_schedule", SchemaVersion: "knowledge_admission.schedule.v1", Value: mustWorkerJSON(sweep), Metadata: json.RawMessage(`{}`),
+		})
+	}
+	return updates
+}
+
+func knowledgeAdmissionContinuation(cursor knowledge.AdmissionCursor, previous knowledgeAdmissionSweepCheckpoint,
+	admission knowledge.AdmissionResult, timedOut bool,
+) (knowledgeAdmissionSweepCheckpoint, bool, string) {
+	if timedOut {
+		return previous, false, "admission_timeout"
+	}
+	if admission.InventoryDeferred {
+		return previous, true, "pipeline_priority"
+	}
+	if admission.Cursor.Incremental {
+		initial := !previous.Complete || previous.SourceGeneration != admission.SourceGeneration
+		previous.SourceGeneration, previous.SweepStarted = admission.SourceGeneration, true
+		if initial {
+			previous.Complete = !admission.InventoryMoreWork
+		}
+		if admission.PriorityMoreWork && admission.PriorityApplied > 0 {
+			return previous, true, "priority_delivery"
+		}
+		if admission.InventoryMoreWork {
+			if initial {
+				return previous, true, "scoped_inventory"
+			}
+			return previous, false, "inventory_reconcile"
+		}
+		return previous, false, "idle"
+	}
+	if previous.SourceGeneration != admission.SourceGeneration {
+		previous = knowledgeAdmissionSweepCheckpoint{SourceGeneration: admission.SourceGeneration}
+	}
+	initialSweep := !previous.Complete
+	if initialSweep {
+		// A generation discovered mid-sweep must also see the beginning of the
+		// inventory. Finish the committed cursor, then take one full fast pass.
+		if !cursor.StorageDone && !cursor.SyncedDone && cursor.StorageAfter == "" && cursor.SyncedAfter == [3]string{} {
+			previous.SweepStarted = true
+		}
+		if !admission.InventoryMoreWork && previous.SweepStarted {
+			previous.Complete = true
+		}
+	}
+	if admission.PriorityMoreWork && admission.PriorityApplied > 0 {
+		return previous, true, "priority_delivery"
+	}
+	if initialSweep && admission.InventoryMoreWork {
+		return previous, true, "initial_inventory"
+	}
+	if admission.InventoryMoreWork {
+		return previous, false, "inventory_reconcile"
+	}
+	return previous, false, "idle"
+}
+
+func knowledgeAdmissionUpgradeBaseline(previous knowledgeAdmissionSweepCheckpoint, admission knowledge.AdmissionResult,
+	existingInventory, timedOut bool,
+) knowledgeAdmissionSweepCheckpoint {
+	// Existing cursor owners already perform continuous reconciliation. Installing
+	// the new cadence must not manufacture another initial import of that inventory.
+	// This checkpoint controls cadence, not source acceptance or coverage truth.
+	if previous.SourceGeneration == "" && existingInventory && !timedOut && !admission.InventoryDeferred {
+		return knowledgeAdmissionSweepCheckpoint{SourceGeneration: admission.SourceGeneration, SweepStarted: true, Complete: true}
+	}
+	return previous
+}
+
+func knowledgeIndexerNextRun(policy workers.TickPolicy, pipelineMore, admissionFast bool, now time.Time) *time.Time {
+	if (pipelineMore || admissionFast) && policy.Mode == workers.TickModeInterval && policy.IntervalSeconds > workers.MinimumIntervalSeconds {
 		next := now.Add(time.Duration(workers.MinimumIntervalSeconds) * time.Second)
 		return &next
 	}

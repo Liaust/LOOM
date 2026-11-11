@@ -29,6 +29,54 @@ type projectPhysicalHTTPFake struct {
 	deadline time.Time
 }
 
+func (f *projectPhysicalHTTPFake) ReviewProjectRegistrationRetirement(_ context.Context, req requestctx.Context, ref string, in storagearchive.ProjectRetirementInput) (storagearchive.ProjectRetirementPlan, error) {
+	f.calls++
+	f.req = req
+	return storagearchive.ProjectRetirementPlan{SchemaVersion: storagearchive.ProjectRetirementPlanSchema, ProjectID: ref, Request: req, RetainedRoot: in.RetainedRoot, Reason: in.Reason, PlanDigest: workspaceHTTPDigest}, f.err
+}
+
+func (f *projectPhysicalHTTPFake) ApplyProjectRegistrationRetirement(_ context.Context, req requestctx.Context, ref string, _ storagearchive.ProjectRetirementApply) (projects.Project, error) {
+	f.calls++
+	f.req = req
+	return projects.Project{ProjectID: ref, Status: "archived"}, f.err
+}
+
+func TestProjectRegistrationRetirementHTTPAuthorizationAndBinding(t *testing.T) {
+	f, p := &projectPhysicalHTTPFake{}, &projectHTTPPolicy{}
+	s := httptest.NewServer(projectHTTPServer(f, p).Handler())
+	defer s.Close()
+	c, _ := localclient.NewHTTP(s.URL)
+	input := storagearchive.ProjectRetirementInput{RetainedRoot: "/retained/test", Reason: "finish retirement"}
+	p.denied = capabilities.WorkspaceArchivePlanCapability
+	if _, err := c.ReviewProjectRegistrationRetirement(context.Background(), "corr", "test", input); err == nil || f.calls != 0 {
+		t.Fatal("unauthorized review ran")
+	}
+	p.denied = ""
+	out, err := c.ReviewProjectRegistrationRetirement(context.Background(), "corr", "test", input)
+	if err != nil || f.calls != 1 {
+		t.Fatal(err)
+	}
+	in := storagearchive.ProjectRetirementApply{Plan: out.Data, PlanDigest: out.Data.PlanDigest}
+	if _, err := c.ApplyProjectRegistrationRetirement(context.Background(), "corr2", "test", in); err == nil || f.calls != 1 {
+		t.Fatal("unconfirmed retirement ran")
+	}
+	in.Confirm = true
+	p.denied = capabilities.WorkspaceArchiveApplyCapability
+	if _, err := c.ApplyProjectRegistrationRetirement(context.Background(), "corr2", "test", in); err == nil || f.calls != 1 {
+		t.Fatal("unauthorized retirement ran")
+	}
+	p.denied = ""
+	in.Plan.Request.ActorID = "other"
+	if _, err := c.ApplyProjectRegistrationRetirement(context.Background(), "corr2", "test", in); err == nil || f.calls != 1 {
+		t.Fatal("caller substitution ran")
+	}
+	in.Plan = out.Data
+	result, err := c.ApplyProjectRegistrationRetirement(context.Background(), "corr2", "test", in)
+	if err != nil || result.Data.Status != "archived" || f.calls != 2 || f.req.ScopeID != "scope_project" {
+		t.Fatal("retirement route failed", err)
+	}
+}
+
 func (f *projectPhysicalHTTPFake) ProjectPhysicalScope(ctx context.Context, _ string) (string, string, string, error) {
 	f.deadline, _ = ctx.Deadline()
 	return "project_test", "scope_project", "project:test", nil

@@ -45,7 +45,7 @@ func HermesArchiveBoundary(ctx context.Context, roots []DirectArchiveRoot, exclu
 				found = true
 			}
 			paths := []string{filepath.ToSlash(filepath.Join(rel, ".hermes"))}
-			if policy.Enabled && workspace == policy.Workspace {
+			if (policy.Enabled || len(policy.PublicKey) == 32) && workspace == policy.Workspace {
 				paths = append(paths, filepath.ToSlash(filepath.Join(rel, "recovery", ".staging")))
 			} else {
 				paths = append(paths, filepath.ToSlash(filepath.Join(rel, "recovery")))

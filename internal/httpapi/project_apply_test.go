@@ -86,6 +86,36 @@ func declarationHTTP(t *testing.T, h http.Handler, method, path, raw string) *ht
 func declarationTestApply() pc.DeclarationApplyRequest {
 	return pc.DeclarationApplyRequest{SchemaVersion: pc.DeclarationRequestSchemaV05, ProjectRef: "/tmp/project", NodeRef: "main", Effects: []pc.DeclarationEffect{pc.DeclarationReconcile}, PlanID: "sha256:" + strings.Repeat("a", 64), IdempotencyKey: "original"}
 }
+
+func TestProjectDeclarationHTTPWatchOnlyScope(t *testing.T) {
+	request := declarationTestApply()
+	request.Effects = []pc.DeclarationEffect{pc.DeclarationWatches}
+	svc := &declarationServiceStub{}
+	h, _ := declarationTestHandler(svc)
+	plan := pc.DeclarationPlanRequest{SchemaVersion: request.SchemaVersion, ProjectRef: request.ProjectRef, NodeRef: request.NodeRef, Effects: request.Effects}
+	for _, tc := range []struct {
+		path  string
+		input any
+	}{
+		{"/v1/project-declaration-plans", plan},
+		{"/v1/project-declaration-operations", request},
+	} {
+		w := declarationHTTP(t, h, "POST", tc.path, declarationJSONTest(t, tc.input))
+		if w.Code != 200 {
+			t.Fatal(w.Code, w.Body)
+		}
+	}
+	if svc.calls != 2 || !reflect.DeepEqual(svc.plan.Effects, request.Effects) || !reflect.DeepEqual(svc.apply.Effects, request.Effects) {
+		t.Fatal("watch-only scope lost before dispatch")
+	}
+	for _, effect := range []pc.DeclarationEffect{pc.DeclarationReconcile, pc.DeclarationProjections, pc.DeclarationWatches} {
+		plan.Effects = []pc.DeclarationEffect{pc.DeclarationWatches, effect}
+		w := declarationHTTP(t, h, "POST", "/v1/project-declaration-plans", declarationJSONTest(t, plan))
+		if w.Code != 422 || svc.calls != 2 {
+			t.Fatal("mixed watch scope dispatched", w.Code, w.Body)
+		}
+	}
+}
 func declarationJSONTest(t *testing.T, v any) string {
 	t.Helper()
 	raw, err := json.Marshal(v)
@@ -155,7 +185,7 @@ func TestProjectDeclarationHTTPErrorsAndDurableResults(t *testing.T) {
 		code   pc.DeclarationErrorCode
 		cause  string
 		status int
-	}{{pc.DeclarationOwnerFailed, "owner_pending", 202}, {pc.DeclarationOwnerFailed, "observation_uncertain", 503}, {pc.DeclarationPlanStale, "source_changed", 409}, {pc.DeclarationUnauthorized, "permission_revoked", 403}, {pc.DeclarationInvalid, "invalid_selector", 422}, {pc.DeclarationUnsupported, "application_owner_required", 422}} {
+	}{{pc.DeclarationOwnerPending, "owner_pending", 202}, {pc.DeclarationOwnerFailed, "owner_pending", 202}, {pc.DeclarationOwnerFailed, "observation_uncertain", 503}, {pc.DeclarationPlanStale, "source_changed", 409}, {pc.DeclarationUnauthorized, "permission_revoked", 403}, {pc.DeclarationInvalid, "invalid_selector", 422}, {pc.DeclarationUnsupported, "application_owner_required", 422}} {
 		t.Run(tt.cause, func(t *testing.T) {
 			result := pc.DeclarationResult{SchemaVersion: pc.DeclarationResultSchemaV05, OperationID: ids.NewJobID(), State: pc.DeclarationOperationPartial, Actions: []pc.DeclarationActionResult{{ActionID: "registration", EffectRef: "receipt", State: pc.DeclarationOperationSucceeded}}}
 			svc := &declarationServiceStub{result: result, err: declarationFailure(tt.code, tt.cause)}
@@ -208,6 +238,8 @@ func TestProjectDeclarationHTTPNextActionCauseMatrix(t *testing.T) {
 		{pc.DeclarationUnsupported, "application_owner_required", "prerequisite", false},
 		{pc.DeclarationUnsupported, "core_not_configured", "prerequisite", false},
 		{pc.DeclarationPlanStale, "source_changed", "same owner", false},
+		{pc.DeclarationPlanStale, "watch_configuration_binding_changed", "without --watches-only", false},
+		{pc.DeclarationPlanStale, "watch_configuration_policy_changed", "without --watches-only", false},
 		{pc.DeclarationIdentityConflict, "identity_changed", "same owner", false},
 		{pc.DeclarationOwnerFailed, "observation_uncertain", "original", true},
 	} {

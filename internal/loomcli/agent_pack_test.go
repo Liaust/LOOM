@@ -38,7 +38,7 @@ func TestAgentPackStatusAndValidateAreLocal(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(output, "fixture-pack 1.0.0") ||
-		!strings.Contains(output, "Harnesses: codex, orca") ||
+		!strings.Contains(output, "Harnesses: codex, hermes") ||
 		!strings.Contains(output, "Recommended skill sets: morathustra, project") ||
 		!strings.Contains(output, "errors=0 warnings=0") {
 		t.Fatalf("unexpected status:\n%s", output)
@@ -396,10 +396,11 @@ func workspaceExportCLIFixture(t *testing.T) string {
 		t.Fatal(err)
 	}
 	paths := []string{"ai-loom-pack/manifest.yaml", "nix/files/mina/skins/mina-matrix-teal.yaml"}
-	for _, relative := range []string{".hermes/SOUL.md", "AGENTS.md", "WORKFLOW.md", "OPERATING-POLICY.md", "WORKSPACE-MAP.md", "TOOLING.md", "protocols/README.md", "protocols/BASECAMP.md", "protocols/GITHUB.md", "protocols/CREDENTIALS.md", "protocols/EXTERNAL-MESSAGING.md", "protocols/LOOM-ROUTING.md", "protocols/PROJECT-DELEGATION.md", "protocols/PROVENANCE-AND-MEMORY.md", "protocols/SESSION-RETRIEVAL.md", "protocols/SKILL-CREATION-AND-PROMOTION.md", "protocols/DEVICE-AND-TOOL-ROUTING.md", "protocols/MAC-COMPUTER-USE.md", "handoffs/HANDOFF-TEMPLATE.md"} {
+	for _, relative := range []string{"SOUL.md", "AGENTS.md", "WORKFLOW.md", "OPERATING-POLICY.md", "WORKSPACE-MAP.md", "TOOLING.md", "protocols/README.md", "protocols/BASECAMP.md", "protocols/GITHUB.md", "protocols/CREDENTIALS.md", "protocols/EXTERNAL-MESSAGING.md", "protocols/LOOM-ROUTING.md", "protocols/PROJECT-DELEGATION.md", "protocols/PROVENANCE-AND-MEMORY.md", "protocols/SESSION-RETRIEVAL.md", "protocols/SKILL-CREATION-AND-PROMOTION.md", "protocols/DEVICE-AND-TOOL-ROUTING.md", "protocols/MAC-COMPUTER-USE.md", "handoffs/HANDOFF-TEMPLATE.md"} {
 		paths = append(paths, "ai-loom-pack/templates/mina/"+relative)
 	}
 	paths = append(paths, "ai-loom-pack/templates/mina/protocols/PROVENANCE-RECONCILIATION.md")
+	paths = append(paths, "ai-loom-pack/templates/mina/protocols/HERMES-RUNTIME.md")
 	for _, path := range paths {
 		payload, err := os.ReadFile(filepath.Join("..", "..", path))
 		if err != nil {
@@ -437,7 +438,7 @@ func TestWorkspaceExportCLIPlanApplyAndRefusal(t *testing.T) {
 		if err := json.Unmarshal([]byte(output), &plan); err != nil {
 			t.Fatal(err)
 		}
-		if len(plan.Manifest.Files) != 23 || plan.Manifest.ExportID == "" || id != "" && id != plan.Manifest.ExportID {
+		if len(plan.Manifest.Files) != 24 || plan.Manifest.ExportID == "" || id != "" && id != plan.Manifest.ExportID {
 			t.Fatalf("invalid plan: %s", output)
 		}
 		id = plan.Manifest.ExportID
@@ -453,10 +454,10 @@ func TestWorkspaceExportCLIPlanApplyAndRefusal(t *testing.T) {
 		t.Fatal(err)
 	}
 	var result agentpack.WorkspaceExportResult
-	if err := json.Unmarshal([]byte(output), &result); err != nil || !result.Applied || result.Manifest.ExportID != id || len(result.Created) != 29 {
+	if err := json.Unmarshal([]byte(output), &result); err != nil || !result.Applied || result.Manifest.ExportID != id || len(result.Created) != len(result.Manifest.Files)+5 {
 		t.Fatalf("result: %+v %v", result, err)
 	}
-	info, err := os.Stat(filepath.Join(destination, ".hermes/SOUL.md"))
+	info, err := os.Stat(filepath.Join(destination, "SOUL.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -464,7 +465,7 @@ func TestWorkspaceExportCLIPlanApplyAndRefusal(t *testing.T) {
 	if err == nil {
 		t.Fatal("existing export not refused")
 	}
-	after, err := os.Stat(filepath.Join(destination, ".hermes/SOUL.md"))
+	after, err := os.Stat(filepath.Join(destination, "SOUL.md"))
 	if err != nil || !os.SameFile(info, after) || !info.ModTime().Equal(after.ModTime()) {
 		t.Fatal("refusal changed destination")
 	}

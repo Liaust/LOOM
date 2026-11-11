@@ -342,6 +342,98 @@ func TestNormalizeBackupBatchInputRejectsNoncanonicalBatchKind(t *testing.T) {
 	}
 }
 
+func TestNormalizeBackupBatchInputDeletionMarkerRetainsPreviousHash(t *testing.T) {
+	deletedAt := time.Date(2026, 10, 2, 20, 7, 11, 0, time.UTC)
+	valid := BackupBatchInput{
+		RootKey:  "notes",
+		Metadata: json.RawMessage(`{"local_batch_id":"local_backup_batch_test"}`),
+		Items: []BackupBatchItemInput{{
+			LocalItemRef:    "local_backup_item_test",
+			ItemKind:        BackupItemKindDeletionMarker,
+			RelativePath:    "Workspace Pilot",
+			PreviousHashURI: "sha256:6db47c164b8e23251bac30050cb500984840216213f2cf2751bb845e95514cd0",
+			SizeBytes:       4096,
+			DeletedAt:       &deletedAt,
+			Metadata:        json.RawMessage(`{"source":"loom-node-agent","local_batch_id":"local_backup_batch_test","local_item_id":"local_backup_item_test","filesystem_observation":{"kind":"directory","logical_size_bytes":4096}}`),
+		}},
+	}
+	got, err := normalizeBackupBatchInput(valid)
+	if err != nil {
+		t.Fatalf("valid deletion marker rejected: %v", err)
+	}
+	if got.Items[0].ContentHashURI != "" || got.Items[0].PreviousHashURI != valid.Items[0].PreviousHashURI || got.Items[0].SizeBytes != 4096 || !got.Items[0].DeletedAt.Equal(deletedAt) {
+		t.Fatalf("deletion evidence changed: %#v", got.Items[0])
+	}
+	file := valid
+	file.Items = append([]BackupBatchItemInput(nil), valid.Items...)
+	file.Items[0].Metadata = json.RawMessage(`{"source":"loom-node-agent","local_batch_id":"local_backup_batch_test","local_item_id":"local_backup_item_test","filesystem_observation":{"kind":"regular_file","logical_size_bytes":4096}}`)
+	if _, err := normalizeBackupBatchInput(file); err != nil {
+		t.Fatalf("valid file deletion marker rejected: %v", err)
+	}
+	file.Items[0].ContentHashURI = valid.Items[0].PreviousHashURI
+	if _, err := normalizeBackupBatchInput(file); err != nil {
+		t.Fatalf("legacy file deletion marker with retained content hash rejected: %v", err)
+	}
+	legacy := valid
+	legacy.Items = append([]BackupBatchItemInput(nil), valid.Items...)
+	legacy.Items[0].Metadata = json.RawMessage(`{"source":"loom-node-agent","local_batch_id":"local_backup_batch_test","local_item_id":"local_backup_item_test"}`)
+	if _, err := normalizeBackupBatchInput(legacy); err != nil {
+		t.Fatalf("retained deletion marker without historical stat evidence rejected: %v", err)
+	}
+	tests := map[string]func(*BackupBatchInput){
+		"missing previous hash": func(input *BackupBatchInput) { input.Items[0].PreviousHashURI = "" },
+		"invalid previous hash": func(input *BackupBatchInput) { input.Items[0].PreviousHashURI = "sha256:invalid" },
+		"invalid current hash":  func(input *BackupBatchInput) { input.Items[0].ContentHashURI = "sha256:invalid" },
+		"missing deletion time": func(input *BackupBatchInput) { input.Items[0].DeletedAt = nil },
+		"negative size":         func(input *BackupBatchInput) { input.Items[0].SizeBytes = -1 },
+		"inconsistent size":     func(input *BackupBatchInput) { input.Items[0].SizeBytes = 0 },
+		"wrong batch":           func(input *BackupBatchInput) { input.Metadata = json.RawMessage(`{"local_batch_id":"other"}`) },
+		"path escape":           func(input *BackupBatchInput) { input.Items[0].RelativePath = "../outside" },
+		"unexpected artifact": func(input *BackupBatchInput) {
+			input.Items[0].ArtifactKind = BackupArtifactKindFileTransfer
+			input.Items[0].ArtifactRef = "unexpected"
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			input := valid
+			input.Items = append([]BackupBatchItemInput(nil), valid.Items...)
+			mutate(&input)
+			if _, err := normalizeBackupBatchInput(input); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("error = %v, want ErrInvalid", err)
+			}
+		})
+	}
+}
+
+func TestNormalizeBackupDeletionWithoutPriorContent(t *testing.T) {
+	deletedAt := time.Date(2026, 11, 3, 6, 0, 0, 0, time.UTC)
+	input := BackupBatchInput{
+		RootKey: "notes", Metadata: json.RawMessage(`{"local_batch_id":"batch"}`),
+		Items: []BackupBatchItemInput{{LocalItemRef: "item", RelativePath: "short-lived.md",
+			ItemKind: BackupItemKindDeletionMarker, DeletedAt: &deletedAt,
+			Metadata: json.RawMessage(`{"source":"loom-node-agent","local_batch_id":"batch","local_item_id":"item","prior_content_unavailable":true}`)}},
+	}
+	got, err := normalizeBackupBatchInput(input)
+	if err != nil || got.Items[0].PreviousHashURI != "" || got.Items[0].ContentHashURI != "" {
+		t.Fatalf("qualified absence-only marker: result=%+v err=%v", got, err)
+	}
+	for _, mutate := range []func(*BackupBatchItemInput){
+		func(item *BackupBatchItemInput) { item.PreviousHashURI = "sha256:" + strings.Repeat("a", 64) },
+		func(item *BackupBatchItemInput) { item.ContentHashURI = "sha256:" + strings.Repeat("a", 64) },
+		func(item *BackupBatchItemInput) { item.DeletedAt = nil },
+		func(item *BackupBatchItemInput) { item.DeletedAt = new(time.Time) },
+		func(item *BackupBatchItemInput) { item.ItemKind = BackupItemKindMetadata },
+	} {
+		bad := input
+		bad.Items = append([]BackupBatchItemInput(nil), input.Items...)
+		mutate(&bad.Items[0])
+		if _, err := normalizeBackupBatchInput(bad); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("contradictory absence evidence accepted: %+v err=%v", bad, err)
+		}
+	}
+}
+
 func TestNormalizeBackupBatchInputRequiresCoherentMetadataOnlyEvidence(t *testing.T) {
 	modifiedAt := time.Date(2026, 8, 28, 12, 33, 0, 0, time.UTC)
 	valid := BackupBatchInput{
@@ -380,6 +472,25 @@ func TestNormalizeBackupBatchInputRequiresCoherentMetadataOnlyEvidence(t *testin
 				t.Fatalf("error = %v, want ErrInvalid", err)
 			}
 		})
+	}
+}
+
+func TestDeletionMarkerAllowsUnavailableHistoricalStatNotInvalidPresentEvidence(t *testing.T) {
+	deletedAt := time.Now().UTC()
+	item := BackupBatchItemInput{LocalItemRef: "item", ItemKind: BackupItemKindDeletionMarker,
+		RelativePath: "old.md", PreviousHashURI: "sha256:" + strings.Repeat("a", 64), DeletedAt: &deletedAt,
+		Metadata: json.RawMessage(`{"source":"loom-node-agent","local_batch_id":"batch","local_item_id":"item"}`)}
+	if err := validateMetadataOnlyBackupInput("batch", item); err != nil {
+		t.Fatal("absent path requires a fabricated stat:", err)
+	}
+	item.DeletedAt = nil
+	if err := validateMetadataOnlyBackupInput("batch", item); !errors.Is(err, ErrInvalid) {
+		t.Fatal("deletion lifecycle evidence bypassed", err)
+	}
+	item.DeletedAt = &deletedAt
+	item.ItemKind = BackupItemKindMetadata
+	if err := validateMetadataOnlyBackupInput("batch", item); !errors.Is(err, ErrInvalid) {
+		t.Fatal("present metadata bypassed stat evidence", err)
 	}
 }
 

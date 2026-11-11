@@ -1,0 +1,57 @@
+diff --git a/tools/bot_desktop/browser.py b/tools/bot_desktop/browser.py
+--- a/tools/bot_desktop/browser.py
++++ b/tools/bot_desktop/browser.py
+@@ -105,4 +105,18 @@ def dock_argv(exe: str, user_data_dir: str, *, sandbox_bypass: Optional[bool] = None)
+                                               else sandbox_bypass) else ())]
+-
++
+-
++
++def socket_temp_env(env: dict) -> dict[str, str]:
++    """Only shorten browser temp roots, never its persistent profile or Hermes scratch policy."""
++    from hermes_constants import SOCKET_TMPDIR_MAX_LEN, socket_safe_tmpdir
++
++    keys = ("TMPDIR", "TMP", "TEMP")
++    if not any(len(os.fsencode(env.get(key, ""))) > SOCKET_TMPDIR_MAX_LEN for key in keys):
++        return {}
++    root = socket_safe_tmpdir()
++    # The upstream helper counts characters; AF_UNIX limits encoded bytes.
++    if len(os.fsencode(root)) > SOCKET_TMPDIR_MAX_LEN:
++        root = "/tmp"
++    return {key: root for key in keys}
++
++
+ def dock_exec_line(exe: str, user_data_dir: str, *, sandbox_bypass: Optional[bool] = None) -> str:
+@@ -121,1 +135,5 @@ def dock_exec_line(exe: str, user_data_dir: str, *, sandbox_bypass: Optional[bool] =
+-    return "Exec=" + " ".join(quote(arg) for arg in dock_argv(exe, user_data_dir, sandbox_bypass=sandbox_bypass))
++    temp = socket_temp_env(os.environ)
++    prefix = ([shutil.which("env") or "env", *(f"{key}={value}" for key, value in temp.items())]
++              if temp else [])
++    return "Exec=" + " ".join(quote(arg) for arg in
++                              [*prefix, *dock_argv(exe, user_data_dir, sandbox_bypass=sandbox_bypass)])
+@@ -201,6 +222,7 @@ def env_for_agent(env: dict) -> dict:
+     where Chromium's singleton swallows the dock's launch into the windowless process. Only runs while a
+     screen is up (:func:`runtime.desktop_env`), so the heavier build is pinned just when it is the point.
+     """
++    env.update(socket_temp_env(env))
+     env.setdefault("AGENT_BROWSER_PROFILE", str(profile_dir()))
+     exe = executable()
+     if exe:
+diff --git a/tools/bot_desktop/launcher.sh b/tools/bot_desktop/launcher.sh
+--- a/tools/bot_desktop/launcher.sh
++++ b/tools/bot_desktop/launcher.sh
+@@ -247,5 +247,13 @@ if [[ -n "${HERMES_BD_BROWSER_EXEC:-}" && -n "${HERMES_BD_BROWSER_EXEC_LINE:-}" && -r
+   [[ -f "$d" ]] && sed -i "s|^Exec=.*|$(printf '%s' "$HERMES_BD_BROWSER_EXEC_LINE" | sed 's/[&|\\]/\\&/g')|" "$d"
+ fi
+-
++
++# The system menu otherwise only sees distro browsers (Epiphany on NixOS).
++# Use the same per-profile Chromium identity as the dock, never a second jar.
++if [[ -n "${HERMES_BD_BROWSER_EXEC:-}" && -n "${HERMES_BD_BROWSER_EXEC_LINE:-}" ]]; then
++  mkdir -p "$XDG_DATA_HOME/applications"
++  printf '[Desktop Entry]\nType=Application\nName=Chromium (Bot Browser)\nGenericName=Web Browser\nIcon=chromium\n%s\nTerminal=false\nCategories=Network;WebBrowser;\n' \
++    "$HERMES_BD_BROWSER_EXEC_LINE" > "$XDG_DATA_HOME/applications/hermes-bot-browser.desktop"
++fi
++
+ # Tests seed the config tree on a fake PATH and stop here (no X server needed).
+ [[ -n "${HERMES_BD_SEED_ONLY:-}" ]] && exit 0

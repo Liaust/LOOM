@@ -41,7 +41,15 @@ func (s *Service) resolveSyncedSource(ctx context.Context, object KnowledgeObjec
 	if s == nil || s.store.db == nil {
 		return binding, fmt.Errorf("knowledge store is not configured")
 	}
-	err := s.store.db.QueryRowContext(ctx, `
+	tx, err := s.store.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return binding, err
+	}
+	defer tx.Rollback()
+	if err = preparePipelineSingletonTx(ctx, tx); err != nil {
+		return binding, err
+	}
+	err = tx.QueryRowContext(ctx, `
 	 SELECT v.object_version_id,r.replica_id,b.blob_id,b.storage_path,b.hash_uri,b.size_bytes
 	 FROM knowledge.knowledge_objects o
 	 JOIN objects.object_versions v ON v.object_version_id=o.metadata->'synced_object'->>'object_version_id'
@@ -77,7 +85,7 @@ func (s *Service) resolveSyncedSource(ctx context.Context, object KnowledgeObjec
 	if err != nil {
 		return binding, err
 	}
-	return binding, nil
+	return binding, tx.Commit()
 }
 
 func (s *Service) readSyncedObjectSource(ctx context.Context, object KnowledgeObject, maxBytes int64) ([]byte, error) {

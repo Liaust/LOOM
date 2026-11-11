@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"strings"
@@ -89,6 +90,25 @@ func TestProjectPhysicalReviewKeepsPlannerCausePrivate(t *testing.T) {
 	}
 }
 
+func TestProjectPhysicalReviewSurvivesUnrelatedSiblingChange(t *testing.T) {
+	env, _, req := newProjectSurfaceEnvironment(t)
+	review := projectSurfaceReview(t, env, req)
+	// Another archive or ordinary folder creation changes the shared parent,
+	// without changing this project's identity, files or runtime configuration.
+	if err := os.Mkdir(env.service.WorkspaceRoots.BoxRoot+"/Projects/unrelated", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	applyProjectSurfaceReview(t, env, req, review)
+}
+
+func TestProjectPhysicalReviewRequiresDurableEvidenceBeforeReturning(t *testing.T) {
+	env, store, req := newProjectSurfaceEnvironment(t)
+	store.failSave = true
+	if _, err := env.service.ReviewProjectPhysicalArchive(context.Background(), req, "canonical-many", ProjectPhysicalArchivePlanInput{Reason: "retain exact review"}); err == nil || env.projects.transitions != 0 || len(store.rows) != 0 {
+		t.Fatal("review escaped failed persistence")
+	}
+}
+
 func TestProjectPhysicalReviewSurvivesWatcherReportButBindsConfiguration(t *testing.T) {
 	for _, change := range []string{"heartbeat", "configuration", "activation", "metadata"} {
 		t.Run(change, func(t *testing.T) {
@@ -116,8 +136,39 @@ func TestProjectPhysicalReviewSurvivesWatcherReportButBindsConfiguration(t *test
 				if err != nil {
 					t.Fatalf("heartbeat invalidated review: %v", err)
 				}
-			} else if err == nil || len(store.rows) != 0 || env.projects.transitions != 0 {
+			} else if err == nil || len(store.rows) != 1 || env.projects.transitions != 0 {
 				t.Fatalf("changed %s accepted or mutated persistence: %v", change, err)
+			}
+		})
+	}
+}
+
+func TestProjectPhysicalReviewRearchivesDisabledWatchedRoot(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("configuration_changed_%t", changed), func(t *testing.T) {
+			env, _, req := newProjectSurfaceEnvironment(t)
+			root := &env.projects.detail.WatchedRootRegistrations[0]
+			before := time.Date(2026, 9, 4, 10, 0, 0, 0, time.UTC)
+			actor := req.ActorID
+			root.ActivationStatus = projects.ProjectWatchedRootRegistrationStatusDisabled
+			root.LastAppliedAt, root.LastAppliedByActorID, root.UpdatedAt = &before, &actor, before
+			root.Metadata = json.RawMessage(`{"declaration_adapter":{"owner":"fixture"}}`)
+			review := projectSurfaceReview(t, env, req)
+			if changed {
+				root.ConfigHash = "sha256:" + strings.Repeat("c", 64)
+			}
+			result, err := env.service.ApplyReviewedProjectPhysicalPlan(context.Background(), req, review.ProjectID, ProjectPhysicalApplyRequest{Plan: review, PlanDigest: review.PlanDigest, Confirm: true})
+			if changed {
+				if err == nil || env.projects.transitions != 0 {
+					t.Fatalf("changed disabled root reached mutation: %+v / %v", result, err)
+				}
+				return
+			}
+			if err != nil || result.Phase != "complete" {
+				t.Fatalf("rearchive failed: %+v / %v; cause=%v", result, err, errors.Unwrap(err))
+			}
+			if _, err := env.service.RecoverReviewedProjectPhysicalKind(context.Background(), req, review.ProjectID, ProjectPhysicalRecoverRequest{OperationID: review.Workspace.OperationID, PlanDigest: review.PlanDigest, Confirm: true}, WorkspaceOperationArchive); err != nil {
+				t.Fatalf("terminal replay of rearchive: %v", err)
 			}
 		})
 	}
@@ -127,7 +178,7 @@ func applyProjectSurfaceReview(t *testing.T, env projectArchivePlanEnvironment, 
 	t.Helper()
 	result, err := env.service.ApplyReviewedProjectPhysicalPlan(context.Background(), req, review.ProjectID, ProjectPhysicalApplyRequest{Plan: review, PlanDigest: review.PlanDigest, Confirm: true})
 	if err != nil {
-		t.Fatalf("apply reviewed plan: %v (%+v)", err, result)
+		t.Fatalf("apply reviewed plan: %v; cause=%v (%+v)", err, errors.Unwrap(err), result)
 	}
 	return result
 }
@@ -135,8 +186,8 @@ func applyProjectSurfaceReview(t *testing.T, env projectArchivePlanEnvironment, 
 func TestProjectPhysicalReviewPreservesArchiveAndRestoreAcrossServices(t *testing.T) {
 	env, store, req := newProjectSurfaceEnvironment(t)
 	review := projectSurfaceReview(t, env, req)
-	if len(store.rows) != 0 || env.projects.transitions != 0 {
-		t.Fatal("planning mutated persistence")
+	if len(store.rows) != 1 || env.projects.transitions != 0 {
+		t.Fatal("planning did not preserve only private review evidence")
 	}
 	raw, _ := json.Marshal(review)
 	for _, private := range []string{env.service.WorkspaceRoots.BoxRoot, env.service.WorkspaceRoots.StorageRoot, "registration_source", "runtime_config", "device_id", "inode", "\"entries\":["} {
@@ -180,8 +231,8 @@ func TestProjectPhysicalReviewPreservesArchiveAndRestoreAcrossServices(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(store.rows) != 1 {
-		t.Fatal("restore planning wrote evidence")
+	if len(store.rows) != 2 {
+		t.Fatal("restore planning did not preserve private review evidence")
 	}
 	restored := applyProjectSurfaceReview(t, env, restoreReq, restore)
 	if restored.Phase != "complete" || !restored.MutationBlocked || restored.ActivationState != WorkspaceActivationInactive || len(store.rows) != 2 {
@@ -294,7 +345,7 @@ func TestProjectPhysicalReviewRejectsCallerAndFieldSubstitutionBeforeWrites(t *t
 			review := projectSurfaceReview(t, env, req)
 			mutate(&review)
 			_, err := env.service.ApplyReviewedProjectPhysicalPlan(context.Background(), req, review.ProjectID, ProjectPhysicalApplyRequest{Plan: review, PlanDigest: review.PlanDigest, Confirm: true})
-			if err == nil || len(store.rows) != 0 || env.projects.transitions != 0 {
+			if err == nil || len(store.rows) != 1 || env.projects.transitions != 0 {
 				t.Fatalf("substitution reached mutation: %v", err)
 			}
 		})
@@ -305,6 +356,8 @@ func TestProjectPhysicalReviewEvidenceFailureAndCrashBeforeIntent(t *testing.T) 
 	env, store, req := newProjectSurfaceEnvironment(t)
 	review := projectSurfaceReview(t, env, req)
 	input := ProjectPhysicalApplyRequest{Plan: review, PlanDigest: review.PlanDigest, Confirm: true}
+	// Older, unsaved reviews retain the compatible fail-closed apply path.
+	delete(store.rows, review.Workspace.OperationID)
 	store.failSave = true
 	if _, err := env.service.ApplyReviewedProjectPhysicalPlan(context.Background(), req, review.ProjectID, input); err == nil || strings.Contains(err.Error(), "/private") {
 		t.Fatalf("private failure: %v", err)
@@ -385,8 +438,8 @@ func TestProjectPhysicalReviewNotReadyConfirmationAndStaleSource(t *testing.T) {
 	if _, err := env.service.ApplyReviewedProjectPhysicalPlan(context.Background(), req, review.ProjectID, input); err == nil {
 		t.Fatal("stale source accepted")
 	}
-	if len(store.rows) != 0 || env.projects.transitions != 0 {
-		t.Fatal("refused request wrote evidence or intent")
+	if len(store.rows) != 1 || env.projects.transitions != 0 {
+		t.Fatal("refused request changed review evidence or intent")
 	}
 }
 

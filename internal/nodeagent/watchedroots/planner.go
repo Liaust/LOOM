@@ -4,13 +4,19 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"path/filepath"
+	"sort"
 	"time"
 
+	"loom.local/loom/internal/filesystemconnector"
 	"loom.local/loom/internal/filesystemmeta"
 	"loom.local/loom/internal/ids"
 	loomsync "loom.local/loom/internal/sync"
 )
+
+var ErrPolicyInputsChanged = errors.New("file policy changed before output planning")
 
 type OutputPlan struct {
 	RootKey     string         `json:"root_key"`
@@ -18,11 +24,24 @@ type OutputPlan struct {
 	GeneratedAt time.Time      `json:"generated_at"`
 	Counts      OutputCounts   `json:"counts"`
 	Actions     []OutputAction `json:"actions,omitempty"`
+	Page        *OutputPage    `json:"page,omitempty"`
 }
+
+type OutputPage struct {
+	After      string `json:"after,omitempty"`
+	Next       string `json:"next,omitempty"`
+	More       bool   `json:"more"`
+	StatesRead int    `json:"states_read"`
+}
+
+// Match one normal delivery page instead of growing a fresh staging backlog on
+// every continuation. Manual full plans remain unaffected.
+const OutputBackupPageSize = 16
 
 type OutputCounts struct {
 	SyncObjects           int `json:"sync_objects"`
 	SyncMetadata          int `json:"sync_metadata"`
+	FileObservations      int `json:"file_observations,omitempty"`
 	DeletionRequests      int `json:"deletion_requests"`
 	BackupFiles           int `json:"backup_files"`
 	BackupMetadata        int `json:"backup_metadata"`
@@ -35,56 +54,149 @@ type OutputCounts struct {
 }
 
 type OutputAction struct {
-	ActionKind            string                      `json:"action_kind"`
-	Status                string                      `json:"status"`
-	RootKey               string                      `json:"root_key"`
-	RelativePath          string                      `json:"relative_path"`
-	LocalObjectID         string                      `json:"local_object_id,omitempty"`
-	LocalVersionID        string                      `json:"local_version_id,omitempty"`
-	LocalSyncOutboxID     string                      `json:"local_sync_outbox_id,omitempty"`
-	LocalBackupArtifactID string                      `json:"local_backup_artifact_id,omitempty"`
-	LocalBackupBatchID    string                      `json:"local_backup_batch_id,omitempty"`
-	LocalBackupItemID     string                      `json:"local_backup_item_id,omitempty"`
-	LocalBackupOutboxID   string                      `json:"local_backup_outbox_id,omitempty"`
-	MainObjectID          string                      `json:"main_object_id,omitempty"`
-	MainVersionID         string                      `json:"main_version_id,omitempty"`
-	ContentHashURI        string                      `json:"content_hash_uri,omitempty"`
-	PreviousHashURI       string                      `json:"previous_hash_uri,omitempty"`
-	LogicalName           string                      `json:"logical_name,omitempty"`
-	SourcePath            string                      `json:"source_path,omitempty"`
-	SizeBytes             int64                       `json:"size_bytes,omitempty"`
-	ModifiedAt            *time.Time                  `json:"modified_at,omitempty"`
-	ProjectRef            string                      `json:"project_ref,omitempty"`
-	ScopeRef              string                      `json:"scope_ref,omitempty"`
-	BackupMode            string                      `json:"backup_mode,omitempty"`
-	BackupItemKind        string                      `json:"backup_item_kind,omitempty"`
-	BackupMaxFileBytes    int64                       `json:"backup_max_file_bytes,omitempty"`
-	BackupMaxBatchBytes   int64                       `json:"backup_max_batch_bytes,omitempty"`
-	BackupMaxPendingItems int                         `json:"backup_max_pending_items,omitempty"`
-	BackupMaxPendingBytes int64                       `json:"backup_max_pending_bytes,omitempty"`
-	SyncPolicy            string                      `json:"sync_policy,omitempty"`
-	IndexPolicy           string                      `json:"index_policy,omitempty"`
-	DeletePolicy          string                      `json:"delete_policy,omitempty"`
-	DeletedAt             *time.Time                  `json:"deleted_at,omitempty"`
-	ReasonCode            string                      `json:"reason_code,omitempty"`
-	Reason                string                      `json:"reason,omitempty"`
-	Error                 string                      `json:"error,omitempty"`
-	Fidelity              *filesystemmeta.Observation `json:"fidelity,omitempty"`
+	ActionKind             string                      `json:"action_kind"`
+	Status                 string                      `json:"status"`
+	RootKey                string                      `json:"root_key"`
+	RelativePath           string                      `json:"relative_path"`
+	LocalObjectID          string                      `json:"local_object_id,omitempty"`
+	LocalVersionID         string                      `json:"local_version_id,omitempty"`
+	LocalSyncOutboxID      string                      `json:"local_sync_outbox_id,omitempty"`
+	LocalBackupArtifactID  string                      `json:"local_backup_artifact_id,omitempty"`
+	LocalBackupBatchID     string                      `json:"local_backup_batch_id,omitempty"`
+	LocalBackupItemID      string                      `json:"local_backup_item_id,omitempty"`
+	LocalBackupOutboxID    string                      `json:"local_backup_outbox_id,omitempty"`
+	MainObjectID           string                      `json:"main_object_id,omitempty"`
+	MainVersionID          string                      `json:"main_version_id,omitempty"`
+	ContentHashURI         string                      `json:"content_hash_uri,omitempty"`
+	PreviousHashURI        string                      `json:"previous_hash_uri,omitempty"`
+	LogicalName            string                      `json:"logical_name,omitempty"`
+	SourcePath             string                      `json:"source_path,omitempty"`
+	SizeBytes              int64                       `json:"size_bytes,omitempty"`
+	ModifiedAt             *time.Time                  `json:"modified_at,omitempty"`
+	ProjectRef             string                      `json:"project_ref,omitempty"`
+	ScopeRef               string                      `json:"scope_ref,omitempty"`
+	BackupMode             string                      `json:"backup_mode,omitempty"`
+	BackupItemKind         string                      `json:"backup_item_kind,omitempty"`
+	BackupMaxFileBytes     int64                       `json:"backup_max_file_bytes,omitempty"`
+	BackupMaxBatchBytes    int64                       `json:"backup_max_batch_bytes,omitempty"`
+	BackupMaxPendingItems  int                         `json:"backup_max_pending_items,omitempty"`
+	BackupMaxPendingBytes  int64                       `json:"backup_max_pending_bytes,omitempty"`
+	SyncPolicy             string                      `json:"sync_policy,omitempty"`
+	IndexPolicy            string                      `json:"index_policy,omitempty"`
+	DeletePolicy           string                      `json:"delete_policy,omitempty"`
+	DeletedAt              *time.Time                  `json:"deleted_at,omitempty"`
+	ReasonCode             string                      `json:"reason_code,omitempty"`
+	Reason                 string                      `json:"reason,omitempty"`
+	Error                  string                      `json:"error,omitempty"`
+	Fidelity               *filesystemmeta.Observation `json:"fidelity,omitempty"`
+	SourceGeneration       string                      `json:"source_generation,omitempty"`
+	SourcePresence         string                      `json:"source_presence,omitempty"`
+	ObservationFingerprint string                      `json:"observation_fingerprint,omitempty"`
 }
 
 func PlanOutputs(store Store, root ValidatedRoot, workerKey string) (OutputPlan, error) {
+	return planOutputs(store, root, workerKey, func() ([]PathState, error) {
+		return store.ListPathStates(root.Config.RootKey, 0)
+	}, nil, 0)
+}
+
+func PlanOutputsPage(store Store, root ValidatedRoot, workerKey, after string, stateLimit, actionLimit int) (OutputPlan, error) {
+	if actionLimit < 3 {
+		return OutputPlan{}, fmt.Errorf("output page must allow all actions for one path")
+	}
+	page := &OutputPage{After: after, Next: after}
+	return planOutputs(store, root, workerKey, func() ([]PathState, error) {
+		states, more, err := store.ListPathStatesPage(root.Config.RootKey, after, stateLimit)
+		page.More, page.StatesRead = more, len(states)
+		return states, err
+	}, page, actionLimit)
+}
+
+// PlanOutputsForPaths plans exact persisted rows, not prefixes or a complete
+// inventory. Its caller must retain full planning for previously unsettled work.
+func PlanOutputsForPaths(store Store, root ValidatedRoot, workerKey string, paths []string) (OutputPlan, error) {
+	return planOutputs(store, root, workerKey, func() ([]PathState, error) {
+		selected := make(map[string]bool, len(paths))
+		for _, path := range paths {
+			relative, _, err := filesystemconnector.NormalizeRelativePath(path)
+			if err != nil || relative == "." || relative == "__rescan__" {
+				return nil, fmt.Errorf("invalid output planning path %q", path)
+			}
+			selected[relative] = true
+		}
+		ordered := make([]string, 0, len(selected))
+		for path := range selected {
+			ordered = append(ordered, path)
+		}
+		sort.Strings(ordered)
+		states := make([]PathState, 0, len(ordered))
+		for _, path := range ordered {
+			state, err := store.LoadPathState(root.Config.RootKey, path)
+			if err != nil {
+				return nil, err
+			}
+			if state.RootKey != root.Config.RootKey || state.RelativePath != path {
+				return nil, fmt.Errorf("output planning path identity mismatch for %q", path)
+			}
+			states = append(states, state)
+		}
+		return states, nil
+	}, nil, 0)
+}
+
+func planOutputs(store Store, root ValidatedRoot, workerKey string, loadStates func() ([]PathState, error), page *OutputPage, actionLimit int) (OutputPlan, error) {
 	now := time.Now().UTC()
 	plan := OutputPlan{
 		RootKey:     root.Config.RootKey,
 		WorkerKey:   workerKey,
 		GeneratedAt: now,
+		Page:        page,
 	}
-	states, err := store.ListPathStates(root.Config.RootKey, 0)
+	checkpoint, err := store.LoadCheckpoint(root.Config.RootKey)
+	if err != nil && !IsNotExist(err) {
+		return OutputPlan{}, err
+	}
+	if coverageConfigMatches(root, checkpoint) && checkpoint.ObservationConfigHash != "" {
+		root.ObservationConfigHash = checkpoint.ObservationConfigHash
+	}
+	states, err := loadStates()
 	if err != nil {
 		return OutputPlan{}, err
 	}
+	if root.PolicyResolver != nil {
+		paths := make([]string, 0, len(states))
+		for _, state := range states {
+			paths = append(paths, state.RelativePath)
+		}
+		current, err := root.PolicyResolver.CurrentForPaths(paths)
+		if err != nil {
+			return OutputPlan{}, err
+		}
+		if !current {
+			return OutputPlan{}, ErrPolicyInputsChanged
+		}
+	}
+	backupActions := 0
 	for _, state := range states {
 		actions := planOutputActions(root, state)
+		pending, backups := 0, 0
+		for _, action := range actions {
+			if action.Status != OutputStatusAlreadyCurrent {
+				pending++
+				switch action.ActionKind {
+				case OutputActionBackupFile, OutputActionBackupMetadata, OutputActionBackupDeletionMarker:
+					backups++
+				}
+			}
+		}
+		if actionLimit > 0 && (len(plan.Actions)+pending > actionLimit || backupActions+backups > OutputBackupPageSize) {
+			page.More = true
+			break
+		}
+		backupActions += backups
+		if page != nil {
+			page.Next = state.PathKey
+		}
 		for _, action := range actions {
 			if action.Status == OutputStatusAlreadyCurrent {
 				plan.Counts.AlreadyCurrent++
@@ -100,6 +212,8 @@ func PlanOutputs(store Store, root ValidatedRoot, workerKey string) (OutputPlan,
 				plan.Counts.SyncObjects++
 			case OutputActionSyncMetadata:
 				plan.Counts.SyncMetadata++
+			case OutputActionFileObservation:
+				plan.Counts.FileObservations++
 			case OutputActionDeletionRequest:
 				plan.Counts.DeletionRequests++
 			case OutputActionBackupFile:
@@ -122,7 +236,16 @@ func planOutputActions(root ValidatedRoot, state PathState) []OutputAction {
 	if isExcludedByCurrentRootConfig(root, state.RelativePath) {
 		return nil
 	}
+	if root.Config.SchemaVersion == IndependentConfigSchemaVersion {
+		if _, err := effectivePolicies(root.Config, state.RelativePath); err != nil {
+			return nil
+		}
+	}
 	actions := []OutputAction{}
+	if action, ok := planFileObservation(root, state); ok {
+		state.LocalObjectID = action.LocalObjectID
+		actions = append(actions, action)
+	}
 	if action, ok := planSyncOutputAction(root, state); ok {
 		actions = append(actions, action)
 	}
@@ -132,9 +255,50 @@ func planOutputActions(root ValidatedRoot, state PathState) []OutputAction {
 	return actions
 }
 
+func planFileObservation(root ValidatedRoot, state PathState) (OutputAction, bool) {
+	if root.ConfigHash == "" || !root.RootReachable {
+		return OutputAction{}, false
+	}
+	presence := "present"
+	switch {
+	case state.Status == PathStatusIncluded && state.Kind == PathKindFile && state.ModifiedAt != nil:
+	case state.Status == PathStatusDeleted && state.LocalObjectID != "":
+		presence = "missing"
+	case (state.Status == PathStatusError || state.Status == PathStatusSkipped) && state.LocalObjectID != "" && state.Classification.ReasonCode == ReasonSkippedPermissionDenied:
+		presence = "unavailable"
+	default:
+		// Unreadable/incomplete scopes are not deletion evidence. Excluded and
+		// internal paths are not newly enrolled by a metadata observation.
+		return OutputAction{}, false
+	}
+	payload, _ := json.Marshal(struct {
+		Generation, Presence string
+		Size                 int64
+		Mtime                *time.Time
+	}{firstNonEmpty(root.ObservationConfigHash, root.ConfigHash), presence, state.SizeBytes, state.ModifiedAt})
+	digest := sha256.Sum256(payload)
+	fingerprint := hex.EncodeToString(digest[:])
+	if fingerprint == state.LastQueuedFileObservation {
+		return OutputAction{}, false
+	}
+	localID := state.LocalObjectID
+	if localID == "" {
+		localID = ids.NewObjectID()
+	}
+	return OutputAction{ActionKind: OutputActionFileObservation, RelativePath: state.RelativePath,
+		LocalObjectID: localID, SourcePath: watchedRootSourcePath(root.Config.RootKey, state.RelativePath),
+		SourceGeneration: root.ConfigHash, SourcePresence: presence, SizeBytes: state.SizeBytes,
+		ModifiedAt: state.ModifiedAt, ObservationFingerprint: fingerprint}, true
+}
+
 func isExcludedByCurrentRootConfig(root ValidatedRoot, relativePath string) bool {
 	if relativePath == "" {
 		return false
+	}
+	if root.Config.SchemaVersion == IndependentConfigSchemaVersion {
+		if included, _ := MatchAny(root.Config.Include, relativePath); !included {
+			return true
+		}
 	}
 	excluded, _ := excludedByCurrentFilePolicy(root, relativePath, false)
 	return excluded
@@ -222,6 +386,9 @@ func effectiveSyncMaxFileBytes(configured int64) int64 {
 
 func planDeletionAction(root ValidatedRoot, state PathState) (OutputAction, bool) {
 	policies := outputPolicies(root, state)
+	if root.Config.SchemaVersion == IndependentConfigSchemaVersion && policies.Sync != SyncModeSelectedFiles {
+		return OutputAction{}, false
+	}
 	if policies.Delete != DeleteModeTombstone {
 		return OutputAction{}, false
 	}
@@ -351,6 +518,10 @@ func planBackupDeletionAction(root ValidatedRoot, state PathState) (OutputAction
 	if state.BackupDeletionMarkerID != "" && (state.BackupStatus == OutputStatusQueued || state.BackupStatus == OutputStatusRecorded || state.BackupStatus == OutputStatusAlreadyCurrent) {
 		return OutputAction{}, false
 	}
+	if state.BackupStatus == OutputStatusFailed && state.LastBackupErrorCode == FindingBackupBatchRejected &&
+		state.DeletedAt != nil && state.LastBackupQueuedAt != nil && !state.DeletedAt.After(*state.LastBackupQueuedAt) {
+		return OutputAction{}, false
+	}
 	deletedAt := state.DeletedAt
 	return OutputAction{
 		ActionKind:            OutputActionBackupDeletionMarker,
@@ -392,6 +563,9 @@ func backupDeletionMarkersEnabled(policy BackupPolicy) bool {
 }
 
 func outputPolicies(root ValidatedRoot, state PathState) Policies {
+	if root.Config.SchemaVersion == IndependentConfigSchemaVersion {
+		return EffectivePolicies(root.Config, state.RelativePath)
+	}
 	policies := state.Classification.Policies
 	if policies.Backup == "" && policies.Sync == "" && policies.Index == "" && policies.Delete == "" {
 		return EffectivePolicies(root.Config, state.RelativePath)

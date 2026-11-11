@@ -167,6 +167,35 @@ func fixture(t *testing.T) (Service, *memoryStore, *testResolver) {
 	r := &testResolver{root: root, active: true, generation: "generation-1"}
 	return Service{Store: m, Sources: r}, m, r
 }
+
+func TestDesktopTextFormatsKeepReferenceReadersSeparate(t *testing.T) {
+	s, _, r := fixture(t)
+	for _, name := range []string{"settings.json", "table.csv", "script.py", "Makefile"} {
+		read, err := s.ReadText(t.Context(), "collection", name)
+		if err != nil || read.Base.Exists {
+			t.Fatalf("absent text %s: %+v %v", name, read.Base, err)
+		}
+		request := Request{OperationID: "create-" + name, FileID: read.File.ID, BaseID: read.Base.ID, Generation: read.Base.Generation, Content: []byte("text\nsecond line")}
+		if _, err := s.Receive(t.Context(), request); err != nil {
+			t.Fatal(err)
+		}
+		if result, err := s.Apply(t.Context(), request.OperationID); err != nil || result.State != Accepted {
+			t.Fatalf("text create %s: %+v %v", name, result, err)
+		}
+	}
+	if _, err := s.ReadText(t.Context(), "collection", "document.pdf"); !errors.Is(err, ErrReferenceOnly) {
+		t.Fatalf("binary admitted as text: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(r.root, "binary.json"), []byte{0, 255}, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReadText(t.Context(), "collection", "binary.json"); err == nil {
+		t.Fatal("invalid text bytes admitted")
+	}
+	if _, err := s.Read(t.Context(), "collection", "binary.json"); err != nil {
+		t.Fatalf("historical reference reader changed: %v", err)
+	}
+}
 func readBase(t *testing.T, s Service, name string) ReadResult {
 	t.Helper()
 	out, err := s.Read(t.Context(), "collection", name)
@@ -174,6 +203,52 @@ func readBase(t *testing.T, s Service, name string) ReadResult {
 		t.Fatal(err)
 	}
 	return out
+}
+
+func TestNestedCreateReadsAbsenceThenCreatesParents(t *testing.T) {
+	s, _, r := fixture(t)
+	path := "research/Memory/new.md"
+	b := readBase(t, s, path)
+	if b.Base.Exists {
+		t.Fatal("missing parent was treated as an existing file")
+	}
+	if _, err := os.Stat(filepath.Join(r.root, "research")); !os.IsNotExist(err) {
+		t.Fatal("read created a directory", err)
+	}
+	receive(t, s, "nested-create", b, "retained draft")
+	first := apply(t, s, "nested-create", Accepted)
+	contents(t, filepath.Join(r.root, path), "retained draft")
+	if again := apply(t, s, "nested-create", Accepted); again.ResultBaseID != first.ResultBaseID {
+		t.Fatal("replay changed the receipt")
+	}
+}
+
+func TestNestedCreateCannotCreateRootOrFollowSubstitutedParents(t *testing.T) {
+	for _, obstruction := range []string{"root", "symlink", "file"} {
+		t.Run(obstruction, func(t *testing.T) {
+			s, _, r := fixture(t)
+			b := readBase(t, s, "new/sub/note.md")
+			receive(t, s, "create", b, "draft")
+			switch obstruction {
+			case "root":
+				r.root = filepath.Join(r.root, "absent-root")
+			case "symlink":
+				outside := t.TempDir()
+				if err := os.Symlink(outside, filepath.Join(r.root, "new")); err != nil {
+					t.Fatal(err)
+				}
+			case "file":
+				write(t, filepath.Join(r.root, "new"), "unrelated")
+			}
+			op, err := s.Apply(t.Context(), "create")
+			if err != nil || op.State != Held {
+				t.Fatal(op, err)
+			}
+			if _, err := os.Stat(filepath.Join(r.root, "new/sub/note.md")); !os.IsNotExist(err) && obstruction != "file" {
+				t.Fatal("unsafe create reached a file", err)
+			}
+		})
+	}
 }
 
 func TestReferenceSnapshotCannotBecomeWriteIntent(t *testing.T) {

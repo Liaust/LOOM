@@ -89,8 +89,15 @@ func (c *HostCollector) storageMetric(now time.Time, cfg Config) Metric {
 	if err != nil {
 		return unavailableMetric("%", now, cfg.HostStaleAfter)
 	}
-	return c.availableMetric("storage", value, "%", now, cfg.HostStaleAfter, cfg.Thresholds.Storage)
+	metric := c.availableMetric("storage", value, "%", now, cfg.HostStaleAfter, cfg.Thresholds.Storage)
+	if capacity, err := platformFilesystemCapacity(c.DataPath); err == nil {
+		metric.Capacity = &capacity
+	}
+	return metric
 }
+
+// StorageMetric reuses the existing collector without sampling unrelated sensors.
+func (c *HostCollector) StorageMetric(cfg Config) Metric { return c.storageMetric(c.now().UTC(), cfg) }
 
 func (c *HostCollector) availableMetric(key string, value float64, unit string, now time.Time, staleAfter time.Duration, threshold Threshold) Metric {
 	severity := c.threshold.Evaluate(key, value, threshold, now)

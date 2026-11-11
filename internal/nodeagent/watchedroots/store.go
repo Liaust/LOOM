@@ -1,10 +1,13 @@
 package watchedroots
 
 import (
+	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"loom.local/loom/internal/communication"
@@ -13,6 +16,7 @@ import (
 	noderuntime "loom.local/loom/internal/nodeagent/runtime"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -144,6 +148,35 @@ func (s Store) LoadCheckpoint(rootKey string) (RootCheckpoint, error) {
 	return checkpoint, err
 }
 
+type outputProgress struct {
+	ConfigHash    string `json:"config_hash"`
+	InventoryHash string `json:"inventory_hash"`
+	After         string `json:"after"`
+}
+
+// Keep continuation additive without changing the strict legacy checkpoint
+// schema. Source/config changes invalidate it; acknowledgement-only changes do not.
+func (s Store) LoadOutputAfter(rootKey string, checkpoint RootCheckpoint) (string, error) {
+	var progress outputProgress
+	err := readJSONFile(filepath.Join(s.RootDir(rootKey), "output-progress.json"), &progress)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if progress.ConfigHash != checkpoint.ConfigHash || progress.InventoryHash != checkpoint.PathStateSnapshotHash {
+		return "", nil
+	}
+	return progress.After, nil
+}
+
+func (s Store) SaveOutputAfter(rootKey string, checkpoint RootCheckpoint, after string) error {
+	return writeJSONFile(filepath.Join(s.RootDir(rootKey), "output-progress.json"), outputProgress{
+		ConfigHash: checkpoint.ConfigHash, InventoryHash: checkpoint.PathStateSnapshotHash, After: after,
+	}, 0600)
+}
+
 func (s Store) SavePathState(state PathState) error {
 	if state.RootKey == "" {
 		return errors.New("path state root key is required")
@@ -245,6 +278,57 @@ func (s Store) ListPathStates(rootKey string, limit int) ([]PathState, error) {
 	return states, nil
 }
 
+// Key order matches the existing hashed shards, so a continuation skips earlier
+// shards without reopening their records. The cursor is not a source pathname.
+func (s Store) ListPathStatesPage(rootKey, after string, limit int) ([]PathState, bool, error) {
+	if limit <= 0 {
+		return nil, false, errors.New("path-state page limit must be positive")
+	}
+	if after != "" {
+		if raw, err := hex.DecodeString(after); err != nil || len(raw) != sha256.Size {
+			return nil, false, errors.New("invalid path-state cursor")
+		}
+	}
+	states := make([]PathState, 0, limit)
+	for shard := 0; shard < 256; shard++ {
+		prefix := fmt.Sprintf("%02x", shard)
+		if after != "" && prefix < after[:2] {
+			continue
+		}
+		entries, err := os.ReadDir(filepath.Join(s.pathsDir(rootKey), prefix))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, false, err
+		}
+		for _, entry := range entries {
+			if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".json") {
+				continue
+			}
+			key := strings.TrimSuffix(entry.Name(), ".json")
+			if key <= after {
+				continue
+			}
+			if len(states) == limit {
+				return states, true, nil
+			}
+			if raw, err := hex.DecodeString(key); err != nil || len(raw) != sha256.Size || !strings.HasPrefix(key, prefix) {
+				return nil, false, fmt.Errorf("invalid path-state key %q", key)
+			}
+			state, err := s.LoadPathStateByKey(rootKey, key)
+			if err != nil {
+				return nil, false, err
+			}
+			if state.RootKey != normalizeRootKey(rootKey) || state.PathKey != key || PathKey(state.RootKey, state.RelativePath) != key {
+				return nil, false, fmt.Errorf("path-state page identity mismatch for %q", key)
+			}
+			states = append(states, state)
+		}
+	}
+	return states, false, nil
+}
+
 func (s Store) ListPathStatesByStatus(rootKey, status string, limit int) ([]PathState, error) {
 	states, err := s.ListPathStates(rootKey, 0)
 	if err != nil {
@@ -273,41 +357,36 @@ func (s Store) DeletePathState(rootKey, relativePath string) error {
 }
 
 func (s Store) AddDirtyHint(rootKey string, hint DirtyHint) error {
+	return s.AddDirtyHints(rootKey, []DirtyHint{hint})
+}
+
+func (s Store) dirtyHintsLock(rootKey string) (func() error, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return noderuntime.NewStore(s.DataDir).AcquireWorkerExecutionLock(ctx, "dirty-hints:"+normalizeRootKey(rootKey))
+}
+
+func (s Store) AddDirtyHints(rootKey string, additions []DirtyHint) error {
 	if err := s.EnsureRoot(rootKey); err != nil {
 		return err
 	}
+	release, err := s.dirtyHintsLock(rootKey)
+	if err != nil {
+		return err
+	}
+	defer release()
 	hints, err := s.loadDirtyHintMap(rootKey)
 	if err != nil {
 		return err
 	}
 	now := time.Now().UTC()
-	hint.RootKey = normalizeRootKey(rootKey)
-	hint.RelativePath = normalizeDirtyPath(hint.RelativePath)
-	if strings.TrimSpace(hint.HintKind) == "" {
-		hint.HintKind = DirtyHintModified
+	scoped := append([]DirtyHint(nil), additions...)
+	for i := range scoped {
+		scoped[i].RootKey = normalizeRootKey(rootKey)
 	}
-	if strings.TrimSpace(hint.Source) == "" {
-		hint.Source = DirtyHintSourceManual
-	}
-	if hint.FirstSeenAt.IsZero() {
-		hint.FirstSeenAt = now
-	}
-	if hint.LastSeenAt.IsZero() {
-		hint.LastSeenAt = now
-	}
-	if hint.Count <= 0 {
-		hint.Count = 1
-	}
-	key := dirtyHintKey(hint.RelativePath)
-	if existing, ok := hints[key]; ok {
-		existing.HintKind = hint.HintKind
-		existing.Source = hint.Source
-		existing.Count += hint.Count
-		existing.LastSeenAt = hint.LastSeenAt
-		existing.LastErrorCode = hint.LastErrorCode
-		hints[key] = existing
-	} else {
-		hints[key] = hint
+	hints = MergeDirtyHints(hints, scoped)
+	if len(hints) > 4096 {
+		hints = map[string]DirtyHint{"__rescan__": {RootKey: normalizeRootKey(rootKey), HintKind: DirtyHintRescanRequired, Source: "native", Generation: rand.Text(), FirstSeenAt: now, LastSeenAt: now, Count: 1, LastErrorCode: "dirty_hint_overflow"}}
 	}
 	return s.saveDirtyHintMap(rootKey, hints)
 }
@@ -334,6 +413,11 @@ func (s Store) ClearDirtyHints(rootKey string, paths []string) error {
 	if err := s.EnsureRoot(rootKey); err != nil {
 		return err
 	}
+	release, err := s.dirtyHintsLock(rootKey)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if len(paths) == 0 {
 		return s.saveDirtyHintMap(rootKey, map[string]DirtyHint{})
 	}
@@ -345,6 +429,35 @@ func (s Store) ClearDirtyHints(rootKey string, paths []string) error {
 		delete(hints, dirtyHintKey(normalizeDirtyPath(path)))
 	}
 	return s.saveDirtyHintMap(rootKey, hints)
+}
+
+// Only acknowledge the observed snapshot. Concurrent arrivals, including the
+// same path during a scan, stay durable for the next reconciliation.
+func (s Store) ClearObservedDirtyHints(rootKey string, observed []DirtyHint) (int, error) {
+	if len(observed) == 0 {
+		return 0, nil
+	}
+	release, err := s.dirtyHintsLock(rootKey)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+	hints, err := s.loadDirtyHintMap(rootKey)
+	if err != nil {
+		return 0, err
+	}
+	cleared := 0
+	for _, hint := range observed {
+		key := dirtyHintKey(hint.RelativePath)
+		if current, ok := hints[key]; ok && reflect.DeepEqual(current, hint) {
+			delete(hints, key)
+			cleared++
+		}
+	}
+	if cleared == 0 {
+		return 0, nil
+	}
+	return cleared, s.saveDirtyHintMap(rootKey, hints)
 }
 
 func (s Store) MarkRescanRequired(rootKey, reason string) error {

@@ -1,10 +1,10 @@
 ---
 title: "LOOM Documentation"
-description: "Navigate the public developer-preview guide, architecture, operations and implementation reference."
+description: "Navigate the desktop workspace, installation, architecture and operating reference."
 audience: [user, operator, developer, agent]
 tags: [loom, documentation]
 status: draft
-verified_at: "2026-09-15"
+verified_at: "2026-11-11"
 source_scope: ["README.md", "internal/loomdocs"]
 related: ["[[User Guide]]", "[[Concepts]]", "[[CLI Reference]]", "[[Operations]]"]
 aliases: ["Docs Home"]
@@ -19,10 +19,11 @@ maintainer's private machine configuration.
 
 Start with the [repository README](../README.md), [current state](../.project/STATE.md)
 and [roadmap](../.project/ROADMAP.md). The README explains what LOOM owns and
-what belongs to Hermes, ORCA, model providers and supporting services.
+what belongs to the desktop, Main, native harnesses and supporting services.
 
 ## Choose A Path
 
+- [Desktop workspace](user-guide/workspace.md): files, editing, local/offline work and operational views.
 - [Getting started](user-guide/getting-started.md): everyday use of an existing installation.
 - [Installation](operations/installation.md): source build, configuration prerequisites and limits.
 - [Projects](user-guide/projects.md): ordinary folders, declarations and portable development state.

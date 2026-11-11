@@ -29,13 +29,15 @@ type pollOptions struct {
 }
 
 type OutboxFlushRun struct {
-	Submitted     int                       `json:"submitted"`
-	Done          int                       `json:"done"`
-	Failed        int                       `json:"failed"`
-	ManualAction  int                       `json:"manual_action"`
-	RequeuedStale int                       `json:"requeued_stale"`
-	Items         []OutboxFlushItem         `json:"items"`
-	Summary       noderuntime.OutboxSummary `json:"summary"`
+	Submitted                int                       `json:"submitted"`
+	Done                     int                       `json:"done"`
+	Failed                   int                       `json:"failed"`
+	ManualAction             int                       `json:"manual_action"`
+	RequeuedStale            int                       `json:"requeued_stale"`
+	Items                    []OutboxFlushItem         `json:"items"`
+	Summary                  noderuntime.OutboxSummary `json:"summary"`
+	SummaryAvailability      string                    `json:"summary_availability"`
+	SummaryUnavailableReason string                    `json:"summary_unavailable_reason,omitempty"`
 }
 
 type OutboxFlushItem struct {
@@ -118,6 +120,9 @@ func (r outboxFlusherRuntime) RunOnce(ctx context.Context, runtimeStore noderunt
 	} else if run.Failed > 0 {
 		health = noderuntime.WorkerStatusOfflineQueueing
 		message = "outbox flush left retryable failures"
+	} else if run.Summary.Availability != "available" {
+		health = noderuntime.WorkerStatusDegraded
+		message = "outbox flush completed; queue summary unavailable"
 	}
 	return noderuntime.RunResult{
 		Status:       noderuntime.RunStatusSucceeded,
@@ -153,7 +158,7 @@ func nodeAgentRuntimeRegistry() noderuntime.Registry {
 		noderuntime.QueueReporterRunner{},
 		applicationCapacityRuntime{},
 		heartbeatRuntime{},
-		pollRuntime{options: pollOptions{maxMessages: 10, flush: false}},
+		pollRuntime{options: pollOptions{maxMessages: 10, flush: true}},
 		outboxFlusherRuntime{maxItems: 50},
 		watchedRootRuntime{},
 		storageMountRuntime{},
@@ -372,7 +377,8 @@ func sendHeartbeatCore(ctx context.Context, store Store, config Config, state St
 	if err != nil {
 		return response.Envelope[nodes.Heartbeat]{}, err
 	}
-	summary, summaryErr := runtimeStore.BuildLocalSummary()
+	runtimeStore.ReadQueueSnapshot = store.readQueueSnapshot
+	summary, summaryErr := runtimeStore.BuildLocalSummaryContext(ctx)
 	inboxBacklog := heartbeatOpts.inboxBacklog
 	outboxBacklog := heartbeatOpts.outboxBacklog
 	storageStatus := map[string]any{
@@ -401,18 +407,27 @@ func sendHeartbeatCore(ctx context.Context, store Store, config Config, state St
 			"workers":        summary.Workers,
 		}
 		metadata["runtime"] = summary
+		if summary.Availability != "available" {
+			storageStatus["status"] = summary.Availability
+			errorSummary = map[string]any{"status": "runtime_summary_" + summary.Availability, "message": summary.UnavailableReason}
+		}
 	} else {
+		storageStatus["status"] = "unavailable"
 		errorSummary = map[string]any{
 			"status":  "runtime_summary_failed",
 			"message": summaryErr.Error(),
 		}
+	}
+	reportedStatus := strings.TrimSpace(heartbeatOpts.reportedStatus)
+	if (summaryErr != nil || summary.Availability != "available") && (reportedStatus == "" || reportedStatus == "ok") {
+		reportedStatus = "degraded"
 	}
 	reportedAt := time.Now().UTC()
 	input := nodes.HeartbeatInput{
 		NodeRef:           state.NodeID,
 		CredentialToken:   state.CredentialToken,
 		RuntimeVersion:    strings.TrimSpace(heartbeatOpts.runtimeVersion),
-		ReportedStatus:    strings.TrimSpace(heartbeatOpts.reportedStatus),
+		ReportedStatus:    reportedStatus,
 		InboxBacklog:      inboxBacklog,
 		OutboxBacklog:     outboxBacklog,
 		ReportedAt:        &reportedAt,
@@ -675,11 +690,15 @@ func flushDueOutbox(ctx context.Context, env noderuntime.Env, runtimeStore noder
 			run.Failed++
 		}
 	}
-	summary, err := runtimeStore.OutboxSummary()
-	if err != nil {
-		return OutboxFlushRun{}, err
-	}
+	// Reporting is observation, not delivery authority. Keep accepted outcomes
+	// even when derived history is rebuilding or its short lock is contended.
+	summary, _ := runtimeStore.OutboxSummary()
 	run.Summary = summary
+	run.SummaryAvailability = summary.Availability
+	run.SummaryUnavailableReason = summary.UnavailableReason
+	if len(run.SummaryUnavailableReason) > 256 {
+		run.SummaryUnavailableReason = run.SummaryUnavailableReason[:256]
+	}
 	return run, nil
 }
 

@@ -38,19 +38,20 @@ type ProjectRepositoryPage struct {
 }
 
 type ProjectRepositoryItem struct {
-	RepositoryID             string                            `json:"repository_id"`
-	RepositoryOwnerProjectID string                            `json:"repository_owner_project_id"`
-	Key                      string                            `json:"key"`
-	RelativePath             string                            `json:"relative_path"`
-	Role                     string                            `json:"role"`
-	StateRoot                string                            `json:"state_root,omitempty"`
-	MembershipLifecycle      string                            `json:"membership_lifecycle"`
-	RepositoryLifecycle      string                            `json:"repository_lifecycle"`
-	ObservationPosture       string                            `json:"observation_posture"`
-	ReasonCode               string                            `json:"reason_code,omitempty"`
-	ObservedAt               *time.Time                        `json:"observed_at,omitempty"`
-	DevelopmentState         ProjectRepositoryDevelopmentState `json:"development_state"`
-	Git                      *ProjectRepositoryGit             `json:"git,omitempty"`
+	Archive                  *projectstate.ArchivedSourceContext `json:"archive,omitempty"`
+	RepositoryID             string                              `json:"repository_id"`
+	RepositoryOwnerProjectID string                              `json:"repository_owner_project_id"`
+	Key                      string                              `json:"key"`
+	RelativePath             string                              `json:"relative_path"`
+	Role                     string                              `json:"role"`
+	StateRoot                string                              `json:"state_root,omitempty"`
+	MembershipLifecycle      string                              `json:"membership_lifecycle"`
+	RepositoryLifecycle      string                              `json:"repository_lifecycle"`
+	ObservationPosture       string                              `json:"observation_posture"`
+	ReasonCode               string                              `json:"reason_code,omitempty"`
+	ObservedAt               *time.Time                          `json:"observed_at,omitempty"`
+	DevelopmentState         ProjectRepositoryDevelopmentState   `json:"development_state"`
+	Git                      *ProjectRepositoryGit               `json:"git,omitempty"`
 }
 
 type ProjectRepositoryDevelopmentState struct {

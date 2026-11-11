@@ -275,6 +275,47 @@ func TestProjectPhysicalArchiveDoctorSeparatesCustodyAndHistory(t *testing.T) {
 	}
 }
 
+func TestProjectHistoricalReactivationDoesNotRequireArchiveGuard(t *testing.T) {
+	for _, test := range []struct {
+		name, projectStatus, physicalID, evidence, physicalStatus string
+		wantKind                                                  string
+	}{
+		{"reactivated", "active", "project_test", "historical", "reactivated", "project_archive_historical"},
+		{"wrong identity", "active", "other", "historical", "reactivated", "project_physical_archive_conflict"},
+		{"still archived", "archived", "project_test", "historical", "reactivated", "project_physical_archive_conflict"},
+		{"unverified", "active", "project_test", "unavailable", "reactivated", "project_physical_archive_conflict"},
+		{"incomplete", "active", "project_test", "historical", "in_progress", "project_physical_archive_conflict"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := newFakeDoctorClient(t, nil, nil)
+			client.projects = []projects.Project{{ProjectID: "project_test", Slug: "test", Status: test.projectStatus, ArchiveState: []byte(`{"schema_version":"project.physical_archive_state.v1"}`)}}
+			client.projectInspection.Physical = &storagearchive.ProjectPhysicalArchiveInspection{ProjectID: test.physicalID, EvidenceStatus: test.evidence, Status: test.physicalStatus}
+			check := checkProjectRuntimeArchives(context.Background(), client, "corr_test")
+			if len(check.Findings) != 1 || check.Findings[0].Kind != test.wantKind {
+				t.Fatalf("unexpected findings: %+v", check.Findings)
+			}
+			if test.wantKind == "project_archive_historical" && check.Findings[0].Severity != SeverityInfo {
+				t.Fatalf("historical evidence still reports a failure: %+v", check)
+			}
+		})
+	}
+}
+
+func TestMainDocumentsDoctorSeparatesAcceptanceRowsWithoutHidingRealMissingFiles(t *testing.T) {
+	status := mainstorage.Status{Exists: true, FilesMissingCataloged: 2, Imports: []mainstorage.FileStatus{
+		{StorageEntryID: "fixture", State: mainstorage.StateMissingDeferred, RelativePath: ".loom-acceptance/old/report.md"},
+		{StorageEntryID: "real", State: mainstorage.StateMissingDeferred, RelativePath: "user.md"},
+	}}
+	check := checkMainDocuments(nil, status, nil)
+	if len(check.Findings) != 2 || check.Findings[0].Kind != "main_documents_missing_acceptance_rows" || check.Findings[1].Kind != "main_documents_missing_cataloged" {
+		t.Fatalf("missing file classes conflated: %+v", check.Findings)
+	}
+	status.Imports[0].RelativePath = ".loom-acceptance/../user.md"
+	if mainDocumentsMissingAcceptanceRows(status) != 0 {
+		t.Fatal("normalized escape treated as fixture")
+	}
+}
+
 func doctorEntry(id string) storagecatalog.Entry {
 	size := int64(128)
 	return storagecatalog.Entry{

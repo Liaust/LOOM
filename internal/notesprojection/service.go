@@ -155,11 +155,34 @@ func (s Service) rebuild(ctx context.Context, input RebuildInput, refresh bool) 
 	}
 	entries, buildFindings := BuildProjectionEntries(root, sources, now)
 	if len(buildFindings) > 0 {
-		return RebuildResult{}, fmt.Errorf("Notes projection has invalid source paths; refusing partial inventory")
+		return RebuildResult{}, invalidSourcePaths(sources)
 	}
 	previous, found, manifestErr := ReadManifest(root)
 	if refresh && manifestErr != nil {
 		return RebuildResult{}, fmt.Errorf("read automatic Notes projection manifest: %w", manifestErr)
+	}
+	// A complete filtered snapshot is not itself withdrawal evidence for an old
+	// manifest identity. In-flight custody, unavailable native evidence or an
+	// absent row must also remain safe on the full repair path used by deltas.
+	if provider, ok := s.Sources.(TargetedSourceProvider); ok && found && manifestErr == nil {
+		var missing []string
+		for _, entry := range previous.Entries {
+			if _, present := seen[entry.KnowledgeObjectID]; !present {
+				missing = append(missing, entry.KnowledgeObjectID)
+			}
+		}
+		for start := 0; start < len(missing); start += MaxDeltaIdentities {
+			ids := missing[start:min(start+MaxDeltaIdentities, len(missing))]
+			delta, err := provider.ReadProjectionSources(ctx, ids)
+			if err != nil {
+				return RebuildResult{}, err
+			}
+			for _, id := range ids {
+				if delta.Withdrawn[id] == "" {
+					return RebuildResult{}, ErrDeltaUncertain
+				}
+			}
+		}
 	}
 	if refresh && found && projectionCurrent(root, previous, entries) {
 		return RebuildResult{ProjectionRoot: root, Manifest: previous}, nil

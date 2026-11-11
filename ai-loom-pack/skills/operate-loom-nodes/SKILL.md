@@ -34,8 +34,9 @@ Current task and repository/node instructions govern scope. Runtime records and
 approved host/service observations establish health; release-matched source and
 help establish support. Plans are future intent.
 
-The committed ORCA 1.4.191 and non-Git registration evidence is historical,
-not installed patch availability or current health. Use the host's native skill.
+ORCA and its legacy skills are retired, not an availability fallback. Historical
+non-Git registration evidence is not installed patch availability or current
+health. Use the actual native harness and release-matched help.
 
 ## Authority and production
 

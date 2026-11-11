@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,10 +13,12 @@ import (
 	"strings"
 	"time"
 
+	"loom.local/loom/internal/boxregistry"
 	"loom.local/loom/internal/capabilities"
 	loomerrors "loom.local/loom/internal/errors"
 	"loom.local/loom/internal/idempotency"
 	"loom.local/loom/internal/policy"
+	"loom.local/loom/internal/projects"
 	"loom.local/loom/internal/provenance"
 	"loom.local/loom/internal/requestctx"
 	"loom.local/loom/internal/response"
@@ -216,6 +219,19 @@ func (s Server) handleProvenanceProjectProjection(w http.ResponseWriter, r *http
 		s.writeProvenanceError(w, correlationID, "project_sync", &provenance.FoundationValidationError{Err: errors.New("project reference is invalid")})
 		return
 	}
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		s.writeProvenanceError(w, correlationID, "project_sync", &provenance.FoundationValidationError{Err: err})
+		return
+	}
+	membershipOnly := false
+	if values, present := query["membership_only"]; present {
+		if len(values) != 1 || values[0] != "true" && values[0] != "false" {
+			s.writeProvenanceError(w, correlationID, "project_sync", &provenance.FoundationValidationError{Err: errors.New("membership_only must appear once as true or false")})
+			return
+		}
+		membershipOnly = values[0] == "true"
+	}
 	key, ok := s.requireProvenanceIdempotencyKey(w, r, correlationID)
 	if !ok {
 		return
@@ -229,23 +245,35 @@ func (s Server) handleProvenanceProjectProjection(w http.ResponseWriter, r *http
 		return
 	}
 	input := map[string]string{"project_id": selectedProjectID}
+	if membershipOnly {
+		home, err := s.projectHomeBoxID(ctx, selectedProjectID)
+		if err != nil {
+			s.writeProvenanceError(w, correlationID, "project_sync", err)
+			return
+		}
+		input["membership_only"], input["home_box_id"] = "true", home
+	}
 	idemRecord, proceed := s.beginRecoverableIdempotency(w, r, ctx, correlationID, req, "provenance.project_projection.sync", input)
 	if !proceed {
 		return
 	}
-	if s.services.ProjectRepos.Provenance == nil || s.services.ProjectRepos.RepositoryState == nil {
-		err := errors.New("bounded project repository projection source is unavailable")
-		s.failProvenanceIdempotency(w, ctx, correlationID, key, idemRecord, "project_sync", err)
-		return
+	var receipt provenance.ProjectProjectionSyncReceipt
+	if membershipOnly {
+		projection, ok := s.provenanceService().(provenance.ProjectProjectionMembershipTransport)
+		if !ok {
+			err = errors.New("provenance membership-only projection sync is unavailable")
+		} else {
+			receipt, err = projection.SyncProjectProjectionMembership(ctx, provenance.ProjectProjectionMembershipInput{ProjectID: selectedProjectID, HomeBoxID: input["home_box_id"]})
+		}
+	} else {
+		projection, ok := s.provenanceService().(provenance.ProjectionTransport)
+		if !ok || s.services.ProjectRepos.Provenance == nil || s.services.ProjectRepos.RepositoryState == nil {
+			err = errors.New("bounded project repository projection source is unavailable")
+		} else {
+			refresh := provenance.ProjectRefreshService{Source: s.services.ProjectRepos.Provenance, Repositories: s.services.ProjectRepos.RepositoryState, Projection: projection, HomeBoxID: s.projectHomeBoxID}
+			receipt, err = refresh.RefreshProject(ctx, selectedProjectID, false)
+		}
 	}
-	projection, ok := s.provenanceService().(provenance.ProjectionTransport)
-	if !ok {
-		err := errors.New("provenance projection runtime is not ready")
-		s.failProvenanceIdempotency(w, ctx, correlationID, key, idemRecord, "project_sync", err)
-		return
-	}
-	refresh := provenance.ProjectRefreshService{Source: s.services.ProjectRepos.Provenance, Repositories: s.services.ProjectRepos.RepositoryState, Projection: projection}
-	receipt, err := refresh.RefreshProject(ctx, selectedProjectID, false)
 	if err != nil {
 		s.failProvenanceIdempotency(w, ctx, correlationID, key, idemRecord, "project_sync", err)
 		return
@@ -264,6 +292,7 @@ func (s Server) handleProvenanceProjectContext(w http.ResponseWriter, r *http.Re
 	}
 	ref := strings.TrimPrefix(r.URL.Path, "/v1/provenance/projects/")
 	query, err := url.ParseQuery(r.URL.RawQuery)
+	query = withoutBoundBoxSelectors(ctx, query)
 	if err != nil || ref == "" || strings.Contains(ref, "/") || len(query) > 1 || (len(query) == 1 && (!query.Has("snapshot_id") || len(query["snapshot_id"]) != 1 || query.Get("snapshot_id") == "")) {
 		s.writeProvenanceError(w, cid, "project", &provenance.FoundationValidationError{Err: errors.New("exact project id and optional snapshot_id required")})
 		return
@@ -373,6 +402,61 @@ func (s Server) handleProvenanceRecords(w http.ResponseWriter, r *http.Request) 
 	s.handleProvenanceList(w, r, "records", func(ctx context.Context, request provenance.PageRequest) (any, error) {
 		return s.provenanceService().ListRecords(ctx, request)
 	})
+}
+
+func (s Server) handleProvenanceReview(w http.ResponseWriter, r *http.Request) {
+	correlationID, ctx, cancel := provenanceRequestMeta(r)
+	defer cancel()
+	if r.Method != http.MethodGet {
+		s.writeError(w, correlationID, http.StatusMethodNotAllowed, "method.not_allowed", "provenance", "review", "Method is not allowed.", nil)
+		return
+	}
+	if _, ok := s.authorizeProvenance(w, ctx, correlationID, capabilities.ProvenanceFoundationReadCapability); !ok {
+		return
+	}
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		s.writeProvenanceError(w, correlationID, "review", &provenance.FoundationValidationError{Err: err})
+		return
+	}
+	limit, err := provenanceLimit(query.Get("limit"))
+	request := provenance.ReviewRequest{Limit: limit, Cursor: query.Get("cursor"), Domain: query.Get("domain"), Visibility: query.Get("visibility"), ExcludeDomains: query["exclude_domain"]}
+	if strings.TrimSpace(query.Get("limit")) == "" {
+		request.Limit = provenance.DefaultReviewLimit
+	}
+	if raw := query.Get("reviewed"); err == nil && raw != "" {
+		if len(raw) > provenance.MaximumReviewCheckpointBytes {
+			err = errors.New("review checkpoints exceed their byte bound")
+		} else {
+			decoder := json.NewDecoder(strings.NewReader(raw))
+			decoder.DisallowUnknownFields()
+			err = decoder.Decode(&request.Reviewed)
+			if err == nil && request.Reviewed == nil {
+				err = errors.New("reviewed must be a JSON checkpoint array, not null")
+			}
+			if err == nil && !json.Valid([]byte(raw)) {
+				err = errors.New("reviewed must contain one JSON checkpoint array")
+			}
+		}
+	}
+	if err == nil {
+		err = provenance.ValidateReviewRequest(request)
+	}
+	if err != nil {
+		s.writeProvenanceError(w, correlationID, "review", &provenance.FoundationValidationError{Err: err})
+		return
+	}
+	reader, ok := s.provenanceService().(provenance.ReviewTransport)
+	if !ok {
+		s.writeError(w, correlationID, http.StatusNotImplemented, "provenance.review_unsupported", "provenance", "review", "This backend does not support effective review reads.", nil)
+		return
+	}
+	result, err := reader.ListReview(ctx, request)
+	if err != nil {
+		s.writeProvenanceError(w, correlationID, "review", err)
+		return
+	}
+	s.writeBoundedProvenanceJSON(w, correlationID, http.StatusOK, response.Success(correlationID, result))
 }
 
 func (s Server) handleProvenanceRecord(w http.ResponseWriter, r *http.Request) {
@@ -495,6 +579,44 @@ func (s Server) handleProvenanceExact(w http.ResponseWriter, r *http.Request, ta
 
 func (s Server) provenanceService() provenance.FoundationTransport {
 	return s.services.Provenance
+}
+
+func (s Server) projectHomeBoxID(ctx context.Context, projectID string) (string, error) {
+	service := s.services.Projects
+	if service.DB == nil {
+		service = projects.NewService(s.services.DB)
+	}
+	if service.DB == nil {
+		// Legacy transports can observe unassigned history, never a guessed Box.
+		if _, scoped := boxregistry.FromContext(ctx); !scoped && s.services.Boxes == nil {
+			return "", nil
+		}
+		return "", errors.New("registered project membership is unavailable")
+	}
+	project, err := service.ResolveProjectRef(ctx, projectID)
+	selection, scoped := boxregistry.FromContext(ctx)
+	if scoped && !selection.AllBoxes && errors.Is(err, sql.ErrNoRows) {
+		return "", &provenance.FoundationConflictError{Err: provenance.ErrBoxSelectionMismatch}
+	}
+	if err != nil {
+		return "", err
+	}
+	id := projects.HomeBoxID(project.Metadata)
+	if scoped && !selection.AllBoxes && (id == "" || !selection.Contains(id)) {
+		return "", &provenance.FoundationConflictError{Err: provenance.ErrBoxSelectionMismatch}
+	}
+	return id, nil
+}
+
+// Middleware owns selector validation and binding. Strict citation validators
+// remove selectors only after that binding, never on an unscoped legacy server.
+func withoutBoundBoxSelectors(ctx context.Context, values url.Values) url.Values {
+	if _, scoped := boxregistry.FromContext(ctx); scoped {
+		for _, key := range []string{"box_id", "box", "all_boxes"} {
+			values.Del(key)
+		}
+	}
+	return values
 }
 
 func provenanceRequestMeta(r *http.Request) (string, context.Context, context.CancelFunc) {
@@ -656,6 +778,10 @@ func provenanceErrorResponse(err error) (int, string, string) {
 	var validation *provenance.FoundationValidationError
 	var conflict *provenance.FoundationConflictError
 	switch {
+	case errors.Is(err, provenance.ErrBoxSelectionMismatch):
+		return http.StatusConflict, "provenance.box_selection_mismatch", "Select the originating Box or explicitly select all_boxes to inspect mixed or unassigned history."
+	case errors.Is(err, provenance.ErrAcceptedProducerHistory):
+		return http.StatusBadRequest, "provenance.producer_history_invalid", "Preserve the exact candidate and reviewer contexts in producer_history; one producer ID cannot change kind."
 	case errors.As(err, &validation):
 		return http.StatusBadRequest, "provenance.invalid_request", "Provenance request is invalid."
 	case errors.Is(err, provenance.ErrFoundationNotFound):

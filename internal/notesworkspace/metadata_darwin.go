@@ -43,6 +43,6 @@ func supportedXattr(name string) bool {
 	return !strings.HasPrefix(name, "com.apple.system.") && name != "com.apple.ResourceFork" && name != "com.apple.decmpfs"
 }
 
-func writerOwnedMetadata(_ replacementMetadata, _ uint32) (replacementMetadata, error) {
+func writerOwnedMetadata(_ replacementMetadata, _, _ uint32, _ []int) (replacementMetadata, error) {
 	return replacementMetadata{}, fmt.Errorf("cross-owner replacement requires Linux access ACL support")
 }

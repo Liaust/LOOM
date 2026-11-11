@@ -524,7 +524,7 @@ func (p *migrationPreview) loadRoot() bool {
 		p.issue("missing_evidence", "source_missing", CanonicalRootContractPath, "project", "Neither root contract is present.", "Supply the existing .loom/project.yaml or loom.project.yaml and both location claims.")
 		return false
 	}
-	if (ap && a.SchemaVersion == ProjectSchemaV05) || (bp && b.SchemaVersion == ProjectSchemaV05) {
+	if (ap && IsDeclarationSchemaVersion(a.SchemaVersion)) || (bp && IsDeclarationSchemaVersion(b.SchemaVersion)) {
 		code := "already_declaration"
 		if ap && bp && a.SchemaVersion != b.SchemaVersion {
 			code = "root_layout_conflict"

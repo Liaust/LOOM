@@ -3,11 +3,13 @@ package repostate
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,38 @@ import (
 	"loom.local/loom/internal/projects"
 	"loom.local/loom/internal/projectstate"
 )
+
+func TestProvenanceAdapterArchiveRevalidatesAfterExtraction(t *testing.T) {
+	root := t.TempDir()
+	writeValidRepositoryStateFixture(t, root)
+	source := projectstate.ProvenanceRepositorySource{
+		Projection:  projectstate.RepositoryProjection{RepositoryID: "repo_01ARZ3NDEKTSV4RRFFQ69G5FAV", RepositoryOwnerProjectID: "project_01ARZ3NDEKTSV4RRFFQ69G5FAV", Role: projects.ProjectRepositoryRoleComponent, StateRoot: StateRoot, SourceBindingDigest: "sha256:" + strings.Repeat("d", 64), Archive: &projectstate.ArchivedSourceContext{OperationID: "archive_fixture"}},
+		ProjectSlug: "atlas", SourceVersion: 9, RepositoryRoot: root, Available: true, Owned: true,
+		NavigationPath: "repos/api", MembershipSourcePath: ".loom/contracts/repos.yaml",
+	}
+	git := &staticRepositoryGitObserver{observation: fixtureGitObservation((Parser{}).Parse(root), time.Now().UTC())}
+	adapter := ProvenanceAdapter{Extractor: Extractor{Git: git}}
+	if got := adapter.ProjectForProvenance(t.Context(), source); got.Available || got.ReasonCode != "archive_source_unverified" || git.calls != 0 {
+		t.Fatal("archive without custody validator was extracted")
+	}
+	checks := 0
+	source.ValidateRead = func(context.Context) error {
+		checks++
+		if checks == 2 {
+			return errors.New("archive changed during extraction")
+		}
+		return nil
+	}
+	got := adapter.ProjectForProvenance(t.Context(), source)
+	if got.Available || got.ReasonCode != "archive_source_changed" || got.Extraction.TrackingStatus != "" || checks != 2 {
+		t.Fatalf("changed custody leaked extraction: %+v", got)
+	}
+	source.ValidateRead = func(context.Context) error { return nil }
+	got = adapter.ProjectForProvenance(t.Context(), source)
+	if !got.Available || !slices.Contains(got.Extraction.Freshness.Reasons, "archived_snapshot") || len(got.Extraction.AcceptedContext) != 0 {
+		t.Fatalf("historical/source posture lost: %+v", got)
+	}
+}
 
 func TestProvenanceAdapterUsesAuthoritativeProjectMembership(t *testing.T) {
 	root := t.TempDir()

@@ -280,6 +280,11 @@ func (s Service) TransitionProjectPhysicalRestore(ctx context.Context, req reque
 		return result, err
 	}
 	project.ArchiveState = payload
+	if next.Phase == ProjectRestorePhaseComplete {
+		if _, err := tx.ExecContext(ctx, `SELECT pg_notify('loom_worker_wake','knowledge_indexer')`); err != nil {
+			return result, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return result, err
 	}

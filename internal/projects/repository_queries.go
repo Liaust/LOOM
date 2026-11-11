@@ -139,7 +139,7 @@ func (s Service) ReadProjectRepositoryState(ctx context.Context, ref string) (Pr
 	}
 	if model.Source == nil {
 		var declaration bool
-		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM projects.project_contract_registrations WHERE project_id=$1 AND contract_schema_version=$2)`, project.ProjectID, ProjectRepositoryProjectSchemaV05).Scan(&declaration); err != nil {
+		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM projects.project_contract_registrations WHERE project_id=$1 AND contract_schema_version IN ($2,$3))`, project.ProjectID, ProjectRepositoryProjectSchemaV05, ProjectRepositoryProjectSchemaV06).Scan(&declaration); err != nil {
 			return ProjectRepositoryReadModel{}, err
 		}
 		if declaration {
@@ -158,11 +158,13 @@ func (s Service) ReadProjectRepositoryState(ctx context.Context, ref string) (Pr
 }
 
 func resolveProjectRepositoryReadProjectTx(ctx context.Context, tx *sql.Tx, ref string) (Project, error) {
+	args := []any{ref}
+	selection := projectBoxSelectionSQL(ctx, "p", &args)
 	row := tx.QueryRowContext(ctx, projectSelectSQL()+`
-		WHERE p.project_id = $1
+		WHERE (p.project_id = $1
 		   OR p.slug = $1
 		   OR scope.scope_key = $1
-		   OR scope.slug = $1
+		   OR scope.slug = $1) AND `+selection+`
 		ORDER BY
 			CASE
 				WHEN p.project_id = $1 THEN 0
@@ -171,7 +173,7 @@ func resolveProjectRepositoryReadProjectTx(ctx context.Context, tx *sql.Tx, ref 
 				ELSE 3
 			END
 		LIMIT 1
-	`, ref)
+	`, args...)
 	return scanProject(row)
 }
 
@@ -240,7 +242,7 @@ func readProjectRepositorySourceTx(ctx context.Context, tx *sql.Tx, projectID st
 	if err != nil {
 		return ProjectRepositorySource{}, ProjectRepositoryCanonicalSource{}, err
 	}
-	if source.ProjectContractSchemaVersion == ProjectRepositoryProjectSchemaV05 {
+	if isDeclarationSchemaVersion(source.ProjectContractSchemaVersion) {
 		if err = validateSingleDeclarationSource(canonical.Snapshot.SourceVersions, source.ProjectRoot, source.ProjectContractPath, source.ReposContractPath, source.ProjectContractDigest, source.ReposContractDigest); err != nil {
 			return ProjectRepositorySource{}, ProjectRepositoryCanonicalSource{}, err
 		}

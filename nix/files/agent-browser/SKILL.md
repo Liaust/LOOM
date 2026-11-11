@@ -1,6 +1,6 @@
 ---
 name: agent-browser
-description: Browse and test websites using Main's local Chromium. Read pages, interact with forms, extract content and take screenshots. Use for agent-owned browser tasks, not for inspecting the operator's existing Mac browser tabs.
+description: Browse and test websites using Main's local Chromium CLI. Use for CLI-only harnesses such as Codex, or an explicit fallback for a native Hermes browser limitation/failure. Native Hermes normally uses browser_exec. Not for inspecting the operator's existing Mac browser tabs.
 ---
 
 # Main Browser
@@ -9,9 +9,13 @@ Full Chromium runs headlessly on Main: it renders JavaScript and images and
 can take screenshots, but does not open a window on the operator's Mac. Its sessions
 do not inherit Safari/Chrome logins. Mac browser handoff remains separate.
 
-In Hermes, use the native browser tools for normal navigation, snapshots,
-clicks, typing and screenshots. They manage task-isolated sessions. General
-coding agents can use the installed `agent-browser` CLI directly.
+Codex sessions on Main use the installed `agent-browser` CLI directly, including
+named assistants and general coding agents. Native Hermes uses `browser_exec`
+by default. In Hermes, use this CLI only for a concrete native-browser
+limitation/failure or an explicitly requested CLI workflow, and state why you
+are switching. Do not use both interfaces by default or bypass authentication,
+permission or site restrictions. Choose a separate task session: the interfaces
+do not share tabs or logins. Native Hermes tool names are not Codex tools.
 
 ## CLI Workflow
 

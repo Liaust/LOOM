@@ -32,6 +32,32 @@ func TestNotesLexicalBatchPartitions(t *testing.T) {
 	}
 }
 
+func TestFileSearchHasOnlyRequestedCurrentPartitions(t *testing.T) {
+	for _, lifecycle := range []SourceLifecycleFilter{SourceLifecycleFilterActive, SourceLifecycleFilterArchived, SourceLifecycleFilterAll} {
+		input := NotesSearchInput{Query: "archive field", SourceLifecycle: lifecycle, RequireCurrent: true, fileView: true, Limit: 3}
+		variants := notesLexicalVariants(input)
+		want := 1
+		if lifecycle == SourceLifecycleFilterAll {
+			want = 2
+		}
+		if len(variants) != want {
+			t.Fatalf("%s: %+v", lifecycle, variants)
+		}
+		for _, variant := range variants {
+			if !variant.Current || variant.Limit != 3 || (lifecycle != SourceLifecycleFilterAll && variant.Lifecycle != lifecycle) {
+				t.Fatalf("unrequested diagnostic work: %+v", variant)
+			}
+		}
+		query, err := buildIndexedNotesLexicalCandidates(input, variants)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lifecycle == SourceLifecycleFilterArchived && !strings.Contains(query.SQL, "ko.knowledge_object_id IN (\n\t SELECT pointer.knowledge_object_id") {
+			t.Fatal("archived candidate restriction missing")
+		}
+	}
+}
+
 func TestNotesIndexedLexicalParityPostgres(t *testing.T) {
 	f := notesArchiveTestFixture(t)
 	if _, err := f.s.store.db.Exec(`UPDATE search.search_documents SET

@@ -18,6 +18,33 @@ func observer(data string) Observer {
 	}
 }
 
+func TestDeclaredProfileInventory(t *testing.T) {
+	profile := "loom-b1ee8493a085ca8265480f6590d2aa4d"
+	o := observer(`{"jobs":[{"id":"native123","origin":{"loom_project_declaration":{"project_id":"project_test","resource":"review","profile":"` + profile + `","retired":false}}}]}`)
+	o.Source.Revision, o.Source.Profile = PlatformRevision, profile
+	out, err := o.Observe(context.Background())
+	if err != nil || len(out.Jobs) != 1 || out.Jobs[0].Profile != profile {
+		t.Fatalf("%+v %v", out, err)
+	}
+	o.Source.Profile = "mina"
+	if _, err := o.Observe(context.Background()); err == nil {
+		t.Fatal("accepted a different store's ownership")
+	}
+}
+
+func TestReviewedPlatformRevision(t *testing.T) {
+	o := observer(`{"jobs":[]}`)
+	o.Source.Revision = PlatformRevision
+	out, err := o.Observe(context.Background())
+	if err != nil || out.Availability != Available || out.Source.Revision != PlatformRevision {
+		t.Fatalf("native platform revision unavailable: %+v %v", out, err)
+	}
+	o.Source.Revision = strings.Repeat("0", 40)
+	if _, err := o.Observe(context.Background()); !errors.Is(err, ErrRevision) {
+		t.Fatalf("unreviewed native revision accepted: %v", err)
+	}
+}
+
 // Canonical save_jobs/create_job shape, with allowlisted values from the pinned
 // native contract. No real profile or prompt data is used in these fixtures.
 func TestNativeInventory(t *testing.T) {
@@ -207,5 +234,19 @@ func TestNativeCronWhitespace(t *testing.T) {
 	}
 	if *out.Jobs[0].Schedule.Expression != "0\t9 * * MON-FRI" {
 		t.Fatal("native expression changed")
+	}
+}
+
+func TestEventInventoryKeepsProjectButNotEventPayload(t *testing.T) {
+	out, err := observer(`{"jobs":[{"id":"event_batch","origin":{"loom_internal_events":{"project_id":"project_example","profile":"mina","events":[{"secret":"not inventory"}]}}}]}`).Observe(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Jobs[0].Project == nil || out.Jobs[0].Project.Resource != "events" {
+		t.Fatalf("missing event project: %+v", out)
+	}
+	raw, _ := json.Marshal(out)
+	if strings.Contains(string(raw), "secret") {
+		t.Fatal("event data leaked into inventory")
 	}
 }

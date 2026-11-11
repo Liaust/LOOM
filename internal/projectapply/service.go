@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -462,11 +463,15 @@ func publicError(err error, o *operation, action string) pc.DeclarationError {
 			}
 		}
 	}
+	if pc.DeclarationWaitingForOwner(e.Code, e.Cause) {
+		return pc.DeclarationError{Code: pc.DeclarationOwnerPending, ActionID: action, Message: "Accepted; waiting for owner confirmation. Continue the same operation with its original request.", CauseCode: e.Cause, Retryable: true, CompletedEffects: done}
+	}
 	return pc.DeclarationError{Code: e.Code, ActionID: action, Message: "Declaration operation stopped; inspect the typed cause and retained effects.", CauseCode: e.Cause, Retryable: e.Code == pc.DeclarationOwnerFailed || e.Code == pc.DeclarationTargetUnavailable, CompletedEffects: done}
 }
 func result(o *operation) pc.DeclarationResult {
 	p := o.Resolution.Plan
 	r := pc.DeclarationResult{SchemaVersion: pc.DeclarationResultSchemaV05, OperationID: o.ID, PlanID: p.PlanID, Target: p.Basis.Target, Revision: p.PlanID, State: o.State, Actions: []pc.DeclarationActionResult{}, Readiness: readiness(p.PlanID), Errors: append([]pc.DeclarationError{}, o.Errors...), SupersededBy: o.SupersededBy}
+	r.Effects = append([]pc.DeclarationEffect(nil), p.Basis.Effects...)
 	r.Readiness.Queued = pc.DeclarationFact{State: pc.DeclarationSatisfied, Revision: p.PlanID, EvidenceRef: o.ID}
 	for _, a := range p.Basis.Actions {
 		ar := o.Actions[a.ID]
@@ -510,6 +515,9 @@ func (s *Service) stop(ctx context.Context, l *projectLock, p Principal, o *oper
 	}
 	r.Errors = []pc.DeclarationError{issue}
 	r.Readiness.Applied.State = pc.DeclarationUnknown
+	if pc.DeclarationWaitingForOwner(issue.Code, issue.CauseCode) {
+		r.Readiness.Applied.State = pc.DeclarationPending
+	}
 	return r, err
 }
 func (s *Service) actionFailed(ctx context.Context, l *projectLock, p Principal, o *operation, a pc.DeclarationAction, err error) (pc.DeclarationResult, error) {
@@ -537,7 +545,11 @@ func (s *Service) pending(ctx context.Context, l *projectLock, p Principal, o *o
 	}
 	ar := *o.Actions[a.ID]
 	ar.State = pc.DeclarationOperationPartial
-	err := fail(pc.DeclarationOwnerFailed, cause)
+	code := pc.DeclarationOwnerFailed
+	if obs.State == Pending {
+		code = pc.DeclarationOwnerPending
+	}
+	err := fail(code, cause)
 	issue := publicError(err, o, a.ID)
 	ar.Error = &issue
 	if e := saveAction(ctx, l, o, a, &ar); e != nil {
@@ -576,6 +588,46 @@ func (s *Service) Operation(ctx context.Context, p Principal, id string) (pc.Dec
 	return r, nil
 }
 func (s *Service) Status(ctx context.Context, p Principal, req pc.DeclarationPlanRequest) (pc.DeclarationStatus, error) {
+	if e := s.config(false); e != nil {
+		return pc.DeclarationStatus{}, e
+	}
+	if e := validPrincipal(p); e != nil {
+		return pc.DeclarationStatus{}, e
+	}
+	var e error
+	req, e = planRequest(req)
+	if e != nil {
+		return pc.DeclarationStatus{}, e
+	}
+	if reader, ok := s.resolver.(interface {
+		ArchivedTarget(context.Context, Principal, pc.DeclarationPlanRequest) (*pc.DeclarationTarget, error)
+	}); ok {
+		target, err := reader.ArchivedTarget(ctx, p, req)
+		if err != nil {
+			return pc.DeclarationStatus{}, safeError(err, pc.DeclarationTargetUnavailable, "archive_identity_unavailable")
+		}
+		if target != nil {
+			// A historical identity intentionally has no executable live location.
+			// Keep the same current read authorizer without live-target validation.
+			if err := s.auth.Read(ctx, p, *target); err != nil {
+				return pc.DeclarationStatus{}, safeError(err, pc.DeclarationUnauthorized, "read_denied")
+			}
+			notApplicable := pc.DeclarationFact{State: pc.DeclarationNotApplicable}
+			unknown := pc.DeclarationFact{State: pc.DeclarationUnknown}
+			workState := ""
+			if s.db != nil {
+				project, err := projects.NewService(s.db).ResolveProjectRef(ctx, target.ProjectID)
+				if err != nil {
+					return pc.DeclarationStatus{}, safeError(err, pc.DeclarationTargetUnavailable, "project_metadata_unavailable")
+				}
+				workState = projects.ProjectWorkState(project.Metadata)
+			}
+			return pc.DeclarationStatus{SchemaVersion: pc.DeclarationStatusSchemaV05, Lifecycle: "archived", WorkState: workState, Target: *target,
+				Resources: map[pc.ResourceKey]pc.DeclarationResourceStatus{}, Errors: []pc.DeclarationError{},
+				Readiness:  pc.DeclarationReadiness{Desired: notApplicable, Queued: notApplicable, Applied: notApplicable, Processing: notApplicable, Healthy: notApplicable, Protected: unknown, Verified: unknown},
+				ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)}, nil
+		}
+	}
 	x, e := s.resolve(ctx, p, req)
 	if e != nil {
 		return pc.DeclarationStatus{}, e
@@ -583,26 +635,7 @@ func (s *Service) Status(ctx context.Context, p Principal, req pc.DeclarationPla
 	if s.db == nil {
 		return pc.DeclarationStatus{}, fail(pc.DeclarationUnsupported, "core_not_configured")
 	}
-	status := pc.DeclarationStatus{SchemaVersion: pc.DeclarationStatusSchemaV05, Target: x.Plan.Basis.Target, Revision: x.Plan.PlanID, Resources: map[pc.ResourceKey]pc.DeclarationResourceStatus{}, Readiness: readiness(x.Plan.PlanID), Errors: []pc.DeclarationError{}, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)}
-	for key, b := range x.Plan.Basis.Bindings {
-		status.Resources[key] = pc.DeclarationResourceStatus{Binding: b, Readiness: readiness(x.Plan.PlanID), Errors: []pc.DeclarationError{}}
-	}
-	for _, action := range x.Plan.Basis.Actions {
-		reader, ok := s.owners[action.Owner].(interface {
-			ResourceStatus(context.Context, pc.DeclarationAction, json.RawMessage) (pc.DeclarationReadiness, error)
-		})
-		if !ok {
-			continue
-		}
-		resource := status.Resources[action.Resource]
-		observed, err := reader.ResourceStatus(ctx, action, x.Payloads[action.ID])
-		if err != nil {
-			resource.Errors = append(resource.Errors, publicError(err, nil, action.ID))
-		} else {
-			resource.Readiness = observed
-		}
-		status.Resources[action.Resource] = resource
-	}
+	status := s.resourceStatus(ctx, x)
 	var id string
 	e = s.db.QueryRowContext(ctx, `SELECT operation_id FROM projects.declaration_operations WHERE project_id=$1 ORDER BY created_at DESC,operation_id DESC LIMIT 1`, status.Target.ProjectID).Scan(&id)
 	if errors.Is(e, sql.ErrNoRows) {
@@ -617,6 +650,110 @@ func (s *Service) Status(ctx context.Context, p Principal, req pc.DeclarationPla
 	}
 	status.Operation = &op
 	return status, nil
+}
+
+// Current owners, not historical operation receipts, establish resource facts.
+func (s *Service) resourceStatus(ctx context.Context, x Resolution) pc.DeclarationStatus {
+	status := pc.DeclarationStatus{SchemaVersion: pc.DeclarationStatusSchemaV05, Target: x.Plan.Basis.Target, Revision: x.Plan.PlanID, Resources: map[pc.ResourceKey]pc.DeclarationResourceStatus{}, Readiness: readiness(x.Plan.PlanID), Errors: []pc.DeclarationError{}, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	for key, b := range x.Plan.Basis.Bindings {
+		status.Resources[key] = pc.DeclarationResourceStatus{Binding: b, Readiness: readiness(x.Plan.PlanID), Errors: []pc.DeclarationError{}}
+	}
+	for _, action := range x.Plan.Basis.Actions {
+		if action.Kind != pc.DeclarationRegisterProject || action.Owner != pc.DeclarationOwnerProjects {
+			continue
+		}
+		var registration projects.DeclarationRegistrationPayload
+		if json.Unmarshal(x.Payloads[action.ID], &registration) != nil || registration.Project.ID != status.Target.ProjectID || registration.ProjectRoot != status.Target.ProjectRoot {
+			continue
+		}
+		if pc.ValidProjectWorkState(registration.Project.WorkState) {
+			status.WorkState = registration.Project.WorkState
+		}
+		for _, member := range registration.Repositories {
+			key := pc.ResourceKey(member.Key)
+			resource, exists := status.Resources[key]
+			if !exists || resource.Binding.Kind != pc.DeclarationRepository || member.Path == "" || path.IsAbs(member.Path) || path.Clean(member.Path) != member.Path || member.Path == ".." || strings.HasPrefix(member.Path, "../") {
+				continue
+			}
+			resource.Path = path.Join(status.Target.ProjectRoot, member.Path)
+			status.Resources[key] = resource
+		}
+	}
+	for _, action := range x.Plan.Basis.Actions {
+		reader, ok := s.owners[action.Owner].(interface {
+			ResourceStatus(context.Context, pc.DeclarationAction, json.RawMessage) (pc.DeclarationReadiness, error)
+		})
+		if !ok {
+			continue
+		}
+		resource := status.Resources[action.Resource]
+		observed, err := reader.ResourceStatus(ctx, action, x.Payloads[action.ID])
+		// A late owner failure (for example backup inspection) must not discard
+		// already observed installation/health evidence.
+		resource.Readiness = observed
+		if err != nil {
+			issue := publicError(err, nil, action.ID)
+			issue.Resource = action.Resource
+			resource.Errors = append(resource.Errors, issue)
+		}
+		status.Resources[action.Resource] = resource
+	}
+	for i, fact := range statusFacts(&status.Readiness) {
+		if i == 0 { // Desired comes from the current resolved declaration.
+			continue
+		}
+		*fact = aggregateResourceFact(status, i)
+	}
+	return status
+}
+
+func statusFacts(r *pc.DeclarationReadiness) []*pc.DeclarationFact {
+	return []*pc.DeclarationFact{&r.Desired, &r.Queued, &r.Applied, &r.Processing, &r.Healthy, &r.Protected, &r.Verified}
+}
+
+func aggregateResourceFact(status pc.DeclarationStatus, dimension int) pc.DeclarationFact {
+	unknown := pc.DeclarationFact{State: pc.DeclarationUnknown, Revision: status.Revision}
+	if len(status.Resources) == 0 {
+		return unknown
+	}
+	applicable, pending, failed, incomplete := false, false, false, false
+	for _, resource := range status.Resources {
+		r := resource.Readiness
+		fact := *statusFacts(&r)[dimension]
+		if len(resource.Errors) > 0 {
+			incomplete = true
+		}
+		if fact.State == pc.DeclarationNotApplicable {
+			continue
+		}
+		applicable = true
+		// Owner revisions (installation, generation, backup manifest) are not
+		// interchangeable with the current declaration revision.
+		if status.Revision == "" || fact.Revision != status.Revision {
+			incomplete = true
+			continue
+		}
+		switch fact.State {
+		case pc.DeclarationSatisfied:
+		case pc.DeclarationPending:
+			pending = true
+		case pc.DeclarationFailed:
+			failed = true
+		default:
+			incomplete = true
+		}
+	}
+	if failed {
+		unknown.State = pc.DeclarationFailed
+	} else if pending {
+		unknown.State = pc.DeclarationPending
+	} else if !incomplete {
+		unknown.State = pc.DeclarationSatisfied
+		if !applicable {
+			unknown.State = pc.DeclarationNotApplicable
+		}
+	}
+	return unknown
 }
 
 // desiredSupersession distinguishes reviewed desired work from execution

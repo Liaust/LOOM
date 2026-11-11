@@ -19,7 +19,7 @@ import (
 )
 
 func TestBoxKnowledgeSourcePoliciesExplicitOptIn(t *testing.T) {
-	root := initializedWatchBox(t, ProfileMain)
+	root := initializedLegacyPolicyBox(t, ProfileMain)
 	resolved := Resolved{RootPath: root, Profile: ProfileMain, OwnerNode: "macbook"}
 	before, err := BuildWatchPlan(WatchStatusInput{Resolved: resolved})
 	if err != nil {
@@ -100,7 +100,7 @@ func TestBoxKnowledgeSourcePoliciesExplicitOptIn(t *testing.T) {
 }
 
 func TestBoxNotesScopedProcessingAndTextLimit(t *testing.T) {
-	root := initializedWatchBox(t, ProfileMain)
+	root := initializedLegacyPolicyBox(t, ProfileMain)
 	contract := *Inspect(Resolved{RootPath: root, Profile: ProfileMain, OwnerNode: "macbook"}).Contract
 	path := filepath.Join(root, contract.Policies[AreaNotes])
 	raw, err := os.ReadFile(path)
@@ -192,8 +192,8 @@ func TestBuildWatchPlanIncludesNotesAndDocumentsOnly(t *testing.T) {
 	if err := json.Unmarshal(notes.ConfigJSON, &notesConfig); err != nil {
 		t.Fatalf("decode notes config: %v", err)
 	}
-	if notesConfig.Scan.FullRescanInterval != boxWatchFullRescanInterval {
-		t.Fatalf("notes full_rescan_interval = %q, want %q", notesConfig.Scan.FullRescanInterval, boxWatchFullRescanInterval)
+	if notesConfig.Scan.FullRescanInterval != "6h" {
+		t.Fatalf("notes full_rescan_interval = %q, want 6h", notesConfig.Scan.FullRescanInterval)
 	}
 	if notesConfig.IgnorePolicy.Profile != string(filepolicy.ProfileManaged) || !notesConfig.IgnorePolicy.DiscoverUserRules || notesConfig.IgnorePolicy.PolicyRootRelativePath != "." || notesConfig.Scan.HiddenPolicy != agentwatchedroots.HiddenPolicyPolicyControlled {
 		t.Fatalf("notes ignore policy = %#v hidden=%q", notesConfig.IgnorePolicy, notesConfig.Scan.HiddenPolicy)
@@ -217,8 +217,8 @@ func TestBuildWatchPlanIncludesNotesAndDocumentsOnly(t *testing.T) {
 	if err := json.Unmarshal(documents.ConfigJSON, &documentsConfig); err != nil {
 		t.Fatalf("decode documents config: %v", err)
 	}
-	if documentsConfig.Scan.FullRescanInterval != boxWatchFullRescanInterval {
-		t.Fatalf("documents full_rescan_interval = %q, want %q", documentsConfig.Scan.FullRescanInterval, boxWatchFullRescanInterval)
+	if documentsConfig.Scan.FullRescanInterval != "6h" {
+		t.Fatalf("documents full_rescan_interval = %q, want 6h", documentsConfig.Scan.FullRescanInterval)
 	}
 	if documentsConfig.Scan.MaxHashFileBytes != boxWatchDocsMaxFileBytes {
 		t.Fatalf("documents max_hash_file_bytes = %d, want %d", documentsConfig.Scan.MaxHashFileBytes, boxWatchDocsMaxFileBytes)
@@ -296,6 +296,13 @@ func TestBuildWatchPlanIncludesActiveBackupContracts(t *testing.T) {
 	if backup.Metadata["source"] != backupcontracts.MetadataSource || backup.Metadata["contract_key"] != "archive" {
 		t.Fatalf("unexpected backup metadata: %#v", backup.Metadata)
 	}
+	var backupConfig agentwatchedroots.RootConfig
+	if err := json.Unmarshal(backup.ConfigJSON, &backupConfig); err != nil {
+		t.Fatalf("decode backup config: %v", err)
+	}
+	if backupConfig.Scan.FullRescanInterval != "1m" {
+		t.Fatalf("backup-contract full_rescan_interval = %q, want unchanged 1m", backupConfig.Scan.FullRescanInterval)
+	}
 	if len(backup.AgentCommands) != 1 {
 		t.Fatalf("backup root should include an owner-agent apply command: %#v", backup.AgentCommands)
 	}
@@ -362,7 +369,7 @@ func TestBoxWatchScopePlansRejectUnexpectedScopeRef(t *testing.T) {
 }
 
 func TestBuildWatchPlanRejectsInvalidPolicy(t *testing.T) {
-	root := initializedWatchBox(t, ProfileWorkspace)
+	root := initializedLegacyPolicyBox(t, ProfileWorkspace)
 	policyPath := filepath.Join(root, ".loom", "policies", "notes.watch.yaml")
 	if err := os.WriteFile(policyPath, []byte("schema_version: nope\narea: notes\nmode: watched_root\n"), 0o644); err != nil {
 		t.Fatalf("write invalid policy: %v", err)

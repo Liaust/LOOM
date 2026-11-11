@@ -422,7 +422,7 @@ func normalizeProjectRepositoryValidatedSourceInput(input ProjectRepositoryValid
 		member.RepositoryID = strings.TrimSpace(member.RepositoryID)
 		member.Key = strings.TrimSpace(member.Key)
 		member.Role = ProjectRepositoryRole(strings.ToLower(strings.TrimSpace(string(member.Role))))
-		member.Path, err = normalizeProjectRepositoryMemberPath(member.Path, true)
+		member.Path, err = normalizeProjectRepositoryMemberPath(member.Path, normalized.Versions != projectRepositorySourceV06V06)
 		if err != nil {
 			return normalized, fmt.Errorf("%w: member %d path: %v", ErrInvalidProjectRepositorySourceInput, index, err)
 		}
@@ -619,7 +619,7 @@ func validateCanonicalProjectRepositorySource(source ProjectRepositoryCanonicalS
 	seenPaths := make(map[string]struct{}, len(source.Snapshot.Members))
 	previousRepositoryID := ""
 	for index, member := range source.Snapshot.Members {
-		normalizedPath, pathErr := normalizeProjectRepositoryMemberPath(member.Path, true)
+		normalizedPath, pathErr := normalizeProjectRepositoryMemberPath(member.Path, source.Snapshot.SourceVersions != projectRepositorySourceV06V06)
 		if pathErr != nil || normalizedPath != member.Path {
 			return fmt.Errorf("%w: member %d path is not canonical", ErrInvalidProjectRepositorySourceInput, index)
 		}
@@ -1316,14 +1316,14 @@ func writeCanonicalJSONValue(buffer *bytes.Buffer, value canonicalJSONValue) err
 	return nil
 }
 
-// v0.5 declares the complete repository set in the actual project source. The
+// Declarations carry the complete repository set in the actual project source. The
 // legacy column names remain compatible; no repos.yaml document is invented.
 func validateSingleDeclarationSource(v ProjectRepositorySourceVersions, root, projectPath, reposPath, projectHash, reposHash string) error {
-	if v != projectRepositorySourceV05V05 {
+	if v != projectRepositorySourceV05V05 && v != projectRepositorySourceV06V06 {
 		return nil
 	}
 	if projectPath != filepath.Join(root, ".loom", "project.yaml") || reposPath != projectPath || reposHash != projectHash {
-		return fmt.Errorf("%w: v0.5 requires one exact .loom/project.yaml path and digest", ErrInvalidProjectRepositorySourceInput)
+		return fmt.Errorf("%w: %s requires one exact .loom/project.yaml path and digest", ErrInvalidProjectRepositorySourceInput, v.ProjectContract)
 	}
 	return nil
 }

@@ -39,11 +39,10 @@ The baseline template does not automatically overwrite live state. See
 `TOOLING.md` for managed-setting refusals and a bounded handoff.
 
 The `created` category does not transfer ownership to the curator. Foreground
-skills remain user-owned until explicit supported adoption. Nineteen visible
-skills remained after unwanted skills were removed from selection. That count
-is a historical observation, not a curated or fixed catalogue or a ceiling.
+skills remain user-owned until explicit supported adoption. Inspect the actual
+installed catalogue; this template supplies no private inventory or live count.
 Do not infer a new-skill approval requirement from it; native write-approval
 and installed/created ownership rules still apply. Disabled bundled skills and
-the four platform-hidden skills remain on disk. See
+platform-hidden skills remain on disk. See
 `protocols/SKILL-CREATION-AND-PROMOTION.md` for selection and maintenance rules.
 Same-user read-only modes alone are not a security sandbox for installed skills.

@@ -61,6 +61,9 @@ func RenderStatus(w io.Writer, status UpdateStatus) {
 		fmt.Fprintf(w, "Active: none (%s)\n", status.ActiveManifestPath)
 	}
 	fmt.Fprintf(w, "History: %d\n", len(status.History))
+	for _, evidence := range status.Reconciliations {
+		fmt.Fprintf(w, "Observation: %s at %s (PID %d; initial status %s)\n", evidence.Status, formatTime(evidence.Readiness.ObservedAt), evidence.Readiness.Process.PID, evidence.InitialStatus)
+	}
 	if len(status.Diagnostics) > 0 {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, "Diagnostics")
@@ -82,6 +85,19 @@ func RenderManifest(w io.Writer, path string, manifest UpdateManifest) {
 		fmt.Fprintf(w, "Finished: %s\n", formatTime(*manifest.FinishedAt))
 	}
 	fmt.Fprintf(w, "Rollback: %s\n", manifest.Rollback.Class)
+	if manifest.Readiness != nil {
+		fmt.Fprintf(w, "Readiness: %s at %s (PID %d; migration %d)\n", manifest.Readiness.Process.Executable, formatTime(manifest.Readiness.ObservedAt), manifest.Readiness.Process.PID, manifest.Readiness.MigrationHead)
+	}
+}
+
+func RenderReconcileResult(w io.Writer, result ReconcileResult) {
+	fmt.Fprintf(w, "LOOM update reconcile: %s\n", result.Status)
+	fmt.Fprintf(w, "Manifest: %s\n", result.ManifestPath)
+	fmt.Fprintf(w, "Evidence: %s (appended=%t)\n", result.EvidencePath, result.Appended)
+	if result.Evidence != nil {
+		fmt.Fprintf(w, "Original status: %s\n", result.Evidence.InitialStatus)
+		fmt.Fprintf(w, "Observed: %s\n", formatTime(result.Evidence.Readiness.ObservedAt))
+	}
 }
 
 func RenderHistory(w io.Writer, history []UpdateManifest) {

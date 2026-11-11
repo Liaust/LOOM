@@ -515,9 +515,9 @@ print('query-boundary-passed')
  args=['provenance','search','slice4 decision','--project','project_fixture','--repo','repo_fixture','--limit','4']
  a=cli('provenance-default',args);assert not a['pending_candidates']['items'] and candidate not in json.dumps(a)
  b=cli('provenance-with-pending',args+['--include-pending']);assert b['accepted_records']['items'][0]['record_id']==record and b['pending_candidates']['items'][0]['candidate_id']==candidate and b['pending_candidates']['items'][0]['match']['assertion_posture']=='unaccepted_candidate'
- assert cli('provenance-record',['provenance','record','get',record])['record']['record_id']==record
+ assert cli('provenance-record',['provenance','record','get',record,'--details'])['record']['record_id']==record
  assert cli('provenance-candidate',['provenance','candidate','get',candidate])['effective_state']=='pending'
- assert cli('provenance-case',['provenance','case','get',case])['case']['case_id']==case
+ assert cli('provenance-case',['provenance','case','get',case,'--details'])['case']['case_id']==case
  assert len(requests)==9 and not failures
  # Once the fixture closes, the CLI must fail on that exact socket; it must not
  # fall back to another configured node or invent a result.

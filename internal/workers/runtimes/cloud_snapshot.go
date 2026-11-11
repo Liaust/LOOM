@@ -30,8 +30,8 @@ const (
 	cloudSnapshotUploadResultSchema      = "cloud_snapshot_upload.result.v1"
 	cloudSnapshotUploadPhase             = "direct_borg_archive"
 	cloudSnapshotCompletionTimeout       = 15 * time.Second
-	cloudSnapshotUploadRunTimeoutSeconds = 7200
-	cloudSnapshotUploadMaxRuntimeMS      = 7200000
+	cloudSnapshotUploadRunTimeoutSeconds = 10920
+	cloudSnapshotUploadMaxRuntimeMS      = 10800000
 	cloudSnapshotScheduleTimezone        = "Europe/Amsterdam"
 	cloudSnapshotPackageWindowHour       = 3
 )
@@ -53,6 +53,7 @@ type OperationalPackageReference struct {
 }
 
 type CloudSnapshotUploadRuntime struct {
+	CustodyRead            func(context.Context) (func(), error)
 	Maintenance            maintenance.Service
 	DataDir                string
 	NodeID                 string
@@ -131,6 +132,13 @@ func (r CloudSnapshotUploadRuntime) ValidateConfig(_ context.Context, raw json.R
 }
 
 func (r CloudSnapshotUploadRuntime) RunOnce(ctx context.Context, run workers.RunContext) (workers.RunResult, error) {
+	if r.CustodyRead != nil {
+		release, err := r.CustodyRead(ctx)
+		if err != nil {
+			return workers.RunResult{}, err
+		}
+		defer release()
+	}
 	cfg, err := r.parseConfig(run.Instance.ConfigJSON)
 	if err != nil {
 		return workers.RunResult{}, err
@@ -205,23 +213,44 @@ func (r CloudSnapshotUploadRuntime) RunOnce(ctx context.Context, run workers.Run
 			},
 		},
 	}
-	operation, err := r.createOperation(ctx, run, cfg)
+	runCtx, cancel, err := cloudArchiveWorkContext(ctx, run.Deadline, time.Duration(cfg.MaxRuntimeMS)*time.Millisecond)
 	if err != nil {
 		return workers.RunResult{}, err
 	}
-	runCtx := ctx
-	var cancel context.CancelFunc
-	if cfg.MaxRuntimeMS > 0 {
-		runCtx, cancel = context.WithTimeout(ctx, time.Duration(cfg.MaxRuntimeMS)*time.Millisecond)
-		defer cancel()
+	defer cancel()
+	operation, err := r.createOperation(ctx, run, cfg)
+	if err != nil {
+		return workers.RunResult{}, err
 	}
 	archive := r.ArchiveCanonical
 	if archive == nil {
 		archive = cloudstorage.ArchiveCanonicalRoots
 	}
-	directResult, archiveErr := archive(runCtx, cloudstorage.DirectArchiveInput{Config: load.Config, RequestV2: &request})
+	archiveInput := cloudstorage.DirectArchiveInput{Config: load.Config, RequestV2: &request, NotesRecoveryPublicationsRoot: backupstrategy.NotesRecoveryPublicationRoot(r.DataDir)}
+	archiveInput.Progress = cloudArchiveProgressReporter(ctx, run)
+	archiveInput.Progress(cloudstorage.DirectArchiveProgress{Phase: "preparing", ObservedAt: time.Now().UTC()})
+	references, err := backupstrategy.DiscoverNotesRecoveryReferences(runCtx, roots, archiveInput.NotesRecoveryPublicationsRoot)
+	if err != nil {
+		return workers.RunResult{}, fmt.Errorf("Notes dependency discovery: %w", err)
+	}
+	if len(references) > 0 {
+		archiveInput.RequestV2 = nil
+		archiveInput.RequestV3 = &backupstrategy.DirectArchiveRequestV3{Schema: backupstrategy.DirectArchiveRequestSchemaV3, Archive: request, NotesRecovery: references}
+	}
+	directResult, archiveErr := archive(runCtx, archiveInput)
+	if archiveErr == nil && directResult.Committed && directResult.Status == cloudstorage.DirectArchiveStatusSucceeded {
+		for _, root := range request.Roots {
+			if root.Name == "application_data" {
+				// Dated producer metadata only; normal status never reads payloads.
+				_ = backupstrategy.PublishRecoveryInventorySummary(runCtx, r.DataDir, backupstrategy.NotesRecoveryRetentionInput{
+					Root: filepath.Join(root.Path, "notes-recovery"), PublicationRoot: backupstrategy.NotesRecoveryPublicationRoot(r.DataDir),
+					ProtectionRoot: backupstrategy.NotesRecoveryProtectionRoot(load.Config.StateDir), Repository: load.Config.Snapshots.Borg.Repository})
+				break
+			}
+		}
+	}
 	resultSummary := cloudDirectArchiveSummary(directResult, packageRef, requestedBackupOperationID, run, operation)
-	validV2Evidence := directResult.ManifestSchema == backupstrategy.DirectArchiveManifestSchemaV2 && directResult.VerificationProfile == backupstrategy.DirectArchiveVerificationProfileRoutineIncrementalV1
+	validV2Evidence := (directResult.ManifestSchema == backupstrategy.DirectArchiveManifestSchemaV2 || directResult.ManifestSchema == backupstrategy.DirectArchiveManifestSchemaV3) && directResult.VerificationProfile == backupstrategy.DirectArchiveVerificationProfileRoutineIncrementalV1
 	validV1ReplayEvidence := directResult.ManifestSchema == backupstrategy.DirectArchiveManifestSchema && directResult.VerificationProfile == "" && (directResult.Idempotent || directResult.ResumedPending)
 	if archiveErr == nil && ((!validV2Evidence && !validV1ReplayEvidence) ||
 		directResult.OperationalPackageID != packageRef.PackageID || directResult.OperationalPackageManifestSHA256 != packageRef.ManifestSHA256 ||
@@ -234,7 +263,7 @@ func (r CloudSnapshotUploadRuntime) RunOnce(ctx context.Context, run workers.Run
 		}
 		_ = cloudstorage.RecordRemoteFailureAt(load.Config, archiveErr, now, "worker.cloud_snapshot_upload")
 		r.completeOperationBestEffort(ctx, operation, maintenance.OperationFailed, resultSummary, archiveErr)
-		return workers.RunResult{}, archiveErr
+		return workers.RunResult{ResultSummary: resultSummary, Retryable: directResult.Retryable}, archiveErr
 	}
 	_ = recordCloudWorkerSuccess(load.Config, now)
 	if err := r.completeSuccessfulOperation(ctx, operation, directResult, resultSummary, packageRef, requestedBackupOperationID); err != nil {
@@ -456,6 +485,10 @@ func (r CloudSnapshotUploadRuntime) resolveOperationalPackage(ctx context.Contex
 }
 
 func (r CloudSnapshotUploadRuntime) directArchiveRoots() ([]backupstrategy.DirectArchiveRoot, []backupstrategy.DirectArchiveExclusion, error) {
+	catalog, catalogErr := r.CoverageOptions.ProtectionBoxes()
+	if catalogErr != nil {
+		return nil, nil, fmt.Errorf("Box protection catalog unavailable: %w", catalogErr)
+	}
 	mainBoxPath, err := cloudDirectArchiveDirectory("main_box", r.CoverageOptions.MainBoxPath, false)
 	if err != nil {
 		return nil, nil, err
@@ -483,14 +516,32 @@ func (r CloudSnapshotUploadRuntime) directArchiveRoots() ([]backupstrategy.Direc
 		{Name: "storage_retention", Path: r.CoverageOptions.StorageRetentionRoot}, {Name: "storage_archive", Path: r.CoverageOptions.StorageArchiveRoot},
 		{Name: "agents", Path: agentsRoot},
 	}
+	if root := r.CoverageOptions.StorageRoot; root != "" {
+		if _, err := cloudDirectArchiveDirectory("storage", root, true); err != nil {
+			return nil, nil, err
+		}
+		for _, area := range []struct{ name, path string }{{"storage_projects", "Projects"}, {"storage_library", "Library"}, {"storage_records", "Records"}, {"storage_location_evidence", ".loom"}} {
+			candidates = append(candidates, backupstrategy.DirectArchiveRoot{Name: area.name, Path: filepath.Join(root, area.path)})
+		}
+	}
 	roots := make([]backupstrategy.DirectArchiveRoot, 0, len(candidates))
 	if r.CoverageOptions.ApplicationDataRoot != "" {
 		candidates = append(candidates, backupstrategy.DirectArchiveRoot{Name: "application_data", Path: r.CoverageOptions.ApplicationDataRoot})
 	}
+	additional, err := backupstrategy.AdditionalBoxArchiveRoots(catalog)
+	if err != nil {
+		return nil, nil, err
+	}
+	candidates = append(candidates, additional...)
 	resolvedPaths := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
-		allowEmpty := candidate.Name == "box_topics" || candidate.Name == "box_library" || candidate.Name == "application_data"
+		allowEmpty := backupstrategy.DirectArchiveRootAllowsEmpty(candidate.Name)
 		path, err := cloudDirectArchiveDirectory(candidate.Name, candidate.Path, allowEmpty)
+		if errors.Is(err, os.ErrNotExist) && backupstrategy.IsBoxArchiveRoot(candidate.Name) {
+			// Never infer protection from enrollment. Coverage keeps the missing
+			// source/state visible; it must not break existing Personal capture.
+			continue
+		}
 		if err != nil {
 			return nil, nil, err
 		}
@@ -514,8 +565,48 @@ func (r CloudSnapshotUploadRuntime) directArchiveRoots() ([]backupstrategy.Direc
 		if root.Name == "main_documents" {
 			exclusions = append(exclusions, backupstrategy.DirectArchiveExclusion{Root: root.Name, RelativePath: ".loom-acceptance"})
 		}
+		if root.Name == "application_data" {
+			// Reviewed failed attempts remain locally held and capacity-accounted;
+			// they are not published cohorts or ordinary application allocations.
+			exclusions = append(exclusions, backupstrategy.DirectArchiveExclusion{Root: root.Name, RelativePath: "notes-recovery-held"})
+		}
+		if backupstrategy.IsBoxArchiveRoot(root.Name) && strings.HasSuffix(root.Name, "_source") {
+			exclusions = append(exclusions, backupstrategy.DirectArchiveExclusion{Root: root.Name, RelativePath: ".loom-acceptance"})
+		}
 	}
 	return roots, exclusions, nil
+}
+
+// This proves current source selection only, never a completed cloud upload.
+func (r CloudSnapshotUploadRuntime) RetainedStorageReady(ctx context.Context, raw json.RawMessage, target string) error {
+	cfg, err := r.parseConfig(raw)
+	if err != nil {
+		return err
+	}
+	load, err := cloudstorage.LoadConfig(cfg.CloudConfigPath)
+	if err != nil {
+		return err
+	}
+	if !load.Config.Enabled || load.Config.Snapshots.Backend != cloudstorage.SnapshotBackendBorg {
+		return fmt.Errorf("existing Borg cloud selection must be enabled before retained relocation")
+	}
+	return r.RetainedStorageSelected(ctx, target)
+}
+
+func (r CloudSnapshotUploadRuntime) RetainedStorageSelected(ctx context.Context, target string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	roots, _, err := r.directArchiveRoots()
+	if err != nil {
+		return err
+	}
+	for _, root := range roots {
+		if (root.Name == "storage_projects" || root.Name == "storage_library" || root.Name == "storage_records" || backupstrategy.IsBoxArchiveRoot(root.Name) && strings.HasSuffix(root.Name, "_archive")) && (target == root.Path || strings.HasPrefix(target, root.Path+string(filepath.Separator))) {
+			return nil
+		}
+	}
+	return fmt.Errorf("named retained destination is not selected by the existing cloud owner")
 }
 
 func cloudDirectArchiveDirectory(name, value string, allowEmpty bool) (string, error) {
@@ -615,6 +706,7 @@ func cloudDirectArchiveSummary(result cloudstorage.DirectArchiveResult, packageR
 		operationID = operation.MaintenanceOperationID
 	}
 	return mustWorkerJSON(map[string]any{
+		"notes_recovery": result.NotesRecovery,
 		"root_coverage":  cloudDirectArchiveRootCoverage(result),
 		"schema_version": cloudSnapshotUploadResultSchema, "status": result.Status, "phase": cloudSnapshotUploadPhase,
 		"phase_status": result.Status, "committed": result.Committed, "idempotent": result.Idempotent, "retryable": result.Retryable,
@@ -626,6 +718,7 @@ func cloudDirectArchiveSummary(result cloudstorage.DirectArchiveResult, packageR
 		"resumed_pending": result.ResumedPending, "verification_phase": result.VerificationPhase,
 		"manifest_schema": result.ManifestSchema, "verification_profile": result.VerificationProfile,
 		"manifest_sha256": result.ManifestSHA256, "checks": result.Checks, "stage_durations_ms": result.StageDurationsMS,
+		"borg_progress":       result.BorgProgress,
 		"borg_command_counts": result.BorgCommandCounts, "packed_bytes": result.PackedBytes, "deduplicated_bytes": result.DeduplicatedBytes,
 		"operational_package_id": packageRef.PackageID, "operational_package_dir": packageRef.PackageDir,
 		"operational_package_manifest_sha256": packageRef.ManifestSHA256, "schema_head": packageRef.SchemaHead,
@@ -652,6 +745,7 @@ func cloudDirectArchiveArtifactInput(operationID string, result cloudstorage.Dir
 		MaintenanceOperationID: operationID, ArtifactKind: maintenance.ArtifactKindCloudSnapshot,
 		URI: result.RemoteURI, SizeBytes: &result.PackedBytes, SHA256: result.ManifestSHA256,
 		Metadata: mustWorkerJSON(map[string]any{
+			"notes_recovery": result.NotesRecovery,
 			"root_coverage":  cloudDirectArchiveRootCoverage(result),
 			"schema_version": "cloud_snapshot_upload.artifact.v1", "archive_ref": result.ArchiveRef,
 			"archive": result.Archive, "backend": result.Backend, "pending_archive": result.PendingArchive,
@@ -668,10 +762,14 @@ func cloudDirectArchiveArtifactInput(operationID string, result cloudstorage.Dir
 }
 
 func cloudDirectArchiveRootCoverage(result cloudstorage.DirectArchiveResult) []backupcoverage.CloudRootEvidence {
-	if result.Status != cloudstorage.DirectArchiveStatusSucceeded || !result.Committed || result.Retryable || result.ManifestV2 == nil || result.Archive != result.ManifestV2.ArchiveName || result.ArchiveRef != result.ManifestV2.ArchiveRef {
+	manifest := result.ManifestV2
+	if result.ManifestV3 != nil {
+		manifest = &result.ManifestV3.Archive
+	}
+	if result.Status != cloudstorage.DirectArchiveStatusSucceeded || !result.Committed || result.Retryable || manifest == nil || result.Archive != manifest.ArchiveName || result.ArchiveRef != manifest.ArchiveRef {
 		return nil
 	}
-	return backupcoverage.CloudRootsFromManifest(result.ManifestV2, result.ManifestSHA256)
+	return backupcoverage.CloudRootsFromVersionedManifest(manifest, result.ManifestV3, result.ManifestSHA256)
 }
 
 func (r CloudSnapshotUploadRuntime) completeOperationBestEffort(ctx context.Context, operation *maintenance.Operation, status string, result any, cause error) {
@@ -688,6 +786,25 @@ func cloudSnapshotCompletionContext(ctx context.Context) (context.Context, conte
 		ctx = context.Background()
 	}
 	return context.WithTimeout(context.WithoutCancel(ctx), cloudSnapshotCompletionTimeout)
+}
+
+func (r CloudSnapshotUploadRuntime) AfterRunCompletion(ctx context.Context, run workers.WorkerRun) error {
+	if run.RunStatus != workers.RunStatusSucceeded || r.DataDir == "" {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var summary struct {
+		Status         string `json:"status"`
+		Committed      bool   `json:"committed"`
+		Archive        string `json:"archive"`
+		ManifestSHA256 string `json:"manifest_sha256"`
+	}
+	if json.Unmarshal(run.ResultSummaryJSON, &summary) != nil || !summary.Committed || summary.Status != cloudstorage.DirectArchiveStatusSucceeded {
+		return nil
+	}
+	return backupstrategy.RequestLocalRecoveryRetention(r.DataDir, run.WorkerRunID, summary.Archive, summary.ManifestSHA256)
 }
 
 func cloudCooldownReason(state cloudstorage.RemoteState) string {

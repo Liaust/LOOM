@@ -36,6 +36,7 @@ func run() error {
 	provenanceOwner := flags.String("provenance-owner", "", "fixed restored Provenance database owner")
 	createdbPath := flags.String("createdb-path", "", "absolute reviewed createdb binary")
 	pgRestorePath := flags.String("pg-restore-path", "", "absolute reviewed pg_restore binary")
+	psqlPath := flags.String("psql-path", "", "absolute reviewed psql binary for fixed pinned extension provisioning")
 	dropdbPath := flags.String("dropdb-path", "", "absolute reviewed dropdb binary")
 	postgresSocketDirectory := flags.String("postgres-socket-directory", restoreauthority.DefaultPostgresSocketDir, "fixed local PostgreSQL Unix socket directory")
 	postgresPort := flags.Uint("postgres-port", uint(restoreauthority.DefaultPostgresPort), "fixed local PostgreSQL port")
@@ -66,6 +67,7 @@ func run() error {
 		Operational:  restoreauthority.DatabasePolicy{ActiveDatabase: *operationalDatabase, Owner: *operationalOwner},
 		Provenance:   restoreauthority.DatabasePolicy{ActiveDatabase: *provenanceDatabase, Owner: *provenanceOwner},
 		CreatedbPath: *createdbPath, PGRestorePath: *pgRestorePath, DropdbPath: *dropdbPath,
+		PsqlPath:                *psqlPath,
 		PostgresSocketDirectory: *postgresSocketDirectory, PostgresPort: uint16(*postgresPort), MaxDumpBytes: *maxDumpBytes,
 	})
 	if err != nil {

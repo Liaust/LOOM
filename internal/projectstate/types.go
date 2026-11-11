@@ -72,27 +72,29 @@ const (
 // records. SourceRevision is the registry binding revision; snapshot owners
 // allocate their own observation revision, including when content reverts.
 type ProjectDevelopmentState struct {
-	Posture        ProjectDevelopmentPosture    `json:"posture"`
-	ReasonCode     string                       `json:"reason_code,omitempty"`
-	ProjectID      string                       `json:"project_id"`
-	OwnerNode      string                       `json:"owner_node,omitempty"`
-	RootDigest     string                       `json:"root_digest,omitempty"`
-	SourceDigest   string                       `json:"source_digest,omitempty"`
-	SourceRevision int64                        `json:"source_revision,omitempty"`
-	Complete       bool                         `json:"complete"`
-	OmittedFiles   int                          `json:"omitted_files"`
-	CapturedBytes  int                          `json:"captured_bytes"`
-	Purpose        string                       `json:"purpose,omitempty"`
-	CurrentFocus   string                       `json:"current_focus,omitempty"`
-	Progress       string                       `json:"progress,omitempty"`
-	Blockers       string                       `json:"blockers,omitempty"`
-	NextAction     string                       `json:"next_action,omitempty"`
-	Roadmap        string                       `json:"roadmap,omitempty"`
-	Structure      string                       `json:"structure,omitempty"`
-	Features       []ProjectDevelopmentFeature  `json:"features"`
-	Decisions      []ProjectDevelopmentDecision `json:"decisions"`
-	Documents      []ProjectDevelopmentDocument `json:"documents"`
-	Git            *ProjectDevelopmentGit       `json:"git,omitempty"`
+	Archive          *ArchivedSourceContext       `json:"archive,omitempty"`
+	MissingDocuments []string                     `json:"missing_documents,omitempty"`
+	Posture          ProjectDevelopmentPosture    `json:"posture"`
+	ReasonCode       string                       `json:"reason_code,omitempty"`
+	ProjectID        string                       `json:"project_id"`
+	OwnerNode        string                       `json:"owner_node,omitempty"`
+	RootDigest       string                       `json:"root_digest,omitempty"`
+	SourceDigest     string                       `json:"source_digest,omitempty"`
+	SourceRevision   int64                        `json:"source_revision,omitempty"`
+	Complete         bool                         `json:"complete"`
+	OmittedFiles     int                          `json:"omitted_files"`
+	CapturedBytes    int                          `json:"captured_bytes"`
+	Purpose          string                       `json:"purpose,omitempty"`
+	CurrentFocus     string                       `json:"current_focus,omitempty"`
+	Progress         string                       `json:"progress,omitempty"`
+	Blockers         string                       `json:"blockers,omitempty"`
+	NextAction       string                       `json:"next_action,omitempty"`
+	Roadmap          string                       `json:"roadmap,omitempty"`
+	Structure        string                       `json:"structure,omitempty"`
+	Features         []ProjectDevelopmentFeature  `json:"features"`
+	Decisions        []ProjectDevelopmentDecision `json:"decisions"`
+	Documents        []ProjectDevelopmentDocument `json:"documents"`
+	Git              *ProjectDevelopmentGit       `json:"git,omitempty"`
 }
 
 // Hash covers the entire bounded source file. Excerpt is captured from those
@@ -189,6 +191,7 @@ type ObservationSummary struct {
 }
 
 type RepositoryProjection struct {
+	Archive                  *ArchivedSourceContext                       `json:"archive,omitempty"`
 	RepositoryID             string                                       `json:"repository_id"`
 	RepositoryOwnerProjectID string                                       `json:"repository_owner_project_id"`
 	Key                      string                                       `json:"key"`

@@ -389,6 +389,14 @@ func (s ProjectRuntimeService) InspectProjectArchive(ctx context.Context, projec
 		Project:      detail,
 		ArchiveState: detail.Project.Project.ArchiveState,
 	}
+	var retirement struct {
+		Schema       string `json:"schema_version"`
+		RetainedRoot string `json:"retained_root"`
+	}
+	if json.Unmarshal(result.ArchiveState, &retirement) == nil && retirement.Schema == "project.registration_retirement.v1" {
+		result.Warnings = append(result.Warnings, "Legacy registration retired; files retained in place at "+retirement.RetainedRoot+". This is not a physical archive or permission to delete. Automatic physical restore does not apply.")
+		return result, nil
+	}
 	if result.Physical = s.inspectProjectPhysicalArchive(ctx, detail); result.Physical != nil {
 		return result, nil
 	}

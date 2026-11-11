@@ -401,7 +401,7 @@ func TestDeclarationOperationJournalPostgres(t *testing.T) {
 	}
 	// Fresh/replay migration and real constraints, including retention guards.
 	againMigration, e := migrations.Up(t.Context(), url, filepath.Join("..", "..", "migrations"))
-	if e != nil || againMigration.CurrentVersion != 71 {
+	if e != nil || againMigration.CurrentVersion != againMigration.LatestVersion || againMigration.CurrentVersion < 71 {
 		t.Fatal(e)
 	}
 	for name, statement := range map[string]string{

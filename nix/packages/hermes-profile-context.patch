@@ -1,0 +1,411 @@
+diff --git a/hermes_cli/config.py b/hermes_cli/config.py
+--- a/hermes_cli/config.py
++++ b/hermes_cli/config.py
+@@ -2105,7 +2105,7 @@
+     **{
+         key: f"TERMINAL_{key.upper()}"
+         for key in (
+-            "modal_mode", "degraded_mode", "cwd", "temp_dir", "timeout", "lifetime_seconds",
++            "modal_mode", "degraded_mode", "cwd", "home_mode", "temp_dir", "timeout", "lifetime_seconds",
+             "docker_image", "docker_forward_env", "singularity_image", "modal_image",
+             "daytona_image", "vercel_runtime", "vercel_image", "ssh_host", "ssh_user", "ssh_port", "ssh_key",
+             "container_cpu", "container_memory", "container_disk", "container_persistent",
+diff --git a/hermes_constants.py b/hermes_constants.py
+--- a/hermes_constants.py
++++ b/hermes_constants.py
+@@ -704,7 +704,11 @@
+     """
+     env = env or {}
+     profile_home = _profile_home_path(env)
+-    mode = _env_get(env, "TERMINAL_HOME_MODE", "auto").lower() or "auto"
++    from tools.terminal_scope import terminal_env, get_terminal_scope
++    mode = (terminal_env("TERMINAL_HOME_MODE", "auto") if get_terminal_scope() is not None
++            else _env_get(env, "TERMINAL_HOME_MODE", "auto")).lower() or "auto"
++    if mode in ("profile", "isolated", "profile_home", "profile-home") and not profile_home:
++        raise ValueError("selected profile HOME is unavailable")
+     mode = _HOME_MODE_ALIASES.get(mode, mode)
+ 
+     if mode == "profile":
+@@ -725,6 +729,8 @@
+ def apply_subprocess_home_env(env: MutableMapping[str, str]) -> None:
+     """Apply Hermes' subprocess HOME contract to *env* in-place: ``HOME``/``HERMES_REAL_HOME``
+     per the home mode, and the temp vars re-pointed at ``env["HERMES_HOME"]``'s scratch dir."""
++    if override := get_hermes_home_override():
++        env["HERMES_HOME"] = override
+     real_home = get_real_home(env)
+     if real_home:
+         env["HERMES_REAL_HOME"] = real_home
+@@ -732,6 +738,8 @@
+     if home:
+         env["HOME"] = home
+     apply_scratch_tmp_env(env)
++    from hermes_cli.profile_context import apply_profile_environment
++    apply_profile_environment(env)
+ 
+ 
+ # --- Scratch dir: Hermes' own temp space, never the system /tmp ---
+diff --git a/hermes_cli/auth.py b/hermes_cli/auth.py
+--- a/hermes_cli/auth.py
++++ b/hermes_cli/auth.py
+@@ -502,10 +502,13 @@
+     return path
+ 
+ 
+-def _global_auth_file_path() -> Optional[Path]:
++def _global_auth_file_path(provider_id: Optional[str] = None) -> Optional[Path]:
+     """Global-root auth.json in profile mode; None when profile and global root are the same dir.
+ 
+     Read-only fallback path, so no pytest seat belt here (it lives on ``_auth_file_path()``)."""
++    from hermes_cli.profile_context import root_auth_fallback_allowed
++    if not root_auth_fallback_allowed(provider_id):
++        return None
+     try:
+         from hermes_constants import get_default_hermes_root
+         global_root = get_default_hermes_root()
+@@ -514,11 +517,11 @@
+     return None if _same_path(get_hermes_home(), global_root) else global_root / "auth.json"
+ 
+ 
+-def _load_global_auth_store() -> dict[str, Any]:
++def _load_global_auth_store(provider_id: Optional[str] = None) -> dict[str, Any]:
+     """Load the global-root auth store (read-only fallback, mtime-memoised); ``{}`` when absent or
+     unreadable — a malformed global store must never break profile reads."""
+     global _global_auth_store_cache
+-    global_path = _global_auth_file_path()
++    global_path = _global_auth_file_path(provider_id)
+     if global_path is None or not global_path.exists():
+         _global_auth_store_cache = None
+         return {}
+@@ -833,8 +836,8 @@
+     state = _provider_state_in(auth_store, provider_id)
+     if state is not None:
+         return state, _auth_file_path()
+-    global_state = _provider_state_in(_load_global_auth_store(), provider_id)
+-    return (global_state, _global_auth_file_path()) if global_state is not None else (None, None)
++    global_state = _provider_state_in(_load_global_auth_store(provider_id), provider_id)
++    return (global_state, _global_auth_file_path(provider_id)) if global_state is not None else (None, None)
+ 
+ 
+ def _load_provider_state(auth_store: dict[str, Any], provider_id: str) -> Optional[dict[str, Any]]:
+@@ -952,7 +955,7 @@
+     when the profile has zero entries for it (``hermes auth add`` in the profile shadows global)."""
+     pool = _load_auth_store().get("credential_pool")
+     pool = pool if isinstance(pool, dict) else {}
+-    global_pool = _load_global_auth_store().get("credential_pool")
++    global_pool = _load_global_auth_store(provider_id).get("credential_pool")
+     global_pool = global_pool if isinstance(global_pool, dict) else {}
+ 
+     if provider_id is None:
+diff --git a/agent/credential_pool.py b/agent/credential_pool.py
+--- a/agent/credential_pool.py
++++ b/agent/credential_pool.py
+@@ -808,7 +808,7 @@
+     See #48415.
+     """
+     try:
+-        global_path = _guarded_global_root(auth_mod._global_auth_file_path())
++        global_path = _guarded_global_root(auth_mod._global_auth_file_path(provider_id))
+     except Exception:
+         return
+     if global_path is None:
+@@ -845,7 +845,7 @@
+     """
+     # Classic mode (profile == root) has no root fallback, so the answer is always "owns";
+     # skip the per-call auth.json re-read on this hot load_pool path.
+-    if auth_mod._global_auth_file_path() is None:
++    if auth_mod._global_auth_file_path(provider) is None:
+         return True
+     try:
+         auth_store = _load_auth_store()
+@@ -854,14 +854,14 @@
+     return _store_owns_pool_provider(auth_store, provider)
+ 
+ 
+-def _borrowed_single_use_pool_root() -> Optional[Path]:
++def _borrowed_single_use_pool_root(provider: Optional[str] = None) -> Optional[Path]:
+     """Global-root auth.json when persisting a BORROWED single-use pool, else None.
+ 
+     ``None`` means "persist to the active store as usual": classic mode
+     (profile == root), or the profile owns its own rows for this provider.
+     """
+     try:
+-        return _guarded_global_root(_global_auth_file_path())
++        return _guarded_global_root(_global_auth_file_path(provider))
+     except Exception:
+         return None
+ 
+@@ -929,7 +929,7 @@
+     (under the root lock); everything else goes to the active store.
+     """
+     if provider in SINGLE_USE_REFRESH_POOL_PROVIDERS and not _profile_owns_pool_provider(provider):
+-        global_path = _borrowed_single_use_pool_root()
++        global_path = _borrowed_single_use_pool_root(provider)
+         if global_path is not None:
+             try:
+                 return _update_root_pool_rows(
+@@ -1488,7 +1488,7 @@
+                 state, source_path = _load_provider_state_with_source(auth_store, self.provider)
+                 if not isinstance(state, dict):
+                     return
+-                global_root = _global_auth_file_path()
++                global_root = _global_auth_file_path(self.provider)
+                 is_from_root = bool(
+                     source_path is not None and global_root is not None and _same_path(source_path, global_root)
+                 )
+diff --git a/agent/credential_pool_admin.py b/agent/credential_pool_admin.py
+--- a/agent/credential_pool_admin.py
++++ b/agent/credential_pool_admin.py
+@@ -130,7 +130,7 @@
+             profile_borrows = (
+                 self.provider in SINGLE_USE_REFRESH_POOL_PROVIDERS
+                 and not _profile_owns_pool_provider(self.provider)
+-                and _borrowed_single_use_pool_root() is not None
++                and _borrowed_single_use_pool_root(self.provider) is not None
+             )
+             if borrowed_ids or profile_borrows:
+                 # ``hermes -p <profile> auth add <single-use provider>``: a fresh
+diff --git a/hermes_cli/auth_codex.py b/hermes_cli/auth_codex.py
+--- a/hermes_cli/auth_codex.py
++++ b/hermes_cli/auth_codex.py
+@@ -863,7 +863,7 @@
+     try:
+         # Same owner rule as ``persist_pool_entries``: a profile with no Codex rows of its own
+         # borrows the global-root pool, so the cooldown must clear where the rows actually live.
+-        target = None if _profile_owns_pool_provider("openai-codex") else _borrowed_single_use_pool_root()
++        target = None if _profile_owns_pool_provider("openai-codex") else _borrowed_single_use_pool_root("openai-codex")
+         with _auth_store_lock(target_path=target):
+             auth_store = _load_auth_store(target)
+             for entry in _codex_pool_dicts(_pool_entries(auth_store, "openai-codex")):
+diff --git a/tools/mcp_tool_config.py b/tools/mcp_tool_config.py
+--- a/tools/mcp_tool_config.py
++++ b/tools/mcp_tool_config.py
+@@ -202,6 +202,8 @@
+             env[key] = os.environ[key]
+     if user_env:
+         env.update(user_env)
++    from hermes_constants import apply_subprocess_home_env
++    apply_subprocess_home_env(env)
+     from agent.delegation_context import delegated_child_subprocess_env
+     return delegated_child_subprocess_env(env)
+ 
+diff --git a/hermes_cli/auth_nous.py b/hermes_cli/auth_nous.py
+--- a/hermes_cli/auth_nous.py
++++ b/hermes_cli/auth_nous.py
+@@ -353,6 +353,10 @@
+     oauth`` one-tap imports it). Written on login AND every runtime refresh so the refresh_token
+     stays current across profiles; a stale token just falls back to device-code.
+     """
++    from hermes_cli.profile_context import root_auth_fallback_allowed
++    if not root_auth_fallback_allowed():
++        from hermes_constants import get_hermes_home
++        return get_hermes_home() / "shared"
+     override = os.getenv("HERMES_SHARED_AUTH_DIR", "").strip()
+     if override:
+         return Path(override).expanduser()
+diff --git a/tools/terminal_scope.py b/tools/terminal_scope.py
+--- a/tools/terminal_scope.py
++++ b/tools/terminal_scope.py
+@@ -166,6 +166,11 @@
+         if isinstance(raw_terminal, dict):
+             _apply(raw_terminal)
+             image_pinned = image_pinned or "docker_image" in raw_terminal
++    from hermes_cli.profile_context import validate_workdir
++    try:
++        validate_workdir(scope.get("TERMINAL_CWD"), home=home)
++    except ValueError as exc:
++        raise TerminalPolicyUnavailable(str(exc)) from exc
+     scope["TERMINAL_DOCKER_IMAGE_PINNED"] = "1" if image_pinned else "0"
+     _resolve_scope_cwd_placeholder(scope)
+     return scope
+diff --git a/tools/file_tools_paths.py b/tools/file_tools_paths.py
+--- a/tools/file_tools_paths.py
++++ b/tools/file_tools_paths.py
+@@ -39,6 +39,10 @@
+ 
+         home = get_subprocess_home()
+     except Exception:
++        from tools.terminal_scope import get_terminal_scope
++        from hermes_cli.profile_context import policy
++        if get_terminal_scope() is not None or policy().get("required_cwd"):
++            raise
+         home = None
+     if home and (path == "~" or path.startswith("~/")):
+         return home if path == "~" else os.path.join(home, path[2:])
+diff --git a/agent/runtime_cwd.py b/agent/runtime_cwd.py
+--- a/agent/runtime_cwd.py
++++ b/agent/runtime_cwd.py
+@@ -95,10 +95,14 @@
+         override = _SESSION_CWD.get()
+         override = "" if override is _UNSET else str(override).strip()
+         if override:
++            from hermes_cli.profile_context import validate_workdir
++            validate_workdir(override)
+             p = _existing_dir(override, "configured working directory")
+             if p is not None or override_is_final:
+                 return p
+     raw = scope_terminal_cwd().strip()
++    from hermes_cli.profile_context import validate_workdir
++    validate_workdir(raw)
+     return _existing_dir(raw, "TERMINAL_CWD") if raw else None
+ 
+ 
+diff --git a/agent/prompt_builder.py b/agent/prompt_builder.py
+--- a/agent/prompt_builder.py
++++ b/agent/prompt_builder.py
+@@ -1859,6 +1859,8 @@
+     AGENTS.md chain (git root → cwd) → CLAUDE.md (cwd) → .cursorrules + .cursor/rules/*.mdc (cwd). SOUL.md
+     from HERMES_HOME is independent and always included unless *skip_soul* (already the identity slot).
+     """
++    from hermes_cli.profile_context import validate_workdir
++    validate_workdir(cwd, home=home_override)
+     cwd_path = Path(cwd if cwd is not None else os.getcwd()).resolve()
+     if _project_context_suppressed(cwd, cwd_path, allow_install_tree_fallback):
+         logger.warning(
+diff --git a/cron/scheduler.py b/cron/scheduler.py
+--- a/cron/scheduler.py
++++ b/cron/scheduler.py
+@@ -1506,6 +1506,9 @@
+ def _resolve_job_workdir(job: dict, job_id: str) -> Optional[str]:
+     """Configured job workdir, or None when unset / no longer a directory (logged)."""
+     workdir = (job.get("workdir") or "").strip() or None
++    from hermes_cli.profile_context import validate_workdir, validate_job_context
++    validate_workdir(workdir)
++    validate_job_context(job)
+     if workdir and not Path(workdir).is_dir():
+         logger.warning(
+             "Job '%s': configured workdir %r no longer exists — running without it",
+diff --git a/cron/jobs.py b/cron/jobs.py
+--- a/cron/jobs.py
++++ b/cron/jobs.py
+@@ -1867,6 +1867,8 @@
+ 
+     raw = locals()
+     f = {key: norm(raw[key]) for key, norm in _CREATE_FIELD_NORMALIZERS.items()}
++    from hermes_cli.profile_context import bind_job_context
++    origin = bind_job_context(origin, f["workdir"])
+     normalized_skills = _normalize_skill_list(skill, skills)
+     normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
+     normalized_reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
+diff --git a/tools/skill_manager_tool.py b/tools/skill_manager_tool.py
+--- a/tools/skill_manager_tool.py
++++ b/tools/skill_manager_tool.py
+@@ -299,5 +299,8 @@
+     error can explain a wrong-profile mistake). Fail-quiet."""
+     matches: list[tuple[str, Path]] = []
++    from hermes_cli.profile_context import policy
++    if policy().get("discover_other_profiles", True) is False:
++        return matches
+     try:
+         from hermes_constants import get_default_hermes_root
+         root = get_default_hermes_root()
+diff --git a/hermes_cli/profile_context.py b/hermes_cli/profile_context.py
+--- /dev/null
++++ b/hermes_cli/profile_context.py
+@@ -0,0 +1,107 @@
++"""Explicit per-invocation context; no process-global environment switches."""
++from pathlib import Path
++
++
++def policy(home=None):
++    from hermes_constants import get_hermes_home
++    from utils import load_yaml_file_readonly
++    directory = Path(home or get_hermes_home())
++    bound = (directory / "loom-box-owner.json").exists()
++    path = directory / "config.yaml"
++    if not path.exists():
++        if bound:
++            raise ValueError("bound profile configuration unavailable")
++        return {}
++    config = load_yaml_file_readonly(path)
++    if not isinstance(config, dict):
++        raise ValueError("profile configuration unavailable")
++    value = config.get("profile_context", {})
++    if not isinstance(value, dict):
++        raise ValueError("invalid profile context")
++    if bound and value.get("allow_root_auth_fallback") is not False:
++        raise ValueError("Box profiles require explicit narrow authentication policy")
++    return value
++
++
++def root_auth_fallback_allowed(provider_id=None):
++    selected = policy()
++    value = selected.get("allow_root_auth_fallback", True)
++    if not isinstance(value, bool):
++        raise ValueError("invalid root authentication fallback policy")
++    shared = selected.get("share_inference_provider")
++    if shared is None:
++        return value
++    if shared != "openai-codex":
++        raise ValueError("only the pinned openai-codex inference provider may be shared")
++    from hermes_constants import get_hermes_home
++    from utils import load_yaml_file_readonly
++    config = load_yaml_file_readonly(get_hermes_home() / "config.yaml")
++    if (config.get("model") or {}).get("provider") != shared:
++        raise ValueError("shared inference provider differs from the selected model provider")
++    return provider_id == shared
++
++
++def validate_workdir(workdir, *, home=None):
++    required = policy(home).get("required_cwd")
++    if required is None:
++        return
++    root = Path(required)
++    selected = Path(workdir) if workdir else None
++    if (not root.is_absolute() or not root.is_dir() or root.resolve() != root
++            or selected is None or not selected.is_absolute() or not selected.is_dir()
++            or selected.resolve() != selected or not selected.is_relative_to(root)):
++        raise ValueError("selected profile workdir is unavailable or outside its bound workspace")
++
++
++def apply_profile_environment(env):
++    selected = policy()
++    if not selected:
++        return
++    overlay = selected.get("environment", {})
++    prefixes = selected.get("unset_environment_prefixes", [])
++    if (not isinstance(overlay, dict) or not isinstance(prefixes, list)
++            or any(not isinstance(p, str) or not p for p in prefixes)):
++        raise ValueError("invalid profile subprocess environment")
++    for key, value in overlay.items():
++        if (not isinstance(key, str) or not key or "=" in key or "\0" in key
++                or not isinstance(value, str) or "\0" in value
++                or key in ("HOME", "HERMES_HOME", "CODEX_HOME")):
++            raise ValueError("invalid profile environment selector")
++    for key in list(env):
++        if any(key.startswith(prefix) for prefix in prefixes):
++            del env[key]
++    env.update(overlay)
++
++
++def box_context():
++    import json
++    from hermes_constants import get_hermes_home
++    if not policy().get("required_cwd"):
++        return None
++    path = get_hermes_home() / "loom-box-owner.json"
++    if path.is_symlink() or path.stat().st_size > 65536:
++        raise ValueError("profile Box binding unavailable")
++    marker = json.loads(path.read_bytes())
++    if marker.get("retired") is not False:
++        raise ValueError("profile Box binding is retired or unavailable")
++    return {k: marker[k] for k in ("box_id", "profile", "workdir", "context_revision")}
++
++
++def bind_job_context(origin, workdir):
++    context = box_context()
++    if context is None:
++        return origin
++    validate_workdir(workdir)
++    origin = dict(origin or {})
++    origin["loom_box_context"] = context
++    return origin
++
++
++def validate_job_context(job):
++    expected = box_context()
++    if expected is None:
++        return
++    origin = job.get("origin") or {}
++    saved = origin.get("loom_box_context") or origin.get("loom_box_schedule") or origin.get("loom_internal_events") or {}
++    if any(saved.get(k) != v for k, v in expected.items()):
++        raise ValueError("saved job Box/profile context changed")

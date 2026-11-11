@@ -1,6 +1,7 @@
 package loomcli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -365,12 +367,69 @@ func renderCapabilityCallOutcome(cmd *cobra.Command, outcome routing.CapabilityC
 	if outcome.DispatchMessageID != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "Dispatch message: %s\n", outcome.DispatchMessageID)
 	}
+	call := outcome.CapabilityCall
+	call.Status = outcome.Status
+	if len(outcome.Result) > 0 {
+		call.ResultJSON = outcome.Result
+	}
+	if len(outcome.ResultRefs) > 0 {
+		call.ResultRefsJSON = outcome.ResultRefs
+	}
+	if outcome.JobID != "" {
+		call.JobID = &outcome.JobID
+	}
 	if outcome.ErrorCode != "" {
-		fmt.Fprintf(cmd.OutOrStdout(), "Error: %s %s\n", outcome.ErrorCode, outcome.ErrorMessage)
+		call.ErrorCode, call.ErrorMessage = &outcome.ErrorCode, &outcome.ErrorMessage
 	}
-	if len(outcome.Result) > 0 && string(outcome.Result) != "{}" {
-		fmt.Fprintf(cmd.OutOrStdout(), "Result: %s\n", compactText(string(outcome.Result), 240))
+	renderCapabilityCallResult(cmd, call)
+}
+
+func renderCapabilityCallResult(cmd *cobra.Command, call routing.CapabilityCall) {
+	if call.ErrorCode != nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "Error: %s\n", automationDiagnosticText(*call.ErrorCode))
 	}
+	if call.ErrorMessage != nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "Error detail: %s\n", capabilityResultExcerpt(*call.ErrorMessage))
+	}
+	result := strings.TrimSpace(string(call.ResultJSON))
+	if result != "" && result != "{}" && result != "null" {
+		var compact bytes.Buffer
+		if json.Compact(&compact, call.ResultJSON) == nil {
+			fmt.Fprintf(cmd.OutOrStdout(), "Recorded result: %s\n", capabilityResultExcerpt(compact.String()))
+		} else {
+			fmt.Fprintln(cmd.OutOrStdout(), "Recorded result: invalid JSON; inspect full detail.")
+		}
+	} else {
+		fmt.Fprintln(cmd.OutOrStdout(), "Execution result: not recorded; dispatch acceptance alone does not establish execution success.")
+	}
+	if refs := strings.TrimSpace(string(call.ResultRefsJSON)); refs != "" && refs != "[]" && refs != "{}" && refs != "null" {
+		fmt.Fprintln(cmd.OutOrStdout(), "Result references: retained in full detail.")
+	}
+	renderAutomationReadRoute(cmd, "Job/result detail", "job inspect --summary", ptrOrDash(call.JobID))
+	renderAutomationReadRoute(cmd, "Full result/detail", "capability-call inspect --json", call.CapabilityCallID)
+}
+
+func capabilityResultExcerpt(value string) string {
+	const limit = 768
+	if !utf8.ValidString(value) {
+		return "[invalid text; inspect full detail]"
+	}
+	truncated := len(value) > limit
+	if truncated {
+		value = value[:limit]
+		for !utf8.ValidString(value) {
+			value = value[:len(value)-1]
+		}
+	}
+	preview := value
+	if !cliEntrySafeText(value, limit) {
+		// Quoting escapes terminal controls and embedded newlines, not normal JSON.
+		preview = fmt.Sprintf("%q", value)
+	}
+	if truncated {
+		preview += " [truncated; inspect full detail]"
+	}
+	return preview
 }
 
 func renderRouteList(cmd *cobra.Command, routes []routing.Route) {
@@ -439,4 +498,5 @@ func renderCapabilityCall(cmd *cobra.Command, call routing.CapabilityCall) {
 	fmt.Fprintf(cmd.OutOrStdout(), "Grant: %s\n", ptrOrDash(call.GrantID))
 	fmt.Fprintf(cmd.OutOrStdout(), "Job: %s\n", ptrOrDash(call.JobID))
 	fmt.Fprintf(cmd.OutOrStdout(), "Created: %s\n", call.CreatedAt.UTC().Format(time.RFC3339))
+	renderCapabilityCallResult(cmd, call)
 }

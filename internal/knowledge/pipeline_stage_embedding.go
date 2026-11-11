@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 )
 
 type EmbeddingStageHandler struct {
@@ -34,6 +35,7 @@ func (handler EmbeddingStageHandler) Execute(ctx context.Context, item PipelineW
 	if err != nil {
 		return HeavyStageObservation{}, nil, err
 	}
+	started := handler.Service.currentTime()
 	var inputBytes int64
 	completed := 0
 	defer func() {
@@ -55,11 +57,11 @@ func (handler EmbeddingStageHandler) Execute(ctx context.Context, item PipelineW
 		if err != nil {
 			return err
 		}
-		for i, chunk := range pending {
-			if err := handler.Service.activateUnifiedChunkEmbedding(ctx, item, chunk, settings, results[i].Vector, results[i].InputHash); err != nil {
-				return err
-			}
-			completed++
+		if err := handler.Service.activateUnifiedChunkEmbeddings(ctx, item, pending, settings, results); err != nil {
+			return err
+		}
+		completed += len(pending)
+		for _, chunk := range pending {
 			inputBytes += int64(len(chunk.ChunkText))
 		}
 		pending, pendingBytes = pending[:0], 0
@@ -70,6 +72,9 @@ func (handler EmbeddingStageHandler) Execute(ctx context.Context, item PipelineW
 			if err = flush(); err != nil {
 				return HeavyStageObservation{}, nil, err
 			}
+			if policy.TurnExpired(started, handler.Service.currentTime(), completed) {
+				return observedHeavy(policy, completed, inputBytes), []string{heavyStageMoreUnits}, nil
+			}
 		}
 		reused, err := handler.Service.reuseUnifiedChunkEmbedding(ctx, item, chunk, settings)
 		if err != nil {
@@ -78,6 +83,9 @@ func (handler EmbeddingStageHandler) Execute(ctx context.Context, item PipelineW
 		if reused {
 			completed++
 			inputBytes += int64(len(chunk.ChunkText))
+			if len(pending) == 0 && policy.TurnExpired(started, handler.Service.currentTime(), completed) {
+				return observedHeavy(policy, completed, inputBytes), []string{heavyStageMoreUnits}, nil
+			}
 			continue
 		}
 		pending = append(pending, chunk)
@@ -130,6 +138,9 @@ func (s *Service) publishUnifiedEmbeddingObjectState(ctx context.Context, item P
 	 AND NOT EXISTS (SELECT 1 FROM knowledge.pipeline_runs r
 	 WHERE r.knowledge_object_version_id=e.knowledge_object_version_id
 	 AND r.status IN ('processing','queued','waiting_coordinator','waiting_heavy','waiting_quiet_window'))`, item.Object.KnowledgeObjectID); err != nil {
+		return err
+	}
+	if err = MarkProjectionDirtyTx(ctx, tx, ProjectionDirtyInput{ObjectIDs: []string{item.Object.KnowledgeObjectID}}); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
@@ -226,7 +237,42 @@ func (s *Service) reuseUnifiedChunkEmbedding(ctx context.Context, item PipelineW
 	return true, tx.Commit()
 }
 
+// Keep the single-chunk entry point for existing callers; inference-sized groups
+// use the same atomic claim fence and leave every earlier completed group durable.
 func (s *Service) activateUnifiedChunkEmbedding(ctx context.Context, item PipelineWorkItem, chunk KnowledgeChunk, settings EmbeddingSettings, vector []float32, inputHash string) error {
+	return s.activateUnifiedChunkEmbeddings(ctx, item, []KnowledgeChunk{chunk}, settings, []chunkEmbeddingResult{{Vector: vector, InputHash: inputHash}})
+}
+
+func prepareUnifiedChunkEmbeddingRows(item PipelineWorkItem, chunks []KnowledgeChunk, settings EmbeddingSettings, results []chunkEmbeddingResult, now time.Time) ([][]any, []string, error) {
+	if len(chunks) != len(results) || len(chunks) > embeddingMicrobatchChunks {
+		return nil, nil, fmt.Errorf("%w: completed embedding group cardinality mismatch", ErrInvalid)
+	}
+	rows := make([][]any, 0, len(chunks))
+	chunkIDs := make([]string, 0, len(chunks))
+	seen := make(map[string]bool, len(chunks))
+	for i, chunk := range chunks {
+		if seen[chunk.KnowledgeChunkID] || len(results[i].Vector) != settings.Dimensions {
+			return nil, nil, fmt.Errorf("%w: completed embedding identity or dimensions mismatch", ErrInvalid)
+		}
+		seen[chunk.KnowledgeChunkID] = true
+		work := unifiedEmbeddingItem(item, chunk, settings)
+		rows = append(rows, []any{
+			newKnowledgeChunkEmbeddingID(), nullableString(&chunk.KnowledgeChunkID), chunk.KnowledgeObjectID,
+			nullableString(chunk.KnowledgeObjectVersionID), defaultEmbeddingRuntimeModelID(work),
+			settings.RuntimeKey, settings.ModelKey, settings.Dimensions, EmbeddingDistanceCosine,
+			chunk.ChunkHash, chunk.ChunkerVersion, results[i].InputHash, nullableInt(chunk.TokenCountEstimate),
+			item.Run.Generation, embeddingVectorLiteral(results[i].Vector), ChunkEmbeddingStatusActive,
+			true, emptyJSONObject, now, now, nil,
+		})
+		chunkIDs = append(chunkIDs, chunk.KnowledgeChunkID)
+	}
+	return rows, chunkIDs, nil
+}
+
+func (s *Service) activateUnifiedChunkEmbeddings(ctx context.Context, item PipelineWorkItem, chunks []KnowledgeChunk, settings EmbeddingSettings, results []chunkEmbeddingResult) error {
+	if len(chunks) == 0 && len(results) == 0 {
+		return nil
+	}
 	tx, err := s.store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -235,13 +281,31 @@ func (s *Service) activateUnifiedChunkEmbedding(ctx context.Context, item Pipeli
 	if err = lockPipelineClaimTx(ctx, tx, item); err != nil {
 		return err
 	}
-	work := unifiedEmbeddingItem(item, chunk, settings)
 	now := s.currentTime()
-	if _, err = deactivateCurrentChunkEmbeddingTx(ctx, tx, work, chunk, now); err != nil {
+	parameters, chunkIDs, err := prepareUnifiedChunkEmbeddingRows(item, chunks, settings, results, now)
+	if err != nil {
 		return err
 	}
-	if err = insertGeneratedChunkEmbeddingTx(ctx, tx, work, chunk, vector, inputHash, ChunkEmbeddingStatusActive, true, now); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE knowledge.chunk_embeddings
+	 SET active=false,status='historical',deactivated_at=$5
+	 WHERE knowledge_chunk_id=ANY($1::text[]) AND runtime_key=$2 AND model_key=$3 AND dimensions=$4 AND active=true`,
+		chunkIDs, settings.RuntimeKey, settings.ModelKey, settings.Dimensions, now); err != nil {
 		return err
+	}
+	for start := 0; start < len(parameters); {
+		end := pipelineWriteBatchEnd(parameters, start)
+		values, args := pipelineWriteValues(parameters[start:end], []string{
+			"text", "text", "text", "text", "text", "text", "text", "integer", "text", "text", "text", "text",
+			"integer", "bigint", "vector", "text", "boolean", "jsonb", "timestamptz", "timestamptz", "timestamptz",
+		})
+		if _, err = tx.ExecContext(ctx, `INSERT INTO knowledge.chunk_embeddings (
+		 knowledge_chunk_embedding_id,knowledge_chunk_id,knowledge_object_id,knowledge_object_version_id,
+		 embedding_runtime_model_id,runtime_key,model_key,dimensions,distance_metric,chunk_hash,chunker_version,
+		 input_hash,token_count_estimate,source_generation,embedding,status,active,metadata,created_at,activated_at,deactivated_at)
+		 VALUES `+values, args...); err != nil {
+			return err
+		}
+		start = end
 	}
 	return tx.Commit()
 }

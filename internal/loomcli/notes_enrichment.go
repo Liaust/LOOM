@@ -12,9 +12,11 @@ import (
 	"loom.local/loom/internal/knowledge"
 )
 
+const enrichmentReplayPlanNotice = "Retained/preserved flags are inputs to the saved plan, not a current output inventory. An existing_run replay queues no new work; inspect its source run's stage outcomes for what completed."
+
 func newNotesEnrichCommand(opts *options) *cobra.Command {
 	var input knowledge.EnrichmentSelection
-	var file, folder, yes bool
+	var file, folder, yes, details bool
 	var previewFile, idempotencyKey string
 	cmd := &cobra.Command{Use: "enrich [object-id or admitted-source-path]", Short: "Preview or request one-time OCR, image vision and embeddings", Long: `Preview admitted Notes objects without queuing work. Use --file or --folder for
 source paths, and --recursive explicitly to include folder descendants. Folder
@@ -22,7 +24,9 @@ previews are bounded database selections, not complete filesystem inventories.
 Save a JSON preview, then apply its exact entries with --preview-file and --yes:
   loom --json notes enrich /source/folder --folder --recursive --ocr > preview.json
   loom notes enrich --preview-file preview.json --yes
-Later arrivals are never included and changed revisions are rejected.`, Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+Later arrivals are never included and changed revisions are rejected. Routine JSON
+previews keep exact bindings, requested/retained outputs, reuse and eligibility;
+--details returns the complete compiled plan. Both saved forms can be applied.`, Args: cobra.MaximumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if file && folder {
 			return fmt.Errorf("choose --file or --folder")
 		}
@@ -82,7 +86,16 @@ Later arrivals are never included and changed revisions are rejected.`, Args: co
 			preview = envelope.Data
 		}
 		if !yes {
+			for _, entry := range preview.Entries {
+				if entry.Reuse != nil && entry.Reuse.Mode == "existing_run" && entry.EffectivePlan != nil && entry.EffectivePlan.Enrichment != nil {
+					preview.Inventory += " " + enrichmentReplayPlanNotice
+					break
+				}
+			}
 			if opts.jsonOutput {
+				if !details && !opts.verboseOutput {
+					return json.NewEncoder(cmd.OutOrStdout()).Encode(compactEnrichmentPreview(preview))
+				}
 				return json.NewEncoder(cmd.OutOrStdout()).Encode(preview)
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), preview.Inventory)
@@ -91,6 +104,16 @@ Later arrivals are never included and changed revisions are rejected.`, Args: co
 				fmt.Fprintf(cmd.OutOrStdout(), "%s  %s\n  revision=%s hash=%s\n  supported: OCR=%t vision=%t embeddings=%t\n  automatic: OCR=%t vision=%t embeddings=%t\n", entry.Binding.ObjectID, entry.SourcePath, entry.Binding.SourceRevision, entry.Binding.SourceHash, entry.Supported.OCR, entry.Supported.Vision, entry.Supported.Embeddings, entry.AutomaticPolicy.PDFOCREnabled || entry.AutomaticPolicy.ImageOCREnabled, entry.AutomaticPolicy.ImageDescriptionsEnabled, entry.AutomaticPolicy.EmbeddingsEnabled)
 				if entry.BlockedReason != "" {
 					fmt.Fprintln(cmd.OutOrStdout(), "  blocked:", entry.BlockedReason)
+				}
+				if entry.EffectivePlan != nil && entry.EffectivePlan.Enrichment != nil {
+					e := entry.EffectivePlan.Enrichment
+					fmt.Fprintf(cmd.OutOrStdout(), "  retained outputs (not rerun): OCR=%t vision=%t embeddings=%t\n", e.Retained.OCR, e.Retained.Vision, e.Retained.Embeddings)
+				}
+				if entry.Reuse != nil {
+					fmt.Fprintf(cmd.OutOrStdout(), "  reuse: %s from %s (%s); no new work for an existing-run replay\n", entry.Reuse.Mode, entry.Reuse.SourceRunID, entry.Reuse.RunStatus)
+				}
+				if entry.NextEligibleAt != nil {
+					fmt.Fprintf(cmd.OutOrStdout(), "  eligible after: %s (%s; queue admission is separate)\n", entry.NextEligibleAt.Format(time.RFC3339), entry.WaitReason)
 				}
 			}
 			if preview.Truncated {
@@ -123,6 +146,9 @@ Later arrivals are never included and changed revisions are rejected.`, Args: co
 					fmt.Fprintf(cmd.OutOrStdout(), "%s: failed: %s\n", result.Binding.ObjectID, result.Error)
 				} else if result.Run != nil {
 					fmt.Fprintf(cmd.OutOrStdout(), "%s: %s (%s)\n", result.Binding.ObjectID, result.Run.KnowledgePipelineRunID, result.Run.Status)
+					if result.Run.QuietWindowEligibleAt != nil {
+						fmt.Fprintf(cmd.OutOrStdout(), "  quiet window eligible after: %s\n", result.Run.QuietWindowEligibleAt.Format(time.RFC3339))
+					}
 				}
 			}
 		}
@@ -145,5 +171,44 @@ Later arrivals are never included and changed revisions are rejected.`, Args: co
 	cmd.Flags().StringVar(&previewFile, "preview-file", "", "apply exact entries from a saved JSON preview")
 	cmd.Flags().StringVar(&idempotencyKey, "idempotency-key", "", "idempotency key for apply replay")
 	cmd.Flags().BoolVar(&yes, "yes", false, "apply the selected enrichment; default is preview")
+	cmd.Flags().BoolVar(&details, "details", false, "return the full JSON preview plan instead of compact selection and reuse")
 	return cmd
+}
+
+type enrichmentOutputsView struct {
+	Requested knowledge.EnrichmentStages `json:"requested"`
+	Retained  knowledge.EnrichmentStages `json:"retained"`
+	Preserved knowledge.EnrichmentStages `json:"preserved"`
+}
+type enrichmentPlanView struct {
+	SchemaVersion     string                 `json:"schema_version"`
+	DefinitionKey     string                 `json:"definition_key"`
+	DefinitionVersion string                 `json:"definition_version"`
+	FileFamily        string                 `json:"file_family"`
+	Enrichment        *enrichmentOutputsView `json:"enrichment,omitempty"`
+}
+type enrichmentEntryView struct {
+	knowledge.EnrichmentPreviewEntry
+	EffectivePlan *enrichmentPlanView `json:"effective_plan,omitempty"`
+}
+type enrichmentPreviewView struct {
+	knowledge.EnrichmentPreview
+	Entries []enrichmentEntryView `json:"entries"`
+}
+
+// The saved CLI view is still an exact selection, never an executable plan.
+func compactEnrichmentPreview(preview knowledge.EnrichmentPreview) enrichmentPreviewView {
+	view := enrichmentPreviewView{EnrichmentPreview: preview, Entries: make([]enrichmentEntryView, 0, len(preview.Entries))}
+	view.Inventory += " Compact CLI preview; compiled stage definitions and duplicate policy details are omitted. Use --details for the full plan."
+	for _, entry := range preview.Entries {
+		item := enrichmentEntryView{EnrichmentPreviewEntry: entry}
+		if plan := entry.EffectivePlan; plan != nil {
+			item.EffectivePlan = &enrichmentPlanView{SchemaVersion: plan.SchemaVersion, DefinitionKey: plan.DefinitionKey, DefinitionVersion: plan.DefinitionVersion, FileFamily: plan.FileFamily}
+			if e := plan.Enrichment; e != nil {
+				item.EffectivePlan.Enrichment = &enrichmentOutputsView{Requested: e.Requested, Retained: e.Retained, Preserved: e.Preserved}
+			}
+		}
+		view.Entries = append(view.Entries, item)
+	}
+	return view
 }

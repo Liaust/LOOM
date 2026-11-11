@@ -72,6 +72,7 @@ type SnapshotsConfig struct {
 
 type BorgConfig struct {
 	Binary                   string              `json:"binary,omitempty"`
+	HostID                   string              `json:"host_id,omitempty"`
 	Repository               string              `json:"repository,omitempty"`
 	PassphraseFile           string              `json:"passphrase_file,omitempty"`
 	RSH                      string              `json:"rsh,omitempty"`
@@ -280,6 +281,9 @@ func NormalizeConfig(input Config) (Config, error) {
 	cfg.StateDir = filepath.Clean(strings.TrimSpace(cfg.StateDir))
 	cfg.RemoteLockPath = filepath.Clean(strings.TrimSpace(cfg.RemoteLockPath))
 	cfg.Snapshots.Borg.Binary = strings.TrimSpace(cfg.Snapshots.Borg.Binary)
+	if id := cfg.Snapshots.Borg.HostID; id != "" && !validBorgHostID(id) {
+		return Config{}, fmt.Errorf("snapshots.borg.host_id must be a bounded safe machine identity")
+	}
 	cfg.Snapshots.Borg.Repository = strings.TrimSpace(cfg.Snapshots.Borg.Repository)
 	cfg.Snapshots.Borg.PassphraseFile = cleanOptionalLocalPath(cfg.Snapshots.Borg.PassphraseFile)
 	cfg.Snapshots.Borg.RSH = strings.TrimSpace(cfg.Snapshots.Borg.RSH)

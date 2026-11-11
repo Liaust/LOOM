@@ -96,7 +96,7 @@ func KeyedProjectContractPath(pluralKind, key string) (string, error) {
 }
 
 func ResolveSingletonContract(loaded LoadedProject, kind, explicitPath string) (ContractPathResolution, error) {
-	if loaded.Contract.SchemaVersion == ProjectSchemaV05 {
+	if IsDeclarationSchemaVersion(loaded.Contract.SchemaVersion) {
 		return resolveDeclarationSingleton(loaded, kind, explicitPath)
 	}
 	kind = strings.TrimSpace(kind)

@@ -35,22 +35,23 @@ type watchedRootStatusResult struct {
 }
 
 type watchedRootStatus struct {
-	RootKey        string                        `json:"root_key"`
-	WorkerKey      string                        `json:"worker_key"`
-	Status         string                        `json:"status"`
-	Config         watchedroots.RootConfig       `json:"config"`
-	ConfigHash     string                        `json:"config_hash,omitempty"`
-	Worker         noderuntime.WorkerInstance    `json:"worker"`
-	Health         *noderuntime.WorkerHealth     `json:"health,omitempty"`
-	Checkpoint     *noderuntime.WorkerCheckpoint `json:"checkpoint,omitempty"`
-	Summary        *watchedroots.RootSummary     `json:"summary,omitempty"`
-	RootCheckpoint *watchedroots.RootCheckpoint  `json:"root_checkpoint,omitempty"`
-	DirtyHints     int                           `json:"dirty_hints"`
-	Findings       int                           `json:"findings"`
-	BackupStatus   *LocalWatchedRootBackupStatus `json:"backup_status,omitempty"`
-	PathCounts     map[string]int                `json:"path_counts,omitempty"`
-	Paths          watchedroots.RootPaths        `json:"paths"`
-	Error          string                        `json:"error,omitempty"`
+	RootKey          string                               `json:"root_key"`
+	WorkerKey        string                               `json:"worker_key"`
+	Status           string                               `json:"status"`
+	Config           watchedroots.RootConfig              `json:"config"`
+	ConfigHash       string                               `json:"config_hash,omitempty"`
+	Worker           noderuntime.WorkerInstance           `json:"worker"`
+	Health           *noderuntime.WorkerHealth            `json:"health,omitempty"`
+	Checkpoint       *noderuntime.WorkerCheckpoint        `json:"checkpoint,omitempty"`
+	Summary          *watchedroots.RootSummary            `json:"summary,omitempty"`
+	RootCheckpoint   *watchedroots.RootCheckpoint         `json:"root_checkpoint,omitempty"`
+	WatchObservation *watchedroots.NativeWatchObservation `json:"last_watch_observation,omitempty"`
+	DirtyHints       int                                  `json:"dirty_hints"`
+	Findings         int                                  `json:"findings"`
+	BackupStatus     *LocalWatchedRootBackupStatus        `json:"backup_status,omitempty"`
+	PathCounts       map[string]int                       `json:"path_counts,omitempty"`
+	Paths            watchedroots.RootPaths               `json:"paths"`
+	Error            string                               `json:"error,omitempty"`
 }
 
 type watchedRootDisableResult struct {
@@ -317,7 +318,7 @@ func applyWatchedRootValidated(store Store, config Config, validated watchedroot
 }
 
 func watchedRootWorkerIntervalSeconds(config watchedroots.RootConfig) int {
-	if strings.HasPrefix(config.RootKey, "loom_box__") {
+	if strings.HasPrefix(config.RootKey, "loom_box__") || strings.HasPrefix(config.RootKey, "loom_box_id_") && config.Watch.Enabled {
 		return 60
 	}
 	interval := watchedroots.DefaultWorkerIntervalSeconds()
@@ -633,6 +634,12 @@ func watchedRootConfigFromProjectPlanItem(item projectcontracts.ProjectWatchedRo
 	if rootConfig.RootKey == "" && item.BackendRootKey != "" {
 		rootConfig.RootKey = item.BackendRootKey
 	}
+	if item.BackendRootKey != "" && filesystemconnector.NormalizeRootKey(item.BackendRootKey) != rootConfig.RootKey ||
+		item.SafeRootKey != "" && filesystemconnector.NormalizeRootKey(item.SafeRootKey) != rootConfig.SafeRootKey ||
+		item.WorkerKey != "" && item.WorkerKey != noderuntime.WatchedRootWorkerKey(rootConfig.RootKey) ||
+		item.ConfigHash != "" && item.ConfigHash != watchedroots.ConfigHash(rootConfig) {
+		return watchedroots.RootConfig{}, fmt.Errorf("watched-root item disagrees with its immutable config binding")
+	}
 	return rootConfig, nil
 }
 
@@ -685,19 +692,44 @@ func ensureWatchedRootPlanSafeRoot(store Store, config Config, rootConfig watche
 	if skipSafeRoot && !exists {
 		return Config{}, fmt.Errorf("filesystem safe root %q is not configured", safeRootKey)
 	}
+	if strings.HasPrefix(safeRootKey, "loom_box_id_") && !exists && strings.TrimSpace(projectRoot) != "" {
+		absolutePath, err := canonicalDirectoryPath(projectRoot)
+		if err != nil {
+			return Config{}, err
+		}
+		binding, err := nodeBoxForPath(config, absolutePath)
+		if err != nil || binding.RootPath != absolutePath || nodeBoxSafeRootKey(binding) != safeRootKey || item.Metadata["box_id"] != binding.ID {
+			return Config{}, fmt.Errorf("Box watch plan does not match configured Box root")
+		}
+		existingSafeRoot = filesystemconnector.DefaultSafeRoot(safeRootKey, absolutePath)
+		exists = true
+	}
 	if safeRootKey != "project" {
 		if !exists {
 			return Config{}, fmt.Errorf("filesystem safe root %q is not configured", safeRootKey)
 		}
-		if safeRootKey == "loom_box" && strings.TrimSpace(projectRoot) != "" {
+		if (safeRootKey == "loom_box" || strings.HasPrefix(safeRootKey, "loom_box_id_")) && strings.TrimSpace(projectRoot) != "" {
 			absolutePath, err := canonicalDirectoryPath(projectRoot)
 			if err != nil {
 				return Config{}, err
+			}
+			binding, err := nodeBoxForPath(config, absolutePath)
+			if config.BoxesFile == "" && config.BoxRootPath == "" && safeRootKey == "loom_box" {
+				// Preserve the legacy explicit local apply-plan operation. Catalogued
+				// nodes must instead match their immutable configured binding.
+				binding.RootPath, binding.RootRef, binding.Primary, err = absolutePath, "box", true, nil
+			}
+			if err != nil || binding.RootPath != absolutePath || nodeBoxSafeRootKey(binding) != safeRootKey {
+				return Config{}, fmt.Errorf("Box watch plan does not match configured Box root")
+			}
+			if filepath.Clean(existingSafeRoot.AbsolutePath) != absolutePath && !binding.Primary {
+				return Config{}, fmt.Errorf("Box safe root cannot be retargeted")
 			}
 			existingSafeRoot.AbsolutePath = absolutePath
 			existingSafeRoot.Metadata, _ = json.Marshal(map[string]any{
 				"source":        "box.watch_plan.apply",
 				"box_root_path": absolutePath,
+				"box_id":        binding.ID,
 			})
 		}
 		requiredMax := watchedRootRequiredSafeRootMaxFileBytes(rootConfig)
@@ -1290,6 +1322,11 @@ func watchedRootsStatus(opts *rootOptions, rootKey string) (watchedRootStatusRes
 		status.ConfigHash = instance.ConfigHash
 		watchedStore := watchedroots.NewStore(store.DataDir)
 		status.Paths = watchedStore.RootPaths(rootConfig.RootKey)
+		if observation, err := watchedStore.LoadWatchObservation(rootConfig.RootKey); err == nil {
+			status.WatchObservation = &observation
+		} else if !watchedroots.IsNotExist(err) {
+			return watchedRootStatusResult{}, err
+		}
 		if _, err := watchedroots.ValidateRootConfigForRun(rootConfig, config.Filesystem); err != nil {
 			status.Status = "invalid_config"
 			status.Error = err.Error()

@@ -98,6 +98,34 @@ func TestKnowledgeFiltersValidate(t *testing.T) {
 	}
 }
 
+func TestKnowledgeWorkspaceSelectionKeepsIndexFilters(t *testing.T) {
+	resources := strings.Replace(enrollmentKnowledge, "category: notes", "category: notes, include: ['**/*.md'], exclude: ['historical/**'], workspace: {include: ['**/*.md', '**/*.canvas'], exclude: ['private/**']}", 1)
+	a := Analyze(declarationEnrollmentFixture(t, resources, ""))
+	if !a.Report.OK || len(a.Plan.WatchedRoots) != 1 {
+		t.Fatalf("workspace compile: %+v", a.Report.Diagnostics)
+	}
+	watch := a.Plan.WatchedRoots[0]
+	if !stringSlicesEqual(watch.Include, []string{"**/*.canvas", "**/*.md"}) || len(watch.Exclude) != 0 {
+		t.Fatalf("watch must cover both consumers: %+v", watch)
+	}
+	source := watch.Metadata["knowledge_source"].(map[string]any)
+	if !declarationJSONEqual(source["include"], []string{"**/*.md"}) || !declarationJSONEqual(source["exclude"], []string{"historical/**"}) {
+		t.Fatal("workspace broadened index selection", source)
+	}
+	if err := ValidateDeclarationEnrollment(*a.Loaded, a.Report, a.Plan); err != nil {
+		t.Fatal(err)
+	}
+	for _, pattern := range []string{"../escape/**", "["} {
+		if _, err := NormalizeKnowledgeSourcePolicy(KnowledgeDeclaration{Workspace: &KnowledgeWorkspacePolicy{Include: []string{pattern}}}); err == nil {
+			t.Fatal("invalid workspace pattern accepted", pattern)
+		}
+	}
+	p, err := NormalizeKnowledgeSourcePolicy(KnowledgeDeclaration{Workspace: &KnowledgeWorkspacePolicy{}})
+	if err != nil || p == nil || p.Workspace == nil || !stringSlicesEqual(p.Workspace.Include, []string{"**/*"}) || len(p.Workspace.Exclude) != 0 {
+		t.Fatal("explicit workspace defaults", p, err)
+	}
+}
+
 func TestKnowledgeFiltersProtectionInheritance(t *testing.T) {
 	for _, tc := range []struct {
 		name, fields, policy string

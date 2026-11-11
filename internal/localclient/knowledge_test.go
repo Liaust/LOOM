@@ -335,3 +335,26 @@ func readKnowledgeRequestBody(t *testing.T, req *http.Request) string {
 	}
 	return string(payload)
 }
+
+func TestKnowledgeNotesPipelineIntegrityIsExplicitAndProgressAdditive(t *testing.T) {
+	for _, inspect := range []bool{false, true} {
+		client := Client{BaseURL: "http://loom", client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			want := "/v1/knowledge/notes/pipelines/status"
+			if inspect {
+				want += "?inspect_integrity=true"
+			}
+			if req.Method != http.MethodGet || req.URL.RequestURI() != want {
+				t.Fatalf("explicit path: %s %s", req.Method, req.URL.RequestURI())
+			}
+			return okEnvelope(`{"counts":{},"current":[],"progress":{"schema_version":"knowledge.pipeline_progress.v1","counts_known":false,"unknown":{"eta":"unknown"},"partial_errors":["policy_unavailable"]},"native_publication":{"schema_version":"notes_workspace.publication_progress.v1","client_received":null}}`), nil
+		})}}
+		read := client.GetKnowledgeNotesPipelineStatus
+		if inspect {
+			read = client.InspectKnowledgeNotesPipelineIntegrity
+		}
+		got, err := read(t.Context(), "test")
+		if err != nil || got.Data.Progress == nil || got.Data.Progress.CountsKnown || len(got.Data.Progress.PartialErrors) != 1 || len(got.Data.NativePublication) == 0 {
+			t.Fatalf("additive progress lost: %+v %v", got, err)
+		}
+	}
+}

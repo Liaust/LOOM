@@ -21,6 +21,13 @@ var searchContractFS embed.FS
 
 const searchFixtureSchema = "loom.provenance_search_fixture.v1"
 
+func TestSearchCompactLimitsMatchCurrentContract(t *testing.T) {
+	limits := loadSearchContract[searchLimitsContract](t, "limits.json")
+	if limits.ContextLimits.MaximumCompactResult != MaximumSearchCompactResult || limits.ContextLimits.MaximumCompactResponse != MaximumSearchCompactResponse || MaximumSearchCompactResult > 1600 || MaximumSearchCompactResponse != 6000 {
+		t.Fatalf("current presentation limits disagree with contract: %#v", limits.ContextLimits)
+	}
+}
+
 type searchFixtureCorpus struct {
 	SchemaVersion string                    `json:"schema_version"`
 	FrozenAt      string                    `json:"frozen_at"`

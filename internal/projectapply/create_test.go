@@ -1,6 +1,7 @@
 package projectapply
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -25,6 +26,29 @@ func TestProjectCreateRegistrationOnlyBoundary(t *testing.T) {
 	if err := guard.resolution(x); err != nil {
 		t.Fatal(err)
 	}
+	x.Plan.Basis.Bindings["files"] = pc.DeclarationBinding{Kind: pc.DeclarationKnowledge}
+	if err := guard.resolution(x); err != nil {
+		t.Fatalf("default files binding is not an activation: %v", err)
+	}
+	guard.Resolver = &staticResolver{x: x}
+	resolved, err := guard.Resolve(context.Background(), Principal{}, pc.DeclarationPlanRequest{})
+	if err != nil || len(resolved.Plan.Basis.Actions) != 1 || len(resolved.Plan.Basis.Bindings) != 1 {
+		t.Fatalf("default constructor resolver: %+v %v", resolved, err)
+	}
+	current, err := guard.Current(context.Background(), Principal{}, resolved)
+	if err != nil || current.Bindings["files"].Kind != pc.DeclarationKnowledge {
+		t.Fatalf("default binding must remain in the prerequisite fence: %+v %v", current, err)
+	}
+	x.Plan.Basis.Bindings["files"] = pc.DeclarationBinding{Kind: pc.DeclarationKnowledge, OwnerRef: "unexpected-owner"}
+	if err := guard.resolution(x); err == nil {
+		t.Fatal("create accepted a bound default resource")
+	}
+	x.Plan.Basis.Bindings["files"] = pc.DeclarationBinding{Kind: pc.DeclarationKnowledge}
+	x.Plan.Basis.Bindings["another"] = pc.DeclarationBinding{Kind: pc.DeclarationKnowledge}
+	if err := guard.resolution(x); err == nil {
+		t.Fatal("create accepted an extra resource binding")
+	}
+	delete(x.Plan.Basis.Bindings, "another")
 	x.Plan.Basis.Actions = append(x.Plan.Basis.Actions, pc.DeclarationAction{ID: "activate"})
 	if err := guard.resolution(x); err == nil {
 		t.Fatal("create accepted resource activation")

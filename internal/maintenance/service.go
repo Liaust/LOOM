@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
+	"loom.local/loom/internal/backupstrategy"
 	"loom.local/loom/internal/ids"
 	"loom.local/loom/internal/requestctx"
 )
@@ -28,7 +30,8 @@ const (
 )
 
 type Service struct {
-	DB *sql.DB
+	DB              *sql.DB
+	RecoveryDataDir string
 }
 
 func NewService(db *sql.DB) Service {
@@ -136,13 +139,48 @@ func (s Service) BackupStatus(ctx context.Context) (BackupStatus, error) {
 		failed = &operation
 	}
 
+	var inventory *backupstrategy.RecoveryInventorySummary
+	inventoryState := "unavailable"
+	if s.RecoveryDataDir != "" {
+		if saved, err := backupstrategy.ReadRecoveryInventorySummary(s.RecoveryDataDir); err == nil {
+			inventory, inventoryState = &saved, "recorded"
+			if time.Since(saved.ObservedAt) > 48*time.Hour {
+				inventoryState = "stale"
+			}
+		}
+	}
 	return BackupStatus{
+		RecoveryInventory: inventory, RecoveryInventoryState: inventoryState,
 		Status:           deriveBackupStatus(worker, successful, failed, findings),
 		Worker:           worker,
 		LatestSuccessful: successful,
 		LatestFailed:     failed,
 		OpenFindings:     findings,
+		LatestRun:        latestBackupRunObservation(successful, failed),
+		EarlierFailure:   successful != nil && failed != nil && failed.Operation.StartedAt.Before(successful.Operation.StartedAt),
 	}, nil
+}
+
+func latestBackupRunObservation(successful, failed *BackupOperation) *BackupRunObservation {
+	latest := successful
+	if failed != nil && (latest == nil || !failed.Operation.StartedAt.Before(latest.Operation.StartedAt)) {
+		latest = failed
+	}
+	if latest == nil {
+		return nil
+	}
+	result := &BackupRunObservation{OperationID: latest.Operation.MaintenanceOperationID, Status: latest.Operation.Status,
+		StartedAt: latest.Operation.StartedAt, VerificationStatus: "unknown"}
+	var receipt struct {
+		VerificationStatus string `json:"verification_status"`
+	}
+	if len(latest.Operation.ResultJSON) <= 64<<10 && json.Unmarshal(latest.Operation.ResultJSON, &receipt) == nil {
+		switch receipt.VerificationStatus {
+		case VerificationSucceeded, VerificationFailed:
+			result.VerificationStatus = receipt.VerificationStatus
+		}
+	}
+	return result
 }
 
 // CloudProtectionStatus returns only display-safe cloud snapshot evidence.
@@ -168,7 +206,7 @@ func (s Service) CloudProtectionStatus(ctx context.Context) (CloudProtectionStat
 	if err != nil {
 		return CloudProtectionStatus{}, err
 	}
-	result := CloudProtectionStatus{Available: worker != nil || success != nil || failed != nil, Verification: "unknown", OpenFindingCount: findings.Open, WarningFindings: findings.Warning + findings.Error, CriticalFindings: findings.Critical}
+	result := CloudProtectionStatus{ObservedAt: time.Now().UTC(), EvidenceBasis: "upload_operation_result", CurrentProtection: "unknown", Available: worker != nil || success != nil || failed != nil, Verification: "unknown", OpenFindingCount: findings.Open, WarningFindings: findings.Warning + findings.Error, CriticalFindings: findings.Critical}
 	if worker != nil {
 		result.WorkerState = worker.HealthStatus
 		result.LastSuccessAt = worker.LastSuccessAt
@@ -178,15 +216,43 @@ func (s Service) CloudProtectionStatus(ctx context.Context) (CloudProtectionStat
 		result.LastSuccessAt = success.FinishedAt
 		result.UpdatedAt = success.UpdatedAt
 		result.Verification = OperationSucceeded
+		result.LatestUpload = cloudUploadEvidence(*success)
 	}
 	if failed != nil {
 		result.LastFailureAt = failed.FinishedAt
 		if failed.UpdatedAt.After(result.UpdatedAt) {
 			result.UpdatedAt = failed.UpdatedAt
 			result.Verification = OperationFailed
+			result.LatestUpload = cloudUploadEvidence(*failed)
 		}
 	}
 	return result, nil
+}
+
+func cloudUploadEvidence(operation Operation) *CloudUploadEvidence {
+	result := &CloudUploadEvidence{OperationID: operation.MaintenanceOperationID, Result: operation.Status, FinishedAt: operation.FinishedAt, ArchiveClass: "unknown"}
+	var receipt struct {
+		ArchiveRef           string `json:"archive_ref"`
+		BackupOperationID    string `json:"backup_operation_id"`
+		OperationalPackageID string `json:"operational_package_id"`
+		ProvenancePackageID  string `json:"provenance_package_id"`
+	}
+	if len(operation.ResultJSON) > 64<<10 || json.Unmarshal(operation.ResultJSON, &receipt) != nil {
+		return result
+	}
+	safe := func(value string) string {
+		if len(value) > 256 || strings.TrimSpace(value) != value || strings.ContainsFunc(value, func(r rune) bool { return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) }) {
+			return ""
+		}
+		return value
+	}
+	result.ArchiveRef = safe(receipt.ArchiveRef)
+	result.BackupOperationID = safe(receipt.BackupOperationID)
+	result.OperationalPackageID = safe(receipt.OperationalPackageID)
+	result.ProvenancePackageID = safe(receipt.ProvenancePackageID)
+	// The current producer receipt supplies neither authenticated archive class
+	// nor payload capture time. Upload completion and archive-ref spelling do not.
+	return result
 }
 
 func (s Service) ListBackups(ctx context.Context, filter OperationFilter) ([]BackupOperation, error) {

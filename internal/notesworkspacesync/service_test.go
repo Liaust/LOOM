@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 
 	"loom.local/loom/internal/notesworkspace"
 )
@@ -38,6 +39,10 @@ func (m *memoryRecords) Get(_ context.Context, k, id string, out any) error {
 }
 func (m *memoryRecords) Put(_ context.Context, k, id string, value any) error {
 	raw, e := json.Marshal(value)
+	// Match sync_records' JSON object/string constraint, including cursor rows.
+	if e == nil && (len(raw) == 0 || raw[0] != '{' && raw[0] != '"') {
+		return fmt.Errorf("sync record must be an object or string")
+	}
 	if e == nil {
 		m.data[k+":"+id] = raw
 	}
@@ -183,6 +188,9 @@ func (r resolver) WithSource(_ context.Context, id, _ string, fn func(notesworks
 func (r resolver) WithPaths(ctx context.Context, id string, paths []string, fn func(notesworkspace.Source) error) error {
 	return r.WithSource(ctx, id, paths[0], fn)
 }
+func (r resolver) WithDirectoryPaths(ctx context.Context, id string, paths []string, fn func(notesworkspace.Source) error) error {
+	return r.WithSource(ctx, id, "", fn)
+}
 
 type fakeNative struct {
 	docs       map[string]Evidence
@@ -197,6 +205,8 @@ type fakeNative struct {
 func (n *fakeNative) Call(_ context.Context, req map[string]any, out any) error {
 	var result any
 	switch req["method"] {
+	case "publication.preflight":
+		result = map[string]string{"status": "ready"}
 	case "status":
 		result = NativeStatus{Status: "ready", Epoch: n.epoch, EncryptionEnabled: true, ClientIntentVersion: 1}
 	case "changes":
@@ -222,6 +232,9 @@ func (n *fakeNative) Call(_ context.Context, req map[string]any, out any) error 
 		result = n.docs[req["path"].(string)+"@"+req["revision"].(string)]
 	case "payload.read":
 		result = n.docs[Prefix+"payload/"+req["intentId"].(string)+".md@1-control"]
+	case "payload.put":
+		path := Prefix + "payload/" + req["intentId"].(string) + ".md"
+		result = Evidence{Path: path, Revision: "1-control", Status: "published", SHA256: digest(nil)[7:]}
 	case "control.read":
 		result = n.docs[req["id"].(string)+"@"+req["revision"].(string)]
 	case "publish", "publish.reference":
@@ -311,6 +324,156 @@ func operation(b Binding, id, text, rev string) (Intent, Publication) {
 	return i, Publication{Header: Header{1, "publication", "pub_" + id}, IntentID: id, IntentDigest: digest(raw), Revisions: []Revision{{Path: b.Path, Revision: rev, Role: "content"}}}
 }
 
+func TestWithdrawnScopePublishesImmutableRefusalWithoutHotRetry(t *testing.T) {
+	s, n, _, root, b := fixture(t)
+	now := time.Unix(1700000000, 0)
+	s.Now = func() time.Time { return now }
+	scopes := s.Scopes
+	s.Scopes = nil
+	i, p := operation(b, "withdrawn", "new", "2-withdrawn")
+	n.content(b.Path, "2-withdrawn", b.NativeRevision, "new")
+	n.add(i)
+	n.add(p)
+	first, err := s.Step(t.Context(), 128)
+	if err != nil || first.Processed != 1 || first.Held != 1 {
+		t.Fatal(first, err)
+	}
+	for k := 0; k < 20; k++ {
+		progress, err := s.Step(t.Context(), 128)
+		if err != nil || progress.Processed != 0 {
+			t.Fatal("unchanged scope hot retry", progress, err)
+		}
+	}
+	j, err := load[Join](t.Context(), s.Store.(*memoryRecords), "operation", i.ID)
+	if err != nil || !j.AckPublished || j.Ack == nil || j.Ack.Status != "held" || j.Ack.Reason != "collection_withdrawn" || j.RetryAfterMS != 0 {
+		t.Fatal(j, err)
+	}
+	now = now.Add(30 * time.Second)
+	progress, err := s.Step(t.Context(), 128)
+	if err != nil || progress.Processed != 0 {
+		t.Fatal("terminal refusal retried", progress, err)
+	}
+	s.Scopes = scopes
+	progress, err = s.Step(t.Context(), 128)
+	if err != nil || progress.Processed != 0 {
+		t.Fatal("old refusal was silently rewritten", progress, err)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "a.md"))
+	if err != nil || string(content) != "A" {
+		t.Fatal(string(content), err)
+	}
+}
+
+func TestChangedGenerationPublishesRefusalWithoutApplyingOldPermission(t *testing.T) {
+	s, n, _, root, b := fixture(t)
+	s.Scopes[0].Generation = "new-generation"
+	i, p := operation(b, "old-generation", "saved offline", "2-offline")
+	n.content(b.Path, "2-offline", b.NativeRevision, "saved offline")
+	n.add(i)
+	n.add(p)
+	progress, err := s.Step(t.Context(), 128)
+	if err != nil || progress.Held != 1 {
+		t.Fatal(progress, err)
+	}
+	j, err := load[Join](t.Context(), s.Store.(*memoryRecords), "operation", i.ID)
+	if err != nil || !j.AckPublished || j.Ack == nil || j.Ack.Reason != "configuration_changed" || j.Ack.Status != "held" {
+		t.Fatal(j, err)
+	}
+	content, err := os.ReadFile(filepath.Join(root, "a.md"))
+	if err != nil || string(content) != "A" {
+		t.Fatal(string(content), err)
+	}
+}
+
+func TestMissingPublicationBacksOffAndNewEvidenceWakesImmediately(t *testing.T) {
+	s, n, _, _, b := fixture(t)
+	now := time.Unix(1700000000, 0)
+	s.Now = func() time.Time { return now }
+	i, p := operation(b, "waiting", "B", "2-b")
+	n.content(b.Path, "2-b", b.NativeRevision, "B")
+	n.add(i)
+	first, err := s.Step(t.Context(), 128)
+	if err != nil || first.Processed != 1 || first.Applied != 0 || first.Held != 1 {
+		t.Fatal(first, err)
+	}
+	for k := 0; k < 3; k++ {
+		quiet, err := s.Step(t.Context(), 128)
+		if err != nil || quiet.Processed != 0 || quiet.MoreWork {
+			t.Fatal("missing publication hot loop", quiet, err)
+		}
+	}
+	n.add(p)
+	ready, err := s.Step(t.Context(), 128)
+	if err != nil || ready.Applied != 1 {
+		t.Fatal("new publication did not wake the exact operation", ready, err)
+	}
+}
+
+func TestOperationRetrySeparatesEvidenceFromTransport(t *testing.T) {
+	if operationRetryDelay("predecessor_not_applied", 9) != 6*time.Hour ||
+		operationRetryDelay("native_revision_unavailable", 9) != 6*time.Hour ||
+		operationRetryDelay("source_admission_unavailable", 1) != 30*time.Second ||
+		operationRetryDelay("source_admission_unavailable", 9) != 5*time.Minute {
+		t.Fatal("retained evidence and transient failures share a hot retry cadence")
+	}
+}
+
+func TestUnrelatedSourceHintKeepsHeldOperationBackoff(t *testing.T) {
+	s, n, _, _, binding := fixture(t)
+	now := time.Unix(1700000000, 0)
+	s.Now = func() time.Time { return now }
+	intent, _ := operation(binding, "source-hint-held", "new", "2-held")
+	n.add(intent)
+	if _, err := s.Step(t.Context(), 128); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := load[Join](t.Context(), s.Store.(*memoryRecords), "operation", intent.ID)
+	i, scope, _ := inventoryFixture(t)
+	r := &Runtime{}
+	for range 3 {
+		if err := i.Hint(t.Context(), scope, "", now); err != nil {
+			t.Fatal(err)
+		}
+		r.sourceRevision.Add(1) // Readiness hint only, not an evidence replacement.
+		progress, err := s.Step(t.Context(), 128)
+		if err != nil || progress.Processed != 0 {
+			t.Fatal("unrelated source activity retried a held operation", progress, err)
+		}
+	}
+	after, _ := load[Join](t.Context(), s.Store.(*memoryRecords), "operation", intent.ID)
+	if before.RetryAfterMS != after.RetryAfterMS || before.RetryAttempts != after.RetryAttempts || before.IntentRaw != after.IntentRaw {
+		t.Fatal("source activity changed retained evidence/backoff")
+	}
+}
+
+func TestAppliedPredecessorBypassesDependentBackoff(t *testing.T) {
+	s, n, _, root, b := fixture(t)
+	now := time.Unix(1700000000, 0)
+	s.Now = func() time.Time { return now }
+	parent, publication := operation(b, "aparent", "B", "2-parent")
+	child, cp := operation(b, "zchild", "C", "3-child")
+	child.Predecessor = parent.ID
+	raw, _ := json.Marshal(child)
+	cp.IntentDigest = digest(raw)
+	n.content(b.Path, "2-parent", b.NativeRevision, "B")
+	n.content(b.Path, "3-child", "2-parent", "C")
+	n.add(parent)
+	n.add(child)
+	n.add(cp)
+	step(t, s)
+	j, _ := load[Join](t.Context(), s.Store.(*memoryRecords), "operation", child.ID)
+	if j.Reason != "predecessor_not_applied" || j.RetryAfterMS <= now.UnixMilli() {
+		t.Fatal("dependent operation not parked", j)
+	}
+	n.add(publication)
+	step(t, s)
+	j, _ = load[Join](t.Context(), s.Store.(*memoryRecords), "operation", child.ID)
+	content, err := os.ReadFile(filepath.Join(root, "a.md"))
+	if err != nil || j.Status != "applied" || string(content) != "C" {
+		t.Fatal("dependency acceptance did not wake the child", j, err)
+	}
+}
+
 func TestReferenceExportRetainsBytesAndRejectsWritableBinding(t *testing.T) {
 	s, native, _, root, _ := fixture(t)
 	content := []byte{137, 80, 78, 71, 0, 255}
@@ -338,7 +501,7 @@ func TestReferenceExportRetainsBytesAndRejectsWritableBinding(t *testing.T) {
 }
 
 func TestMigrationReferencesRemainReadOnly(t *testing.T) {
-	for _, extension := range []string{"canvas", "wav", "svg", "csv", "xlsx", "dat", "json"} {
+	for _, extension := range []string{"wav", "svg", "csv", "xlsx", "dat", "json"} {
 		t.Run(extension, func(t *testing.T) {
 			s, native, _, root, _ := fixture(t)
 			name := "attachment." + extension
@@ -404,6 +567,10 @@ type generationResolver struct {
 	root, generation string
 }
 
+func (r generationResolver) WithDirectoryPaths(ctx context.Context, id string, paths []string, fn func(notesworkspace.Source) error) error {
+	return r.WithSource(ctx, id, "", fn)
+}
+
 func (r generationResolver) WithSource(_ context.Context, id, _ string, fn func(notesworkspace.Source) error) error {
 	return fn(notesworkspace.Source{CollectionID: id, Generation: r.generation, Path: r.root})
 }
@@ -425,6 +592,29 @@ func (n transitionNative) Call(ctx context.Context, req map[string]any, out any)
 		return json.Unmarshal(raw, out)
 	}
 	return n.fakeNative.Call(ctx, req, out)
+}
+
+func TestUnavailableSourceDefersInsteadOfPermanentlyWithdrawingIntent(t *testing.T) {
+	s, n, _, root, b := fixture(t)
+	i, p := operation(b, "temporarily-unavailable", "B", "2-resumed")
+	n.content(b.Path, "2-resumed", b.NativeRevision, "B")
+	n.add(i)
+	n.add(p)
+	active := s.Scopes
+	s.UnavailableScopes, s.Scopes = active, nil
+	step(t, s)
+	j, err := load[Join](t.Context(), s.Store.(*memoryRecords), "operation", i.ID)
+	if err != nil || j.Ack != nil || j.Reason != "source_admission_unavailable" {
+		t.Fatalf("temporary admission failure became terminal: %+v %v", j, err)
+	}
+	s.Scopes, s.UnavailableScopes, s.RetryRevision = active, nil, "source-returned"
+	step(t, s)
+	if len(n.acks) != 1 || n.acks[0].Status != "applied" {
+		t.Fatalf("same saved intent did not resume: %+v", n.acks)
+	}
+	if body, err := os.ReadFile(filepath.Join(root, "a.md")); err != nil || string(body) != "B" {
+		t.Fatalf("resumed source differs: %q %v", body, err)
+	}
 }
 
 func TestEnrollmentExportDiscoveryIsPagedAndScopeBound(t *testing.T) {
@@ -456,6 +646,31 @@ func TestEnrollmentExportDiscoveryIsPagedAndScopeBound(t *testing.T) {
 	}
 	if _, _, err := s.enrollmentExports(t.Context(), "", 0); !errors.Is(err, ErrHeld) {
 		t.Fatal("unbounded discovery accepted")
+	}
+}
+
+func TestEnrollmentCatchupUpgradesLegacyCanvasMetadataOnlyForWritableScope(t *testing.T) {
+	s, _, _, _, old := fixture(t)
+	records := s.Store.(*memoryRecords)
+	id := mapKey(Intent{Workspace: old.Workspace, Collection: old.Collection, Generation: old.Generation, FileID: old.FileID})
+	mapping, err := load[FileMapping](t.Context(), records, "file", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapping.Latest.Path = "Notes/legacy.canvas"
+	mapping.Latest.Writable = false
+	if err := records.Put(t.Context(), "file", id, mapping); err != nil {
+		t.Fatal(err)
+	}
+	s.Scopes[0].PreviousGeneration = "legacy"
+	page, _, err := s.enrollmentExports(t.Context(), "", 32)
+	if err != nil || len(page) != 1 {
+		t.Fatalf("legacy Canvas upgrade missing: %+v %v", page, err)
+	}
+	s.Scopes[0].ReadOnly = true
+	page, _, err = s.enrollmentExports(t.Context(), "", 32)
+	if err != nil || len(page) != 0 {
+		t.Fatalf("read-only Canvas permission changed: %+v %v", page, err)
 	}
 }
 
@@ -498,6 +713,18 @@ func TestExportSelectionTransitionPreservesHistory(t *testing.T) {
 			if string(records.data[oldKey]) != oldRecord {
 				t.Fatal("old mapping rewritten")
 			}
+			page, _, err := s.enrollmentExports(t.Context(), "", 128)
+			if err != nil || len(page) != 0 {
+				t.Fatalf("completed successor repeatedly exported: %d %v", len(page), err)
+			}
+			receiptKey := "export:published_" + key(next.ID)
+			receipt := records.data[receiptKey]
+			delete(records.data, receiptKey)
+			page, _, err = s.enrollmentExports(t.Context(), "", 128)
+			if err != nil || len(page) != 1 {
+				t.Fatalf("interrupted publication lost catch-up: %d %v", len(page), err)
+			}
+			records.data[receiptKey] = receipt
 			if oldIntent, _ := operation(old, "old_edit", "pending", "2-old"); func() bool { _, ok := s.scope(oldIntent); return ok }() {
 				t.Fatal("withdrawn generation authorizes an incoming edit")
 			}
@@ -843,6 +1070,7 @@ func TestCanonicalPathOperationsAndReceiptReplay(t *testing.T) {
 					t.Fatal("uncertain commit acknowledged or changed ID")
 				}
 				source.afterCommitPath = nil
+				s.RetryRevision = "source-path-wake"
 			}
 			n.ackFailure = true
 			if _, e = s.Step(ctx, 128); e == nil {

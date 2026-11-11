@@ -1,0 +1,1441 @@
+diff --git a/dashboard/plugin_api.py b/dashboard/plugin_api.py
+index 64eb5aa..31dc38a 100644
+--- a/dashboard/plugin_api.py
++++ b/dashboard/plugin_api.py
+@@ -85,26 +85,191 @@ except ImportError:  # pragma: no cover
+ router = APIRouter() if APIRouter else None
+ _log = logging.getLogger("hermes.plugins.talk-desktop")
+ 
+-_PROFILES_ROOT = Path.home() / ".hermes" / "profiles"
+ _MINT_LOCK = threading.Lock()
++_TRAINING_LOCK = threading.Lock()
++
++
++def _profile_path(profile: str) -> Path:
++    from hermes_cli.profiles import get_profile_dir
++
++    return get_profile_dir(profile)
+ 
+ 
+ def _list_bots() -> list[str]:
+-    if not _PROFILES_ROOT.is_dir():
++    root = _profile_path("default") / "profiles"
++    if not root.is_dir():
+         return []
+     return sorted(
+-        e.name for e in _PROFILES_ROOT.iterdir()
++        e.name for e in root.iterdir()
+         if e.is_dir() and (e / "SOUL.md").is_file()
+     )
+ 
+ 
++def _transcribe_wake_sample(encoded: str) -> dict:
++    """Bounded local-only acoustic diagnostic; never persist the recording."""
++    import base64
++    import tempfile
++    import wave
++
++    if not isinstance(encoded, str) or not encoded or len(encoded) > 426668:
++        raise ValueError("Wake sample must contain at most ten seconds of 16 kHz PCM.")
++    try:
++        pcm = base64.b64decode(encoded, validate=True)
++    except (ValueError, TypeError) as error:
++        raise ValueError("Invalid wake sample encoding.") from error
++    if not pcm or len(pcm) > 320000 or len(pcm) % 2:
++        raise ValueError("Invalid wake sample length.")
++    from tools.transcription_tools import transcribe_audio_local_fallback
++
++    with tempfile.TemporaryDirectory(prefix="hermes-wake-sample-") as directory:
++        path = str(Path(directory) / "sample.wav")
++        with wave.open(path, "wb") as audio:
++            audio.setnchannels(1)
++            audio.setsampwidth(2)
++            audio.setframerate(16000)
++            audio.writeframes(pcm)
++        result = transcribe_audio_local_fallback(path)
++    if not result.get("success") and not result.get("no_speech"):
++        raise RuntimeError("Installed local transcription failed; no cloud fallback was used.")
++    return {"ok": True, "provider": "local", "transcript": str(result.get("transcript") or "")}
++
++
++def _wake_training_root(profile: str) -> Path:
++    home = _profile_home(profile)
++    if home is None:
++        raise ValueError("Unknown training profile.")
++    return home / "wakewords" / "training" / "mina-v1"
++
++
++def _wake_training_status(profile: str) -> dict:
++    root = _wake_training_root(profile)
++    counts = {split: {"positive": 0, "negativeSeconds": 0.0}
++              for split in ("train", "validation", "test")}
++    invalid = 0
++    if root.exists():
++        if root.is_symlink():
++            raise ValueError("Training directory must not be a symbolic link.")
++        for path in root.glob("*/sample.json"):
++            if path.parent.name.startswith("."):
++                continue
++            try:
++                record = json.loads(path.read_text())
++                if record["schema"] != 1 or record["target"] != "mina":
++                    raise ValueError("Unknown training sample schema.")
++                group = counts[record["split"]]
++                if not (path.parent / "audio.wav").is_file():
++                    raise ValueError("Incomplete training sample.")
++                if record["kind"] == "positive":
++                    group["positive"] += 1
++                elif record["kind"] == "negative":
++                    group["negativeSeconds"] += record["seconds"]
++                else:
++                    raise ValueError("Unknown sample class.")
++            except (KeyError, TypeError, ValueError, OSError):
++                invalid += 1
++    return {"ok": True, "target": "mina", "counts": counts, "invalid": invalid,
++            "goals": {"train": {"positive": 60, "negativeSeconds": 120},
++                      "validation": {"positive": 20, "negativeSeconds": 60},
++                      "test": {"positive": 20, "negativeSeconds": 60}}}
++
++
++def _save_wake_training_sample(profile: str, body: dict) -> dict:
++    """Explicit collection only. Commit one immutable WAV and its metadata together."""
++    import array
++    import base64
++    import hashlib
++    import math
++    import tempfile
++    import wave
++
++    if body.get("consent") is not True or body.get("target") != "mina":
++        raise ValueError("Explicit MINA training recording consent is required.")
++    sample_id, batch_id = body.get("sampleId"), body.get("batchId")
++    if not all(isinstance(value, str) and re.fullmatch(r"[a-f0-9]{32}", value)
++               for value in (sample_id, batch_id)):
++        raise ValueError("Invalid training sample or batch identity.")
++    kind, split = body.get("kind"), body.get("split")
++    if kind not in ("positive", "negative") or split not in ("train", "validation", "test"):
++        raise ValueError("Invalid training class or split.")
++    encoded = body.get("pcm")
++    if not isinstance(encoded, str) or not encoded or len(encoded) > 426668:
++        raise ValueError("Training clips must be at most ten seconds.")
++    try:
++        pcm = base64.b64decode(encoded, validate=True)
++    except (ValueError, TypeError) as error:
++        raise ValueError("Invalid training PCM encoding.") from error
++    seconds = len(pcm) / 32000
++    if len(pcm) % 2 or not 2.5 <= seconds <= 10:
++        raise ValueError("Invalid training PCM duration.")
++    if kind == "positive" and seconds > 4:
++        raise ValueError("Positive clips must contain one short utterance.")
++    if type(body.get("dropped")) is not int or body["dropped"] != 0:
++        raise ValueError("Audio frames were dropped; record this clip again.")
++    microphone, capture_rate = body.get("microphone"), body.get("captureRate")
++    if not isinstance(microphone, str) or not 1 <= len(microphone) <= 250:
++        raise ValueError("Missing actual training microphone.")
++    if type(capture_rate) is not int or not 8000 <= capture_rate <= 192000:
++        raise ValueError("Invalid microphone capture rate.")
++    samples = array.array("h", pcm)
++    if sys.byteorder != "little":
++        samples.byteswap()
++    rms = math.sqrt(sum(value * value for value in samples) / len(samples)) / 32768
++    if kind == "positive" and rms < 0.001:
++        raise ValueError("This clip is too quiet; please record that utterance again.")
++    record = {"schema": 1, "target": "mina", "sampleId": sample_id,
++              "batchId": batch_id, "kind": kind, "split": split,
++              "microphone": microphone, "captureRate": capture_rate,
++              "sampleRate": 16000, "seconds": seconds, "dropped": 0,
++              "rms": rms, "peak": max(abs(value) for value in samples) / 32768,
++              "pcmSha256": hashlib.sha256(pcm).hexdigest()}
++    root = _wake_training_root(profile)
++    with _TRAINING_LOCK:
++        root.mkdir(mode=0o700, parents=True, exist_ok=True)
++        if root.is_symlink():
++            raise ValueError("Training directory must not be a symbolic link.")
++        root.chmod(0o700)
++        destination = root / sample_id
++        if destination.exists():
++            previous = json.loads((destination / "sample.json").read_text())
++            if any(previous.get(key) != value for key, value in record.items()):
++                raise ValueError("Training sample identity already contains different data.")
++        else:
++            with tempfile.TemporaryDirectory(prefix=".pending-", dir=root) as directory:
++                temporary = Path(directory)
++                path = temporary / "audio.wav"
++                with path.open("xb") as raw:
++                    path.chmod(0o600)
++                    with wave.open(raw, "wb") as audio:
++                        audio.setnchannels(1)
++                        audio.setsampwidth(2)
++                        audio.setframerate(16000)
++                        audio.writeframes(pcm)
++                    raw.flush()
++                    os.fsync(raw.fileno())
++                record["createdAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
++                metadata = temporary / "sample.json"
++                with metadata.open("x") as output:
++                    metadata.chmod(0o600)
++                    json.dump(record, output, sort_keys=True)
++                    output.flush()
++                    os.fsync(output.fileno())
++                temporary.rename(destination)
++                directory_fd = os.open(root, os.O_RDONLY)
++                try:
++                    os.fsync(directory_fd)
++                finally:
++                    os.close(directory_fd)
++    return {"ok": True, "saved": True, "sampleId": sample_id,
++            "status": _wake_training_status(profile)}
++
++
+ def _profile_home(profile: str) -> Path | None:
+     # Nombre de perfil simple (sin traversal). Los perfiles pueden ser symlinks
+     # (p.ej. mi-bot → ~/.hermes-mi-bot), así que NO se exige que el path
+     # resuelto quede bajo profiles/ — solo que el nombre sea seguro y exista.
+     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", profile or ""):
+         return None
+-    p = _PROFILES_ROOT / profile
++    p = _profile_path(profile)
+     if not p.is_dir():
+         return None
+     return p.resolve()
+@@ -121,7 +286,8 @@ def _host_bot_name() -> str:
+             return name
+     except Exception:
+         pass
+-    return "Hermes"
++    name = _bot_display_name("default")
++    return name if name != "Default" else "Hermes"
+ 
+ 
+ def _bot_display_name(profile: str) -> str:
+@@ -546,6 +712,48 @@ def _start_codex_login() -> dict:
+ 
+ if router is not None:
+ 
++    @router.get("/wake/training")
++    async def wake_training_status(request: Request) -> dict:
++        try:
++            return await asyncio.to_thread(_wake_training_status, request.query_params.get("profile") or "default")
++        except ValueError as error:
++            raise HTTPException(status_code=400, detail=str(error)) from error
++
++    @router.post("/wake/training/samples")
++    async def save_wake_training_sample(request: Request) -> dict:
++        raw = await request.body()
++        if len(raw) > 440000:
++            raise HTTPException(status_code=413, detail="Training clip exceeds ten seconds.")
++        try:
++            body = json.loads(raw)
++            if not isinstance(body, dict):
++                raise ValueError("Invalid training sample request.")
++            profile = body.get("profile") or "default"
++            if not isinstance(profile, str):
++                raise ValueError("Invalid training profile.")
++            return await asyncio.to_thread(_save_wake_training_sample, profile, body)
++        except ValueError as error:
++            raise HTTPException(status_code=400, detail=str(error)) from error
++
++    @router.post("/wake/transcribe")
++    async def transcribe_wake_sample(request: Request) -> dict:
++        raw = await request.body()
++        if len(raw) > 440000:
++            raise HTTPException(status_code=413, detail="Wake sample exceeds ten seconds.")
++        try:
++            body = json.loads(raw)
++            if not isinstance(body, dict):
++                raise ValueError("Invalid wake sample request.")
++            profile = body.get("profile") or "default"
++            if not isinstance(profile, str) or _profile_home(profile) is None:
++                raise ValueError("Unknown wake profile.")
++            from hermes_cli.web_routers.audio import _run_config_scoped
++            return await _run_config_scoped(profile, lambda: _transcribe_wake_sample(body.get("pcm")))
++        except ValueError as error:
++            raise HTTPException(status_code=400, detail=str(error)) from error
++        except RuntimeError as error:
++            raise HTTPException(status_code=503, detail=str(error)) from error
++
+     @router.get("/status")
+     async def status() -> dict:
+         try:
+@@ -555,14 +763,17 @@ if router is not None:
+             auth_source = f"unavailable: {exc}"
+         return {
+             "ok": True,
++            "subscriptionOnly": _subscription_only(),
+             "auth": auth_source,
+-            "model": talk_config.talk_model(),
++            "model": "gpt-live-1-codex" if _subscription_only() else talk_config.talk_model(),
+             "voices": list(talk_config.OPENAI_REALTIME_VOICES),
+             "bots": _list_bots(),
+         }
+ 
+     @router.post("/session")
+     async def create_session(request: Request) -> dict:
++        if _subscription_only():
++            raise HTTPException(status_code=403, detail="This installation uses GPT-Live with Codex OAuth only; no API-key fallback.")
+         body = {}
+         try:
+             body = await request.json()
+@@ -612,6 +823,7 @@ if router is not None:
+                     "login": {k: _LOGIN.get(k) for k in ("status", "url", "code", "message")}}
+         return {
+             "ok": True,
++            "managedAuth": _managed_auth(),
+             "configured": st.get("configured"),
+             "lane": st.get("source"),
+             "detail": st.get("detail"),
+@@ -730,10 +942,14 @@ if router is not None:
+ 
+     @router.post("/codex/login/start")
+     async def codex_login_start() -> dict:
++        if _managed_auth():
++            raise HTTPException(status_code=409, detail="OAuth is managed by the existing native Codex/Hermes login; no plugin login replacement.")
+         return await asyncio.to_thread(_start_codex_login)
+ 
+     @router.post("/codex/login/cancel")
+     async def codex_login_cancel() -> dict:
++        if _managed_auth():
++            raise HTTPException(status_code=409, detail="OAuth is managed by the existing native Codex/Hermes login.")
+         with _LOGIN_LOCK:
+             proc = _LOGIN.get("proc")
+             if proc is not None and proc.poll() is None:
+@@ -951,6 +1167,14 @@ def _talk_settings() -> dict:
+     return {}
+ 
+ 
++def _subscription_only() -> bool:
++    return _talk_settings().get("subscriptionOnly") is True
++
++
++def _managed_auth() -> bool:
++    return _talk_settings().get("managedAuth") is True
++
++
+ def _agent_model() -> str | None:
+     """Modelo del agente delegado (el thread de Codex que ejecuta tareas de voz).
+     En cajas con un modelo default no-ChatGPT (p.ej. un proxy) hay que forzar un
+diff --git a/desktop/plugin.js b/desktop/plugin.js
+index 352ca05..5f3c6ed 100644
+--- a/desktop/plugin.js
++++ b/desktop/plugin.js
+@@ -32,9 +32,447 @@ const effVoiceFor = (engine, stored) => {
+ }
+ const SENTINEL_DEFAULT = '__default'
+ const SENTINEL_HOST = '__host'
+-const EN = String((typeof navigator !== 'undefined' && navigator.language) || 'en').toLowerCase().indexOf('en') === 0
++const EN = !String((typeof navigator !== 'undefined' && navigator.language) || 'en').toLowerCase().startsWith('es')
+ const tr = (es, en) => (EN ? en : es)
+ 
++// Native wake notifications belong to their lease's transport. A dedicated
++// public-API connection prevents core Desktop from starting a second engine.
++const KEY_WAKE = 'native-wake.v1'
++const WAKE_SURFACE = 'live-voice'
++let wakeClient = null
++let trainingRecorder = null
++let callStarting = false
++let pluginDisposed = false
++let wakeView = { phase: 'off', error: '', enabled: false, phrase: 'mina' }
++
++async function openWakeRpc(route, onDetect, onLost) {
++  if (typeof sdk.resolveSiblingWsUrl !== 'function') throw new Error('This Desktop does not support routed wake connections.')
++  const url = await sdk.resolveSiblingWsUrl(route, '/api/ws')
++  const socket = new WebSocket(url)
++  const pending = new Map()
++  let nextId = 0
++  let closing = false
++  const fail = () => {
++    for (const p of pending.values()) { clearTimeout(p.timer); p.reject(new Error('Wake connection closed.')) }
++    pending.clear()
++    if (!closing) onLost(new Error('Wake connection lost; listening stopped.'))
++  }
++  socket.addEventListener('close', fail)
++  socket.addEventListener('message', event => {
++    let frame
++    try { frame = JSON.parse(event.data) } catch { return }
++    const p = pending.get(frame.id)
++    if (p) {
++      pending.delete(frame.id); clearTimeout(p.timer)
++      if (frame.error) p.reject(new Error(frame.error.message || 'Wake request failed.'))
++      else p.resolve(frame.result)
++    } else if (frame.method === 'event' && frame.params?.type === 'wake.detected') {
++      onDetect(frame.params.payload || {})
++    } else if (frame.method && frame.id != null && socket.readyState === WebSocket.OPEN) {
++      // This transport owns only wake, never approvals or agent requests.
++      socket.send(JSON.stringify({ jsonrpc: '2.0', id: frame.id, error: { code: -32601, message: 'Wake-only client' } }))
++    }
++  })
++  try {
++    await new Promise((resolve, reject) => {
++      const timer = setTimeout(() => { socket.close(); reject(new Error('Wake connection timed out.')) }, 15000)
++      socket.addEventListener('open', () => { clearTimeout(timer); resolve() }, { once: true })
++      socket.addEventListener('error', () => { clearTimeout(timer); reject(new Error('Wake connection failed.')) }, { once: true })
++    })
++  } catch (error) { closing = true; socket.close(); throw error }
++  return {
++    request(method, params = {}) {
++      if (socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error('Wake connection is not open.'))
++      const id = `wake-${++nextId}`
++      return new Promise((resolve, reject) => {
++        const timer = setTimeout(() => { pending.delete(id); reject(new Error(`${method} timed out.`)) }, method === 'wake.start' ? 180000 : 10000)
++        pending.set(id, { resolve, reject, timer })
++        try { socket.send(JSON.stringify({ jsonrpc: '2.0', id, method, params })) }
++        catch (error) { pending.delete(id); clearTimeout(timer); reject(error) }
++      })
++    },
++    close() { closing = true; socket.close(); fail() }
++  }
++}
++
++async function captureWakePcm(request, frameLength, onError, micId = '', { feed = true } = {}) {
++  const audio = { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
++  if (micId) audio.deviceId = { exact: micId }
++  const stream = await navigator.mediaDevices.getUserMedia({ audio, video: false })
++  let context, source, processor, mute, stopped = false, inFlight = false, badFeeds = 0, buffered = [], lastFrame = Date.now(), watchdog
++  let probe = null, sent = 0, dropped = 0
++  const queued = []
++  const stop = () => {
++    if (stopped) return
++    stopped = true
++    queued.length = 0
++    if (probe) { clearTimeout(probe.timer); probe.reject(new Error('Microphone capture stopped during the sample.')); probe = null }
++    clearInterval(watchdog)
++    if (processor) processor.onaudioprocess = null
++    stream.getTracks().forEach(track => track.stop())
++    try { source?.disconnect(); processor?.disconnect(); mute?.disconnect() } catch {}
++    if (context) void context.close().catch(() => {})
++  }
++  const fail = error => { if (!stopped) { stop(); onError(error) } }
++  const pump = () => {
++    if (stopped || inFlight || !queued.length) return
++    const frames = queued.splice(0, 4)
++    const bytes = new Uint8Array(frames.reduce((total, frame) => total + frame.length, 0))
++    let offset = 0
++    for (const frame of frames) { bytes.set(frame, offset); offset += frame.length }
++    inFlight = true; sent += frames.length
++    void request('wake.feed', { pcm: btoa(String.fromCharCode(...bytes)), sample_rate: 16000 })
++      .then(result => {
++        if (result?.fed) badFeeds = 0
++        else if (++badFeeds >= 3) fail(new Error('Wake listener no longer accepts audio.'))
++      }, error => { if (++badFeeds >= 3) fail(error) })
++      .finally(() => { inFlight = false; pump() })
++  }
++  try {
++    if (!stream.getAudioTracks().some(track => track.readyState === 'live')) throw new Error('Wake microphone is unavailable.')
++    context = new AudioContext()
++    await context.resume()
++    source = context.createMediaStreamSource(stream)
++    processor = context.createScriptProcessor(4096, 1, 1)
++    mute = context.createGain(); mute.gain.value = 0
++    const length = Math.max(160, Math.min(16000, frameLength || 1280))
++    processor.onaudioprocess = event => {
++      if (stopped) return
++      lastFrame = Date.now()
++      const input = event.inputBuffer.getChannelData(0)
++      const ratio = context.sampleRate / 16000
++      for (let i = 0; i < Math.floor(input.length / ratio); i++) {
++        let sum = 0, count = 0
++        for (let j = Math.floor(i * ratio); j < Math.min(input.length, Math.floor((i + 1) * ratio)); j++) { sum += input[j]; count++ }
++        buffered.push(count ? sum / count : 0)
++      }
++      while (buffered.length >= length) {
++        const frame = buffered.splice(0, length)
++        const bytes = new Uint8Array(length * 2), view = new DataView(bytes.buffer)
++        frame.forEach((value, index) => { const s = Math.max(-1, Math.min(1, value)); view.setInt16(index * 2, s < 0 ? s * 32768 : s * 32767, true) })
++        if (probe && probe.samples + length <= 160000) {
++          probe.chunks.push(bytes)
++          for (const value of frame) { probe.squareSum += value * value; probe.peak = Math.max(probe.peak, Math.abs(value)) }
++          probe.samples += length
++        }
++        if (feed) {
++          queued.push(bytes)
++          if (queued.length > 6) { queued.shift(); dropped++ } // At most 480 ms queued, never an unbounded delay.
++        }
++      }
++      pump() // One ordered RPC at a time; batch bursts from the same audio callback.
++    }
++    stream.getAudioTracks().forEach(track => track.addEventListener('ended', () => fail(new Error('Wake microphone stopped.')), { once: true }))
++    source.connect(processor); processor.connect(mute); mute.connect(context.destination)
++    watchdog = setInterval(() => { if (Date.now() - lastFrame > 5000) fail(new Error('Wake microphone stopped delivering audio.')) }, 2500)
++    return {
++      stop,
++      probe(durationMs = 8000) {
++        if (stopped || probe) return Promise.reject(new Error('Wake sample is unavailable or already recording.'))
++        if (!Number.isFinite(durationMs) || durationMs < 2600 || durationMs > 10000) return Promise.reject(new Error('Invalid recording duration.'))
++        return new Promise((resolve, reject) => {
++          probe = { chunks: [], samples: 0, squareSum: 0, peak: 0, sent, dropped, reject, timer: null }
++          probe.timer = setTimeout(() => {
++            const sample = probe; probe = null
++            const bytes = new Uint8Array(sample.samples * 2)
++            let offset = 0
++            for (const chunk of sample.chunks) { bytes.set(chunk, offset); offset += chunk.length }
++            let binary = ''
++            for (let i = 0; i < bytes.length; i += 4096) binary += String.fromCharCode(...bytes.subarray(i, i + 4096))
++            resolve({ pcm: btoa(binary), durationMs: sample.samples / 16,
++              microphone: stream.getAudioTracks()[0]?.label || 'System default',
++              captureRate: context.sampleRate,
++              sent: sent - sample.sent, dropped: dropped - sample.dropped,
++              rms: Math.sqrt(sample.squareSum / Math.max(1, sample.samples)), peak: sample.peak })
++          }, durationMs)
++        })
++      }
++    }
++  } catch (error) { stop(); throw error }
++}
++
++class NativeWakeClient {
++  constructor({ connect, capture, onState, onDetect }) {
++    Object.assign(this, { connect, capture, onState, onDetect })
++    this.route = null; this.rpc = null; this.mic = null; this.wanted = false; this.generation = 0; this.phase = 'off'; this.phrase = 'mina'
++  }
++  state(phase, error = '') { this.phase = phase; this.onState({ phase, error, enabled: this.wanted, phrase: this.phrase }) }
++  stopMic() { this.mic?.stop(); this.mic = null }
++  lost(error) { this.generation++; this.stopMic(); this.rpc?.close(); this.rpc = null; this.state('error', error.message) }
++  setRoute(route) {
++    const key = value => value ? `${value.connectionId}:${value.profile}` : ''
++    if (key(route) === key(this.route)) return false
++    this.dispose(); this.route = route; return true
++  }
++  async enable(persist = true) {
++    if (!this.route) throw new Error('Select MINA on Main before enabling wake.')
++    this.wanted = true
++    const generation = ++this.generation
++    this.state('arming')
++    try {
++      let connected = this.rpc
++      const rpc = connected || await this.connect(this.route,
++        payload => { if (this.rpc === connected) this.detected(payload) },
++        error => { if (this.rpc === connected) this.lost(error) })
++      connected = rpc
++      if (generation !== this.generation) { if (rpc !== this.rpc) rpc.close(); return }
++      this.rpc = rpc
++      const status = await rpc.request('wake.status', { surface: WAKE_SURFACE, client_capture: true })
++      if (generation !== this.generation) return
++      this.phrase = String(status.phrase || this.phrase)
++      if (status.configured_surface !== WAKE_SURFACE) throw new Error('Native wake must be assigned to the live-voice surface.')
++      if (!persist && !status.enabled) { this.wanted = false; this.state('off'); return }
++      const result = await rpc.request('wake.start', { surface: WAKE_SURFACE, client_capture: true, persist })
++      if (generation !== this.generation) {
++        if (!this.wanted) { try { await rpc.request('wake.stop', { persist: true }) } catch {} }
++        return
++      }
++      if (!result.started) throw new Error(result.hint || `Wake refused: ${result.reason}`)
++      if (result.capture !== 'client') throw new Error('Wake must capture the Mac microphone, not the server microphone.')
++      await this.listen(generation, result.frame_length)
++    } catch (error) {
++      if (generation === this.generation) { this.lost(error); throw error }
++    }
++  }
++  async listen(generation, frameLength) {
++    const mic = await this.capture((...args) => this.rpc.request(...args), frameLength, error => this.lost(error))
++    if (generation !== this.generation || !this.wanted) { mic.stop(); return }
++    this.mic = mic; this.state('listening')
++  }
++  detected(payload) {
++    if (!this.wanted || this.phase !== 'listening') return
++    if (this.probing) {
++      this.probeMatches++
++      void this.rpc.request('wake.resume').catch(error => this.lost(error))
++      return
++    }
++    this.stopMic(); this.state('calling')
++    void Promise.resolve(this.onDetect(payload)).catch(error => this.state('error', error.message))
++  }
++  async pauseForCall({ training = false } = {}) {
++    if (trainingRecorder?.running && !training) throw new Error('Stop the training recording before starting a call.')
++    if (this.probing) throw new Error('Finish the eight-second wake sample before starting a call.')
++    ++this.generation; this.stopMic()
++    if (this.wanted) {
++      if (this.rpc) await this.rpc.request('wake.pause')
++      this.state('calling')
++    }
++  }
++  async sample() {
++    if (this.phase !== 'listening' || !this.mic || this.probing) throw new Error('Turn on wake listening and wait for Listening before sampling.')
++    this.probing = true; this.probeMatches = 0
++    const route = this.route, generation = this.generation, rpc = this.rpc
++    try {
++      const audio = await this.mic.probe()
++      const matches = this.probeMatches
++      if (generation === this.generation && this.wanted) {
++        // Retire the sample transport so queued detections cannot open a call
++        // after the recording window. A fresh lease also resets decoder audio.
++        this.stopMic(); this.rpc = null; this.state('arming')
++        try { await rpc.request('wake.stop') } finally { rpc.close() }
++        if (generation === this.generation && this.wanted) await this.enable(false)
++      }
++      return { ...audio, matches, route }
++    }
++    catch (error) { if (generation === this.generation && this.wanted) this.lost(error); throw error }
++    finally { this.probing = false }
++  }
++  async resumeAfterCall() {
++    if (!this.wanted) return
++    if (!this.rpc) { try { await this.enable(false) } catch {}; return }
++    const generation = ++this.generation
++    try {
++      const status = await this.rpc.request('wake.status', { surface: WAKE_SURFACE, client_capture: true })
++      if (generation !== this.generation) return
++      if (!status.enabled) { this.wanted = false; this.stopMic(); this.state('off'); return }
++      if (!status.owned_by_caller) throw new Error('Another surface owns wake; listening was not resumed.')
++      const result = await this.rpc.request('wake.resume')
++      if (generation !== this.generation) return
++      if (!result.resumed) throw new Error('Wake could not resume; toggle listening to retry.')
++      await this.listen(generation, status.frame_length)
++    } catch (error) { if (generation === this.generation) this.lost(error) }
++  }
++  async disable() {
++    this.wanted = false; ++this.generation; this.stopMic(); this.state('off')
++    const rpc = this.rpc; this.rpc = null
++    if (rpc) { try { await rpc.request('wake.stop', { persist: true }) } finally { rpc.close() } }
++  }
++  dispose() {
++    this.wanted = false; ++this.generation; this.stopMic(); this.rpc?.close(); this.rpc = null; this.state('off')
++  }
++}
++
++class WakeTrainingRecorder {
++  constructor({ route, pause, resume, capture, save, onState, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
++    Object.assign(this, { route, pause, resume, capture, save, onState, sleep })
++    this.running = false; this.generation = 0; this.mic = null
++  }
++  cancel() {
++    if (!this.running) return
++    ++this.generation; this.mic?.stop()
++    this.onState({ phase: 'stopping', message: 'Stopping; saved samples are preserved.' })
++  }
++  async record({ kind, split, count = 10, seconds = 60 }) {
++    if (this.running) throw new Error('A training recording is already running.')
++    if (!['positive', 'negative'].includes(kind) || !['train', 'validation', 'test'].includes(split)
++      || (kind === 'positive' && (!Number.isInteger(count) || count < 1 || count > 10))
++      || (kind === 'negative' && (!Number.isFinite(seconds) || seconds <= 0 || seconds > 60))) throw new Error('Invalid recording batch.')
++    const selected = this.route()
++    if (!selected?.connectionId) throw new Error('Select MINA on Main first.')
++    const route = { ...selected }
++    this.running = true
++    const generation = ++this.generation, batchId = crypto.randomUUID().replace(/-/g, '')
++    const check = () => {
++      const current = this.route()
++      if (generation !== this.generation || current?.connectionId !== route.connectionId || current?.profile !== route.profile) throw new Error('Recording stopped; saved samples are preserved.')
++    }
++    let saved = 0, duration = 0, status = null, paused = false
++    try {
++      this.onState({ phase: 'preparing', message: 'Preparing microphone; wait for the recording cue.' })
++      await this.pause(); paused = true; check()
++      this.mic = await this.capture(error => { this.cancel(); this.onState({ phase: 'error', message: error.message }) })
++      check()
++      this.onState({ phase: 'preparing', message: 'Get ready...' })
++      await this.sleep(1500); check()
++      while (kind === 'positive' ? saved < count : duration < seconds) {
++        this.onState({ phase: 'recording', message: kind === 'positive'
++          ? `Say MINA once now (${saved + 1} of ${count})`
++          : `Speak normally without MINA (${Math.floor(duration)} of ${seconds} seconds saved)`, status })
++        const audio = await this.mic.probe(kind === 'positive' ? 3200 : 8000)
++        check()
++        this.onState({ phase: 'saving', message: 'Saving privately on Main...', status })
++        const result = await this.save(route, { target: 'mina', consent: true,
++          sampleId: crypto.randomUUID().replace(/-/g, ''), batchId, kind, split,
++          pcm: audio.pcm, microphone: audio.microphone, captureRate: audio.captureRate, dropped: audio.dropped })
++        check()
++        if (!result?.saved) throw new Error('Main did not confirm this sample; recording stopped.')
++        status = result.status; saved++; duration += audio.durationMs / 1000
++        this.onState({ phase: 'saved', message: `${saved} samples saved in this batch.`, status })
++        if (kind === 'positive' && saved < count) { await this.sleep(700); check() }
++      }
++      this.onState({ phase: 'done', message: `Batch saved: ${saved} clips.`, status })
++      return status
++    } catch (error) {
++      this.onState({ phase: 'error', message: error.message, status })
++      throw error
++    } finally {
++      this.mic?.stop(); this.mic = null; this.running = false
++      if (paused) await this.resume()
++    }
++  }
++}
++
++// END LOOM NATIVE WAKE
++
++function TrainingSettings({ ctx, blocked = false }) {
++  const selected = useValue(sdk.host.state.focusedSessionOwner)
++  const [consent, setConsent] = useState(false)
++  const [split, setSplit] = useState('train')
++  const [status, setStatus] = useState(null)
++  const [view, setView] = useState({ phase: 'idle', message: '' })
++  const alive = useRef(true)
++  const refresh = async () => {
++    const route = wakeClient?.route
++    if (!route) return
++    try {
++      const result = await ctx.rest(`/wake/training?profile=${encodeURIComponent(route.profile || 'default')}`)
++      if (alive.current && wakeClient.route?.connectionId === route.connectionId && wakeClient.route?.profile === route.profile) setStatus(result)
++    } catch (error) { if (alive.current) setView({ phase: 'error', message: error.message }) }
++  }
++  useEffect(() => {
++    alive.current = true
++    const listener = event => {
++      if (!alive.current) return
++      setView(event.detail)
++      if (event.detail.status) setStatus(event.detail.status)
++    }
++    window.addEventListener('talk-desktop:training', listener)
++    return () => { alive.current = false; trainingRecorder?.cancel(); window.removeEventListener('talk-desktop:training', listener) }
++  }, [])
++  useEffect(() => { setStatus(null); void refresh() }, [selected?.connectionId, selected?.profile])
++  const busy = ['preparing', 'recording', 'saving', 'saved', 'stopping'].includes(view.phase)
++  const record = async kind => {
++    try {
++      if (!consent || blocked || callStarting || bus.live) return
++      const current = status.counts[split], goal = status.goals[split]
++      await trainingRecorder.record({ kind, split,
++        count: Math.min(10, Math.max(0, goal.positive - current.positive)),
++        seconds: Math.min(60, Math.max(0, goal.negativeSeconds - current.negativeSeconds)) })
++    } catch {} finally { if (alive.current) void refresh() }
++  }
++  return jsxs('details', { style: { marginBottom: 12, borderTop: '1px solid var(--ui-border, #555)', paddingTop: 8 }, children: [
++    jsx('summary', { children: 'Train MINA wake word', style: { cursor: 'pointer', fontWeight: 600 } }),
++    jsx('div', { style: { fontSize: 11, marginTop: 6 }, children: 'Recordings are saved privately on Main for local training, not sent to the voice provider.' }),
++    jsxs('label', { style: { display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }, children: [
++      jsx(Switch, { checked: consent, disabled: busy, onCheckedChange: setConsent }),
++      jsx('span', { children: 'Save my training recordings' })
++    ] }),
++    jsxs(Select, { value: split, onValueChange: setSplit, disabled: busy, children: [
++      jsx(SelectTrigger, { style: { marginTop: 8 }, children: jsx(SelectValue, {}) }),
++      jsx(SelectContent, { children: [['train', 'Training'], ['validation', 'Validation'], ['test', 'Final check']].map(([value, label]) => jsx(SelectItem, { value, children: label }, value)) })
++    ] }),
++    status && jsx('div', { style: { fontSize: 11, marginTop: 6 }, children:
++      `MINA samples: ${status.counts[split].positive}/${status.goals[split].positive} | Other speech: ${Math.floor(status.counts[split].negativeSeconds)}/${status.goals[split].negativeSeconds} s` }),
++    jsxs('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }, children: [
++      jsx(Button, { size: 'sm', disabled: busy || blocked || !consent || !status || callStarting || bus.live || status.counts[split].positive >= status.goals[split].positive,
++        onClick: () => record('positive'), children: 'Record 10 MINAs' }),
++      jsx(Button, { size: 'sm', variant: 'secondary', disabled: busy || blocked || !consent || !status || callStarting || bus.live || status.counts[split].negativeSeconds >= status.goals[split].negativeSeconds,
++        onClick: () => record('negative'), children: 'Record other speech' }),
++      busy && jsx(Button, { size: 'sm', variant: 'secondary', onClick: () => trainingRecorder.cancel(), children: 'Stop' })
++    ] }),
++    view.message && jsx('div', { role: 'status', style: { marginTop: 8, fontSize: 12, fontWeight: view.phase === 'recording' ? 600 : 400,
++      color: view.phase === 'error' ? '#dc2626' : 'inherit' }, children: view.message })
++  ] })
++}
++
++function WakeSettings({ ctx }) {
++  const [state, setState] = useState(wakeView)
++  const [diagnostic, setDiagnostic] = useState(null)
++  const [sampling, setSampling] = useState(false)
++  const [sampleStatus, setSampleStatus] = useState('')
++  const alive = useRef(true)
++  useEffect(() => {
++    alive.current = true
++    const listener = event => setState(event.detail)
++    window.addEventListener('talk-desktop:wake', listener)
++    return () => { alive.current = false; window.removeEventListener('talk-desktop:wake', listener) }
++  }, [])
++  const sample = async () => {
++    setSampling(true); setDiagnostic(null); setSampleStatus('Recording for 8 seconds…')
++    try {
++      const audio = await wakeClient.sample()
++      if (!alive.current) return
++      setSampleStatus('Transcribing locally on Main…')
++      const result = await ctx.rest('/wake/transcribe', { method: 'POST',
++        body: { pcm: audio.pcm, profile: audio.route.profile }, timeoutMs: 60000 })
++      if (alive.current) { const { pcm, route, ...metrics } = audio; setDiagnostic({ ...metrics, transcript: result.transcript }); setSampleStatus('') }
++    } catch (error) { if (alive.current) setSampleStatus(error.message) }
++    finally { if (alive.current) setSampling(false) }
++  }
++  return jsxs('div', { style: { marginBottom: 12 }, children: [
++    jsxs('label', { style: { display: 'flex', alignItems: 'center', gap: 8 }, children: [
++      jsx(Switch, { checked: state.enabled, disabled: trainingRecorder?.running || (!state.enabled && (callStarting || bus.live)),
++        onCheckedChange: async enabled => {
++          ctx.storage.set(KEY_WAKE, enabled ? '1' : '0')
++          try { if (enabled) await wakeClient.enable(true); else await wakeClient.disable() }
++          catch (error) { sdk.host.notifyError(error.message, 'MINA wake word') }
++        } }),
++      jsx('span', { children: `Listen for “${state.phrase || 'mina'}”` })
++    ] }),
++    jsx('div', { role: 'status', style: { fontSize: 11, marginTop: 4, color: state.error ? '#dc2626' : 'var(--ui-text-tertiary, #a1a1aa)' }, children:
++      state.error || ({ off: 'Off', arming: 'Arming…', listening: 'Listening on this Mac', calling: 'Paused during the call' }[state.phase] || state.phase) }),
++    jsx(Button, { variant: 'secondary', size: 'sm', disabled: trainingRecorder?.running || sampling || state.phase !== 'listening', onClick: sample,
++      style: { marginTop: 8 }, children: 'Record 8-second wake sample' }),
++    sampleStatus && jsx('div', { role: 'status', style: { fontSize: 11, marginTop: 5 }, children: sampleStatus }),
++    diagnostic && jsxs('div', { style: { fontSize: 11, marginTop: 8, whiteSpace: 'normal', overflowWrap: 'anywhere' }, children: [
++      jsx('div', { children: `Heard (local Whisper): ${diagnostic.transcript || '(no speech recognized)'}` }),
++      jsx('div', { children: `Microphone: ${diagnostic.microphone} · capture: ${diagnostic.captureRate} Hz → 16000 Hz` }),
++      jsx('div', { children: `${(diagnostic.durationMs / 1000).toFixed(1)} s · wake matches: ${diagnostic.matches} · sent: ${diagnostic.sent} · dropped: ${diagnostic.dropped}` }),
++      jsx('div', { children: `Average level: ${(20 * Math.log10(Math.max(1e-6, diagnostic.rms))).toFixed(1)} dBFS · peak: ${(diagnostic.peak * 100).toFixed(1)}%` })
++    ] })
++  ] })
++}
++
+ // A POST to /api/plugins/talk-desktop/* that the dashboard does not route (backend half not
+ // loaded) falls into its GET-only SPA catch-all and comes back as a bare "Method Not Allowed"
+ // (405) or "Not Found" (404). Say what that means instead of leaking the raw status text.
+@@ -50,10 +488,6 @@ const backendHint = (msg) => {
+ // Allowance de VOZ de Codex en desktop: ventana rolling de 5 horas, por plan.
+ // Fuente: learn.chatgpt.com/docs/pricing (Plus ~15-30 min; Pro 5x ~1-2.5 h; Pro 20x ilimitado).
+ const VOICE_CAP_MIN = plan => {
+-  const p = String(plan || '').toLowerCase()
+-  if (p.indexOf('plus') >= 0) return [15, 30]
+-  if (p.indexOf('business') >= 0 || p.indexOf('enterprise') >= 0 || p.indexOf('edu') >= 0) return [45, 45]
+-  if (p.indexOf('pro') >= 0) return [60, 150]
+   return null
+ }
+ const SB = 'var(--popover-surface, #ffffff)'
+@@ -493,8 +927,25 @@ async function mintSession(ctx, profile, voice, allowChat) {
+   return sess
+ }
+ 
+-async function startLive(ctx, { profile, voice, micId, outId, engine, log }) {
++async function startLive(ctx, options) {
++  if (trainingRecorder?.running) throw new Error('Stop the training recording before starting a call.')
++  if (callStarting || bus.live) throw new Error('A Live Voice call is already starting or active.')
++  callStarting = true
++  try {
++    await wakeClient?.pauseForCall()
++    const handle = await startLiveSession(ctx, options)
++    if (pluginDisposed) { handle.close(); throw new Error('Live Voice plugin was unloaded.') }
++    return handle
++  } catch (error) {
++    bus.set({ live: false, stage: 'error', err: String(error.message || error) })
++    void wakeClient?.resumeAfterCall()
++    throw error
++  } finally { callStarting = false }
++}
++
++async function startLiveSession(ctx, { profile, voice, micId, outId, engine, log }) {
+   const eng = engine || 'codex'
++  if (eng !== 'codex') throw new Error('This installation uses GPT-Live with Codex OAuth only; no API-key fallback.')
+   clearTranscript()
+   liveAudioMs = 0
+   bus.set({ err: '', widget: true, stage: 'mint' })
+@@ -614,9 +1065,10 @@ async function startLive(ctx, { profile, voice, micId, outId, engine, log }) {
+   }
+ 
+   log('negociando…')
++  let codexSession = null
++  try {
+   const offer = await pc.createOffer()
+   await pc.setLocalDescription(offer)
+-  let codexSession = null
+   if (eng === 'codex') {
+     const r2 = await ctx.rest('/codexlive/session', {
+       method: 'POST',
+@@ -644,6 +1096,19 @@ async function startLive(ctx, { profile, voice, micId, outId, engine, log }) {
+     }
+     await pc.setRemoteDescription({ type: 'answer', sdp: await res.text() })
+   }
++  } catch (error) {
++    // A refused subscription/SDP must not leave the microphone or meter alive.
++    clearInterval(idleTimer)
++    try { pc.close() } catch {}
++    try { stream.getTracks().forEach(t => t.stop()) } catch {}
++    try { audioEl?.pause() } catch {}
++    try { await audioCtx.close() } catch {}
++    _liveRefs = null
++    if (codexSession?.threadId) {
++      try { await ctx.rest('/codexlive/stop', { method: 'POST', body: { threadId: codexSession.threadId } }) } catch {}
++    }
++    throw error
++  }
+   log('en vivo')
+ 
+   // poll de niveles WebRTC cada 250ms (audioLevel outbound=mic / inbound=bot)
+@@ -737,6 +1202,7 @@ async function startLive(ctx, { profile, voice, micId, outId, engine, log }) {
+     currentBotTurnId = ''
+     _botSpeakingSince = 0
+     bus.set({ live: false, stage: 'idle', micLevel: 0, remoteLevel: 0, widget: false, muted: false })
++    void wakeClient?.resumeAfterCall()
+   }
+   return {
+     close: () => { try { ctl.close && ctl.close() } catch {} },
+@@ -859,6 +1325,7 @@ function _pvPlay(url, outId) {
+ }
+ 
+ async function _pvGenerate(ctx, { engine, voice, profile, micId, outId }) {
++  if (trainingRecorder?.running) throw new Error('Stop the training recording before testing voices.')
+   const eng = engine || 'codex'
+   const sc = { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+   if (micId) sc.deviceId = { exact: micId }
+@@ -962,7 +1429,7 @@ function ConfigForm({ ctx, dense = false }) {
+   const [micId, setMicId] = useState(() => ctx.storage.get(KEY_MIC) || '')
+   const [outId, setOutId] = useState(() => ctx.storage.get(KEY_OUT) || '')
+   const [chatWork, setChatWork] = useState(() => (ctx.storage.get(KEY_CHAT) || '1') !== '0')
+-  const [engine, setEngine] = useState(() => ctx.storage.get(KEY_ENGINE) || 'codex')
++  const [engine, setEngine] = useState(() => 'codex')
+   const [micTest, setMicTest] = useState({ on: false, err: '' })
+   const [pvVoice, setPvVoice] = useState({ state: 'idle', voice: '' })
+   const micBarRef = useRef(null)
+@@ -988,6 +1455,7 @@ function ConfigForm({ ctx, dense = false }) {
+   useEffect(() => { ctx.storage.set(KEY_CHAT, chatWork ? '1' : '0') }, [chatWork])
+   useEffect(() => { ctx.storage.set(KEY_ENGINE, engine) }, [engine])
+   const runPreview = async () => {
++    if (trainingRecorder?.running) { sdk.host.notifyError('Stop the training recording before testing voices.', 'Live Voice'); return }
+     if (bus.live) { try { sdk.host && sdk.host.notifyError && sdk.host.notifyError(tr('Colgá la llamada activa antes de probar voces.', 'Hang up the active call before testing voices.'), 'Live Voice') } catch {} return }
+     if (pvVoice.state === 'load') return
+     const eng = engine || 'codex'
+@@ -1033,6 +1501,10 @@ function ConfigForm({ ctx, dense = false }) {
+   }
+   const toggleMicTest = async () => {
+     if (micTest.on) { stopMicTest(); return }
++    if (trainingRecorder?.running || wakeClient?.wanted || bus.live || callStarting) {
++      sdk.host.notifyError('Turn off wake listening and end the call before testing the microphone.', 'Live Voice')
++      return
++    }
+     setMicTest({ on: true, err: '' })
+     try {
+       const stream = await navigator.mediaDevices.getUserMedia({ audio: micId ? { deviceId: { exact: micId } } : true })
+@@ -1064,7 +1536,7 @@ function ConfigForm({ ctx, dense = false }) {
+     }
+   }
+ 
+-  return jsxs('div', { style: { display: 'flex', flexDirection: 'column', width: '100%' }, children: [
++  return jsxs('div', { style: { display: 'flex', flexDirection: 'column', width: '100%', maxHeight: 'min(85vh, 900px)', overflowY: 'auto', overscrollBehavior: 'contain' }, children: [
+     jsxs('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }, children: [
+       jsx('div', { style: { fontSize: 13, fontWeight: 700, color: 'var(--foreground, #18181b)' }, children: 'Live Voice' }),
+       info && jsx('div', {
+@@ -1093,8 +1565,7 @@ function ConfigForm({ ctx, dense = false }) {
+       jsxs(Select, { value: engine, onValueChange: setEngine, children: [
+         jsx(SelectTrigger, { style: trigStyle, children: jsx(SelectValue, { style: valStyle }) }),
+         jsxs(SelectContent, { children: [
+-          jsx(SelectItem, { value: 'codex', children: opt('Codex Live-1 (gpt-live-1)') }),
+-          jsx(SelectItem, { value: 'hermes', children: opt('Hermes (gpt-realtime-2.1)') })
++          jsx(SelectItem, { value: 'codex', children: opt('GPT-Live (Codex OAuth)') })
+         ] })
+       ] }),
+       jsx('div', { style: { fontSize: 10, color: 'var(--ui-text-tertiary, #a1a1aa)', marginTop: -2, marginBottom: 2 }, children: engine === 'codex'
+@@ -1125,6 +1596,8 @@ function ConfigForm({ ctx, dense = false }) {
+         jsx('div', { style: { fontSize: 10, color: 'var(--ui-text-tertiary, #a1a1aa)' }, children: tr('Las tareas se ejecutan en el chat abierto, con sus tools y su modelo (tu config de Hermes). La voz no ejecuta nada por su cuenta.', 'Tasks run in the open chat with its tools and model (your Hermes config). The voice never runs anything on its own.') }),
+       ] })
+     ] }),
++    jsx(WakeSettings, { ctx }),
++    jsx(TrainingSettings, { ctx, blocked: micTest.on || pvVoice.state === 'load' || pvVoice.state === 'play' }),
+     jsx('div', { style: { ...label, marginTop: 6, marginBottom: 6, borderTop: '1px solid var(--ui-stroke-secondary, rgba(127,127,127,0.25))', paddingTop: 8 }, children: tr('Audio', 'Audio') }),
+     jsxs('div', { style: field, children: [
+       jsx('div', { style: label, children: tr('Micrófono', 'Microphone') }),
+@@ -1355,7 +1828,7 @@ function CodexSection({ ctx }) {
+         ] }, 'ux-' + label)
+       })
+     ] }),
+-    jsxs('div', { style: { display: 'flex', gap: 6 }, children: [
++    st?.managedAuth ? jsx('div', { style: { fontSize: 11, color: 'var(--ui-text-tertiary, #71717a)' }, children: tr('OAuth administrado por el inicio de sesión nativo existente.', 'OAuth managed by the existing native login.') }) : jsxs('div', { style: { display: 'flex', gap: 6 }, children: [
+           pending ? cbtn(tr('Reiniciar', 'Restart'), start) : cbtn(active ? tr('Reiniciar sesión', 'Restart sign-in') : tr('Iniciar sesión', 'Sign in'), start),
+           pending ? cbtn(tr('Cancelar', 'Cancel'), cancel, 'danger') : (active ? cbtn(tr('Cerrar sesión', 'Sign out'), logout, 'danger') : null)
+         ] })
+@@ -1507,7 +1980,7 @@ function ComposerLiveButton({ ctx }) {
+     if (busy || bus.live) return
+     try { window.__talkLiveHandle?.close() } catch {}
+     const effProfile = profile === '__host' ? '' : (profile || autoBot())
+-    const eng = ctx.storage.get(KEY_ENGINE) || 'codex'
++    const eng = 'codex'
+     const vv = effVoiceFor(eng, ctx.storage.get(KEY_VOICE) || '')
+     setBusy(true)
+     try {
+@@ -1516,10 +1989,7 @@ function ComposerLiveButton({ ctx }) {
+       let m = backendHint(String(e?.message || e))
+       if (m.indexOf('LIVE_SIN_QUOTA') >= 0) {
+         m = m.replace('LIVE_SIN_QUOTA: ', '')
+-        try {
+-          ctx.storage.set(KEY_ENGINE, 'realtime')
+-          pushTranscript('sys', tr('Plan semanal sin quota: motor cambiado a gpt-realtime-2.1 — prueba de nuevo.', 'Weekly plan out of quota: engine switched to gpt-realtime-2.1 — try again.'))
+-        } catch {}
++        pushTranscript('sys', tr('Cuota no disponible. No se cambió de motor.', 'Subscription quota unavailable. No engine or billing fallback was enabled.'))
+       }
+       if (m.indexOf('LIVE_HANDOFF_NO_SOPORTADO') >= 0) {
+         m = tr('Este Codex no soporta delegar en tu chat (clientManagedHandoffs): actualiza Codex, usa delegation=server o el motor gpt-realtime.', 'This Codex does not support delegating to your chat (clientManagedHandoffs): update Codex, use delegation=server or the gpt-realtime engine.')
+@@ -1752,6 +2222,45 @@ export default {
+   id: 'talk-desktop',
+   name: 'Live Voice',
+   register(ctx) {
++    pluginDisposed = false
++    wakeClient = new NativeWakeClient({
++      connect: openWakeRpc,
++      capture: (...args) => captureWakePcm(...args, ctx.storage.get(KEY_MIC) || ''),
++      onState: state => { wakeView = state; window.dispatchEvent(new CustomEvent('talk-desktop:wake', { detail: state })) },
++      onDetect: async () => {
++        if (callStarting || bus.live) return
++        const route = wakeClient.route
++        if (!route) throw new Error('Wake agent is no longer selected.')
++        window.__talkLiveHandle = await startLive(ctx, {
++          profile: route.profile === 'default' ? '' : route.profile,
++          voice: effVoiceFor('codex', ctx.storage.get(KEY_VOICE)),
++          micId: ctx.storage.get(KEY_MIC) || '', outId: ctx.storage.get(KEY_OUT) || '',
++          engine: 'codex', log: () => {}
++        })
++      }
++    })
++    trainingRecorder = new WakeTrainingRecorder({
++      route: () => wakeClient.route,
++      pause: () => wakeClient.pauseForCall({ training: true }),
++      resume: () => wakeClient.resumeAfterCall(),
++      capture: onError => captureWakePcm(null, 1280, onError, ctx.storage.get(KEY_MIC) || '', { feed: false }),
++      save: (route, body) => ctx.rest('/wake/training/samples', { method: 'POST', body: { ...body, profile: route.profile || 'default' }, timeoutMs: 30000 }),
++      onState: state => window.dispatchEvent(new CustomEvent('talk-desktop:training', { detail: state }))
++    })
++    const owner = sdk.host.state.focusedSessionOwner
++    if (owner?.subscribe) ctx.onDispose(owner.subscribe(route => {
++      if (!wakeClient.setRoute(route?.connectionId ? route : null)) return
++      trainingRecorder.cancel()
++      if (route?.connectionId && !trainingRecorder.running && ctx.storage.get(KEY_WAKE) === '1' && !bus.live && !callStarting) {
++        void wakeClient.enable(false).catch(() => {})
++      }
++    }))
++    ctx.onDispose(() => {
++      pluginDisposed = true
++      trainingRecorder.cancel()
++      wakeClient.dispose()
++      try { window.__talkLiveHandle?.close() } catch {}
++    })
+     ctx.register({
+       id: 'composer-live',
+       area: 'composer.leading',
+diff --git a/language_directive.txt b/language_directive.txt
+index 76dd236..a63ce15 100644
+--- a/language_directive.txt
++++ b/language_directive.txt
+@@ -1,3 +1 @@
+-IDIOMA Y VOZ: Habla en el idioma en que te habla el usuario — si te habla en español, responde en español natural de Chile; si te habla en inglés, en inglés. Nunca mezcles idiomas ni respondas en inglés cuando te hablan en español. Tu voz debe sonar como la de un hablante nativo del idioma que estés usando.
+-
+-LANGUAGE AND VOICE: Speak the language the user speaks to you — if they speak Spanish, reply in natural Chilean Spanish; if they speak English, reply in English. Never mix languages or reply in English when the user speaks Spanish. Your voice should sound like a native speaker of the language you are using.
++LANGUAGE AND VOICE: Follow the user's language and the selected agent's own personality and preferences. Do not impose a regional dialect or a different identity. Speak naturally and clearly.
+diff --git a/tests/test_loom_compat.py b/tests/test_loom_compat.py
+new file mode 100644
+index 0000000..be9450b
+--- /dev/null
++++ b/tests/test_loom_compat.py
+@@ -0,0 +1,132 @@
++"""Focused LOOM custom-home and subscription-only regressions."""
++
++import asyncio
++import re
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++
++from test_plugin_api import PLUGIN_API, load_unit
++
++
++def test_default_and_named_profiles_use_native_root(tmp_path):
++    root = tmp_path / "custom-hermes"
++    reader = root / "profiles" / "reader"
++    reader.mkdir(parents=True)
++    (reader / "SOUL.md").write_text("# Reader\n")
++    resolve = lambda name: root if name == "default" else root / "profiles" / name
++    ns = load_unit(PLUGIN_API, "_profile_home")
++    ns.update(re=re, _profile_path=resolve)
++    assert ns["_profile_home"]("default") == root.resolve()
++    assert ns["_profile_home"]("reader") == reader.resolve()
++    assert ns["_profile_home"]("missing") is None
++    assert ns["_profile_home"]("../reader") is None
++    bots = load_unit(PLUGIN_API, "_list_bots")
++    bots.update(_profile_path=resolve)
++    assert bots["_list_bots"]() == ["reader"]
++
++
++def test_host_name_uses_default_personality_when_agent_name_is_unset(tmp_path):
++    (tmp_path / "config.yaml").write_text("model:\n  default: example\n")
++    ns = load_unit(PLUGIN_API, "_host_bot_name")
++    ns.update(talk_config=SimpleNamespace(get_hermes_home=lambda: tmp_path),
++              _bot_display_name=lambda profile: "MINA")
++    assert ns["_host_bot_name"]() == "MINA"
++
++
++@pytest.mark.parametrize("name,code,guard", [
++    ("create_session", 403, "_subscription_only"),
++    ("codex_login_start", 409, "_managed_auth"),
++    ("codex_login_cancel", 409, "_managed_auth"),
++])
++def test_managed_mode_refuses_before_credentials_or_network(name, code, guard):
++    class Refused(Exception):
++        def __init__(self, status_code, detail):
++            self.status_code = status_code
++
++    ns = load_unit(PLUGIN_API, name)
++    ns.update({guard: lambda: True, "HTTPException": Refused})
++    with pytest.raises(Refused) as error:
++        asyncio.run(ns[name](SimpleNamespace()) if name == "create_session" else ns[name]())
++    assert error.value.status_code == code
++
++
++def test_desktop_has_no_quota_fallback():
++    source = (PLUGIN_API.parent.parent / "desktop/plugin.js").read_text()
++    assert "ctx.storage.set(KEY_ENGINE, 'realtime')" not in source
++    assert "value: 'hermes', children: opt" not in source
++    assert "if (eng !== 'codex') throw new Error" in source
++
++
++@pytest.mark.parametrize("encoded", [None, "", "!", "AA==", "A" * 426669])
++def test_wake_sample_rejects_invalid_or_oversized_pcm_before_transcription(encoded):
++    ns = load_unit(PLUGIN_API, "_transcribe_wake_sample")
++    ns["Path"] = Path
++    with pytest.raises(ValueError):
++        ns["_transcribe_wake_sample"](encoded)
++
++
++def test_wake_sample_uses_local_only_and_removes_its_temporary_wav(monkeypatch):
++    import base64
++    import sys
++    import wave
++
++    paths = []
++    def local_only(path):
++        paths.append(Path(path))
++        with wave.open(path) as audio:
++            assert (audio.getnchannels(), audio.getsampwidth(), audio.getframerate()) == (1, 2, 16000)
++            assert audio.readframes(2) == b"\x01\x00\x02\x00"
++        return {"success": True, "transcript": "Hey Mina", "provider": "local"}
++
++    monkeypatch.setitem(sys.modules, "tools.transcription_tools", SimpleNamespace(transcribe_audio_local_fallback=local_only))
++    ns = load_unit(PLUGIN_API, "_transcribe_wake_sample")
++    ns["Path"] = Path
++    result = ns["_transcribe_wake_sample"](base64.b64encode(b"\x01\x00\x02\x00").decode())
++    assert result == {"ok": True, "provider": "local", "transcript": "Hey Mina"}
++    assert len(paths) == 1 and not paths[0].exists() and not paths[0].parent.exists()
++
++
++def training_unit(tmp_path):
++    import os
++    import sys
++    import threading
++    ns = load_unit(PLUGIN_API, "_save_wake_training_sample")
++    ns.update(Path=Path, re=re, json=__import__("json"), os=os, sys=sys,
++              _TRAINING_LOCK=threading.Lock(), _wake_training_root=lambda _: tmp_path / "training")
++    status = load_unit(PLUGIN_API, "_wake_training_status")
++    status.update(json=__import__("json"), _wake_training_root=ns["_wake_training_root"])
++    ns["_wake_training_status"] = status["_wake_training_status"]
++    return ns
++
++
++def test_training_saved_privately_and_replayed_without_duplicate(tmp_path):
++    import base64
++    import math
++    import struct
++    import wave
++    ns = training_unit(tmp_path)
++    pcm = b"".join(struct.pack("<h", int(3000 * math.sin(i / 7))) for i in range(48000))
++    body = {"consent": True, "target": "mina", "sampleId": "a" * 32, "batchId": "b" * 32,
++            "kind": "positive", "split": "validation", "microphone": "Test microphone",
++            "captureRate": 48000, "dropped": 0, "pcm": base64.b64encode(pcm).decode()}
++    first = ns["_save_wake_training_sample"]("default", body)
++    second = ns["_save_wake_training_sample"]("default", body)
++    assert first["status"]["counts"]["validation"]["positive"] == 1
++    assert second["status"]["counts"]["validation"]["positive"] == 1
++    root = tmp_path / "training"
++    assert root.stat().st_mode & 0o777 == 0o700
++    assert (root / body["sampleId"] / "audio.wav").stat().st_mode & 0o777 == 0o600
++    with wave.open(str(root / body["sampleId"] / "audio.wav")) as audio:
++        assert audio.getframerate() == 16000 and audio.readframes(48000) == pcm
++    body["split"] = "train"
++    with pytest.raises(ValueError, match="different data"):
++        ns["_save_wake_training_sample"]("default", body)
++
++
++def test_training_requires_opt_in_and_lossless_audio(tmp_path):
++    ns = training_unit(tmp_path)
++    with pytest.raises(ValueError, match="consent"):
++        ns["_save_wake_training_sample"]("default", {})
++    assert not (tmp_path / "training").exists()
+diff --git a/tests/test_loom_training.mjs b/tests/test_loom_training.mjs
+new file mode 100644
+index 0000000..75ab13f
+--- /dev/null
++++ b/tests/test_loom_training.mjs
+@@ -0,0 +1,69 @@
++import assert from 'node:assert/strict'
++import { readFileSync } from 'node:fs'
++import { webcrypto } from 'node:crypto'
++import vm from 'node:vm'
++import { test } from 'node:test'
++
++const source = readFileSync(new URL('../desktop/plugin.js', import.meta.url), 'utf8')
++const section = source.slice(source.indexOf('class WakeTrainingRecorder'), source.indexOf('// END LOOM NATIVE WAKE'))
++const context = { crypto: webcrypto, setTimeout }
++vm.createContext(context)
++vm.runInContext(`${section}; this.Recorder = WakeTrainingRecorder`, context)
++
++function fixture(overrides = {}) {
++  const calls = [], states = [], samples = []
++  const route = { connectionId: 'main', profile: 'default' }
++  const mic = { stop() { calls.push('stop') }, async probe() {
++    return { pcm: 'private-audio', microphone: 'Actual microphone', captureRate: 48000, dropped: 0, durationMs: 3120 }
++  } }
++  const recorder = new context.Recorder({ route: () => route,
++    pause: async () => calls.push('pause'), resume: async () => calls.push('resume'),
++    capture: async () => mic, sleep: async () => {},
++    save: async (r, body) => { samples.push(body); return { saved: true, status: { count: samples.length } } },
++    onState: state => states.push(state), ...overrides })
++  return { recorder, calls, states, samples, mic, route }
++}
++
++test('one batch preserves explicit consent, split, microphone and immutable sample identities', async () => {
++  const f = fixture()
++  await f.recorder.record({ kind: 'positive', split: 'validation', count: 2 })
++  assert.deepEqual(f.calls, ['pause', 'stop', 'resume'])
++  assert.equal(f.samples.length, 2)
++  assert.equal(f.samples[0].batchId, f.samples[1].batchId)
++  assert.notEqual(f.samples[0].sampleId, f.samples[1].sampleId)
++  assert.equal(f.samples[0].consent, true)
++  assert.equal(f.samples[0].split, 'validation')
++  assert.equal(f.samples[0].microphone, 'Actual microphone')
++  assert.equal(f.recorder.running, false)
++})
++
++test('cancel stops capture and preserves previously saved clips without another upload', async () => {
++  const f = fixture()
++  let n = 0
++  f.mic.probe = async () => {
++    if (++n === 2) f.recorder.cancel()
++    return { pcm: 'private', microphone: 'Mic', captureRate: 48000, dropped: 0, durationMs: 3120 }
++  }
++  await assert.rejects(f.recorder.record({ kind: 'positive', split: 'train', count: 3 }), /stopped/)
++  assert.equal(f.samples.length, 1)
++  assert.equal(f.recorder.running, false)
++  assert.equal(f.calls.at(-1), 'resume')
++})
++
++test('route changes and unconfirmed saves end collection rather than sending another clip', async () => {
++  const f = fixture()
++  f.mic.probe = async () => { f.route.profile = 'other'; return {} }
++  await assert.rejects(f.recorder.record({ kind: 'positive', split: 'train', count: 2 }), /stopped/)
++  assert.equal(f.samples.length, 0)
++  const g = fixture({ save: async () => ({ saved: false }) })
++  await assert.rejects(g.recorder.record({ kind: 'positive', split: 'train', count: 2 }), /did not confirm/)
++  assert.equal(g.calls.at(-1), 'resume')
++})
++
++test('finishing the other quota does not prevent this kind of recording', async () => {
++  const f = fixture()
++  await f.recorder.record({ kind: 'negative', split: 'train', count: 0, seconds: 3 })
++  assert.equal(f.samples.length, 1)
++  await f.recorder.record({ kind: 'positive', split: 'train', count: 1, seconds: 0 })
++  assert.equal(f.samples.length, 2)
++})
+diff --git a/tests/test_loom_wake.mjs b/tests/test_loom_wake.mjs
+new file mode 100644
+index 0000000..a80b0fb
+--- /dev/null
++++ b/tests/test_loom_wake.mjs
+@@ -0,0 +1,202 @@
++import assert from 'node:assert/strict'
++import { readFileSync } from 'node:fs'
++import { test } from 'node:test'
++import vm from 'node:vm'
++
++const source = readFileSync(new URL('../desktop/plugin.js', import.meta.url), 'utf8')
++const section = source.slice(source.indexOf("const KEY_WAKE ="), source.indexOf('// END LOOM NATIVE WAKE'))
++const context = { setTimeout, clearTimeout, setInterval, clearInterval, sdk: {} }
++vm.createContext(context)
++vm.runInContext(`${section}\nthis.Client = NativeWakeClient; this.openRpc = openWakeRpc; this.capture = captureWakePcm`, context)
++
++const defer = () => { let resolve; const promise = new Promise(r => { resolve = r }); return { promise, resolve } }
++function fixture(overrides = {}) {
++  const calls = [], states = [], microphones = []
++  const config = { enabled: true, configured_surface: 'live-voice', owned_by_caller: true, frame_length: 1280 }
++  const rpc = {
++    async request(method, params) {
++      calls.push([method, params])
++      if (method === 'wake.status') return { ...config }
++      if (method === 'wake.start') return { started: true, capture: 'client', frame_length: 1280 }
++      if (method === 'wake.resume') return { resumed: true }
++      return {}
++    },
++    close() { calls.push(['close']) }
++  }
++  const client = new context.Client({
++    connect: async () => rpc,
++    capture: async () => { const mic = { stopped: false, stop() { this.stopped = true } }; microphones.push(mic); return mic },
++    onState: state => states.push(state), onDetect: () => {}, ...overrides
++  })
++  client.setRoute({ connectionId: 'main', profile: 'default' })
++  return { client, calls, states, microphones, config, rpc }
++}
++
++test('wake stops the listening mic before starting one call, then re-arms after hang-up', async () => {
++  const f = fixture()
++  let detected = 0
++  f.client.onDetect = () => { assert.equal(f.microphones[0].stopped, true); detected++ }
++  await f.client.enable()
++  assert.equal(f.client.phase, 'listening')
++  f.client.detected({}); f.client.detected({})
++  assert.equal(detected, 1)
++  await f.client.pauseForCall()
++  await f.client.resumeAfterCall()
++  assert.equal(f.client.phase, 'listening')
++  assert.equal(f.microphones.length, 2)
++  f.client.dispose()
++})
++
++test('a deliberate off during microphone acquisition wins', async () => {
++  const pending = defer()
++  const mic = { stopped: false, stop() { this.stopped = true } }
++  const f = fixture({ capture: () => pending.promise })
++  const arming = f.client.enable()
++  await new Promise(resolve => setImmediate(resolve))
++  await f.client.disable()
++  pending.resolve(mic); await arming
++  assert.equal(mic.stopped, true)
++  assert.equal(f.client.phase, 'off')
++  assert.equal(f.client.wanted, false)
++  assert.equal(f.calls.some(([m, p]) => m === 'wake.stop' && p.persist), true)
++})
++
++test('off during connection establishment closes the stale connection without capture', async () => {
++  const pending = defer()
++  const f = fixture({ connect: () => pending.promise })
++  const arming = f.client.enable()
++  await f.client.disable()
++  pending.resolve(f.rpc); await arming
++  assert.equal(f.microphones.length, 0)
++  assert.equal(f.calls.at(-1)[0], 'close')
++})
++
++test('native config off prevents resume and is not overwritten', async () => {
++  const f = fixture()
++  await f.client.enable(); await f.client.pauseForCall()
++  f.config.enabled = false
++  await f.client.resumeAfterCall()
++  assert.equal(f.client.phase, 'off')
++  assert.equal(f.microphones.length, 1)
++  assert.equal(f.calls.some(([m]) => m === 'wake.resume'), false)
++  f.client.dispose()
++})
++
++test('the listening label follows the configured keyword rather than a hard-coded greeting', async () => {
++  const f = fixture()
++  f.config.phrase = 'mina'
++  await f.client.enable()
++  assert.equal(f.states.at(-1).phrase, 'mina')
++  await f.client.disable()
++  f.config.phrase = 'different phrase'
++  await f.client.enable()
++  assert.equal(f.states.at(-1).phrase, 'different phrase')
++  f.client.dispose()
++})
++
++test('another owner is not stolen; the wrong surface never opens a mic', async () => {
++  const f = fixture()
++  f.config.configured_surface = 'gui'
++  await assert.rejects(f.client.enable(), /live-voice surface/)
++  assert.equal(f.microphones.length, 0)
++  f.client.dispose()
++  const g = fixture()
++  await g.client.enable(); await g.client.pauseForCall()
++  g.config.owned_by_caller = false
++  await g.client.resumeAfterCall()
++  assert.equal(g.client.phase, 'error')
++  assert.equal(g.microphones.length, 1)
++  assert.equal(g.calls.some(([m]) => m === 'wake.resume'), false)
++})
++
++test('unchanged owner does not restart capture; route change and loss release it', async () => {
++  const f = fixture()
++  await f.client.enable()
++  assert.equal(f.client.setRoute({ connectionId: 'main', profile: 'default' }), false)
++  assert.equal(f.microphones[0].stopped, false)
++  f.client.setRoute({ connectionId: 'main', profile: 'reader' })
++  assert.equal(f.microphones[0].stopped, true)
++  await f.client.enable()
++  f.client.lost(new Error('offline'))
++  assert.equal(f.microphones[1].stopped, true)
++  assert.equal(f.client.phase, 'error')
++})
++
++test('diagnostic counts wake matches without starting calls or a second microphone', async () => {
++  const f = fixture(), pending = defer()
++  let calls = 0
++  f.client.onDetect = () => { calls++ }
++  await f.client.enable()
++  f.microphones[0].probe = () => pending.promise
++  const sample = f.client.sample()
++  f.client.detected({}); f.client.detected({})
++  await assert.rejects(f.client.pauseForCall(), /Finish the eight-second/)
++  assert.equal(f.microphones[0].stopped, false)
++  assert.equal(f.calls.filter(([method]) => method === 'wake.resume').length, 2)
++  pending.resolve({ pcm: 'sample', dropped: 0 })
++  assert.equal((await sample).matches, 2)
++  assert.equal(f.client.probing, false)
++  assert.equal(f.microphones[0].stopped, true)
++  assert.equal(f.client.phase, 'listening')
++  assert.equal(calls, 0)
++  f.client.dispose()
++})
++
++test('one audio callback sends all burst frames, with later frames ordered behind the acknowledgement', async () => {
++  const requests = [], completions = []
++  const node = () => ({ connect() {}, disconnect() {} })
++  const track = { readyState: 'live', label: 'Test mic', addEventListener() {}, stop() {} }
++  context.navigator = { mediaDevices: { getUserMedia: async () => ({ getTracks: () => [track], getAudioTracks: () => [track] }) } }
++  context.AudioContext = class {
++    constructor() { this.sampleRate = 16000; this.destination = {}; context.audioContext = this }
++    async resume() {}
++    async close() {}
++    createMediaStreamSource() { return node() }
++    createScriptProcessor() { this.processor = node(); return this.processor }
++    createGain() { return { ...node(), gain: { value: 0 } } }
++  }
++  context.btoa = binary => Buffer.from(binary, 'binary').toString('base64')
++  const handle = await context.capture((method, params) => {
++    requests.push(Buffer.from(params.pcm, 'base64'))
++    const pending = defer(); completions.push(pending); return pending.promise
++  }, 1280, error => { throw error })
++  const emit = value => context.audioContext.processor.onaudioprocess({ inputBuffer: { getChannelData: () => new Float32Array(3840).fill(value) } })
++  emit(0.25)
++  assert.equal(requests.length, 1)
++  assert.equal(requests[0].length, 3 * 1280 * 2)
++  emit(0.5)
++  assert.equal(requests.length, 1)
++  completions[0].resolve({ fed: true })
++  await new Promise(resolve => setImmediate(resolve))
++  assert.equal(requests.length, 2)
++  assert.equal(requests[1].length, 3 * 1280 * 2)
++  assert.equal(requests[0].readInt16LE(0), 8191)
++  assert.equal(requests[1].readInt16LE(0), 16383)
++  handle.stop(); completions[1].resolve({ fed: true })
++})
++
++test('wake uses the routed native socket, not the main Desktop event stream', async () => {
++  class Socket extends EventTarget {
++    static OPEN = 1
++    constructor(url) { super(); this.url = url; this.readyState = 1; Socket.current = this; queueMicrotask(() => this.dispatchEvent(new Event('open'))) }
++    send(text) { this.sent = JSON.parse(text) }
++    close() { this.readyState = 3; this.dispatchEvent(new Event('close')) }
++    receive(frame) { const event = new Event('message'); event.data = JSON.stringify(frame); this.dispatchEvent(event) }
++  }
++  context.WebSocket = Socket
++  let routeSeen, wakes = 0, losses = 0
++  context.sdk.resolveSiblingWsUrl = async (route, path) => { routeSeen = { ...route, path }; return 'wss://main.invalid/api/ws?ticket=private' }
++  const rpc = await context.openRpc({ connectionId: 'main', profile: 'default' }, () => wakes++, () => losses++)
++  assert.equal(routeSeen.connectionId, 'main')
++  assert.equal(routeSeen.path, '/api/ws')
++  const result = rpc.request('wake.status', { surface: 'live-voice' })
++  const socket = Socket.current
++  socket.receive({ jsonrpc: '2.0', id: socket.sent.id, result: { enabled: false } })
++  assert.equal((await result).enabled, false)
++  socket.receive({ jsonrpc: '2.0', method: 'event', params: { type: 'wake.detected', payload: {} } })
++  assert.equal(wakes, 1)
++  const pending = rpc.request('wake.status')
++  rpc.close()
++  await assert.rejects(pending, /closed/)
++  assert.equal(losses, 0)
++})
+diff --git a/tests/test_plugin_api.py b/tests/test_plugin_api.py
+index 4cc6ec1..4d568c8 100644
+--- a/tests/test_plugin_api.py
++++ b/tests/test_plugin_api.py
+@@ -42,7 +42,8 @@ def load_unit(path: Path, name: str) -> dict:
+         type_ignores=[],
+     )
+     ast.fix_missing_locations(unit)
+-    ns: dict = {"asyncio": asyncio, "time": time, "json": json}
++    ns: dict = {"asyncio": asyncio, "time": time, "json": json,
++                "_subscription_only": lambda: False, "_managed_auth": lambda: False}
+     exec(compile(unit, str(path), "exec"), ns)
+     return ns
+ 
+@@ -362,7 +363,8 @@ def test_codex_thread_recovery_keeps_session_language():
+ def test_host_bot_name_reads_agent_name_and_falls_back_to_hermes(tmp_path):
+     """Without a profile the voice session must not ship a hardcoded personal name."""
+     ns = load_unit(PLUGIN_API, "_host_bot_name")
+-    ns.update(talk_config=SimpleNamespace(get_hermes_home=lambda: tmp_path))
++    ns.update(talk_config=SimpleNamespace(get_hermes_home=lambda: tmp_path),
++              _bot_display_name=lambda profile: "Default")
+     assert ns["_host_bot_name"]() == "Hermes"
+     (tmp_path / "config.yaml").write_text("agent:\n  name: Atlas\n", encoding="utf-8")
+     assert ns["_host_bot_name"]() == "Atlas"

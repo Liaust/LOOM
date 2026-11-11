@@ -219,6 +219,7 @@ func newScheduleCommand(opts *options) *cobra.Command {
 	addScheduleStatusCommand(cmd, opts, "pause")
 	addScheduleStatusCommand(cmd, opts, "resume")
 	addScheduleStatusCommand(cmd, opts, "disable")
+	cmd.AddCommand(newScheduleTimingCommand(opts))
 
 	fireOpts := struct {
 		reason         string
@@ -826,6 +827,8 @@ func newDirectEventEndpointsCommand(opts *options) *cobra.Command {
 	cmd := &cobra.Command{Use: "endpoints", Short: "Manage direct-event endpoints"}
 	createOpts := struct {
 		automation.CreateDirectEventEndpointInput
+		hermesProfile       string
+		internalEvents      []string
 		mapFlags            []string
 		requiredFields      []string
 		authProfileRefs     []string
@@ -876,6 +879,14 @@ func newDirectEventEndpointsCommand(opts *options) *cobra.Command {
 				}
 				input.TimeoutSeconds = seconds
 			}
+			if createOpts.hermesProfile != "" || len(createOpts.internalEvents) > 0 {
+				if len(createOpts.mapFlags) != 0 || input.TargetCapability != "" {
+					return renderError(cmd, opts, correlationID, fmt.Errorf("internal Hermes events use their fixed mapping and target"))
+				}
+				if err := automation.ConfigureHermesEvents(&input, createOpts.hermesProfile, createOpts.internalEvents); err != nil {
+					return renderError(cmd, opts, correlationID, err)
+				}
+			}
 			client, _ = withEffectIdempotency(client, createOpts.idempotencyKey, "direct_event.endpoints.create."+input.EndpointSlug)
 			envelope, err := client.CreateDirectEventEndpoint(ctx, correlationID, input)
 			if err != nil {
@@ -909,6 +920,8 @@ func newDirectEventEndpointsCommand(opts *options) *cobra.Command {
 	createCmd.Flags().StringVar(&createOpts.syncWaitTimeout, "sync-wait-timeout", "", "HTTP sync-wait response timeout duration")
 	createCmd.Flags().IntVar(&createOpts.MaxAttempts, "max-attempts", 1, "maximum dispatch attempts")
 	createCmd.Flags().StringVar(&createOpts.idempotencyStrategy, "idempotency-strategy", automation.DirectEventIdempotencyNone, "event idempotency strategy")
+	createCmd.Flags().StringVar(&createOpts.hermesProfile, "hermes-profile", "", "native profile for internal project job notifications")
+	createCmd.Flags().StringArrayVar(&createOpts.internalEvents, "internal-event", nil, "opt-in job.failed or job.timed_out (repeatable); no HTTP ingress")
 	createCmd.Flags().StringVar(&createOpts.idempotencyPath, "idempotency-path", "", "payload path for payload_path idempotency")
 	createCmd.Flags().StringVar(&createOpts.idempotencyHeader, "idempotency-header", "", "header name for header idempotency")
 	createCmd.Flags().StringVar(&createOpts.idempotencyKey, "idempotency-key", "", "retry key for this effectful request")
@@ -1310,11 +1323,58 @@ func renderScheduleDetail(cmd *cobra.Command, detail automation.ScheduleDetail) 
 	if detail.DryRun {
 		fmt.Fprintln(cmd.OutOrStdout(), "Preview only: no schedule created or activated.")
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Schedule: %s (%s)\n", schedule.ScheduleKey, schedule.ScheduleID)
-	fmt.Fprintf(cmd.OutOrStdout(), "Status: %s\n", schedule.Status)
-	fmt.Fprintf(cmd.OutOrStdout(), "Kind: %s %s\nTimezone: %s\n", schedule.ScheduleKind, schedule.ScheduleExpr, schedule.Timezone)
-	fmt.Fprintf(cmd.OutOrStdout(), "Automation: %s\n", detail.Automation.AutomationID)
+	fmt.Fprintf(cmd.OutOrStdout(), "Schedule: %s (%s)\n", automationDiagnosticText(schedule.ScheduleKey), automationDiagnosticText(schedule.ScheduleID))
+	fmt.Fprintf(cmd.OutOrStdout(), "Status: %s\n", automationDiagnosticText(schedule.Status))
+	fmt.Fprintf(cmd.OutOrStdout(), "Kind: %s %s\nTimezone: %s\n", automationDiagnosticText(schedule.ScheduleKind), automationDiagnosticText(schedule.ScheduleExpr), automationDiagnosticText(schedule.Timezone))
+	fmt.Fprintf(cmd.OutOrStdout(), "Automation: %s\n", automationDiagnosticText(detail.Automation.AutomationID))
+	var target automation.TargetProfile
+	if json.Unmarshal(schedule.TargetProfileJSON, &target) == nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "Target: %s\n", automationDiagnosticText(target.CapabilityRef))
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Run-as authorization actor: %s\n", automationDiagnosticText(schedule.RunAsActorID))
+	fmt.Fprintf(cmd.OutOrStdout(), "Project: %s\nScope: %s\n", automationDiagnosticText(ptrOrDash(schedule.ProjectID)), automationDiagnosticText(ptrOrDash(schedule.ScopeID)))
+	if script := scheduleScriptRef(schedule.InputJSON); script != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "Script: %s\n", script)
+		renderAutomationReadRoute(cmd, "Script detail", "script inspect", script)
+	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Next fire: %s\n", timePtrText(schedule.NextFireAt))
+	fmt.Fprintf(cmd.OutOrStdout(), "Last fire: %s (%s)\n", timePtrText(schedule.LastFireAt), automationDiagnosticText(ptrOrDash(schedule.LastScheduleFireID)))
+	if !detail.DryRun {
+		renderAutomationReadRoute(cmd, "Fires", "schedule fires", schedule.ScheduleID)
+		renderAutomationReadRoute(cmd, "Automation detail", "automation inspect", detail.Automation.AutomationID)
+	}
+}
+
+func automationDiagnosticText(value string) string {
+	if !cliEntrySafeText(value, 240) {
+		return "[unavailable in human output]"
+	}
+	if value == "" {
+		return "-"
+	}
+	return value
+}
+
+func scheduleScriptRef(input json.RawMessage) string {
+	var fields struct {
+		ScriptRef string `json:"script_ref"`
+	}
+	if json.Unmarshal(input, &fields) != nil || strings.TrimSpace(fields.ScriptRef) == "" || !cliEntrySafeText(fields.ScriptRef, 240) {
+		return ""
+	}
+	return fields.ScriptRef
+}
+
+func renderAutomationReadRoute(cmd *cobra.Command, label, command, ref string) {
+	if ref == "" || ref == "-" || !cliEntrySafeText(ref, 240) {
+		return
+	}
+	// Always quote the exact reference; '--' keeps it a positional argument.
+	quoted := "'" + strings.ReplaceAll(ref, "'", "'\\''") + "'"
+	if len(quoted) > 400 {
+		return
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "%s: loom %s -- %s\n", label, command, quoted)
 }
 
 func renderScheduleList(cmd *cobra.Command, schedules []automation.Schedule) {
@@ -1335,8 +1395,10 @@ func renderScheduleStatus(cmd *cobra.Command, status automation.ScheduleStatus) 
 		status.CompletedScheduleCount,
 		status.DueScheduleCount,
 	)
+	fmt.Fprintln(cmd.OutOrStdout(), "History scope: retained history excluding archived-project automations; not a recent window.")
 	fmt.Fprintf(cmd.OutOrStdout(), "Fires: missed=%d\n", status.MissedFireCount)
-	fmt.Fprintf(cmd.OutOrStdout(), "Invocations: pending=%d failed=%d\n", status.PendingInvocationCount, status.FailedInvocationCount)
+	fmt.Fprintf(cmd.OutOrStdout(), "Invocations: pending=%d failed_or_attention=%d\n", status.PendingInvocationCount, status.FailedInvocationCount)
+	fmt.Fprintln(cmd.OutOrStdout(), "Attention includes waiting_approval and requires_manual_action, not hard failures.")
 	fmt.Fprintf(cmd.OutOrStdout(), "Next fire: %s\n", timePtrText(status.NextFireAt))
 	fmt.Fprintf(cmd.OutOrStdout(), "Oldest pending invocation: %s\n", timePtrText(status.OldestPendingInvocationAt))
 	fmt.Fprintf(cmd.OutOrStdout(), "Workers: %s %s\n", status.SchedulerWorkerKey, status.DispatcherWorkerKey)
@@ -1348,7 +1410,12 @@ func renderScheduleFireList(cmd *cobra.Command, fires []automation.ScheduleFire)
 		return
 	}
 	for _, fire := range fires {
-		fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%s\t%s\n", fire.ScheduleFireID, fire.Status, fire.ScheduledFor.Format(time.RFC3339), ptrOrDash(fire.InvocationID))
+		fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%s\t%s\n", automationDiagnosticText(fire.ScheduleFireID), automationDiagnosticText(fire.Status), fire.ScheduledFor.Format(time.RFC3339), automationDiagnosticText(ptrOrDash(fire.InvocationID)))
+		if note := fire.LatenessDescription(); note != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "  Timing: %s\n", note)
+		}
+		renderAutomationReadRoute(cmd, "  Invocation detail", "invocation inspect", ptrOrDash(fire.InvocationID))
+		renderAutomationReadRoute(cmd, "  Job/result detail", "job inspect --summary", ptrOrDash(fire.JobID))
 	}
 }
 
@@ -1511,6 +1578,7 @@ func renderDirectEventStatus(cmd *cobra.Command, status automation.DirectEventSt
 		status.DisabledEndpointCount,
 	)
 	fmt.Fprintf(cmd.OutOrStdout(), "Integrations: active=%d\n", status.ActiveIntegrationCount)
+	fmt.Fprintln(cmd.OutOrStdout(), "Event history scope: retained history excluding archived-project automations; not a recent window.")
 	fmt.Fprintf(cmd.OutOrStdout(), "Events: accepted=%d mapping_pending=%d invocation_created=%d failed=%d\n",
 		status.AcceptedCount,
 		status.MappingPendingCount,
@@ -1542,13 +1610,20 @@ func renderInvocationList(cmd *cobra.Command, invocations []automation.Invocatio
 }
 
 func renderInvocation(cmd *cobra.Command, invocation automation.Invocation) {
-	fmt.Fprintf(cmd.OutOrStdout(), "Invocation: %s\n", invocation.InvocationID)
-	fmt.Fprintf(cmd.OutOrStdout(), "Status: %s\n", invocation.Status)
-	fmt.Fprintf(cmd.OutOrStdout(), "Source: %s %s\n", invocation.SourceKind, invocation.SourceOccurrenceRef)
-	fmt.Fprintf(cmd.OutOrStdout(), "Target: %s\n", invocation.TargetCapability)
-	fmt.Fprintf(cmd.OutOrStdout(), "Route: %s\n", ptrOrDash(invocation.RouteID))
-	fmt.Fprintf(cmd.OutOrStdout(), "Capability call: %s\n", ptrOrDash(invocation.CapabilityCallID))
-	fmt.Fprintf(cmd.OutOrStdout(), "Job: %s\n", ptrOrDash(invocation.JobID))
+	fmt.Fprintf(cmd.OutOrStdout(), "Invocation: %s\n", automationDiagnosticText(invocation.InvocationID))
+	fmt.Fprintf(cmd.OutOrStdout(), "Status: %s\n", automationDiagnosticText(invocation.Status))
+	fmt.Fprintf(cmd.OutOrStdout(), "Source: %s %s\n", automationDiagnosticText(invocation.SourceKind), automationDiagnosticText(invocation.SourceOccurrenceRef))
+	fmt.Fprintf(cmd.OutOrStdout(), "Target: %s\n", automationDiagnosticText(invocation.TargetCapability))
+	fmt.Fprintf(cmd.OutOrStdout(), "Route: %s\n", automationDiagnosticText(ptrOrDash(invocation.RouteID)))
+	fmt.Fprintf(cmd.OutOrStdout(), "Capability call: %s\n", automationDiagnosticText(ptrOrDash(invocation.CapabilityCallID)))
+	fmt.Fprintf(cmd.OutOrStdout(), "Job: %s\n", automationDiagnosticText(ptrOrDash(invocation.JobID)))
+	renderAutomationReadRoute(cmd, "Job/result detail", "job inspect --summary", ptrOrDash(invocation.JobID))
+	if invocation.JobID == nil || *invocation.JobID == "" {
+		renderAutomationReadRoute(cmd, "Execution/result detail", "capability-call inspect", ptrOrDash(invocation.CapabilityCallID))
+		if invocation.CapabilityCallID != nil && *invocation.CapabilityCallID != "" {
+			fmt.Fprintln(cmd.OutOrStdout(), "Invocation status describes dispatch; read the capability call for execution status and its recorded result.")
+		}
+	}
 }
 
 func timePtrText(value *time.Time) string {

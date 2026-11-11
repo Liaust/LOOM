@@ -42,6 +42,12 @@ func (d *sourceDirectory) check() error {
 	return nil
 }
 func openSourceParent(root, relative string) (*sourceDirectory, string, error) {
+	return sourceParent(root, relative, false)
+}
+
+var errMissingSourceDirectory = errors.New("source parent directory is absent")
+
+func sourceParent(root, relative string, create bool) (*sourceDirectory, string, error) {
 	if !filepath.IsAbs(root) || filepath.Clean(root) != root {
 		return nil, "", ErrUnsafePath
 	}
@@ -52,7 +58,8 @@ func openSourceParent(root, relative string) (*sourceDirectory, string, error) {
 		return nil, "", err
 	}
 	d := &sourceDirectory{dirs: []*os.File{os.NewFile(uintptr(fd), "/")}}
-	for _, part := range strings.Split(strings.TrimPrefix(parent, "/"), "/") {
+	rootDepth := len(strings.Split(strings.TrimPrefix(root, "/"), "/"))
+	for index, part := range strings.Split(strings.TrimPrefix(parent, "/"), "/") {
 		if part == "" {
 			continue
 		}
@@ -61,6 +68,28 @@ func openSourceParent(root, relative string) (*sourceDirectory, string, error) {
 			return nil, "", err
 		}
 		next, err := unix.Openat(d.fd(), part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if errors.Is(err, unix.ENOENT) && index >= rootDepth {
+			if !create {
+				if err := d.check(); err != nil {
+					d.Close()
+					return nil, "", err
+				}
+				d.Close()
+				return nil, "", errors.Join(errMissingSourceDirectory, unix.ENOENT)
+			}
+			if err = d.check(); err == nil {
+				err = unix.Mkdirat(d.fd(), part, 0775)
+				if errors.Is(err, unix.EEXIST) {
+					err = nil
+				}
+			}
+			if err == nil {
+				err = d.current().Sync()
+			}
+			if err == nil {
+				next, err = unix.Openat(d.fd(), part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+			}
+		}
 		if err != nil {
 			d.Close()
 			return nil, "", err

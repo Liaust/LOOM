@@ -28,7 +28,7 @@ func TestDeclarationRepositoryProjectionSourcePostgres(t *testing.T) {
 	versions := projects.SupportedProjectRepositorySourceVersions()
 	for _, pair := range versions {
 		paths := []string{"api"}
-		if pair.ProjectContract == projects.ProjectRepositoryProjectSchemaV05 {
+		if pc.IsDeclarationSchemaVersion(pair.ProjectContract) {
 			paths = []string{"custom-code", "repos/api"}
 		}
 		for _, memberPath := range paths {
@@ -37,12 +37,13 @@ func TestDeclarationRepositoryProjectionSourcePostgres(t *testing.T) {
 					root := t.TempDir()
 					var input projects.RegisterProjectContractInput
 					var navigation, sourceRef string
-					if pair.ProjectContract == projects.ProjectRepositoryProjectSchemaV05 {
+					if pc.IsDeclarationSchemaVersion(pair.ProjectContract) {
 						input = declarationRegistrationInput(t, root, ids.NewProjectID(), 0)
 						var document map[string]any
 						if err := json.Unmarshal(input.Contract, &document); err != nil {
 							t.Fatal(err)
 						}
+						document["schema_version"] = pair.ProjectContract
 						document["resources"] = map[string]any{"api": map[string]any{"kind": "repository", "repository": map[string]any{"path": memberPath, "role": "component"}}}
 						navigation, sourceRef = memberPath, ".loom/project.yaml"
 						projectionFixtureGit(t, root, navigation)
@@ -119,7 +120,7 @@ func TestDeclarationRepositoryProjectionSourcePostgres(t *testing.T) {
 					}
 					// Corruption lives only in this newly created disposable fixture row.
 					columns := []string{"project_contract_path", "repos_contract_path"}
-					if pair.ProjectContract == projects.ProjectRepositoryProjectSchemaV05 {
+					if pc.IsDeclarationSchemaVersion(pair.ProjectContract) {
 						columns = []string{"project_root"}
 					}
 					for _, column := range columns {
@@ -128,7 +129,7 @@ func TestDeclarationRepositoryProjectionSourcePostgres(t *testing.T) {
 							t.Fatal(err)
 						}
 						assignment := column + "=$2"
-						if pair.ProjectContract == projects.ProjectRepositoryProjectSchemaV05 {
+						if pc.IsDeclarationSchemaVersion(pair.ProjectContract) {
 							// Preserve the canonical single-source shape while making
 							// its location disagree with the accepted snapshot/registration.
 							assignment = "project_root=$2,project_contract_path=$2||'/.loom/project.yaml',repos_contract_path=$2||'/.loom/project.yaml'"

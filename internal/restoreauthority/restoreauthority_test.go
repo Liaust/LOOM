@@ -344,6 +344,132 @@ func TestRestoreAuthorityTOCFilteringOmitsOnlyPrecreatedVectorExtensionComment(t
 	}
 }
 
+func TestRestoreAuthorityPGSearchTOCRequiresExactAuthenticatedPin(t *testing.T) {
+	declaration := []ExtensionRequirement{{Name: "pg_search", Version: PGSearchVersion}}
+	const entries = "1; 2615 16384 SCHEMA - paradedb postgres\n2; 3079 16385 EXTENSION - pg_search\n3; 0 0 COMMENT - EXTENSION pg_search\n"
+	const ordinary = "4; 1259 16390 TABLE public pg_search loom\n5; 0 0 COMMENT public TABLE pg_search loom\n6; 0 0 COMMENT public INDEX bm25_probe loom\n7; 0 0 COMMENT - EXTENSION pg_trgm\n9; 0 0 COMMENT - SCHEMA paradedb postgres\n10; 0 100 TABLE DATA paradedb _typmod_cache postgres\n11; 0 0 SEQUENCE SET paradedb _typmod_cache_id_seq postgres\n"
+	filtered, err := filterRestoreTOC([]byte(entries+ordinary), declaration...)
+	if err != nil || string(filtered) != ordinary {
+		t.Fatalf("filtered TOC = %q err=%v", filtered, err)
+	}
+	for _, raw := range []string{
+		ordinary, // Metadata without a matching dump is not sufficient.
+		entries + "8; 3079 2 EXTENSION - pg_search\n",
+		entries + "8; 0 0 COMMENT - EXTENSION pg_search\n",
+		entries + "8; 2615 2 SCHEMA - paradedb postgres\n",
+		strings.Replace(entries, "SCHEMA - paradedb postgres", "SCHEMA - paradedb unreviewed_owner", 1),
+		strings.Replace(entries, "1; 2615 16384 SCHEMA - paradedb postgres\n", "", 1),
+		"2; 3079 1 EXTENSION - pg_search postgres\n",
+		"2; 3079 1 EXTENSION public pg_search\n",
+		entries + "8; 0 0 COMMENT - EXTENSION pg_search postgres\n",
+		entries + "2; 1259 16390 TABLE public probe loom\n",
+		"2; bad 1 EXTENSION - pg_search\n",
+	} {
+		if _, err := filterRestoreTOC([]byte(raw), declaration...); err == nil {
+			t.Fatalf("ambiguous or mismatched TOC accepted: %q", raw)
+		}
+	}
+	if _, err := filterRestoreTOC([]byte(entries)); err == nil {
+		t.Fatal("versionless legacy pg_search dump was accepted")
+	}
+}
+
+func TestRestoreAuthorityPGSearchDeclarationValidation(t *testing.T) {
+	for _, extensions := range [][]ExtensionRequirement{
+		{{Name: "pg_search", Version: "0.26.0"}},
+		{{Name: "pg_search"}},
+		{{Name: "vector", Version: PGSearchVersion}},
+		{{Name: "pg_search", Version: PGSearchVersion}, {Name: "pg_search", Version: PGSearchVersion}},
+	} {
+		request := requestHeader{Schema: ProtocolSchema, Operation: OperationRestoreOperational, Kind: KindOperational,
+			Database: OperationalPrefix + "extensions", DumpSize: 5, DumpSHA256: strings.Repeat("a", 64), Extensions: extensions}
+		if err := validateRequestHeader(request, 1024); err == nil {
+			t.Fatalf("invalid extension declaration accepted: %#v", extensions)
+		}
+	}
+	for _, operation := range []Operation{OperationRestoreProvenance, OperationDropDisposable} {
+		request := requestHeader{Schema: ProtocolSchema, Operation: operation, Kind: KindProvenance,
+			Database: ProvenancePrefix + "extensions", Extensions: []ExtensionRequirement{{Name: "pg_search", Version: PGSearchVersion}}}
+		if operation == OperationRestoreProvenance {
+			request.DumpSize, request.DumpSHA256 = 5, strings.Repeat("a", 64)
+		}
+		if err := validateRequestHeader(request, 1024); err == nil {
+			t.Fatalf("extension declaration accepted for %s", operation)
+		}
+	}
+}
+
+func TestRestoreAuthorityPGSearchProvisioningKeepsDumpUnprivileged(t *testing.T) {
+	for _, failure := range []string{"", "provision", "restore", "missing_psql", "toc"} {
+		t.Run(failure, func(t *testing.T) {
+			var provisioned, restored, cleaned bool
+			target := OperationalPrefix + "pg_search"
+			fixture := startAuthorityFixture(t, func(config *ServerConfig, executor *recordingExecutor) {
+				if failure != "missing_psql" {
+					config.PsqlPath = "/reviewed/postgresql/bin/psql"
+				}
+				executor.inspect = func(context.Context, string, []string, io.Reader, int64) ([]byte, error) {
+					if failure == "toc" {
+						return []byte("1; 1259 1 TABLE public probe loom\n"), nil
+					}
+					return []byte("4; 2615 2 SCHEMA - paradedb postgres\n1; 3079 1 EXTENSION - pg_search\n2; 0 0 COMMENT - EXTENSION pg_search\n3; 0 0 COMMENT public TABLE probe loom\n"), nil
+				}
+				executor.run = func(_ context.Context, name string, args []string, stdin io.Reader) error {
+					switch filepath.Base(name) {
+					case "psql":
+						provisioned = true
+						raw, err := io.ReadAll(stdin)
+						if err != nil || string(raw) != provisionPGSearchSQL || !strings.Contains(string(raw), "VERSION '"+PGSearchVersion+"'") || !strings.Contains(string(raw), "extnamespace = 'paradedb'::regnamespace") {
+							t.Fatalf("provisioning SQL drift: %q err=%v", raw, err)
+						}
+						if args[len(args)-1] != target || !strings.Contains(strings.Join(args, " "), "--username postgres --no-password --no-psqlrc --set ON_ERROR_STOP=1") {
+							t.Fatalf("provisioning target/identity drift: %#v", args)
+						}
+						if failure == "provision" {
+							return errors.New("unavailable or incompatible installed pin")
+						}
+					case "dropdb":
+						cleaned = true
+					}
+					return nil
+				}
+				executor.restore = func(_ context.Context, _ string, args []string, _ io.Reader, list *os.File) error {
+					restored = true
+					if !provisioned || !strings.Contains(strings.Join(args, " "), "--username loom --no-password --no-owner --no-acl") {
+						t.Fatalf("restore authority widened or provisioning absent: %#v", args)
+					}
+					raw, err := io.ReadAll(list)
+					if err != nil || string(raw) != "3; 0 0 COMMENT public TABLE probe loom\n" {
+						t.Fatalf("restore list lost ordinary comments: %q err=%v", raw, err)
+					}
+					if failure == "restore" {
+						return errors.New("restricted restore failure")
+					}
+					return nil
+				}
+			})
+			raw := []byte("PGDMP-pinned-test")
+			digest := sha256.Sum256(raw)
+			result, err := fixture.client.Restore(context.Background(), RestoreRequest{
+				Kind: KindOperational, Database: target, DumpSize: int64(len(raw)), DumpSHA256: fmt.Sprintf("%x", digest), Dump: bytes.NewReader(raw),
+				Extensions: []ExtensionRequirement{{Name: "pg_search", Version: PGSearchVersion}},
+			})
+			if failure == "" {
+				if err != nil || !restored || cleaned || result.Status != "succeeded" {
+					t.Fatalf("restore result=%#v err=%v", result, err)
+				}
+			} else {
+				if err == nil || !cleaned || !result.CleanupSucceeded || (failure != "restore" && restored) {
+					t.Fatalf("failed restore lost boundary/cleanup: result=%#v err=%v", result, err)
+				}
+				if failure == "toc" && provisioned {
+					t.Fatal("provisioned before archive agreement")
+				}
+			}
+		})
+	}
+}
+
 func TestRestoreAuthorityTrailerAndControlFramesAreStrictAndBounded(t *testing.T) {
 	t.Run("trailer_identity_mismatch", func(t *testing.T) {
 		fixture := startAuthorityFixture(t, nil)

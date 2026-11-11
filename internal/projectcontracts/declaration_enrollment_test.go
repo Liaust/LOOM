@@ -64,8 +64,8 @@ func TestDeclarationEnrollmentExplicitPath(t *testing.T) {
 	if config.SyncPolicy.MaxFileBytes <= 0 || config.IndexPolicy.MaxTextBytes <= 0 || !config.IgnorePolicy.DiscoverUserRules || config.IgnorePolicy.Profile != "managed" {
 		t.Fatalf("lost defaults: %+v", config)
 	}
-	if config.Scan.FullRescanInterval != "1m" {
-		t.Fatalf("knowledge folder polling interval = %q, want 1m", config.Scan.FullRescanInterval)
+	if config.Scan.FullRescanInterval != "6h" || config.Watch.Backend != watchedroots.WatchBackendAuto || !config.Watch.Enabled || config.Watch.DebounceWindow != "2s" {
+		t.Fatalf("knowledge folder event/fallback policy = %+v", config)
 	}
 	if config.SyncPolicy.MaxFileBytes != 1<<30 {
 		t.Fatalf("knowledge sync limit = %d, want 1 GiB", config.SyncPolicy.MaxFileBytes)

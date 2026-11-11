@@ -1,24 +1,25 @@
 ---
 name: manage-loom-projects
-description: Work in a LOOM project, manage its declarations and lifecycle, or deploy declared applications through project plan/apply/status, including approved public HTTPS endpoints.
+description: Plan LOOM integration, manage projects, deploy applications, and report friction.
 ---
 
 # Manage LOOM Projects
 
+For new repos/infrastructure or friction, see [integration planning](references/integration-planning.md).
+Use the existing plan/report, not another approval document.
+
 ## Ordinary edits
 
-Work in known source under actual repository instructions (including `AGENTS.md`).
-Start with project `.project/STATE.md` and relevant files; use OVERVIEW, PROJECT,
-ROADMAP or MAP when useful. These are editable Markdown, not registration
-manifests. Run appropriate tests and give a concise handoff.
-No LOOM registration, activation, projection refresh or semantic acceptance
-is needed merely to read or edit source. Do not install optional `.repo/` or
-initialize Git as enrollment ceremony. Use the actual harness; Git remains optional.
+Follow `AGENTS.md`, read files directly, test and hand off. Source work needs no
+enrollment, activation or semantic acceptance. Git and `.repo/` are optional.
 
-Use known commands; consult [project commands](references/project-commands.md)
-when needed. Optional `loom project context <ref> --node <node>` reads bounded
-development context and technical status; `--verbose` adds source pointers. Neither
-is a prerequisite for editing or a request to apply or refresh anything.
+Implement substantial features and fixes directly when authorized, including
+complex/unfamiliar work. Delegation is optional. Complete authorized application
+rollouts within node policy; involve another owner only for conflicting work or
+missing effect/access scope.
+
+Use known commands or [project commands](references/project-commands.md).
+`loom project context <ref> --node <node>` optionally reads context/status.
 
 ## When asking LOOM to manage a resource
 
@@ -26,59 +27,64 @@ Resolve the canonical source and requested effect. `.loom/project.yaml` owns
 intent; edit its resource declarations to request management. Saving source does
 not enroll it. Generated `loom-storage` views are never write targets.
 
-Creation is caller-local unless `--backend` selects the configured backend
-filesystem. `owner_node` does not route a local command to Main.
-Normal backend creation registers the same generated identity and source, with
-no resource activation. Its context is automatically observed by the bounded
-project-context worker. Local-only creation stays source-only.
-Plan/apply resolves on the selected owner node; verify target/root.
+Separate Notes indexing, client selection and placement; see
+[Notes pipeline](references/notes-pipeline.md). Existing collections can retain
+older folder names; applying source does not verify client layout.
+Use one project-root `files` resource with inherited `files.rules`, not descendant
+redeclarations. Preserve compatibility selections.
+Original `loom files ls/stat/read/explain` needs no indexing.
 
-Use reviewed plan/apply/status for management. Keep target, plan and stable request key. Historical
-operation inspection does not resume it. Registration and activation are separate;
-valid source is not runtime health. A deterministic projection is not accepted
-semantic context. Reading or refreshing source never accepts candidates or
-launches Archivist.
+Creation is caller-local; `--backend` selects backend creation/registration without
+activation. `owner_node` does not route commands. Verify the plan's target/root.
+
+Review plan/apply/status; retain target, plan and stable request key. Inspection
+never resumes operations. Registration isn't activation/health; refreshes never
+accept semantic context or launch Archivist.
+
+## Work state and Notes views
+
+`project.work_state` classifies work; passive must not pause services, schedules,
+intake or editable Notes. For classification-only registration and archive/view
+rules, read [project commands](references/project-commands.md).
 
 ## Authority and credentials
 
 LOOM host updates, NixOS rebuilds and backup/restore belong to the operator unless
-delegated. Authorized application rollouts through project plan/apply belong to
+delegated. Authorized application rollouts through project deploy/plan/apply belong to
 the project agent. Archive/migration retains its explicit review; archived projects
 are not normal mutation targets.
 
-Proton Pass owns credential values. Current `.loom/contracts/credentials.yaml`
-bindings support environment variables or absolute files. Managed application
-`credential_sources` uses exact `pass://SHARE/ITEM/FIELD` references. For now,
-the operator creates/registers credentials manually in Proton. When an item is missing,
-specify the required account/item and fields, then ask for its reference, never
-the secret in chat. Automatic generation is deferred; do not request an Editor
-token upgrade or choose `pass+generate://` for current rollouts. Keep only
-references in source, logs and handoffs.
+Proton Pass owns reusable credential values. `.loom/contracts/credentials.yaml` supports
+environment-variable or absolute-file references; managed `credential_sources`
+uses exact `pass://SHARE/ITEM/FIELD` references. the operator registers missing items
+manually: specify account/item/fields and ask for its reference, never a secret.
+Automatic generation, Editor token upgrades and `pass+generate://` are deferred.
+For already-authorized Google OAuth, the supported protected import can return
+an opaque owner-bound `runtime://...` reference without repeating consent.
+Keep only references in source, logs and handoffs.
 
 ## Harness and availability
 
-Choose lifecycle by running harness, not model vendor. A Codex model inside ORCA
-remains ORCA-owned; Codex-owned worktrees use native Codex controls. Use the
-installed native skills; never adopt the other's worktree.
+Use each harness's native controls. Opening elsewhere never transfers
+ownership. ORCA registration is retired; it is not part of LOOM registration.
 
 ## Source custody and command scope
 
-Project export and `.loomignore` are current. Portal **Export Project...** Local
-reads caller-visible source; From Main requires backend access. Both return
-caller-local output and exclude `.loom/state/` and `.loom/tmp/`.
-Local export can use readable caller-local source when main is offline; From
-Main requires connectivity. Keep credential values out of exported source.
+Export respects `.loomignore`. Portal **Export Project...** Local reads
+caller-visible source offline; From Main needs connectivity. Output is caller-local,
+excluding `.loom/state/` and `.loom/tmp/`. Keep credential values out of exports.
 
-Declaration reconciliation and prepared application installation use the same
-plan/apply/status workflow; node policy supplies allocation and credential access
-without per-app operator grants. For deployment inputs see
+For private Python, Cargo/Rust or locked Nix-native workers, declare source/run and genuine
+settings, then `project deploy --check` / `project deploy --yes`. LOOM packages,
+binds and supervises them; do not manufacture deployment sidecars or a repository.
+Existing prepared applications retain plan/apply/status. Node policy supplies
+allocation and credentials without manual per-app grants. See
 [managed applications](references/managed-applications.md).
 Public HTTPS beneath `apps.example.com` is part of that same workflow: declare
 the hostname. No separate per-application DNS, TLS or operator grant setup is needed.
-Project context has automatic metadata refresh; a manual diagnostic is
-`loom provenance project sync <project-ref>`.
-Source support, installed availability and live health remain distinct.
+Project metadata refreshes automatically; provenance sync is diagnostic.
 
-Use [schedules](references/project-schedules.md) for either MINA's native
-`hermes_schedule` declaration or a LOOM capability schedule (including project
-`codex exec`). Personal MINA timers do not require a project.
+Use [schedules](references/project-schedules.md) for native Hermes agent/profile
+tasks, standalone Main Codex dispatch and ordinary LOOM capability schedules.
+Personal routines need no dummy project; declared agents share plan/apply/status.
+Coding workers need no persona.

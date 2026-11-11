@@ -158,3 +158,87 @@ func workerInstanceInSet(instances []WorkerInstance, instanceID string) bool {
 	}
 	return false
 }
+
+func TestDailyClaimAndInterruptedOccurrencePostgres(t *testing.T) {
+	wakePostgresDB(t)
+	for _, scenario := range []string{"consumed", "legacy_overdue", "operator_future", "manual"} {
+		t.Run(scenario, func(t *testing.T) {
+			db, req, fixture, registry := workerPolicyPostgresFixture(t)
+			ctx := t.Context()
+			now := time.Now().UTC().Truncate(time.Microsecond)
+			_, raw, err := NormalizeTickPolicy(TickPolicy{Mode: TickModeDailyLocal, LocalTime: "03:00", Timezone: "Europe/Amsterdam"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			due := now.Add(-time.Hour)
+			if _, err := db.ExecContext(ctx, `UPDATE workers.worker_instances SET tick_policy_json=$2,next_run_after=$3 WHERE worker_instance_id=$1`, fixture.WorkerInstanceID, raw, due); err != nil {
+				t.Fatal(err)
+			}
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			instance, err := lockWorkerInstance(ctx, tx, fixture.WorkerInstanceID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lease, err := acquireLease(ctx, tx, instance, holderID(req), LeaseHolderLoomd, time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			trigger := TriggerSupervisorTick
+			if scenario == "manual" {
+				trigger = TriggerManual
+			}
+			run, err := startRun(ctx, tx, req, instance, lease, RunOnceInput{TriggerKind: trigger, Reason: "interrupted daily fixture"}, now.Add(-time.Second))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := attachLeaseRun(ctx, tx, lease, run.WorkerRunID); err != nil {
+				t.Fatal(err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			service := NewService(db, registry, nil)
+			claimed, err := service.InspectWorkerPolicy(ctx, fixture.WorkerKey)
+			if err != nil || claimed.NextRunAfter == nil || (scenario != "manual" && !claimed.NextRunAfter.After(now)) {
+				t.Fatalf("daily admission did not consume occurrence: %+v %v", claimed, err)
+			}
+			if scenario == "legacy_overdue" {
+				if _, err := db.ExecContext(ctx, `UPDATE workers.worker_instances SET next_run_after=$2 WHERE worker_instance_id=$1`, fixture.WorkerInstanceID, due); err != nil {
+					t.Fatal(err)
+				}
+			}
+			future := now.Add(72 * time.Hour)
+			if scenario == "operator_future" {
+				if _, err := db.ExecContext(ctx, `UPDATE workers.worker_instances SET next_run_after=$2 WHERE worker_instance_id=$1`, fixture.WorkerInstanceID, future); err != nil {
+					t.Fatal(err)
+				}
+			}
+			repaired, err := service.RepairStaleRuns(ctx, req, time.Now().UTC())
+			if err != nil || repaired.TimedOutRuns != 1 {
+				t.Fatalf("stale daily repair: %+v %v", repaired, err)
+			}
+			after, err := service.InspectWorkerPolicy(ctx, fixture.WorkerKey)
+			if err != nil || after.NextRunAfter == nil {
+				t.Fatal("missing repaired policy", err)
+			}
+			switch scenario {
+			case "manual":
+				if !after.NextRunAfter.Equal(due) {
+					t.Fatal("manual interruption changed daily timing")
+				}
+			case "operator_future":
+				if !after.NextRunAfter.Equal(future) {
+					t.Fatal("stale repair overwrote operator timing")
+				}
+			default:
+				if !after.NextRunAfter.After(time.Now().UTC()) {
+					t.Fatal("interrupted occurrence remains due")
+				}
+			}
+		})
+	}
+}

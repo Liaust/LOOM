@@ -20,19 +20,26 @@ import (
 )
 
 func addProjectDeclarationCommands(parent *cobra.Command, opts *options, plan, status *cobra.Command) {
+	addProjectDeployCommand(parent, opts)
 	addProjectContextCommand(parent, opts)
 	legacyPlan, legacyStatus := plan.RunE, status.RunE
 	analyze := &cobra.Command{Use: "analyze <project-folder-or-ref>", Short: "Print the legacy read-only contract registration analysis", Args: cobra.ExactArgs(1), RunE: legacyPlan}
 	analyze.Flags().AddFlagSet(plan.Flags())
 	parent.AddCommand(analyze)
-	parent.AddCommand(&cobra.Command{Use: "registration-status <project-ref>", Short: "Show the legacy registration and facet inventory", Args: cobra.ExactArgs(1), RunE: legacyStatus})
+	registrationStatus := &cobra.Command{Use: "registration-status <project-ref>", Short: "Show the legacy registration and facet inventory", Args: cobra.ExactArgs(1), RunE: legacyStatus}
+	registrationStatus.Flags().Bool("summary", false, "with --json, omit raw registration and configuration blobs")
+	parent.AddCommand(registrationStatus)
 	var planNode, statusNode string
-	var refresh, legacyPlanFlag, legacyStatusFlag, conversionPreview bool
+	var refresh, watchesOnly, legacyPlanFlag, legacyStatusFlag, conversionPreview bool
 	plan.Short = "Review declaration effects and resolved owner; local v0.3/v0.4 sources retain legacy analysis"
 	plan.Flags().StringVar(&planNode, "node", "", "explicit owner node; paths resolve on that node")
 	plan.Flags().BoolVar(&refresh, "refresh-projections", false, "include the explicit projection refresh effect")
+	plan.Flags().BoolVar(&watchesOnly, "watches-only", false, "converge watch timing/work-state only; selection, path or policy changes need a normal plan")
 	plan.Flags().BoolVar(&legacyPlanFlag, "legacy", false, "use the legacy contract analysis path")
 	plan.RunE = func(cmd *cobra.Command, args []string) error {
+		if watchesOnly && (refresh || legacyPlanFlag) {
+			return fmt.Errorf("--watches-only cannot be combined with --refresh-projections or --legacy")
+		}
 		if legacyPlanFlag {
 			if planNode != "" || refresh {
 				return fmt.Errorf("--legacy cannot select declaration nodes or effects")
@@ -43,7 +50,7 @@ func addProjectDeclarationCommands(parent *cobra.Command, opts *options, plan, s
 		projectRef := args[0]
 		// Only a positively identified current legacy source selects the old reader.
 		// Explicit node selection never opens a caller-local file or changes host.
-		if planNode == "" && !refresh {
+		if planNode == "" && !refresh && !watchesOnly {
 			var analysis pc.Analysis
 			if backend {
 				var err error
@@ -80,9 +87,12 @@ func addProjectDeclarationCommands(parent *cobra.Command, opts *options, plan, s
 			return err
 		}
 		input := pc.DeclarationPlanRequest{SchemaVersion: pc.DeclarationRequestSchemaV05, ProjectRef: projectRef, NodeRef: planNode, Effects: declarationEffects(refresh)}
+		if watchesOnly {
+			input.Effects = []pc.DeclarationEffect{pc.DeclarationWatches}
+		}
 		env, err := client.PlanProjectDeclaration(ctx, cid, input)
 		if err != nil {
-			return renderDeclarationFailure(cmd, opts, cid, err, nil)
+			return renderDeclarationFailure(cmd, opts, cid, err, nil, args[0])
 		}
 		if opts.jsonOutput {
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(env.Data)
@@ -94,6 +104,13 @@ func addProjectDeclarationCommands(parent *cobra.Command, opts *options, plan, s
 				fmt.Fprintf(cmd.OutOrStdout(), "Public exposure (%s): %s\n", declarationDisplay(string(action.Resource)), declarationDisplay(action.PublicURL))
 			}
 		}
+		for _, placement := range env.Data.NotesWorkspace {
+			fmt.Fprintf(cmd.OutOrStdout(), "Notes workspace (%s): %s\n  Source: %s\n  Current: %s\n  Desired: %s\n", declarationDisplay(string(placement.Resource)), declarationDisplay(placement.Change), declarationDisplay(placement.SourcePath), declarationDisplay(placement.CurrentRoot), declarationDisplay(placement.DesiredRoot))
+			if placement.SourceStatus != "" && placement.SourceStatus != "active" {
+				fmt.Fprintf(cmd.OutOrStdout(), "  Source posture: %s; layout publication requires current admission.\n", declarationDisplay(placement.SourceStatus))
+			}
+		}
+		renderDeclarationPlanActions(cmd, env.Data.Basis.Actions, input)
 		renderDeclarationReadiness(cmd, env.Data.Readiness)
 		next := pc.DeclarationApplyRequest{ProjectRef: input.ProjectRef, NodeRef: input.NodeRef, Effects: input.Effects, PlanID: env.Data.PlanID, IdempotencyKey: "declaration:" + env.Data.PlanID}
 		action := declarationNextAction{Kind: "apply", Reason: "Apply the reviewed plan.", Command: declarationApplyCommand(next)}
@@ -127,9 +144,13 @@ func addProjectDeclarationCommands(parent *cobra.Command, opts *options, plan, s
 			return err
 		}
 		if conversionPreview {
-			env, err := client.GetProjectConversionAssessment(ctx, cid, args[0], statusNode)
+			projectRef, err := declarationReadProjectRef(args[0], statusNode)
 			if err != nil {
-				return renderDeclarationFailure(cmd, opts, cid, err, nil)
+				return err
+			}
+			env, err := client.GetProjectConversionAssessment(ctx, cid, projectRef, statusNode)
+			if err != nil {
+				return renderDeclarationFailure(cmd, opts, cid, err, nil, args[0])
 			}
 			if opts.jsonOutput {
 				return json.NewEncoder(cmd.OutOrStdout()).Encode(env.Data)
@@ -149,36 +170,43 @@ func addProjectDeclarationCommands(parent *cobra.Command, opts *options, plan, s
 			renderDeclarationReadiness(cmd, a.Readiness)
 			return nil
 		}
-		env, err := client.GetProjectDeclarationStatus(ctx, cid, args[0], statusNode)
+		projectRef, err := declarationReadProjectRef(args[0], statusNode)
 		if err != nil {
-			return renderDeclarationFailure(cmd, opts, cid, err, nil)
+			return err
+		}
+		env, err := client.GetProjectDeclarationStatus(ctx, cid, projectRef, statusNode)
+		if err != nil {
+			return renderDeclarationFailure(cmd, opts, cid, err, nil, args[0])
 		}
 		if opts.jsonOutput {
-			return json.NewEncoder(cmd.OutOrStdout()).Encode(env.Data)
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(struct {
+				pc.DeclarationStatus
+				ReadinessNote string `json:"readiness_note"`
+			}{env.Data, declarationReadinessNote})
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Declaration: %s\nNode: %s\nRoot: %s\nCurrent revision: %s\n", declarationDisplay(env.Data.Target.ProjectID), declarationDisplay(env.Data.Target.OwnerNodeID), declarationDisplay(env.Data.Target.ProjectRoot), declarationDisplay(env.Data.Revision))
+		renderProjectResourceSummary(cmd, env.Data)
+		fmt.Fprintln(cmd.OutOrStdout(), "Current whole-declaration evidence:")
 		renderDeclarationReadiness(cmd, env.Data.Readiness)
-		keys := make([]string, 0, len(env.Data.Resources))
-		for key := range env.Data.Resources {
-			keys = append(keys, string(key))
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			if endpoint := env.Data.Resources[pc.ResourceKey(key)].Readiness.Endpoint; endpoint != nil {
-				fmt.Fprintf(cmd.OutOrStdout(), "Application: %s\n", declarationDisplay(key))
-				renderDeclarationEndpoint(cmd, endpoint)
-			}
-		}
+		fmt.Fprintln(cmd.OutOrStdout(), declarationReadinessNote)
 		if env.Data.Operation != nil {
-			fmt.Fprintf(cmd.OutOrStdout(), "Historical operation: %s (%s); revision %s\n", declarationDisplay(env.Data.Operation.OperationID), declarationDisplay(string(env.Data.Operation.State)), declarationDisplay(env.Data.Operation.Revision))
+			fmt.Fprintf(cmd.OutOrStdout(), "Last operation: %s (%s); revision %s\n", declarationDisplay(env.Data.Operation.OperationID), declarationDisplay(string(env.Data.Operation.State)), declarationDisplay(env.Data.Operation.Revision))
+			fmt.Fprintln(cmd.OutOrStdout(), "Operation evidence: "+declarationEvidenceScope(*env.Data.Operation, nil))
 		}
-		renderDeclarationCauses(cmd, env.Data.Errors, nil)
+		failures := append([]pc.DeclarationError(nil), env.Data.Errors...)
+		for _, key := range projectResourceSummaryKeys(env.Data) {
+			failures = append(failures, env.Data.Resources[key].Errors...)
+		}
+		renderDeclarationCauses(cmd, failures, nil)
 		renderDeclarationNextAction(cmd, declarationStatusNextAction(env.Data))
 		return nil
 	}
 	var input pc.DeclarationApplyRequest
-	var applyRefresh bool
+	var applyRefresh, applyWatchesOnly bool
 	apply := &cobra.Command{Use: "apply <project-folder-or-ref>", Short: "Apply a reviewed declaration or resume its original operation", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if applyWatchesOnly && applyRefresh {
+			return fmt.Errorf("--watches-only cannot be combined with --refresh-projections")
+		}
 		input.SchemaVersion = pc.DeclarationRequestSchemaV05
 		input.ProjectRef = args[0]
 		if input.NodeRef == "" && !filepath.IsAbs(input.ProjectRef) {
@@ -190,6 +218,9 @@ func addProjectDeclarationCommands(parent *cobra.Command, opts *options, plan, s
 			}
 		}
 		input.Effects = declarationEffects(applyRefresh)
+		if applyWatchesOnly {
+			input.Effects = []pc.DeclarationEffect{pc.DeclarationWatches}
+		}
 		ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
 		defer cancel()
 		cid, client, err := declarationClient(cmd, opts)
@@ -198,7 +229,7 @@ func addProjectDeclarationCommands(parent *cobra.Command, opts *options, plan, s
 		}
 		env, err := client.ApplyProjectDeclaration(ctx, cid, input)
 		if err != nil {
-			return renderDeclarationFailure(cmd, opts, cid, err, &input)
+			return renderDeclarationFailure(cmd, opts, cid, err, &input, args[0])
 		}
 		return renderDeclarationResult(cmd, opts, env.Data, &input)
 	}}
@@ -208,6 +239,7 @@ func addProjectDeclarationCommands(parent *cobra.Command, opts *options, plan, s
 	apply.Flags().StringVar(&input.OperationID, "resume", "", "resume this operation with its original selectors, effects, plan and key")
 	apply.Flags().StringArrayVar(&input.ApprovalRefs, "approval", nil, "exact approval reference (repeatable)")
 	apply.Flags().BoolVar(&applyRefresh, "refresh-projections", false, "include the reviewed projection refresh effect")
+	apply.Flags().BoolVar(&applyWatchesOnly, "watches-only", false, "apply only the reviewed source-watch configuration")
 	_ = apply.MarkFlagRequired("plan-id")
 	_ = apply.MarkFlagRequired("idempotency-key")
 	parent.AddCommand(apply)
@@ -225,6 +257,39 @@ func addProjectDeclarationCommands(parent *cobra.Command, opts *options, plan, s
 		return renderDeclarationResult(cmd, opts, env.Data, nil)
 	}})
 }
+
+func renderDeclarationPlanActions(cmd *cobra.Command, actions []pc.DeclarationAction, input pc.DeclarationPlanRequest) {
+	shown, bytes := 0, 0
+	for _, action := range actions {
+		line := fmt.Sprintf("Review action: %s (%s); resource %s\n", action.ID, action.Kind, action.Resource)
+		if shown >= 16 || bytes+len(line) > 2048 || !declarationDisplayText(action.ID, string(action.Kind), string(action.Resource)) {
+			continue
+		}
+		fmt.Fprint(cmd.OutOrStdout(), line)
+		shown++
+		bytes += len(line)
+	}
+	if shown < len(actions) {
+		command := "loom project plan --help"
+		if declarationSelector(input.ProjectRef) {
+			candidate := "loom project plan " + quoteDeclarationArg(input.ProjectRef) + " --json"
+			if declarationSelector(input.NodeRef) {
+				candidate += " --node " + quoteDeclarationArg(input.NodeRef)
+			}
+			for _, effect := range input.Effects {
+				if effect == pc.DeclarationWatches {
+					candidate += " --watches-only"
+				} else if effect == pc.DeclarationProjections {
+					candidate += " --refresh-projections"
+				}
+			}
+			if declarationSafeCommand(candidate) {
+				command = candidate
+			}
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "Review actions omitted: %d; detail: %s\n", len(actions)-shown, command)
+	}
+}
 func declarationEffects(refresh bool) []pc.DeclarationEffect {
 	effects := []pc.DeclarationEffect{pc.DeclarationReconcile}
 	if refresh {
@@ -240,7 +305,7 @@ func declarationClient(cmd *cobra.Command, opts *options) (string, localclient.C
 	}
 	return cid, client, nil
 }
-func renderDeclarationFailure(cmd *cobra.Command, opts *options, cid string, err error, input *pc.DeclarationApplyRequest) error {
+func renderDeclarationFailure(cmd *cobra.Command, opts *options, cid string, err error, input *pc.DeclarationApplyRequest, selectors ...string) error {
 	var failure *localclient.DeclarationRequestError
 	if errors.As(err, &failure) && failure.Result != nil && failure.Result.OperationID != "" {
 		return renderOwnedCLIError(cmd, err, func(cmd *cobra.Command) error {
@@ -260,19 +325,38 @@ func renderDeclarationFailure(cmd *cobra.Command, opts *options, cid string, err
 		})
 	}
 	if failure != nil && failure.Detail.Code != "" {
+		selector := ""
+		var lookup *declarationNextAction
+		if failure.Detail.Code == pc.DeclarationReferenceMissing && failure.Detail.CauseCode == "project_missing" {
+			if len(selectors) > 0 {
+				selector = declarationDisplay(selectors[0])
+			} else if input != nil {
+				selector = declarationDisplay(input.ProjectRef)
+			}
+			if selector != "" {
+				lookup = &declarationNextAction{Kind: "lookup", Reason: fmt.Sprintf("Project selector %q was not found. Look up registered projects.", selector), Command: "loom project list"}
+			}
+		}
 		return renderOwnedCLIError(cmd, err, func(cmd *cobra.Command) error {
 			if opts.jsonOutput {
-				// Preserve the original standard envelope and server extension verbatim.
+				// Keep the server envelope/detail intact; qualify a confirmed lookup
+				// miss with the submitted selector and read-only discovery command.
 				if e := json.NewEncoder(cmd.OutOrStdout()).Encode(struct {
 					response.ErrorEnvelope
-					Detail pc.DeclarationError `json:"declaration_error"`
-				}{failure.Envelope, failure.Detail}); e != nil {
+					Detail            pc.DeclarationError    `json:"declaration_error"`
+					RequestedSelector string                 `json:"requested_selector,omitempty"`
+					NextAction        *declarationNextAction `json:"next_action,omitempty"`
+				}{failure.Envelope, failure.Detail, selector, lookup}); e != nil {
 					return e
 				}
 			} else {
 				renderDeclarationErrorMetadata(cmd, failure)
 				renderDeclarationCauses(cmd, []pc.DeclarationError{failure.Detail}, nil)
-				renderDeclarationNextAction(cmd, declarationResultNextAction(pc.DeclarationResult{State: pc.DeclarationOperationFailed, Errors: []pc.DeclarationError{failure.Detail}}, input))
+				if lookup != nil {
+					renderDeclarationNextAction(cmd, *lookup)
+				} else {
+					renderDeclarationNextAction(cmd, declarationResultNextAction(pc.DeclarationResult{State: pc.DeclarationOperationFailed, Errors: []pc.DeclarationError{failure.Detail}}, input))
+				}
 			}
 			return nil
 		})
@@ -281,7 +365,14 @@ func renderDeclarationFailure(cmd *cobra.Command, opts *options, cid string, err
 	if errors.As(err, &requestErr) {
 		return renderError(cmd, opts, cid, err)
 	}
-	return renderError(cmd, opts, cid, loomerrors.Wrap("transport.unavailable", "runtime", "declaration", "Could not reach the declaration service. Retry with the original plan and idempotency key if the response was lost.", err))
+	summary := "Could not reach the declaration service. Check the connection and current session's access."
+	if errors.Is(err, os.ErrPermission) {
+		summary = "Could not access the declaration service: permission denied in the current execution context."
+	}
+	if input != nil {
+		summary += " If apply was sent, inspect its recorded state before resending with the original plan and idempotency key."
+	}
+	return renderError(cmd, opts, cid, loomerrors.Wrap("transport.unavailable", "runtime", "declaration", summary, err))
 }
 func renderDeclarationErrorMetadata(cmd *cobra.Command, failure *localclient.DeclarationRequestError) {
 	env := failure.Envelope
@@ -296,14 +387,45 @@ func renderDeclarationErrorMetadata(cmd *cobra.Command, failure *localclient.Dec
 	}
 }
 func renderDeclarationResult(cmd *cobra.Command, opts *options, result pc.DeclarationResult, input *pc.DeclarationApplyRequest) error {
+	activity := string(result.State)
+	for _, issue := range result.Errors {
+		if pc.DeclarationWaitingForOwner(issue.Code, issue.CauseCode) {
+			activity = "waiting_for_owner"
+		}
+	}
+	next := declarationResultNextAction(result, input)
 	if opts.jsonOutput {
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(result)
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(struct {
+			pc.DeclarationResult
+			Activity      string                `json:"activity"`
+			NextAction    declarationNextAction `json:"next_action"`
+			EvidenceScope string                `json:"evidence_scope"`
+			ReadinessNote string                `json:"readiness_note"`
+		}{result, activity, next, declarationEvidenceScope(result, input), declarationReadinessNote})
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Declaration operation: %s\nState: %s\n", declarationDisplay(result.OperationID), declarationDisplay(string(result.State)))
+	if activity == "waiting_for_owner" {
+		fmt.Fprintln(cmd.OutOrStdout(), "Accepted; waiting for owner confirmation.")
+	}
 	renderDeclarationCauses(cmd, result.Errors, result.Actions)
+	fmt.Fprintln(cmd.OutOrStdout(), "Operation evidence: "+declarationEvidenceScope(result, input))
 	renderDeclarationReadiness(cmd, result.Readiness)
-	renderDeclarationNextAction(cmd, declarationResultNextAction(result, input))
+	fmt.Fprintln(cmd.OutOrStdout(), declarationReadinessNote)
+	renderDeclarationNextAction(cmd, next)
 	return nil
+}
+
+const declarationReadinessNote = "Unknown means not established by this evidence, not failed. Applied configuration does not prove processing, health or backup protection."
+
+func declarationEvidenceScope(result pc.DeclarationResult, input *pc.DeclarationApplyRequest) string {
+	effects := result.Effects
+	if len(effects) == 0 && input != nil {
+		effects = input.Effects
+	}
+	if len(effects) == 1 && effects[0] == pc.DeclarationWatches {
+		return "watch_configuration_only"
+	}
+	return "reviewed_operation_only"
 }
 func renderDeclarationReadiness(cmd *cobra.Command, r pc.DeclarationReadiness) {
 	fmt.Fprintf(cmd.OutOrStdout(), "Desired: %s | Queued: %s | Applied: %s\nProcessing: %s | Healthy: %s | Protected: %s | Verified: %s\n", declarationDisplay(string(r.Desired.State)), declarationDisplay(string(r.Queued.State)), declarationDisplay(string(r.Applied.State)), declarationDisplay(string(r.Processing.State)), declarationDisplay(string(r.Healthy.State)), declarationDisplay(string(r.Protected.State)), declarationDisplay(string(r.Verified.State)))
@@ -320,6 +442,9 @@ func declarationApplyCommand(input pc.DeclarationApplyRequest) string {
 	}
 	next += " --plan-id " + quoteDeclarationArg(input.PlanID) + " --idempotency-key " + quoteDeclarationArg(input.IdempotencyKey)
 	for _, effect := range input.Effects {
+		if effect == pc.DeclarationWatches {
+			next += " --watches-only"
+		}
 		if effect == pc.DeclarationProjections {
 			next += " --refresh-projections"
 		}
@@ -364,6 +489,9 @@ func declarationRequestCustody(input pc.DeclarationApplyRequest) bool {
 		return false
 	}
 	// The CLI can express exactly these effects; never silently lose a future one.
+	if len(input.Effects) == 1 && input.Effects[0] == pc.DeclarationWatches {
+		return true
+	}
 	if len(input.Effects) == 0 || len(input.Effects) > 2 || input.Effects[0] != pc.DeclarationReconcile {
 		return false
 	}
@@ -381,6 +509,9 @@ func declarationReplanAction(input pc.DeclarationApplyRequest, target pc.Declara
 		command += " --node " + quoteDeclarationArg(input.NodeRef)
 	}
 	for _, effect := range input.Effects {
+		if effect == pc.DeclarationWatches {
+			command += " --watches-only"
+		}
 		if effect == pc.DeclarationProjections {
 			command += " --refresh-projections"
 		}
@@ -391,14 +522,32 @@ func declarationResultNextAction(result pc.DeclarationResult, input *pc.Declarat
 	inspect := func(reason string) declarationNextAction {
 		return declarationInspectAction(result.Target, result.OperationID, reason)
 	}
-	if result.State == pc.DeclarationOperationSucceeded || result.State == pc.DeclarationOperationSuperseded {
-		return declarationInspectAction(result.Target, "", "Inspect current status; operation history does not establish current readiness.")
-	}
 	failures := append([]pc.DeclarationError(nil), result.Errors...)
 	for _, action := range result.Actions {
 		if action.Error != nil {
 			failures = append(failures, *action.Error)
 		}
+	}
+	for _, e := range failures {
+		if e.Code == pc.DeclarationPlanStale && (e.CauseCode == "watch_configuration_binding_changed" || e.CauseCode == "watch_configuration_policy_changed") {
+			if input != nil {
+				normal := *input
+				normal.Effects = []pc.DeclarationEffect{pc.DeclarationReconcile}
+				action := declarationReplanAction(normal, result.Target, result.OperationID)
+				action.Reason = "Review a normal plan for changed enrollment/selection policy; watches-only cannot apply it."
+				return action
+			}
+			return inspect("Review a normal loom project plan without --watches-only for changed enrollment/selection policy; do not repeat registration alone.")
+		}
+		if e.CauseCode == "project_restored_inactive" {
+			return inspect("Recovery completed; runtime remains inactive. Inspect recovery before explicit reactivation; do not retry completed effects.")
+		}
+	}
+	if result.State == pc.DeclarationOperationSucceeded || result.State == pc.DeclarationOperationSuperseded {
+		if result.State == pc.DeclarationOperationSucceeded && declarationEvidenceScope(result, input) == "watch_configuration_only" {
+			return declarationNextAction{Kind: "none", Reason: "Reviewed watch configuration applied with owner confirmation. No further apply is needed for this operation; whole-project readiness is separate."}
+		}
+		return declarationInspectAction(result.Target, "", "Inspect current status; operation history does not establish current readiness.")
 	}
 	stale, retryable := false, len(failures) > 0
 	for _, e := range failures {
@@ -412,7 +561,7 @@ func declarationResultNextAction(result pc.DeclarationResult, input *pc.Declarat
 		case pc.DeclarationPlanStale, pc.DeclarationIdentityConflict:
 			stale = true
 		}
-		pending := e.Code == pc.DeclarationOwnerFailed && (e.CauseCode == "owner_pending" || e.CauseCode == "observation_uncertain")
+		pending := pc.DeclarationWaitingForOwner(e.Code, e.CauseCode) || e.Code == pc.DeclarationOwnerFailed && e.CauseCode == "observation_uncertain"
 		if !e.Retryable && !pending {
 			retryable = false
 		}
@@ -430,21 +579,74 @@ func declarationResultNextAction(result pc.DeclarationResult, input *pc.Declarat
 	if !stale && (pending || retryable) && declarationSelector(result.OperationID) {
 		next := *input
 		next.OperationID = result.OperationID
-		return boundDeclarationAction(declarationNextAction{Kind: "resume", Reason: "Continue with the original request.", Command: declarationApplyCommand(next)}, result.Target, result.OperationID)
+		return boundDeclarationAction(declarationNextAction{Kind: "resume", Reason: "Retain completed effects; explicitly continue with the original request and owner tokens. No automatic retry.", Command: declarationApplyCommand(next)}, result.Target, result.OperationID)
 	}
 	return inspect("Inspect the cause and resolve its prerequisite before further work.")
 }
 func declarationStatusNextAction(status pc.DeclarationStatus) declarationNextAction {
-	if len(status.Errors) > 0 {
+	if status.Lifecycle == "archived" {
+		return declarationNextAction{Kind: "historical", Reason: "Read verified retained project context; current deployment readiness is not applicable."}
+	}
+	failures := append([]pc.DeclarationError(nil), status.Errors...)
+	keys := make([]string, 0, len(status.Resources))
+	for key := range status.Resources {
+		keys = append(keys, string(key))
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		failures = append(failures, status.Resources[pc.ResourceKey(key)].Errors...)
+	}
+	if len(failures) > 0 {
 		// A verified status target permits same-owner replanning, but carries no
 		// original apply request, key or approval custody and can never resume.
 		input := pc.DeclarationApplyRequest{ProjectRef: status.Target.ProjectID, NodeRef: status.Target.OwnerNodeID}
-		return declarationResultNextAction(pc.DeclarationResult{Target: status.Target, State: pc.DeclarationOperationFailed, Errors: status.Errors}, &input)
+		return declarationResultNextAction(pc.DeclarationResult{Target: status.Target, State: pc.DeclarationOperationFailed, Errors: failures}, &input)
 	}
-	if status.Operation != nil {
-		return declarationInspectAction(status.Target, status.Operation.OperationID, "Inspect the historical operation; current readiness remains separate.")
+	if op := status.Operation; op != nil && (op.State == pc.DeclarationOperationPartial || op.State == pc.DeclarationOperationFailed || op.State == pc.DeclarationOperationQueued || op.State == pc.DeclarationOperationRunning) {
+		return declarationInspectAction(status.Target, op.OperationID, "Inspect the unfinished operation and retained effects; continuation requires its original request. No automatic retry; current readiness remains separate.")
 	}
-	return declarationReplanAction(pc.DeclarationApplyRequest{ProjectRef: status.Target.ProjectID, NodeRef: status.Target.OwnerNodeID}, status.Target, "")
+	for _, key := range keys {
+		r := status.Resources[pc.ResourceKey(key)].Readiness
+		for _, fact := range declarationFacts(&r) {
+			if fact.State == pc.DeclarationPending || fact.State == pc.DeclarationFailed {
+				return declarationInspectAction(status.Target, "", "Inspect current resource blockers and evidence coverage; development readiness remains independent.")
+			}
+		}
+		if e := r.Endpoint; e != nil && (e.DNS == "pending" || e.DNS == "failed" || e.TLS == "pending" || e.TLS == "failed" || e.Routing == "pending" || e.Routing == "failed") {
+			return declarationInspectAction(status.Target, "", "Inspect current publication prerequisites; development readiness remains independent.")
+		}
+	}
+	for _, fact := range declarationFacts(&status.Readiness) {
+		if fact.State == pc.DeclarationPending || fact.State == pc.DeclarationFailed {
+			return declarationInspectAction(status.Target, "", "Inspect current deployment blockers; development readiness remains independent.")
+		}
+	}
+	return declarationNextAction{Kind: "none", Reason: "No current deployment action is established. Continue project development independently; unknown evidence is not a deployment guarantee."}
+}
+
+func declarationCompletedEffects(result pc.DeclarationResult) []string {
+	seen := map[string]bool{}
+	effects := []string{}
+	add := func(effect string) {
+		if effect != "" && !seen[effect] {
+			seen[effect] = true
+			effects = append(effects, effect)
+		}
+	}
+	for _, failure := range result.Errors {
+		for _, effect := range failure.CompletedEffects {
+			add(effect)
+		}
+	}
+	for _, action := range result.Actions {
+		add(action.EffectRef)
+		if action.Error != nil {
+			for _, effect := range action.Error.CompletedEffects {
+				add(effect)
+			}
+		}
+	}
+	return effects
 }
 func renderDeclarationNextAction(cmd *cobra.Command, action declarationNextAction) {
 	fmt.Fprintln(cmd.OutOrStdout(), "Next: "+action.Reason+" "+action.Command)

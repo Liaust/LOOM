@@ -576,6 +576,9 @@ func planBorgSnapshotRetention(ctx context.Context, backend BorgSnapshotBackend,
 	if err != nil {
 		return SnapshotRetentionPlan{}, err
 	}
+	if err := checkNotesRecoveryCloudPrunePins(retentionCfg, plan); err != nil {
+		return SnapshotRetentionPlan{}, err
+	}
 	if err := validateBorgPruneGlobInventory(plan, inventory); err != nil {
 		return SnapshotRetentionPlan{}, err
 	}
@@ -716,6 +719,11 @@ func applyBorgSnapshotRetentionLocked(ctx context.Context, runner BorgCommandRun
 		result.Prune.Status = RetentionStageSkipped
 		result.Compact.Status = RetentionStageSkipped
 		return fmt.Errorf("Borg retention decisions do not match the canonical GFS plan")
+	}
+	if err := checkNotesRecoveryCloudPrunePins(retentionCfg, expectedPlan); err != nil {
+		result.Status = RetentionStatusRefused
+		result.Prune.Status, result.Compact.Status = RetentionStageSkipped, RetentionStageSkipped
+		return err
 	}
 	if err := validateBorgPruneGlobInventory(expectedPlan, liveInventory); err != nil {
 		result.Status = RetentionStatusRefused

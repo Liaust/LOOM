@@ -157,6 +157,12 @@ func (r ApplicationRuntime) PublishPrepared(ctx context.Context, peer uint32, q 
 		return err
 	}
 	defer release()
+	if active, err := r.applicationActionActive(q.Publication.Owner); err != nil || active {
+		if err != nil {
+			return err
+		}
+		return applicationError("action.active")
+	}
 	p, err = r.policy()
 	if err != nil {
 		return err

@@ -300,7 +300,7 @@ func TestOperationalRestoreDrillUsesAuthenticatedBytesAndDetectsMutationDuringPG
 	}
 }
 
-func createOperationalRestoreFixture(t *testing.T) (backupstrategy.OperationalPackageCreateResult, string, []byte) {
+func createOperationalRestoreFixture(t *testing.T, extensions ...restoreauthority.ExtensionRequirement) (backupstrategy.OperationalPackageCreateResult, string, []byte) {
 	t.Helper()
 	packageRoot := filepath.Join(t.TempDir(), "packages")
 	sourceRoot := filepath.Join(t.TempDir(), "sources")
@@ -324,7 +324,9 @@ func createOperationalRestoreFixture(t *testing.T) (backupstrategy.OperationalPa
 	trusted := []byte("PGDMP\x01authenticated-operational-dump")
 	created, err := backupstrategy.CreateOperationalPackage(context.Background(), backupstrategy.OperationalPackageCreateInput{
 		PackagesRoot: packageRoot, PackageID: "operational-toctou", CreatedAt: time.Date(2026, 8, 30, 9, 0, 0, 0, time.UTC), SchemaHead: 61,
-		PostgresDump:  func(_ context.Context, destination string) error { return os.WriteFile(destination, trusted, 0o600) },
+		PostgresDumpWithExtensions: func(_ context.Context, destination string) ([]restoreauthority.ExtensionRequirement, error) {
+			return extensions, os.WriteFile(destination, trusted, 0o600)
+		},
 		ServiceConfig: writeSource("service.env", "LOOM_ENV=test\n"), InstallConfig: writeSource("install.json", `{"profile":"test"}`),
 		ReleaseConfig: writeSource("release.json", `{"release":"test"}`), MigrationState: writeSource("migration.json", string(migrationRaw)),
 		UpdateState: writeSource("update.json", `{"status":"idle"}`), Health: writeSource("health.json", `{"status":"ok"}`),
@@ -333,6 +335,38 @@ func createOperationalRestoreFixture(t *testing.T) (backupstrategy.OperationalPa
 		t.Fatal(err)
 	}
 	return created, filepath.Join(created.PackageDir, "postgres.dump"), trusted
+}
+
+func TestOperationalRestoreDrillPGSearchAuthenticatedMetadataReachesAuthority(t *testing.T) {
+	created, _, _ := createOperationalRestoreFixture(t, restoreauthority.ExtensionRequirement{Name: "pg_search", Version: restoreauthority.PGSearchVersion})
+	input := OperationalRestoreDrillInput{PackageDir: created.PackageDir, ExpectedManifestSHA256: created.ManifestSHA256}
+	called, dropped := false, false
+	input.Authority = restoreAuthorityStub{
+		restore: func(_ context.Context, request restoreauthority.RestoreRequest) (restoreauthority.Result, error) {
+			called = true
+			if len(request.Extensions) != 1 || request.Extensions[0].Name != "pg_search" || request.Extensions[0].Version != restoreauthority.PGSearchVersion {
+				t.Fatalf("authenticated metadata lost: %#v", request.Extensions)
+			}
+			return restoreauthority.Result{Status: "succeeded", Kind: request.Kind, Database: request.Database}, nil
+		},
+		drop: func(_ context.Context, request restoreauthority.DropRequest) (restoreauthority.Result, error) {
+			dropped = true
+			return restoreauthority.Result{Status: "succeeded", Kind: request.Kind, Database: request.Database, CleanupAttempted: true, CleanupSucceeded: true}, nil
+		},
+	}
+	input.Runner = func(context.Context, string, []string, io.Reader) ([]byte, error) {
+		return []byte(`{"migration":61}`), nil
+	}
+	if _, err := RunOperationalRestoreDrill(context.Background(), input); err != nil || !called || !dropped {
+		t.Fatalf("restore called=%t dropped=%t err=%v", called, dropped, err)
+	}
+	for _, hash := range []string{"", strings.Repeat("f", 64)} {
+		called = false
+		input.ExpectedManifestSHA256 = hash
+		if _, err := RunOperationalRestoreDrill(context.Background(), input); err == nil || called {
+			t.Fatalf("unauthenticated metadata reached authority: called=%t err=%v", called, err)
+		}
+	}
 }
 
 func TestValidateRestoreDrillDatabaseRefusesUnsafeTargets(t *testing.T) {
@@ -710,6 +744,22 @@ func TestRunRestoreDrillUsesTemporaryDatabaseAndCleansUp(t *testing.T) {
 		if commands[i] != want[i] {
 			t.Fatalf("commands[%d] = %q, want %q", i, commands[i], want[i])
 		}
+	}
+}
+
+func TestRunRestoreDrillRefusesPGSearchOnLegacyPrivilegedPath(t *testing.T) {
+	dir := validBackupDir(t)
+	path := filepath.Join(dir, "manifest.json")
+	manifest := readRestoreDrillManifest(t, path)
+	manifest.Database.Extensions = []restoreauthority.ExtensionRequirement{{Name: "pg_search", Version: restoreauthority.PGSearchVersion}}
+	writeRestoreDrillManifest(t, path, manifest)
+	called := false
+	_, err := RunRestoreDrill(context.Background(), RestoreDrillInput{
+		BackupDir: dir, TargetDatabase: "loom_restore_drill_legacy_pg_search",
+		Runner: func(context.Context, string, []string, io.Reader) ([]byte, error) { called = true; return nil, nil },
+	})
+	if err == nil || called {
+		t.Fatalf("legacy restore widened: called=%t err=%v", called, err)
 	}
 }
 

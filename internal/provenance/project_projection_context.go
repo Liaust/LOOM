@@ -83,6 +83,9 @@ func (api *FoundationAPI) GetProjectProjection(ctx context.Context, projectID st
 	if err != nil {
 		return ProjectProjectionSnapshot{}, err
 	}
+	if err := checkHomeBox(ctx, result.Context.HomeBoxID); err != nil {
+		return ProjectProjectionSnapshot{}, err
+	}
 	if result.ProjectID != projectID || snapshotID != "" && result.SnapshotID != snapshotID {
 		return ProjectProjectionSnapshot{}, errors.New("project snapshot has mismatched identity")
 	}

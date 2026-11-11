@@ -85,6 +85,32 @@ func calendarDatabase(t *testing.T) (*sql.DB, string, requestctx.Context) {
 	return db, u.String(), req
 }
 
+func TestScheduleProjectDefaultScopePostgres(t *testing.T) {
+	db, _, req := calendarDatabase(t)
+	project := seedCalendarTarget(t, db, req)
+	svc := automation.Service{DB: db}
+	for _, tc := range []struct{ name, project, explicit, want string }{
+		{"project-default", project.ProjectID, "", project.ProjectScopeID},
+		{"explicit-override", project.ProjectID, req.ScopeID, req.ScopeID},
+		{"personal-default", "", "", req.ScopeID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			detail, err := svc.CreateSchedule(t.Context(), req, automation.CreateScheduleInput{
+				ScheduleKey: "scope_" + tc.name, ScheduleKind: "interval", ScheduleExpr: "1h",
+				TargetCapability: "main@calendar.read", ProjectRef: tc.project, ScopeRef: tc.explicit,
+				RunAsActorRef: "owner", InputJSON: json.RawMessage(`{}`), DryRun: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var target automation.TargetProfile
+			if json.Unmarshal(detail.Schedule.TargetProfileJSON, &target) != nil || detail.Schedule.ScopeID == nil || *detail.Schedule.ScopeID != tc.want || target.ScopeRef != tc.want {
+				t.Fatalf("schedule/target scope mismatch: %+v %+v", detail.Schedule, target)
+			}
+		})
+	}
+}
+
 // Exercise this migration's SQL, not whichever migration happens to be latest.
 func calendarMigration(t *testing.T, db *sql.DB, up bool) error {
 	t.Helper()

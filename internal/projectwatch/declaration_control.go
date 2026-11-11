@@ -193,7 +193,7 @@ func ValidateDeclarationWatchGroup(group projects.DeclarationWatchGroup) error {
 			return fmt.Errorf("invalid project watch source")
 		}
 		seen[s.Ref] = true
-		rootSource = rootSource || (s.Ref == pc.CanonicalRootContractPath && s.SchemaVersion == pc.ProjectSchemaV05)
+		rootSource = rootSource || (s.Ref == pc.CanonicalRootContractPath && pc.IsDeclarationSchemaVersion(s.SchemaVersion))
 	}
 	if !rootSource {
 		return fmt.Errorf("project watch root source required")

@@ -40,20 +40,26 @@ type ApplicationClosurePath struct {
 	NARHash string `json:"nar_hash"`
 }
 type ApplicationArtifactDescriptor struct {
-	SchemaVersion         string                         `json:"schema_version"`
-	RepositoryID          string                         `json:"repository_id"`
-	SourceRevision        string                         `json:"source_revision"`
-	SourceDigest          string                         `json:"source_digest"`
-	Artifact              ApplicationArtifact            `json:"artifact"`
-	StoreRoot             string                         `json:"store_root"`
-	Launcher              string                         `json:"launcher"`
-	Executable            string                         `json:"executable"`
-	Closure               []ApplicationClosurePath       `json:"closure"`
-	ClosureDigest         string                         `json:"closure_digest"`
-	Configuration         ApplicationConfigurationSchema `json:"configuration"`
-	ConfigurationDigest   string                         `json:"configuration_digest"`
-	DataFormat            string                         `json:"data_format"`
-	CompatibleDataFormats []string                       `json:"compatible_data_formats"`
+	Actions               map[string]ApplicationActionDefinition `json:"actions,omitempty"`
+	SourceIdentity        string                                 `json:"source_identity,omitempty"`
+	SchemaVersion         string                                 `json:"schema_version"`
+	RepositoryID          string                                 `json:"repository_id"`
+	SourceRevision        string                                 `json:"source_revision"`
+	SourceDigest          string                                 `json:"source_digest"`
+	Artifact              ApplicationArtifact                    `json:"artifact"`
+	StoreRoot             string                                 `json:"store_root"`
+	Launcher              string                                 `json:"launcher"`
+	Executable            string                                 `json:"executable"`
+	Closure               []ApplicationClosurePath               `json:"closure"`
+	ClosureDigest         string                                 `json:"closure_digest"`
+	Configuration         ApplicationConfigurationSchema         `json:"configuration"`
+	ConfigurationDigest   string                                 `json:"configuration_digest"`
+	DataFormat            string                                 `json:"data_format"`
+	CompatibleDataFormats []string                               `json:"compatible_data_formats"`
+}
+
+type ApplicationActionDefinition struct {
+	ReadOnly bool `json:"read_only,omitempty"`
 }
 
 var applicationNodePattern = regexp.MustCompile(`^node_[0-7][0-9A-HJKMNP-TV-Z]{25}$`)
@@ -62,7 +68,16 @@ var applicationStorePattern = regexp.MustCompile(`^/nix/store/[0-9a-df-np-sv-z]{
 var applicationRevisionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$`)
 
 func (d ApplicationArtifactDescriptor) Validate() error {
-	if d.SchemaVersion != "application.artifact.v1" || !applicationRepoPattern.MatchString(d.RepositoryID) || !applicationSourceRevisionPattern.MatchString(d.SourceRevision) || !applicationDigestPattern.MatchString(d.SourceDigest) || !applicationRef(d.Artifact.Ref) || !applicationDigestPattern.MatchString(d.Artifact.Digest) || (d.Artifact.Platform != "aarch64-linux" && d.Artifact.Platform != "x86_64-linux") || !applicationStorePattern.MatchString(d.StoreRoot) || d.Launcher != d.StoreRoot+"/bin/loom-application-launcher" || !applicationAbsolutePath(d.Executable) || !strings.HasPrefix(d.Executable, "/nix/store/") || len(d.Closure) == 0 || len(d.Closure) > 2048 || !applicationRevisionPattern.MatchString(d.DataFormat) || len(d.CompatibleDataFormats) > 32 {
+	if len(d.Actions) > 16 || (len(d.Actions) > 0 && d.SchemaVersion != "application.artifact.v2") {
+		return applicationError("artifact.actions_invalid")
+	}
+	for name := range d.Actions {
+		if !applicationKeyPattern.MatchString(name) {
+			return applicationError("artifact.actions_invalid")
+		}
+	}
+	versionValid := d.SchemaVersion == "application.artifact.v1" && d.SourceIdentity == "" && applicationRepoPattern.MatchString(d.RepositoryID) || d.SchemaVersion == "application.artifact.v2" && d.RepositoryID == "" && validApplicationSourceIdentity("", d.SourceIdentity)
+	if !versionValid || !applicationSourceRevisionPattern.MatchString(d.SourceRevision) || !applicationDigestPattern.MatchString(d.SourceDigest) || !applicationRef(d.Artifact.Ref) || !applicationDigestPattern.MatchString(d.Artifact.Digest) || (d.Artifact.Platform != "aarch64-linux" && d.Artifact.Platform != "x86_64-linux") || !applicationStorePattern.MatchString(d.StoreRoot) || d.Launcher != d.StoreRoot+"/bin/loom-application-launcher" || !applicationAbsolutePath(d.Executable) || !strings.HasPrefix(d.Executable, "/nix/store/") || len(d.Closure) == 0 || len(d.Closure) > 2048 || !applicationRevisionPattern.MatchString(d.DataFormat) || len(d.CompatibleDataFormats) > 32 {
 		return applicationError("artifact.invalid")
 	}
 	previous := ""
@@ -98,16 +113,21 @@ func (d ApplicationArtifactDescriptor) Validate() error {
 }
 
 type ApplicationDataPolicy struct {
-	CloudBackup bool   `json:"cloud_backup,omitempty"`
-	Path        string `json:"path"`
-	Pool        string `json:"pool"`
-	BindingRef  string `json:"binding_ref,omitempty"`
+	StorageClass string                         `json:"storage_class,omitempty"`
+	ProjectState *ApplicationProjectStatePolicy `json:"project_state,omitempty"`
+	CloudBackup  bool                           `json:"cloud_backup,omitempty"`
+	Path         string                         `json:"path"`
+	Pool         string                         `json:"pool"`
+	BindingRef   string                         `json:"binding_ref,omitempty"`
 }
 type ApplicationCredentialPolicy struct {
 	Path     string `json:"path"`
 	Revision string `json:"revision"`
 }
 type ApplicationGrant struct {
+	Network          ApplicationNetworkProfile              `json:"network,omitempty"`
+	NetworkPolicy    *ApplicationNetworkPolicy              `json:"network_policy,omitempty"`
+	SourceIdentity   string                                 `json:"source_identity,omitempty"`
 	Owner            ApplicationOwner                       `json:"owner"`
 	RepositoryID     string                                 `json:"repository_id"`
 	PolicyRevision   string                                 `json:"policy_revision"`
@@ -144,10 +164,13 @@ func (p ApplicationHostPolicy) grant(o ApplicationOwner) (ApplicationGrant, erro
 			match = &p.Grants[i]
 		}
 	}
-	if match == nil || !o.valid() || !applicationRepoPattern.MatchString(match.RepositoryID) || !applicationRevisionPattern.MatchString(match.PolicyRevision) || !applicationRevisionPattern.MatchString(match.LocationRevision) || match.MaxMemoryBytes == 0 || len(match.Data) > 16 || len(match.Credentials) > 16 {
+	if match == nil || !o.valid() || !validApplicationSourceIdentity(match.RepositoryID, match.SourceIdentity) || (match.SourceIdentity != "" && match.SourceIdentity != o.ProjectID+"/"+o.Resource) || !applicationRevisionPattern.MatchString(match.PolicyRevision) || !applicationRevisionPattern.MatchString(match.LocationRevision) || match.MaxMemoryBytes == 0 || len(match.Data) > 16 || len(match.Credentials) > 16 {
 		return ApplicationGrant{}, applicationError("policy.scope_denied")
 	}
 	for k, v := range match.Data {
+		if v.StorageClass != "" && (v.StorageClass != ApplicationProjectStateStorageClass || v.ProjectState == nil || v.ProjectState.Owner != o || v.ProjectState.ProjectRoot != v.Pool || filepath.Join(v.Pool, v.ProjectState.RelativePath) != v.Path) {
+			return ApplicationGrant{}, applicationError("data.project_state_invalid")
+		}
 		if !applicationKeyPattern.MatchString(k) || !applicationAbsolutePath(v.Path) || !applicationAbsolutePath(v.Pool) || !strings.HasPrefix(v.Path, v.Pool+"/") || strings.Contains(v.Path, "/.git/") || strings.Contains(v.Path, "/.codex/") || strings.Contains(v.Path, "/worktrees/") {
 			return ApplicationGrant{}, applicationError("data.policy_invalid")
 		}

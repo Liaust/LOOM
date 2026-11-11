@@ -13,6 +13,23 @@ import (
 	"loom.local/loom/internal/response"
 )
 
+func TestWorkspaceDiscoveryAndNativeControlRejectTCPIdentityHeaders(t *testing.T) {
+	for _, route := range []string{"/v1/files/search?root=box&query=note", "/v1/schedules/hermes/workspace"} {
+		method := "POST"
+		if strings.HasPrefix(route, "/v1/files/") {
+			method = "GET"
+		}
+		req := httptest.NewRequest(method, route, strings.NewReader(`{"operation":"workspace_info","profile":"mina"}`))
+		req.Header.Set("X-Loom-Actor-ID", "operator")
+		req.Header.Set("X-Loom-Node-ID", "main")
+		out := httptest.NewRecorder()
+		NewServer(Services{}, slog.Default()).Handler().ServeHTTP(out, req)
+		if out.Code != 403 {
+			t.Fatalf("%s: %d", route, out.Code)
+		}
+	}
+}
+
 func TestHermesScheduleInventoryAvailabilityAndPrivacy(t *testing.T) {
 	for _, tc := range []struct {
 		name, payload string

@@ -27,6 +27,8 @@ type ApplicationCalls interface {
 }
 
 type applicationPayload struct {
+	Source      *applicationSourcePayload    `json:"source,omitempty"`
+	Browse      *sr.ApplicationBrowseRequest `json:"browse,omitempty"`
 	Endpoint    string                       `json:"endpoint"`
 	Request     sr.ApplicationRuntimeRequest `json:"request"`
 	Preparation *applicationPreparation      `json:"preparation,omitempty"`
@@ -48,8 +50,17 @@ func (r *LocalResolver) appendApplications(ctx context.Context, x localDeclarati
 	slices.Sort(keys)
 	issues := []pc.DeclarationPreflightIssue{}
 	for _, key := range keys {
+		if selected, deployOnly := pc.ApplicationDeployResource(basis.Effects); deployOnly && selected != key {
+			continue
+		}
 		res := d.Resources[key]
 		if res.Kind != pc.DeclarationApplication {
+			continue
+		}
+		if res.Application.Source != nil {
+			if err := r.appendSourceApplication(ctx, x, key, *res.Application, basis, payloads); err != nil {
+				return err
+			}
 			continue
 		}
 		var raw []byte
@@ -121,8 +132,32 @@ func (r *LocalResolver) appendApplications(ctx context.Context, x localDeclarati
 		if q.Endpoint != nil {
 			a.PublicURL = "https://" + q.Endpoint.Hostname
 		}
-		basis.Actions = append(basis.Actions, a)
-		payloads[a.ID] = payload
+		views := map[string]sr.ApplicationBrowseBinding{}
+		for dataKey, data := range res.Application.Data {
+			if data.Browse != nil {
+				views[string(dataKey)] = sr.ApplicationBrowseBinding{BindingRef: data.BindingRef, View: *data.Browse}
+			}
+		}
+		// Only the content-view path may reuse a confirmed installed generation.
+		// Other explicit application applies retain their existing recovery behavior.
+		contentOnly := (len(views) > 0 || facts.BrowseRevision != "") && !facts.GrantMissing && facts.Installation.Present && facts.Installation.Applied != nil && *facts.Installation.Applied && facts.RuntimeDesired == q.RuntimeDesiredDigest()
+		if !contentOnly {
+			basis.Actions = append(basis.Actions, a)
+			payloads[a.ID] = payload
+		}
+		if len(views) > 0 || facts.BrowseRevision != "" {
+			browse := sr.ApplicationBrowseRequest{Owner: owner, ProjectName: d.Project.Name, Operation: "apply", ExpectedInstallationRevision: facts.Installation.Revision, RuntimeDesired: q.RuntimeDesiredDigest(), ExpectedRevision: facts.BrowseRevision, Views: views}
+			p, e := canonicalValue(applicationPayload{Endpoint: capabilities.NodeSystemProviderAddress(x.Input.Project.OwnerNode) + ".project.application.browse", Browse: &browse})
+			if e != nil {
+				return e
+			}
+			a.ID = "apply_application_browse:" + string(key)
+			a.PublicURL = ""
+			a.InputHash = hashBytes(p)
+			a.DependsOn = []string{basis.Actions[len(basis.Actions)-1].ID}
+			basis.Actions = append(basis.Actions, a)
+			payloads[a.ID] = p
+		}
 	}
 	if len(issues) > 0 {
 		return &Failure{Code: pc.DeclarationTargetUnavailable, Cause: "application_preflight_blocked", Preflight: issues}
@@ -221,6 +256,8 @@ type ApplicationInspector interface {
 }
 
 type ApplicationOwner struct {
+	Builds    ApplicationBuildQueue
+	Source    *SourceApplicationAdapter
 	Backup    ApplicationBackupStatus
 	Calls     ApplicationCalls
 	Inspector ApplicationInspector
@@ -228,6 +265,20 @@ type ApplicationOwner struct {
 }
 
 func (o ApplicationOwner) ResourceStatus(ctx context.Context, a pc.DeclarationAction, raw json.RawMessage) (pc.DeclarationReadiness, error) {
+	var content applicationPayload
+	if strictOwnerPayload(raw, &content) == nil && content.Source != nil {
+		resolved, err := o.materializeSource(ctx, a, content, false)
+		if errors.Is(err, ErrSourceApplicationOutputMissing) {
+			return readiness(a.InputHash), nil
+		}
+		if err != nil {
+			return readiness(a.InputHash), err
+		}
+		return o.ResourceStatus(ctx, a, resolved)
+	}
+	if json.Unmarshal(raw, &content) == nil && content.Browse != nil {
+		return o.browseStatus(ctx, a, raw, content)
+	}
 	out := readiness(a.InputHash)
 	if err := o.Validate(ctx, a, raw); err != nil {
 		return out, err
@@ -280,6 +331,15 @@ func (o ApplicationOwner) ResourceStatus(ctx context.Context, a pc.DeclarationAc
 
 func (o ApplicationOwner) Validate(_ context.Context, a pc.DeclarationAction, raw json.RawMessage) error {
 	var p applicationPayload
+	if strictOwnerPayload(raw, &p) == nil && p.Source != nil {
+		return validateSourceAction(a, p)
+	}
+	if strictOwnerPayload(raw, &p) == nil && p.Browse != nil {
+		return validateApplicationBrowse(a, p)
+	}
+	if a.ID != "apply_application:"+string(a.Resource) {
+		return fail(pc.DeclarationInvalid, "application_action_mismatch")
+	}
 	if strictOwnerPayload(raw, &p) != nil || a.Kind != pc.DeclarationApplyApplication || a.Owner != pc.DeclarationOwnerApplication || p.Request.Operation != "apply" || p.Request.OperationToken != "" || p.Request.Owner.ProjectID+"/"+p.Request.Owner.Resource != a.TargetRef || p.Request.Owner.Resource != string(a.Resource) || p.Request.Manifest == nil || p.Request.Rollback || !strings.HasPrefix(p.Endpoint, "workspace/") || !strings.HasSuffix(p.Endpoint, ".project.application.apply") {
 		return fail(pc.DeclarationInvalid, "application_payload_invalid")
 	}
@@ -320,6 +380,24 @@ func applicationCallInput(call ActionCall) (applicationPayload, []byte, error) {
 }
 
 func (o ApplicationOwner) Observe(ctx context.Context, call ActionCall) (Observation, error) {
+	var p applicationPayload
+	if strictOwnerPayload(call.Payload, &p) == nil && p.Source != nil {
+		raw, err := o.materializeSource(ctx, call.Action, p, false)
+		if errors.Is(err, ErrSourceApplicationOutputMissing) {
+			if p.Source.SourceSnapshot.Program != nil && o.Builds != nil {
+				return o.Builds.Observe(ctx, call)
+			}
+			return Observation{State: Absent}, nil
+		}
+		if err != nil {
+			return Observation{}, err
+		}
+		call.Payload = raw
+		return o.Observe(ctx, call)
+	}
+	if json.Unmarshal(call.Payload, &p) == nil && p.Browse != nil {
+		return o.observeBrowse(ctx, call)
+	}
 	observed, _, err := o.observeDelivery(ctx, call)
 	return observed, err
 }
@@ -361,13 +439,15 @@ func (o ApplicationOwner) observeDelivery(ctx context.Context, call ActionCall) 
 			return Observation{}, "", fail(pc.DeclarationOperationConflict, "application_call_identity_conflict")
 		}
 		var receipt sr.ApplicationRuntimeReceipt
-		bound := json.Unmarshal(found.ResultJSON, &receipt) == nil && receipt.SchemaVersion == sr.ApplicationRuntimeSchema && receipt.Owner == p.Request.Owner && receipt.OperationToken == call.Token && receipt.InputDigest == p.Request.Digest() && receipt.InstallationRevision == receipt.InputDigest && receipt.Applied && !receipt.Retired && receipt.Revision == p.Request.ExpectedRevision && receipt.EvidenceRef != ""
+		bound := json.Unmarshal(found.ResultJSON, &receipt) == nil && receipt.SchemaVersion == sr.ApplicationRuntimeSchema && receipt.Owner == p.Request.Owner && receipt.OperationToken == call.Token && receipt.InputDigest == p.Request.Digest() && !receipt.Retired && receipt.Revision == p.Request.ExpectedRevision && receipt.EvidenceRef != ""
+		committed := receipt.Applied && receipt.InstallationRevision == receipt.InputDigest
+		preparing := !receipt.Applied && receipt.InstallationRevision == p.Request.ExpectedInstallationRevision && receipt.InstallationRevision != receipt.InputDigest
 		if found.Status == routing.CapabilityCallStatusFailed {
 			cause := "application_call_failed"
 			if found.ErrorCode != nil && causePattern.MatchString(*found.ErrorCode) {
 				cause = *found.ErrorCode
 			}
-			if !bound || receipt.State != "partial" || receipt.ErrorCode != cause || !strings.HasPrefix(cause, "application.") || found.CapabilityCallID == "" {
+			if !bound || (!committed && !preparing) || receipt.State != "partial" || receipt.ErrorCode != cause || !strings.HasPrefix(cause, "application.") || found.CapabilityCallID == "" {
 				return Observation{State: Uncertain, CauseCode: cause}, "", nil
 			}
 			previous = Observation{State: Resumable, CauseCode: cause}
@@ -377,7 +457,7 @@ func (o ApplicationOwner) observeDelivery(ctx context.Context, call ActionCall) 
 		if found.Status != routing.CapabilityCallStatusCompleted {
 			return Observation{State: Pending, CauseCode: "application_node_execution_pending"}, "", nil
 		}
-		if !bound || receipt.State != "succeeded" {
+		if !bound || !committed || receipt.State != "succeeded" {
 			return Observation{}, "", fail(pc.DeclarationOwnerFailed, "application_receipt_invalid")
 		}
 		return Observation{State: Committed, Receipt: &Receipt{Token: call.Token, ActionID: call.Action.ID, Owner: call.Action.Owner, InputHash: call.Action.InputHash, EffectRef: receipt.EvidenceRef, Revisions: map[string]RevisionChange{}, Bindings: map[pc.ResourceKey]BindingChange{}}}, "", nil
@@ -391,6 +471,41 @@ func sameJSON(a, b []byte) bool {
 }
 
 func (o ApplicationOwner) Apply(ctx context.Context, call ActionCall) (Observation, error) {
+	var content applicationPayload
+	if strictOwnerPayload(call.Payload, &content) == nil && content.Source != nil {
+		if call.Fence == nil {
+			return Observation{}, fail(pc.DeclarationUnauthorized, "application_fence_required")
+		}
+		if err := call.Fence.Check(ctx); err != nil {
+			return Observation{}, err
+		}
+		build := true
+		if content.Source.SourceSnapshot.Program != nil {
+			if o.Builds == nil {
+				return Observation{}, fail(pc.DeclarationTargetUnavailable, "application_build_queue_unavailable")
+			}
+			ready, err := o.Builds.Ensure(ctx, call, *content.Source)
+			if err != nil {
+				return Observation{}, err
+			}
+			if !ready {
+				return Observation{State: Pending, CauseCode: "application_build_pending"}, nil
+			}
+			build = false
+		}
+		raw, err := o.materializeSource(ctx, call.Action, content, build)
+		if err != nil {
+			return Observation{}, err
+		}
+		if err := call.Fence.Check(ctx); err != nil {
+			return Observation{}, err
+		}
+		call.Payload = raw
+		return o.Apply(ctx, call)
+	}
+	if json.Unmarshal(call.Payload, &content) == nil && content.Browse != nil {
+		return o.applyBrowse(ctx, call)
+	}
 	observed, deliveryToken, err := o.observeDelivery(ctx, call)
 	if err != nil || (observed.State != Absent && observed.State != Resumable) {
 		return observed, err

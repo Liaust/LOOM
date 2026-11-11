@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"loom.local/loom/internal/dropzone"
+	"loom.local/loom/internal/filepolicy"
 	"loom.local/loom/internal/lane"
 	"loom.local/loom/internal/projectcontracts"
 	"loom.local/loom/internal/projects"
@@ -12,7 +13,8 @@ import (
 )
 
 const (
-	SchemaVersion = "loom.box.v0.4.1"
+	SchemaVersion             = "loom.box.v0.4.1"
+	FolderPolicySchemaVersion = "loom.box.v0.5"
 
 	DefaultRootDirName            = "loom-box"
 	LegacyRootDirName             = "LOOM Box"
@@ -46,21 +48,23 @@ const (
 var CanonicalAreas = []string{AreaProjects, AreaNotes, AreaDocuments, AreaLane, AreaDropzone}
 
 type Contract struct {
-	SchemaVersion      string            `json:"schema_version" yaml:"schema_version"`
-	BoxID              string            `json:"box_id" yaml:"box_id"`
-	OwnerNode          string            `json:"owner_node" yaml:"owner_node"`
-	Profile            string            `json:"profile" yaml:"profile"`
-	RootPath           string            `json:"root_path" yaml:"root_path"`
-	Areas              map[string]Area   `json:"areas" yaml:"areas"`
-	DefaultProjectPath string            `json:"default_project_path" yaml:"default_project_path"`
-	Policies           map[string]string `json:"policies" yaml:"policies"`
-	Metadata           Metadata          `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	SchemaVersion      string                   `json:"schema_version" yaml:"schema_version"`
+	BoxID              string                   `json:"box_id" yaml:"box_id"`
+	OwnerNode          string                   `json:"owner_node" yaml:"owner_node"`
+	Profile            string                   `json:"profile" yaml:"profile"`
+	RootPath           string                   `json:"root_path" yaml:"root_path"`
+	Areas              map[string]Area          `json:"areas" yaml:"areas"`
+	DefaultProjectPath string                   `json:"default_project_path" yaml:"default_project_path"`
+	Policies           map[string]string        `json:"policies" yaml:"policies"`
+	Metadata           Metadata                 `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	Files              *filepolicy.FolderPolicy `json:"files,omitempty" yaml:"files,omitempty"`
 }
 
 type Area struct {
-	Path           string `json:"path" yaml:"path"`
-	Enabled        bool   `json:"enabled" yaml:"enabled"`
-	TransferStatus string `json:"transfer_status,omitempty" yaml:"transfer_status,omitempty"`
+	Path           string       `json:"path" yaml:"path"`
+	Enabled        bool         `json:"enabled" yaml:"enabled"`
+	TransferStatus string       `json:"transfer_status,omitempty" yaml:"transfer_status,omitempty"`
+	Watch          *WatchPolicy `json:"watch,omitempty" yaml:"watch,omitempty"`
 }
 
 type Metadata struct {
@@ -70,6 +74,8 @@ type Metadata struct {
 }
 
 type ResolveInput struct {
+	BoxID            string
+	RootRef          string
 	ExplicitPath     string
 	ConfiguredPath   string
 	RuntimeStateRoot string
@@ -81,6 +87,8 @@ type ResolveInput struct {
 }
 
 type Resolved struct {
+	BoxID            string `json:"box_id,omitempty"`
+	RootRef          string `json:"root_ref,omitempty"`
 	RootPath         string `json:"root_path"`
 	PathSource       string `json:"path_source"`
 	Profile          string `json:"profile"`
@@ -159,10 +167,11 @@ type RuntimeStateResolution struct {
 }
 
 type InitInput struct {
-	Resolved Resolved
-	DryRun   bool
-	Now      func() time.Time
-	NewBoxID func() string
+	Resolved   Resolved
+	DryRun     bool
+	RetireLane bool
+	Now        func() time.Time
+	NewBoxID   func() string
 }
 
 type InitResult struct {
@@ -188,11 +197,11 @@ type InitResult struct {
 
 type WatchPolicy struct {
 	Processing    *projectcontracts.KnowledgeProcessingPolicy `json:"processing,omitempty" yaml:"processing,omitempty"`
-	SchemaVersion string                                      `json:"schema_version" yaml:"schema_version"`
-	Area          string                                      `json:"area" yaml:"area"`
-	Path          string                                      `json:"path" yaml:"path"`
+	SchemaVersion string                                      `json:"schema_version,omitempty" yaml:"schema_version,omitempty"`
+	Area          string                                      `json:"area,omitempty" yaml:"area,omitempty"`
+	Path          string                                      `json:"path,omitempty" yaml:"path,omitempty"`
 	Enabled       bool                                        `json:"enabled" yaml:"enabled"`
-	Mode          string                                      `json:"mode" yaml:"mode"`
+	Mode          string                                      `json:"mode,omitempty" yaml:"mode,omitempty"`
 	Semantics     string                                      `json:"semantics" yaml:"semantics"`
 	Catalog       WatchPolicyToggle                           `json:"catalog" yaml:"catalog"`
 	Object        WatchPolicyToggle                           `json:"object" yaml:"object"`

@@ -17,5 +17,6 @@ explicit inclusion and remain unaccepted clues. Source documents and repository
 contracts can correct a semantic navigation result.
 
 Use authorized capabilities for actions inside LOOM. Worker controls belong to
-supported LOOM worker surfaces; ORCA owns interactive agent/task lifecycle.
+supported LOOM worker surfaces; the current native harness owns agent/task lifecycle.
+ORCA is retired, not an availability fallback.
 Never read database tables or call lifecycle storage internals to bypass either.

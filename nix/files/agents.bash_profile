@@ -1,4 +1,4 @@
-# Load the managed interactive profile for login and ORCA wrapper shells.
+# Load the shared agents interactive profile for login shells.
 if [[ -f $HOME/.bashrc ]]; then
   source "$HOME/.bashrc"
 fi

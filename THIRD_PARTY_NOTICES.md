@@ -10,9 +10,10 @@ model weights, or external application binaries.
 | Material | Origin and license |
 | --- | --- |
 | Geist and Geist Mono font files | Vercel and basement.studio; SIL Open Font License 1.1. Full notice is retained at [fonts/LICENSE.txt](internal/minidashboard/web/fonts/LICENSE.txt). |
-| Hermes compatibility patches | Against NousResearch/hermes-agent, pinned in `flake.lock`; upstream MIT notice retained at [licenses/hermes-MIT.txt](licenses/hermes-MIT.txt). LOOM changes add the remote Mac adapter and centered skin layout. |
+| Hermes compatibility patches | Against NousResearch/hermes-agent, pinned in `flake.lock`; upstream MIT notice retained at [licenses/hermes-MIT.txt](licenses/hermes-MIT.txt). LOOM changes cover native profile/runtime integration, desktop/browser access and compatibility repairs. |
 | ORCA folder bootstrap patch | Against stablyai/orca 1.4.191; upstream MIT notice retained at [licenses/orca-MIT.txt](licenses/orca-MIT.txt). LOOM changes expose the non-Git folder CLI path. |
 | Cua contract integration | The adapter and selected compatibility fixtures refer to trycua/cua's pinned driver contract; upstream MIT notice retained at [licenses/cua-MIT.txt](licenses/cua-MIT.txt). |
+| Xfwm compatibility patch | Against Xfce's Xfwm window manager; upstream source retains its GPL notices. This source tree contains a patch, not a relicensed or bundled window-manager binary. |
 | Notes LiveSync overlays | Pinned Self-hosted LiveSync 1.0.32 and livesync-commonlib 0.1.29; upstream MIT notice retained at [LICENSE.upstream](modules/notes-workspace-client/LICENSE.upstream). Source pins and packaging notices are in [the transport module](modules/notes-workspace-sync/THIRD_PARTY.md). |
 
 Patch files contain upstream context as well as LOOM changes. They do not
@@ -24,6 +25,12 @@ patched packages and preserve any additional notices those packages contain.
 - **Go libraries:** exact modules/checksums are in `go.mod` and `go.sum`.
   Upstream licenses remain with the modules; a future binary distribution must
   include the notices applicable to its linked dependency set.
+- **Desktop JavaScript libraries and Electron:** exact direct and transitive
+  versions are in `modules/workspace-electron/package-lock.json`. The renderer
+  uses independently licensed editor, parser, PDF, graph, chart and icon
+  libraries. Their packages and Electron are resolved separately, not checked
+  into this source tree. A packaged desktop must carry the applicable upstream
+  notices for its included dependency set, not just LOOM's Apache license.
 - **Nix/Nixpkgs:** `flake.lock` pins the package definitions and upstream inputs.
   The packages built from those definitions have their own licenses.
 - **Hermes, ORCA, Basecamp CLI, agent-browser, Chromium and Cua Driver:** optional

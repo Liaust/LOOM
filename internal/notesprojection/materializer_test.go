@@ -28,6 +28,7 @@ func TestBoxSourceProjectionPathsAndContext(t *testing.T) {
 		{RootKindProjectMaterial, "incoming", "research", "projects/atlas/incoming/a.md"},
 		{RootKindProjectMaterial, "app/output", "docs", "projects/atlas/app/output/a.md"},
 		{RootKindProjectMaterial, "late", "notes", "projects/atlas/late/a.md"},
+		{RootKindProjectMaterial, ".", "notes", "projects/atlas/a.md"},
 	} {
 		source := SourceObject{RootKind: test.kind, RootRelativePath: test.root, Declaration: test.decl, RelativePath: "a.md", SourceNodeKey: "main", ProjectSlug: "atlas"}
 		got, err := projectedPathForSource(source)
@@ -39,6 +40,19 @@ func TestBoxSourceProjectionPathsAndContext(t *testing.T) {
 			if _, err := projectedPathForSource(source); err == nil {
 				t.Fatal("accepted unbound projection root")
 			}
+		}
+	}
+}
+
+func TestProjectionRootDotDoesNotRelaxAreaOrFilePaths(t *testing.T) {
+	for _, kind := range []string{RootKindBoxTopics, RootKindBoxLibrary} {
+		if _, err := projectedPathForSource(SourceObject{RootKind: kind, RootRelativePath: ".", RelativePath: "a.md"}); err == nil {
+			t.Fatal("dot admitted a Box area", kind)
+		}
+	}
+	for _, relative := range []string{".", "../escape.md", "/absolute.md"} {
+		if _, err := projectedPathForSource(SourceObject{RootKind: RootKindProjectMaterial, RootRelativePath: ".", Declaration: "notes", ProjectSlug: "atlas", RelativePath: relative}); err == nil {
+			t.Fatal("dot root weakened file path admission", relative)
 		}
 	}
 }

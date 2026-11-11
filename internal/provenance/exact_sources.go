@@ -104,6 +104,9 @@ func (api *FoundationAPI) readExactSources(ctx context.Context, kind string, id 
 		return nil, LinkedSources{}, &FoundationValidationError{Err: errors.New("unsupported exact source parent")}
 	}
 	if err != nil {
+		if errors.Is(err, ErrBoxSelectionMismatch) {
+			return nil, LinkedSources{}, err
+		}
 		return nil, LinkedSources{}, &linkedSourcesReadError{cause: err}
 	}
 	if !found {

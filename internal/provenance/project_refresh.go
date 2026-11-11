@@ -16,6 +16,8 @@ type ProjectRefreshService struct {
 	Projection   interface {
 		SyncProjectProjection(context.Context, ProjectProjectionSyncInput) (ProjectProjectionSyncReceipt, error)
 	}
+	// Resolve verified registration membership without changing project IDs.
+	HomeBoxID func(context.Context, string) (string, error)
 }
 
 func (s ProjectRefreshService) RefreshProject(ctx context.Context, project string, contextOnly bool) (ProjectProjectionSyncReceipt, error) {
@@ -39,6 +41,12 @@ func (s ProjectRefreshService) RefreshProject(ctx context.Context, project strin
 		return ProjectProjectionSyncReceipt{}, err
 	}
 	input := ProjectProjectionSyncInput{Project: source.Projection, ContextOnly: contextOnly, Repositories: []repostate.ProvenanceProjection{}}
+	if s.HomeBoxID != nil {
+		input.HomeBoxID, err = s.HomeBoxID(ctx, source.Projection.Project.ProjectID)
+		if err != nil {
+			return ProjectProjectionSyncReceipt{}, err
+		}
+	}
 	if !contextOnly {
 		if s.Repositories == nil {
 			return ProjectProjectionSyncReceipt{}, fmt.Errorf("repository observer is unavailable")

@@ -17,12 +17,17 @@ const ApplicationProvisioningSchema = "application.provisioning.v1"
 // Configured once per node. Planned capacity is admission, not a filesystem
 // quota or a reservation. Application data is allocated by the existing installer.
 type ApplicationProvisioningPolicy struct {
-	PublicEndpoints *ApplicationPublicEndpointPolicy `json:"public_endpoints,omitempty"`
-	CloudBackup     bool                             `json:"cloud_backup,omitempty"`
-	Proton          *ApplicationProtonPolicy         `json:"proton,omitempty"`
-	DataRoot        string                           `json:"data_root"`
-	MaxMemoryBytes  uint64                           `json:"max_memory_bytes"`
-	MaxPlannedBytes uint64                           `json:"max_planned_bytes"`
+	ProjectRoot                  string                           `json:"project_root,omitempty"`
+	ProjectRoots                 []string                         `json:"project_roots,omitempty"`
+	RuntimeCredentialRoot        string                           `json:"runtime_credential_root,omitempty"`
+	RuntimeCredentialImportRoots []string                         `json:"runtime_credential_import_roots,omitempty"`
+	Network                      *ApplicationNetworkPolicy        `json:"network,omitempty"`
+	PublicEndpoints              *ApplicationPublicEndpointPolicy `json:"public_endpoints,omitempty"`
+	CloudBackup                  bool                             `json:"cloud_backup,omitempty"`
+	Proton                       *ApplicationProtonPolicy         `json:"proton,omitempty"`
+	DataRoot                     string                           `json:"data_root"`
+	MaxMemoryBytes               uint64                           `json:"max_memory_bytes"`
+	MaxPlannedBytes              uint64                           `json:"max_planned_bytes"`
 }
 
 type ApplicationPublicEndpointPolicy struct {
@@ -44,14 +49,19 @@ type ApplicationProtonPolicy struct {
 // Supplied by the project coordinator after its normal project/actor checks.
 // This is a helper-only daemon operation, not a remotely callable capability.
 type ApplicationProvisionRequest struct {
-	Endpoint          *ApplicationEndpointRequest `json:"endpoint,omitempty"`
-	CloudBackup       bool                        `json:"cloud_backup,omitempty"`
-	CredentialSources map[string]string           `json:"credential_sources,omitempty"`
-	SchemaVersion     string                      `json:"schema_version"`
-	Owner             ApplicationOwner            `json:"owner"`
-	RepositoryID      string                      `json:"repository_id"`
-	LocationRevision  string                      `json:"location_revision"`
-	Data              map[string]string           `json:"data"`
+	Network           ApplicationNetworkProfile                `json:"network,omitempty"`
+	ProjectRoot       string                                   `json:"project_root,omitempty"`
+	ProjectState      map[string]string                        `json:"project_state,omitempty"`
+	StateIdentities   map[string]ApplicationProjectStatePolicy `json:"state_identities,omitempty"`
+	SourceIdentity    string                                   `json:"source_identity,omitempty"`
+	Endpoint          *ApplicationEndpointRequest              `json:"endpoint,omitempty"`
+	CloudBackup       bool                                     `json:"cloud_backup,omitempty"`
+	CredentialSources map[string]string                        `json:"credential_sources,omitempty"`
+	SchemaVersion     string                                   `json:"schema_version"`
+	Owner             ApplicationOwner                         `json:"owner"`
+	RepositoryID      string                                   `json:"repository_id"`
+	LocationRevision  string                                   `json:"location_revision"`
+	Data              map[string]string                        `json:"data"`
 }
 
 // No physical allocation paths or credential values cross the helper boundary.
@@ -78,6 +88,14 @@ func (p ApplicationHostPolicy) provisioningRevision() (string, error) {
 	if p.SchemaVersion != "application.policy.v1" || !applicationNodePattern.MatchString(p.NodeID) || p.InstallerUID == 0 || p.InstallerUID == p.PublisherUID || len(p.Grants) > 128 || (p.Platform != "x86_64-linux" && p.Platform != "aarch64-linux") || !applicationAbsolutePath(v.DataRoot) || v.MaxMemoryBytes == 0 || v.MaxPlannedBytes == 0 {
 		return "", applicationError("provisioning.policy_invalid")
 	}
+	if len(v.ProjectRoots) > 128 {
+		return "", applicationError("provisioning.policy_invalid")
+	}
+	for _, parent := range v.ProjectRoots {
+		if !applicationAbsolutePath(parent) || parent == "/" {
+			return "", applicationError("provisioning.policy_invalid")
+		}
+	}
 	if v.Proton != nil {
 		if !applicationAbsolutePath(v.Proton.CredentialRoot) || strings.HasPrefix(v.Proton.CredentialRoot, "/nix/store/") || len(v.Proton.ShareIDs) == 0 || len(v.Proton.ShareIDs) > 16 {
 			return "", applicationError("credential.policy_invalid")
@@ -100,6 +118,18 @@ func (p ApplicationHostPolicy) provisioningRevision() (string, error) {
 }
 
 func applicationProvisionValid(q ApplicationProvisionRequest) bool {
+	if q.Network != "" && q.Network != ApplicationNetworkLoopback && q.Network != ApplicationNetworkOutboundHTTPS {
+		return false
+	}
+	if len(q.ProjectState) != len(q.StateIdentities) || len(q.ProjectState) > 16 || (len(q.ProjectState) > 0 && (!applicationAbsolutePath(q.ProjectRoot) || q.SourceIdentity == "")) {
+		return false
+	}
+	for key, relative := range q.ProjectState {
+		state, ok := q.StateIdentities[key]
+		if !ok || q.Data[key] == "" || !applicationAdoptionRelative(relative) || state.Owner != q.Owner || state.ProjectRoot != q.ProjectRoot || state.RelativePath != relative || state.DirectoryIdentity.Inode == 0 || state.RootIdentity.Inode == 0 {
+			return false
+		}
+	}
 	if q.Endpoint != nil && !q.Endpoint.valid() {
 		return false
 	}
@@ -107,11 +137,12 @@ func applicationProvisionValid(q ApplicationProvisionRequest) bool {
 		return false
 	}
 	for ref, source := range q.CredentialSources {
-		if _, _, ok := pc.ApplicationCredentialSourceShare(source); !ok || !applicationPrerequisiteBindingRef(ref) || ref == "" {
+		_, _, pass := pc.ApplicationCredentialSourceShare(source)
+		if (!pass && !pc.ValidApplicationRuntimeCredentialReference(source)) || !applicationPrerequisiteBindingRef(ref) || ref == "" {
 			return false
 		}
 	}
-	if q.SchemaVersion != ApplicationProvisioningSchema || !q.Owner.valid() || !applicationRepoPattern.MatchString(q.RepositoryID) || !applicationRevisionPattern.MatchString(q.LocationRevision) || q.Data == nil || len(q.Data) > 16 {
+	if q.SchemaVersion != ApplicationProvisioningSchema || !q.Owner.valid() || !validApplicationSourceIdentity(q.RepositoryID, q.SourceIdentity) || (q.SourceIdentity != "" && q.SourceIdentity != q.Owner.ProjectID+"/"+q.Owner.Resource) || !applicationRevisionPattern.MatchString(q.LocationRevision) || q.Data == nil || len(q.Data) > 16 {
 		return false
 	}
 	seen := map[string]bool{}
@@ -135,7 +166,24 @@ func (p ApplicationHostPolicy) deriveGrant(q ApplicationProvisionRequest) (appli
 		endpoint := *q.Endpoint
 		q.Endpoint = &endpoint
 	}
-	revision, err := p.provisioningRevision()
+	// Adding an opt-in source producer must not invalidate retained v1 grants
+	// for unrelated existing applications.
+	revisionPolicy := p
+	if p.Provisioning != nil && len(p.Provisioning.ProjectRoots) > 0 {
+		selected := *p.Provisioning
+		selected.ProjectRoots = nil
+		if parent, ok := p.Provisioning.projectParent(q.ProjectRoot); ok {
+			selected.ProjectRoot = parent
+		}
+		revisionPolicy.Provisioning = &selected
+	}
+	if q.SourceIdentity == "" && q.Network == "" && len(q.ProjectState) == 0 && p.Provisioning != nil {
+		legacy := *revisionPolicy.Provisioning
+		legacy.ProjectRoot, legacy.RuntimeCredentialRoot = "", ""
+		legacy.RuntimeCredentialImportRoots, legacy.Network = nil, nil
+		revisionPolicy.Provisioning = &legacy
+	}
+	revision, err := revisionPolicy.provisioningRevision()
 	if err != nil {
 		return out, err
 	}
@@ -147,7 +195,13 @@ func (p ApplicationHostPolicy) deriveGrant(q ApplicationProvisionRequest) (appli
 			return out, applicationError("provisioning.explicit_grant")
 		}
 	}
-	g := ApplicationGrant{Owner: q.Owner, RepositoryID: q.RepositoryID, LocationRevision: q.LocationRevision, PolicyRevision: revision, MaxMemoryBytes: p.Provisioning.MaxMemoryBytes, MaxPlannedBytes: p.Provisioning.MaxPlannedBytes, Data: map[string]ApplicationDataPolicy{}, Credentials: map[string]ApplicationCredentialPolicy{}}
+	g := ApplicationGrant{Owner: q.Owner, RepositoryID: q.RepositoryID, SourceIdentity: q.SourceIdentity, LocationRevision: q.LocationRevision, PolicyRevision: revision, MaxMemoryBytes: p.Provisioning.MaxMemoryBytes, MaxPlannedBytes: p.Provisioning.MaxPlannedBytes, Data: map[string]ApplicationDataPolicy{}, Credentials: map[string]ApplicationCredentialPolicy{}}
+	if q.Network != "" {
+		g.Network, g.NetworkPolicy = q.Network, p.Provisioning.Network.Clone()
+		if _, _, err := applicationNetworkPlanForGrant(ApplicationGeneration{Owner: q.Owner, UID: applicationAccountUID(q.Owner)}, g); err != nil {
+			return out, err
+		}
+	}
 	if q.Endpoint != nil {
 		edge := p.Provisioning.PublicEndpoints
 		if edge == nil || !strings.HasSuffix(q.Endpoint.Hostname, "."+edge.Suffix) || strings.Contains(strings.TrimSuffix(q.Endpoint.Hostname, "."+edge.Suffix), ".") {
@@ -157,8 +211,23 @@ func (p ApplicationHostPolicy) deriveGrant(q ApplicationProvisionRequest) (appli
 	}
 	for key, ref := range q.Data {
 		g.Data[key] = ApplicationDataPolicy{Pool: p.Provisioning.DataRoot, Path: filepath.Join(p.Provisioning.DataRoot, q.Owner.Instance()+"-"+key), BindingRef: ref, CloudBackup: p.Provisioning.CloudBackup}
+		if state, adopted := q.StateIdentities[key]; adopted {
+			if _, ok := p.Provisioning.projectParent(q.ProjectRoot); !ok {
+				return out, applicationError("adoption.project_not_permitted")
+			}
+			copy := state
+			g.Data[key] = ApplicationDataPolicy{StorageClass: ApplicationProjectStateStorageClass, ProjectState: &copy, Pool: q.ProjectRoot, Path: filepath.Join(q.ProjectRoot, state.RelativePath), BindingRef: ref, CloudBackup: false}
+		}
 	}
 	for ref, source := range q.CredentialSources {
+		if pc.ValidApplicationRuntimeCredentialReference(source) {
+			root := p.Provisioning.RuntimeCredentialRoot
+			if !applicationAbsolutePath(root) || strings.HasPrefix(root, "/nix/store/") {
+				return out, applicationError("credential.runtime_import_disabled")
+			}
+			g.Credentials[ref] = ApplicationCredentialPolicy{Path: filepath.Join(root, strings.TrimPrefix(source, "runtime://")+".credential"), Revision: ApplicationProtonCredentialRevision(source)}
+			continue
+		}
 		share, generate, _ := pc.ApplicationCredentialSourceShare(source)
 		if p.Provisioning.Proton == nil || !slices.Contains(p.Provisioning.Proton.ShareIDs, share) {
 			return out, applicationError("credential.share_not_permitted")
@@ -243,6 +312,33 @@ func (r ApplicationRuntime) provisionPlan(p ApplicationHostPolicy, peer uint32, 
 	if peer != p.InstallerUID {
 		return out, desired, applicationError("provisioning.peer_denied")
 	}
+	if len(q.ProjectState) > 0 && len(q.StateIdentities) == 0 {
+		if _, ok := p.Provisioning.projectParent(q.ProjectRoot); !ok {
+			return out, desired, applicationError("adoption.project_not_permitted")
+		}
+		q.StateIdentities = map[string]ApplicationProjectStatePolicy{}
+		stored, readErr := r.readManagedGrant(q.Owner)
+		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+			return out, desired, readErr
+		}
+		for key, relative := range q.ProjectState {
+			if readErr == nil && stored.Request.ProjectRoot == q.ProjectRoot && stored.Request.ProjectState[key] == relative {
+				if retained, ok := stored.Request.StateIdentities[key]; ok {
+					q.StateIdentities[key] = retained
+					continue
+				}
+			}
+			state, err := ObserveApplicationProjectState(q.ProjectRoot, relative, q.Owner)
+			if err != nil {
+				return out, desired, err
+			}
+			// A managed private directory retains current effective access while
+			// new state inherits only its project/application owners, not legacy
+			// masked shared-writer defaults. The exact transition is journaled.
+			state.NormalizePrivateDefaults = true
+			q.StateIdentities[key] = state
+		}
+	}
 	desired, err := p.deriveGrant(q)
 	if err != nil {
 		return out, desired, err
@@ -251,10 +347,20 @@ func (r ApplicationRuntime) provisionPlan(p ApplicationHostPolicy, peer uint32, 
 	if applicationCheckTrustedParents(pool, r.Store.OwnerUID, r.Store.TrustedParentOwners) != nil || applicationCustody(pool, r.Store.OwnerUID, true) != nil {
 		return out, desired, applicationError("provisioning.pool_unavailable")
 	}
-	if len(q.CredentialSources) > 0 && (applicationCheckParents(p.Provisioning.Proton.CredentialRoot, r.Store.OwnerUID) != nil || applicationCustody(p.Provisioning.Proton.CredentialRoot, r.Store.OwnerUID, true) != nil) {
+	passCredentials := false
+	for _, source := range q.CredentialSources {
+		if pc.ValidApplicationRuntimeCredentialReference(source) {
+			if _, err := r.ResolveRuntimeCredential(q.Owner, source); err != nil {
+				return out, desired, err
+			}
+		} else {
+			passCredentials = true
+		}
+	}
+	if passCredentials && (p.Provisioning.Proton == nil || applicationCheckParents(p.Provisioning.Proton.CredentialRoot, r.Store.OwnerUID) != nil || applicationCustody(p.Provisioning.Proton.CredentialRoot, r.Store.OwnerUID, true) != nil) {
 		return out, desired, applicationError("credential.materialization_unavailable")
 	}
-	if len(q.CredentialSources) > 0 && r.Credentials == nil {
+	if passCredentials && r.Credentials == nil {
 		return out, desired, applicationError("credential.resolver_unavailable")
 	}
 	if err := r.checkEndpointOwnership(p, q); err != nil {
@@ -273,7 +379,7 @@ func (r ApplicationRuntime) provisionPlan(p ApplicationHostPolicy, peer uint32, 
 			return out, desired, applicationError("edge.replacement_pending")
 		}
 		// Grant revision updates never relocate or detach retained application data.
-		if stored.Grant.RepositoryID != desired.Grant.RepositoryID || stored.Grant.LocationRevision != desired.Grant.LocationRevision {
+		if stored.Grant.ProducerIdentity() != desired.Grant.ProducerIdentity() || stored.Grant.LocationRevision != desired.Grant.LocationRevision {
 			return out, desired, applicationError("provisioning.identity_changed")
 		}
 		for key, old := range stored.Grant.Data {
@@ -291,6 +397,18 @@ func (r ApplicationRuntime) provisionPlan(p ApplicationHostPolicy, peer uint32, 
 	out = ApplicationProvisionPlan{SchemaVersion: ApplicationProvisioningSchema, Request: desired.Request, PolicyRevision: desired.Grant.PolicyRevision, ExpectedRevision: stored.Revision, GrantRevision: desired.Revision}
 	out.PlanID = applicationProvisionPlanID(out)
 	return out, desired, nil
+}
+
+func (p *ApplicationProvisioningPolicy) projectParent(root string) (string, bool) {
+	if p == nil || !applicationAbsolutePath(root) {
+		return "", false
+	}
+	for _, parent := range append([]string{p.ProjectRoot}, p.ProjectRoots...) {
+		if applicationAbsolutePath(parent) && parent != "/" && strings.HasPrefix(root, parent+"/") {
+			return parent, true
+		}
+	}
+	return "", false
 }
 
 func (r ApplicationRuntime) PlanProvision(ctx context.Context, peer uint32, q ApplicationProvisionRequest) (ApplicationProvisionPlan, error) {
@@ -324,6 +442,12 @@ func (r ApplicationRuntime) Provision(ctx context.Context, peer uint32, plan App
 	}
 	defer release()
 	// Acquire inventory after the instance lock: a same-app retry must not hold
+	if active, err := r.applicationActionActive(plan.Request.Owner); err != nil || active {
+		if err != nil {
+			return empty, err
+		}
+		return empty, applicationError("action.active")
+	}
 	// the global inventory while another request is resolving its credentials.
 	releaseInventory, err := r.Store.lock(ctx, "provisioning")
 	if err != nil {
@@ -419,8 +543,17 @@ func applicationProvisionResponse(response ApplicationHelperResponse, q Applicat
 		return empty, err
 	}
 	p := response.Provision
-	if p == nil || response.Receipt != nil || response.Manager != nil || response.Prerequisites != nil || p.SchemaVersion != ApplicationProvisioningSchema || applicationSHA(p.Request) != applicationSHA(q) || !applicationProvisionValid(p.Request) || p.PlanID != applicationProvisionPlanID(*p) || !applicationDigestPattern.MatchString(p.PolicyRevision) || !applicationDigestPattern.MatchString(p.GrantRevision) || (p.ExpectedRevision != "" && !applicationDigestPattern.MatchString(p.ExpectedRevision)) {
+	if p == nil || response.Receipt != nil || response.Manager != nil || response.Prerequisites != nil || p.SchemaVersion != ApplicationProvisioningSchema || !applicationProvisionRequestMatches(q, p.Request) || !applicationProvisionValid(p.Request) || p.PlanID != applicationProvisionPlanID(*p) || !applicationDigestPattern.MatchString(p.PolicyRevision) || !applicationDigestPattern.MatchString(p.GrantRevision) || (p.ExpectedRevision != "" && !applicationDigestPattern.MatchString(p.ExpectedRevision)) {
 		return empty, applicationError("provisioning.response_invalid")
 	}
 	return *p, nil
+}
+
+func applicationProvisionRequestMatches(request, observed ApplicationProvisionRequest) bool {
+	// Only the trusted helper observes initial state identities. All caller
+	// intent stays exact, and later requests pin those identities verbatim.
+	if len(request.ProjectState) > 0 && len(request.StateIdentities) == 0 {
+		observed.StateIdentities = request.StateIdentities
+	}
+	return applicationSHA(observed) == applicationSHA(request)
 }

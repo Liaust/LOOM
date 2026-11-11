@@ -31,11 +31,14 @@ export async function inspectConflict(client: IntentClient, path: string, settle
     const state = client.journal.state;
     const installed = state.bindings[path];
     if (!installed?.writable) throw Error("This note has no writable source binding.");
+    const scope = state.scopes?.[installed.workspace + "/" + installed.collection];
+    if (scope && !scope.writable) throw Error("This source is no longer writable; saved edits remain preserved.");
     const candidates = [...new Map([installed, ...Object.values(state.candidates),
         ...Object.values(state.acks ?? {}).flatMap(a => a.status === "applied" && a.binding ? [a.binding] : [])]
         .filter(b => b.path === path && b.writable && b.fileId === installed.fileId &&
             b.workspace === installed.workspace && b.collection === installed.collection &&
-            b.generation === installed.generation).map(b => [b.id, b])).values()];
+            (b.generation === installed.generation || scope?.generation === b.generation &&
+                (b.sourceSequence ?? 0) > (installed.sourceSequence ?? 0))).map(b => [b.id, b])).values()];
     const leaves = await client.io.conflictLeaves?.(path) ?? [];
     if (leaves.length > 32) throw Error("Too many competing revisions; keep this note for operator review.");
     const sameSource = (a: Binding, b: Binding) => a.sourceBase === b.sourceBase && a.sha256 === b.sha256;
@@ -74,7 +77,7 @@ export async function inspectConflict(client: IntentClient, path: string, settle
         throw Error("This conflict includes a rename, deletion or different file identity; keep it for operator review.");
     if (pending.some(o => o.resolution && !o.ack && o.state !== "held"))
         throw Error("A resolution is already waiting for source acceptance.");
-    const ids = pending.filter(o => o.ack?.status === "conflict" && o.ack.reason === "source_conflict")
+    const ids = pending.filter(o => o.intent.generation === binding.generation && o.ack?.status === "conflict" && o.ack.reason === "source_conflict")
         .map(o => o.intent.id);
     if (ids.length > 32) throw Error("Resolve this long conflict history through the operator before continuing.");
     const covered = pending.map(o => o.intent.id);
@@ -85,6 +88,7 @@ export async function inspectConflict(client: IntentClient, path: string, settle
             const op = state.operations.find(o => o.intent.id === id);
             if (!op) return false;
             if (op.state === "conflict" || op.state === "held") return true;
+            if (scope?.generation === binding.generation && op.intent.generation !== binding.generation) return true;
             id = op.intent.predecessor;
         }
         return false;

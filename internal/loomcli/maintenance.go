@@ -623,6 +623,18 @@ func renderMaintenanceDBStatus(cmd *cobra.Command, status maintenance.DBStatus) 
 
 func renderMaintenanceBackupStatus(cmd *cobra.Command, status maintenance.BackupStatus) {
 	fmt.Fprintf(cmd.OutOrStdout(), "Backup: %s\n", status.Status)
+	if inventory := status.RecoveryInventory; inventory != nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "Saved recovery inventory: %s observed=%s (dated metadata, not fresh protection or deletion authority)\n", status.RecoveryInventoryState, inventory.ObservedAt.UTC().Format(time.RFC3339))
+		fmt.Fprintf(cmd.OutOrStdout(), "Operational inventory: available=%t verified=%d findings=%d\nNotes inventory: available=%t entries=%d saved-cloud-evidence=%d held=%d known-allocated-bytes=%d accounting-complete=%t\n",
+			inventory.OperationalAvailable, inventory.OperationalVerified, inventory.OperationalFindings,
+			inventory.NotesAvailable, inventory.NotesCaptures, inventory.NotesProtected, inventory.NotesHeld, inventory.NotesKnownAllocatedBytes, inventory.NotesAccountingComplete)
+	} else {
+		fmt.Fprintln(cmd.OutOrStdout(), "Saved recovery inventory: unavailable (no private archive scan was started)")
+	}
+	if status.LatestRun != nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "Latest completed run: %s status=%s verification=%s (not cloud protection)\n",
+			status.LatestRun.OperationID, status.LatestRun.Status, status.LatestRun.VerificationStatus)
+	}
 	if status.Worker != nil {
 		fmt.Fprintf(cmd.OutOrStdout(), "Worker: %s health=%s last_success=%s\n",
 			status.Worker.WorkerKey,
@@ -642,7 +654,11 @@ func renderMaintenanceBackupStatus(cmd *cobra.Command, status maintenance.Backup
 		}
 	}
 	if status.LatestFailed != nil {
-		fmt.Fprintf(cmd.OutOrStdout(), "Latest failure: %s started=%s\n",
+		label := "Latest failure"
+		if status.EarlierFailure {
+			label = "Earlier failure (retained, not resolved)"
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "%s: %s started=%s\n", label,
 			status.LatestFailed.Operation.MaintenanceOperationID,
 			status.LatestFailed.Operation.StartedAt.UTC().Format(time.RFC3339),
 		)
@@ -653,6 +669,9 @@ func renderMaintenanceBackupStatus(cmd *cobra.Command, status maintenance.Backup
 		status.OpenFindings.Error,
 		status.OpenFindings.Warning,
 	)
+	if status.LatestRun != nil && status.LatestRun.Status == maintenance.OperationSucceeded && status.OpenFindings.Open > 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "The latest run succeeded; unresolved findings remain separate and may concern older recovery artifacts. Inspect them before resolving anything.")
+	}
 }
 
 func renderMaintenanceBackupList(cmd *cobra.Command, backups []maintenance.BackupOperation) {

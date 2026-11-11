@@ -37,6 +37,9 @@ func (s Service) AcceptDirectEvent(ctx context.Context, req requestctx.Context, 
 	if err != nil {
 		return DirectEventIngestResult{}, err
 	}
+	if hasHermesEvents(endpoint.MetadataJSON) {
+		return DirectEventIngestResult{}, ErrDirectEventUnauthorized
+	}
 	integration, err := s.getIntegration(ctx, endpoint.IntegrationID)
 	if err != nil {
 		return DirectEventIngestResult{}, err
@@ -677,7 +680,7 @@ func (s Service) listDirectEvents(ctx context.Context, filter DirectEventFilter,
 		query += fmt.Sprintf(" AND automation_id IN (SELECT automation_id FROM automation.automations WHERE project_id = $%d)", len(args))
 	}
 	if !hasExplicitRuntimeRef(filter.EndpointRef, filter.IntegrationRef, filter.AutomationRef, filter.ProjectRef) {
-		query += archivedProjectByAutomationColumnSQL("automation_id")
+		query += archivedProjectByAutomationColumnSQL("direct_events.automation_id")
 	}
 	args = append(args, filter.Limit)
 	query += fmt.Sprintf(" ORDER BY received_at DESC LIMIT $%d", len(args))

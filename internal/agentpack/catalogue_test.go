@@ -21,7 +21,7 @@ func TestBoxSourceRoutingAndCitationProtocol(t *testing.T) {
 	}
 	routing := read("ai-loom-pack/skills/use-loom-provenance/references/retrieval-routing.md")
 	review := read("ai-loom-pack/skills/use-loom-provenance/references/reconciliation.md")
-	for _, required := range []string{"loom object inspect", "loom notes search", "loom notes passage get", "--object <object-id>", "--version <version-id>", "--source-hash sha256:<digest>", "loom provenance search", "--include-pending", "current_source_context", "Topics remain drafts", "Library passages remain attributed claims", "search one engine first"} {
+	for _, required := range []string{"loom object inspect", "loom notes search", "loom notes read", "loom notes passage get", "--object <object-id>", "--version <version-id>", "--source-hash sha256:<digest>", "loom provenance search", "--include-pending", "current_source_context", "Topics remain drafts", "Library passages remain attributed claims", "Independent retrievals may run in", "Historical Citations", "Get known file/record references directly", "--details --json"} {
 		if !strings.Contains(routing, required) {
 			t.Fatalf("routing lost %q", required)
 		}
@@ -140,10 +140,13 @@ func TestSharedProvenanceCaptureDoesNotDispatchArchivist(t *testing.T) {
 		}
 	}
 	registration := read("skills/use-loom-provenance/references/registration.md")
-	for _, required := range []string{"POST /v1/provenance/candidates", "X-Loom-Idempotency-Key", "--unix-socket", "--fail-with-body", "candidate get <candidate-id> --sources", "--include-pending", "effective_state", "producer labels", "unchanged request/producer"} {
+	for _, required := range []string{"POST /v1/provenance/candidates", "loom provenance candidate register --file candidate.json", "--idempotency-key", "--yes --json", "candidate get <candidate-id> --sources", "--include-pending", "effective_state", "producer labels", "unchanged request/producer"} {
 		if !strings.Contains(registration, required) {
 			t.Errorf("registration guidance omits %s", required)
 		}
+	}
+	if strings.Contains(registration, "curl ") || strings.Contains(registration, "--unix-socket") {
+		t.Fatal("ordinary capture still requires a raw HTTP recipe")
 	}
 	_, example, found := strings.Cut(registration, "```json\n")
 	if !found {
@@ -211,7 +214,7 @@ func TestKnowledgeRetrievalSkillIsDiscoverableWithoutArchivistAuthority(t *testi
 		return string(content)
 	}
 	skill := read("skills/search-loom-knowledge/SKILL.md")
-	for _, command := range []string{"notes search", "notes objects show", "notes passage get", "object inspect", "provenance search", "provenance record get", "provenance candidate get", "provenance repo list", "--source-hash", "--include-pending", "--repo <repository>"} {
+	for _, command := range []string{"notes search", "notes read", "object inspect", "provenance search", "provenance record get", "provenance candidate get", "provenance repo list", "--details --json", "--include-pending", "--repo <repository>"} {
 		if !strings.Contains(skill, command) {
 			t.Errorf("missing supported retrieval path: %s", command)
 		}
@@ -231,8 +234,9 @@ func TestVerifiedRetrievalSourceBoundaries(t *testing.T) {
 		file string
 		want []string
 	}{
-		{"skills/search-loom-knowledge/SKILL.md", []string{"known exact ID/citation", "directly to its getter", "Prefer the complete `passage_followup` tuple", "--source-lifecycle <tuple-lifecycle>", "Only when no tuple exists", "Never replace a historical match's digest with a current object digest", "current source access", "loom --json provenance record get <record-id> --sources", "loom --json provenance candidate get <candidate-id> --sources", "omit it when only the parent is needed", "not a current source fetch, candidate acceptance or authority", "`sources_truncated` and `incomplete_items` separately from parent truncation", "needed private receipt detail"}},
+		{"skills/search-loom-knowledge/SKILL.md", []string{"known file ID or exact path", "read it directly", "notes read <file-id-or-exact-path>", "one compact result per current file", "Missing and unavailable sources", "retained bytes", "--details --json", "loom --json provenance record get <record-id> --sources", "loom --json provenance candidate get <candidate-id> --sources", "omit it when only the parent is needed", "not a current source fetch, candidate acceptance or authority", "needed private receipt detail", "references/selective-enrichment.md"}},
 		{"skills/search-loom-knowledge/references/exact-citations.md", []string{"metadata.text_pipeline.knowledge_object_version_id", "If version metadata is absent or mismatched, do not use its hash", "Archived lifecycle is separate from historical text version", "do not retry another engine to evade it", "without fetching current sources", "`sources_truncated=true`", "`incomplete_items>0`", "Complete disclosure requires both false/zero", "CLI default/maximum is 16 source items", "16 KiB per item and 256 KiB per expansion", "Disclose only the detail needed", "receipt does not change that lifecycle"}},
+		{"skills/search-loom-knowledge/references/selective-enrichment.md", []string{"--ocr", "--embeddings", "--vision", "--source-revision", "--source-hash", "--preview-file", "--recursive", "at most 100 admitted entries", "Later arrivals are excluded", "notes pipelines retry", "future revisions use its defaults"}},
 	} {
 		t.Run(c.file, func(t *testing.T) {
 			content, err := os.ReadFile(filepath.Join("..", "..", "ai-loom-pack", c.file))
@@ -249,6 +253,64 @@ func TestVerifiedRetrievalSourceBoundaries(t *testing.T) {
 				t.Error("manual producer-history reconstruction restored")
 			}
 		})
+	}
+}
+
+func TestAgentRetrievalGuidanceUsesAffordancesNotCallSequences(t *testing.T) {
+	read := func(relative string) string {
+		t.Helper()
+		body, err := os.ReadFile(filepath.Join("..", "..", "ai-loom-pack", relative))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(strings.Fields(string(body)), " ")
+	}
+	for _, relative := range []string{
+		"host-instructions/codex/AGENTS.md", "templates/mina/AGENTS.md",
+		"templates/mina/WORKFLOW.md", "templates/mina/protocols/LOOM-ROUTING.md",
+		"skills/search-loom-knowledge/SKILL.md", "skills/use-loom-provenance/SKILL.md",
+		"skills/use-loom-provenance/references/retrieval-routing.md",
+	} {
+		body := read(relative)
+		if !strings.Contains(body, "parallel") {
+			t.Errorf("%s omits independent retrieval permission", relative)
+		}
+		for _, stale := range []string{
+			"Do not fan out in parallel", "Expand sequentially", "expand sequentially",
+			"Exact-get before relying on a hit", "Interpret evidence, lifecycle, relationships, qualification, and diagnostics only from that exact projection",
+		} {
+			if strings.Contains(body, stale) {
+				t.Errorf("%s preserves blanket retrieval sequence %q", relative, stale)
+			}
+		}
+	}
+	entry := read("skills/search-loom-knowledge/SKILL.md")
+	for _, term := range []string{"`object_*`", "`knowledge_object_*`", "loom notes objects show <knowledge-object-ref>", "not global Objects"} {
+		if !strings.Contains(entry, term) {
+			t.Errorf("retrieval entry lacks namespace guidance %q", term)
+		}
+	}
+	if strings.Contains(entry, "legacy knowledge IDs remain compatible") {
+		t.Error("retrieval entry still implies cross-namespace Objects compatibility")
+	}
+	for _, term := range []string{"On `notes search`, `--details`", "accepts `--limit` and `--offset`, not `--details`"} {
+		if !strings.Contains(entry, term) {
+			t.Errorf("retrieval entry lacks command-scoped flag guidance %q", term)
+		}
+	}
+	if strings.Contains(entry, "notes enrich <knowledge-object-id>") || !strings.Contains(entry, "references/selective-enrichment.md") {
+		t.Fatal("search entry eagerly includes enrichment procedure or loses its reference")
+	}
+	for _, relative := range []string{
+		"skills/use-loom-provenance/references/reconciliation.md",
+		"templates/mina/protocols/PROVENANCE-RECONCILIATION.md",
+	} {
+		body := read(relative)
+		for _, term := range []string{"--details --json", "exact", "idempotency", "authority"} {
+			if !strings.Contains(body, term) {
+				t.Errorf("%s loses mutation prerequisite %q", relative, term)
+			}
+		}
 	}
 }
 

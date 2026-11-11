@@ -3,9 +3,12 @@ package knowledge
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
+	rootpolicy "loom.local/loom/internal/nodeagent/watchedroots"
 	"loom.local/loom/internal/notesprojection"
 	"loom.local/loom/internal/storagecatalog"
 )
@@ -47,8 +50,12 @@ func (s Store) ListProjectionSources(ctx context.Context, input notesprojection.
 }
 
 func declareProjectionSources(ctx context.Context, tx *sql.Tx) error {
-	_, err := tx.ExecContext(ctx, `DECLARE notes_projection_sources NO SCROLL CURSOR FOR
-		SELECT o.knowledge_object_id,
+	_, err := tx.ExecContext(ctx, "DECLARE notes_projection_sources NO SCROLL CURSOR FOR "+projectionSourcesSQL(""), projectionSourceArgs()...)
+	return err
+}
+
+func projectionSourcesSQL(predicate string) string {
+	return `SELECT o.knowledge_object_id,
 		       o.notes_source_root_id,
 		       root.root_kind,
 		       COALESCE(NULLIF(o.source_node_key, ''), root.node_key, '') AS source_node_key,
@@ -69,7 +76,7 @@ func declareProjectionSources(ctx context.Context, tx *sql.Tx) error {
 		       COALESCE(source_ref.uri, NULLIF(o.metadata->'synced_object'->>'blob_storage_path', ''), '') AS source_ref_uri,
 		       COALESCE(source_ref.metadata->>'content_member', '') AS source_ref_member,
 	       o.last_seen_at,
-	       `+sourceContextRootSQL("root")+`, root.root_relative_path
+	       ` + sourceContextRootSQL("root") + `, root.root_relative_path
 		FROM knowledge.knowledge_objects o
 		JOIN knowledge.notes_source_roots root
 		  ON root.notes_source_root_id = o.notes_source_root_id
@@ -96,22 +103,27 @@ func declareProjectionSources(ctx context.Context, tx *sql.Tx) error {
 		) source_ref ON TRUE
 		WHERE root.status = $1
 		  AND o.deleted_at IS NULL
-		  AND `+visibleNotesKnowledgeObjectSQL("o")+`
-		  AND `+visibleNotesCustodyObjectSQL("o", true)+`
-		  AND `+notesLifecycleSelectionSQL("o", SourceLifecycleFilterActive)+`
-		  AND `+notesCustodyWriteAllowedSQL("o")+`
+		  AND ` + visibleNotesKnowledgeObjectSQL("o") + `
+		  AND ` + visibleNotesCustodyObjectSQL("o", true) + `
+		  AND ` + notesLifecycleSelectionSQL("o", SourceLifecycleFilterActive) + `
+		  AND ` + notesCustodyWriteAllowedSQL("o") + `
 		  AND (
 		    COALESCE(o.source_path, '') <> ''
 		    OR source_ref.uri IS NOT NULL
 		    OR COALESCE(NULLIF(o.metadata->'synced_object'->>'blob_storage_path', ''), '') <> ''
 		  )
 		  AND COALESCE(o.file_class, '') <> $2
-		  AND `+visibleNotesKnowledgeRelativePathSQL("o.relative_path")+`
+		  AND ` + visibleNotesKnowledgeRelativePathSQL("o.relative_path") + `
+        ` + predicate + `
 		ORDER BY root.root_kind,
 		         COALESCE(NULLIF(o.source_node_key, ''), root.node_key, ''),
 		         COALESCE(project.slug, o.project_id, ''),
 		         o.relative_path,
-		         o.knowledge_object_id`,
+		         o.knowledge_object_id`
+}
+
+func projectionSourceArgs() []any {
+	return []any{
 		SourceRootStatusActive,
 		storagecatalog.FileClassDirectory,
 		storagecatalog.PhysicalRefKindLocalPath,
@@ -119,8 +131,135 @@ func declareProjectionSources(ctx context.Context, tx *sql.Tx) error {
 		storagecatalog.PhysicalRefKindLaneFile,
 		storagecatalog.PhysicalRefKindRetentionPayload,
 		storagecatalog.PhysicalRefKindArchiveFile,
-		storagecatalog.PhysicalRefKindBackupArtifact)
-	return err
+		storagecatalog.PhysicalRefKindBackupArtifact}
+}
+
+func (s *Service) ReadProjectionSources(ctx context.Context, ids []string) (notesprojection.SourceDelta, error) {
+	if s == nil {
+		return notesprojection.SourceDelta{}, fmt.Errorf("knowledge service is not configured")
+	}
+	return s.store.ReadProjectionSources(ctx, ids)
+}
+
+func (s Store) ReadProjectionSources(ctx context.Context, ids []string) (notesprojection.SourceDelta, error) {
+	result := notesprojection.SourceDelta{Withdrawn: map[string]string{}}
+	if s.db == nil || len(ids) == 0 || len(ids) > notesprojection.MaxDeltaIdentities {
+		return result, fmt.Errorf("invalid targeted projection read")
+	}
+	wanted := map[string]bool{}
+	for _, id := range ids {
+		if id == "" || wanted[id] {
+			return result, fmt.Errorf("invalid targeted projection identity")
+		}
+		wanted[id] = true
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return result, err
+	}
+	defer tx.Rollback()
+	// These fixed-shape, bounded identity reads must not replan the expanded
+	// admission/custody predicates for every ID array. Cache the SQL plan, never
+	// an authorization result; every execution still evaluates live evidence.
+	if err := preparePipelineSingletonTx(ctx, tx); err != nil {
+		return result, err
+	}
+	args := append(projectionSourceArgs(), ids)
+	rows, err := tx.QueryContext(ctx, projectionSourcesSQL("AND o.knowledge_object_id=ANY($9::text[])"), args...)
+	if err != nil {
+		return result, err
+	}
+	for rows.Next() {
+		source, err := scanProjectionSource(rows)
+		if err != nil {
+			rows.Close()
+			return notesprojection.SourceDelta{}, err
+		}
+		result.Sources = append(result.Sources, source)
+		delete(wanted, source.KnowledgeObjectID)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return notesprojection.SourceDelta{}, err
+	}
+	if len(wanted) == 0 {
+		if err := tx.Commit(); err != nil {
+			return notesprojection.SourceDelta{}, err
+		}
+		return result, nil
+	}
+	// Positive evidence only. Failed custody/admission joins, absent identities,
+	// missing refs and in-flight archive intents must not become withdrawals.
+	rows, err = tx.QueryContext(ctx, `SELECT o.knowledge_object_id, CASE
+	 WHEN o.deleted_at IS NOT NULL THEN 'source_withdrawn'
+	 WHEN o.file_class='directory' OR NOT `+visibleNotesKnowledgeRelativePathSQL("o.relative_path")+` THEN 'source_excluded'
+	 WHEN `+notesObservedSourceMissingSQL("o")+` AND `+notesCustodyReadCaughtUpSQL("o")+`
+	 AND `+notesCustodyWriteAllowedSQL("o")+` THEN 'source_missing'
+	 WHEN root.status<>'active' AND `+notesCustodyReadCaughtUpSQL("o")+`
+	 AND (NOT `+notesHasCustodySQL("o")+` OR EXISTS (`+notesCurrentCustodySQL("o")+`)) THEN 'root_withdrawn'
+	 WHEN `+visibleNotesCustodyObjectSQL("o", true)+` AND `+notesLifecycleSelectionSQL("o", SourceLifecycleFilterArchived)+` THEN 'custody_archived'
+	 ELSE '' END,
+	 o.relative_path,COALESCE(root.metadata,'{}'::jsonb),
+	 COALESCE(root.status='active' AND `+declarationEnrollmentMembershipSQL("root")+`
+	 AND `+notesCustodyReadCaughtUpSQL("o")+` AND `+notesCustodyWriteAllowedSQL("o")+`,false)
+	 FROM knowledge.knowledge_objects o LEFT JOIN knowledge.notes_source_roots root USING(notes_source_root_id)
+	 WHERE o.knowledge_object_id=ANY($1::text[])`, ids)
+	if err != nil {
+		return notesprojection.SourceDelta{}, err
+	}
+	for rows.Next() {
+		var id, reason, relativePath string
+		var metadata json.RawMessage
+		var exclusionAllowed bool
+		if err := rows.Scan(&id, &reason, &relativePath, &metadata, &exclusionAllowed); err != nil {
+			rows.Close()
+			return notesprojection.SourceDelta{}, err
+		}
+		if wanted[id] && reason == "" && exclusionAllowed && projectionDeclaredPathExcluded(metadata, relativePath) {
+			reason = "source_excluded"
+		}
+		if wanted[id] && reason != "" {
+			result.Withdrawn[id] = reason
+			delete(wanted, id)
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return notesprojection.SourceDelta{}, err
+	}
+	if len(wanted) > 0 {
+		unavailable := make([]string, 0, len(wanted))
+		for id := range wanted {
+			unavailable = append(unavailable, id)
+		}
+		sort.Strings(unavailable)
+		return notesprojection.SourceDelta{}, &notesprojection.UncertainSourcesError{ObjectIDs: unavailable}
+	}
+	if err := tx.Commit(); err != nil {
+		return notesprojection.SourceDelta{}, err
+	}
+	return result, nil
+}
+
+func projectionDeclaredPathExcluded(metadata json.RawMessage, relativePath string) bool {
+	registration, ok := jsonObject(metadata)["registration_metadata"].(map[string]any)
+	if !ok {
+		return false
+	}
+	declaration, ok := registration["knowledge_source"].(map[string]any)
+	if !ok {
+		return false
+	}
+	include, includeOK := expandedSourcePatterns(declaration["include"])
+	exclude, excludeOK := expandedSourcePatterns(declaration["exclude"])
+	if !includeOK || !excludeOK || len(include) == 0 {
+		return false
+	}
+	included, _ := rootpolicy.MatchAny(include, relativePath)
+	excluded, _ := rootpolicy.MatchAny(exclude, relativePath)
+	return !included || excluded
 }
 
 func fetchProjectionSources(ctx context.Context, tx *sql.Tx) ([]notesprojection.SourceObject, error) {

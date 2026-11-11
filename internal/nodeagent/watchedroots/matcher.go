@@ -32,6 +32,39 @@ func MatchPattern(pattern, relativePath string) (bool, error) {
 	return matchParts(patternParts, pathParts), nil
 }
 
+// Prune only impossible include prefixes; recursive globs remain conservative.
+func mayMatchDescendant(patterns []string, relativeDirectory string) bool {
+	if len(patterns) == 0 {
+		return true
+	}
+	directory := splitMatchPath(relativeDirectory)
+	for _, pattern := range patterns {
+		parts := splitMatchPath(pattern)
+		possible := true
+		for i, segment := range directory {
+			if i >= len(parts) {
+				possible = false
+				break
+			}
+			if parts[i] == "**" {
+				return true
+			}
+			matched, err := path.Match(parts[i], segment)
+			if err != nil {
+				return true
+			}
+			if !matched {
+				possible = false
+				break
+			}
+		}
+		if possible && len(parts) > len(directory) {
+			return true
+		}
+	}
+	return false
+}
+
 func validatePatterns(patterns []string) error {
 	for _, pattern := range patterns {
 		if err := validatePattern(pattern); err != nil {

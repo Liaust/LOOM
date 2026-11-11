@@ -347,14 +347,10 @@ func TestSelectedRefreshPublicationPostgres(t *testing.T) {
 		t.Fatalf("entries: %v %v", entries, err)
 	}
 	retainRefreshFixtureBlob(t, s, object)
-	step := func() {
-		t.Helper()
-		result, err := s.RunPipelineCoordinatorOnce(t.Context(), PipelineCoordinatorRunInput{WorkerRunID: "refresh-test", Limit: 20, Now: time.Now().Add(time.Hour)})
-		if err != nil || result.Failed != 0 || result.Claimed == 0 {
-			t.Fatalf("stage: %+v %v", result, err)
-		}
+	result, err := s.RunPipelineCoordinatorOnce(t.Context(), PipelineCoordinatorRunInput{WorkerRunID: "refresh-test", Limit: 1, Now: time.Now().Add(time.Hour)})
+	if err != nil || result.Failed != 0 || result.Claimed != 1 {
+		t.Fatalf("capture: %+v %v", result, err)
 	}
-	step() // Select the initial revision, but do not extract it yet.
 	first, err := s.store.GetPipelineRun(t.Context(), object.KnowledgeObjectID)
 	if err != nil || len(first.SourceSnapshot) == 0 {
 		t.Fatalf("selection: %+v %v", first, err)
@@ -367,10 +363,14 @@ func TestSelectedRefreshPublicationPostgres(t *testing.T) {
 		}
 	}
 	same, err := s.store.GetPipelineRun(t.Context(), object.KnowledgeObjectID)
-	if err != nil || same.KnowledgePipelineRunID != first.KnowledgePipelineRunID {
-		t.Fatal("new upload superseded selected work", err)
+	if err != nil || same.KnowledgePipelineRunID == first.KnowledgePipelineRunID || same.SourceRevision != object.SourceRevision {
+		t.Fatal("new upload did not supersede selected old work", err)
 	}
-	// A new service must resume the captured blob, not the latest upload.
+	stale, err := s.store.GetPipelineRun(t.Context(), first.KnowledgePipelineRunID)
+	if err != nil || stale.Status != FilePipelineStatusStale {
+		t.Fatal("old captured work remained runnable", err)
+	}
+	// Restart resumes only the newest admitted revision.
 	s = NewService(s.store.db)
 	advanceBoxSyncedFixture(t, s)
 	search := func(query string, strict bool) NotesSearchResultSet {
@@ -382,12 +382,8 @@ func TestSelectedRefreshPublicationPostgres(t *testing.T) {
 		return out
 	}
 	old := search("cobalt observatory", false)
-	if len(old.Results) != 1 || old.Results[0].Freshness.Current || old.Results[0].Freshness.IndexedSourceRevision != first.SourceRevision || old.Results[0].Freshness.LatestSourceRevision != object.SourceRevision {
-		t.Fatalf("last publication not truthful: %+v", old)
-	}
-	strict := search("cobalt observatory", true)
-	if len(strict.Results) != 0 || strict.RefreshingMatchesOmitted != 1 {
-		t.Fatalf("strict current: %+v", strict)
+	if len(old.Results) != 0 {
+		t.Fatalf("superseded capture published old text: %+v", old)
 	}
 	latest, err := s.store.GetKnowledgeObject(t.Context(), object.KnowledgeObjectID)
 	if err != nil || latest.SourceRevision == first.SourceRevision {
@@ -398,9 +394,6 @@ func TestSelectedRefreshPublicationPostgres(t *testing.T) {
 	if err != nil || queued.SourceRevision != object.SourceRevision {
 		t.Fatal("newest pending target was not queued", err)
 	}
-	if len(search("cobalt observatory", false).Results) != 1 {
-		t.Fatal("queued replacement hid old publication")
-	}
 	advanceBoxSyncedFixture(t, s)
 	newest := search("amber experiment", true)
 	if len(newest.Results) != 1 || !newest.Results[0].Freshness.Current {
@@ -408,9 +401,6 @@ func TestSelectedRefreshPublicationPostgres(t *testing.T) {
 	}
 	if len(search("cobalt observatory", false).Results) != 0 {
 		t.Fatal("old lexical publication still selected")
-	}
-	if _, err = s.GetNotesPassage(t.Context(), *old.Results[0].PassageFollowup); err != nil {
-		t.Fatal("old exact citation was lost", err)
 	}
 	// Force on identical bytes gets separate output storage, so publication is
 	// retained throughout the replacement, not deleted by rechunking.

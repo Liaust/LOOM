@@ -6,16 +6,33 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
+
+	"loom.local/loom/internal/objectstore"
 )
 
 type Service struct {
 	Sources Resolver
 	Store   Store
+	Blobs   objectstore.Store
 }
 
 // Read binds an existing or absent path to a stable ID, then persists exact bytes
 // before returning a base. An absent base is the only create authorization.
 func (s Service) Read(ctx context.Context, collection, relative string) (out ReadResult, err error) {
+	return s.read(ctx, collection, relative, false)
+}
+
+// ReadText keeps editable text admission separate from retained binary/reference
+// readers, including extensions such as JSON that historically support both.
+func (s Service) ReadText(ctx context.Context, collection, relative string) (ReadResult, error) {
+	if !IsEditableTextPath(relative) {
+		return ReadResult{}, ErrReferenceOnly
+	}
+	return s.read(ctx, collection, relative, true)
+}
+
+func (s Service) read(ctx context.Context, collection, relative string, textOnly bool) (out ReadResult, err error) {
 	if s.Store == nil || s.Sources == nil {
 		return out, fmt.Errorf("notes workspace is not configured")
 	}
@@ -33,22 +50,31 @@ func (s Service) Read(ctx context.Context, collection, relative string) (out Rea
 				return ErrMembership
 			}
 			parent, name, err := openSourceParent(src.Path, relative)
-			if err != nil {
+			absentParent := errors.Is(err, errMissingSourceDirectory)
+			if err != nil && !absentParent {
 				return err
 			}
-			defer parent.Close()
-			if err := parent.check(); err != nil {
-				return err
+			if parent != nil {
+				defer parent.Close()
+				if err := parent.check(); err != nil {
+					return err
+				}
 			}
+			reference := IsReferencePath(relative) && !textOnly
 			limit := int64(MaxContentBytes)
-			if IsReferencePath(relative) {
+			if reference {
 				limit = MaxReferenceBytes
 			}
-			content, exists, err := readBytesAt(parent.current(), name, limit)
-			if err == nil && !IsReferencePath(relative) {
+			var content []byte
+			var exists bool
+			err = nil
+			if !absentParent {
+				content, exists, err = readBytesAt(parent.current(), name, limit)
+			}
+			if err == nil && !reference {
 				err = validateContent(content)
 			}
-			if err == nil && IsReferencePath(relative) && !exists {
+			if err == nil && reference && !exists {
 				err = ErrReferenceOnly
 			}
 			if err != nil {
@@ -62,8 +88,8 @@ func (s Service) Read(ctx context.Context, collection, relative string) (out Rea
 			if err != nil {
 				return err
 			}
-			if f.RelativePath != relative {
-				return fmt.Errorf("source path case/Unicode collision")
+			if f.RelativePath != relative || f.EntryKind != "" {
+				return fmt.Errorf("source path case/Unicode or entry-kind collision")
 			}
 			base := makeBase(f, src.Generation, exists, content)
 			if err := store.SaveBase(ctx, base); err != nil {
@@ -90,6 +116,9 @@ func (s Service) Receive(ctx context.Context, request Request) (Operation, error
 	}
 	// An existing receipt replays against its original file snapshot after moves.
 	if old, err := s.Store.Operation(ctx, request.OperationID); err == nil {
+		if old.Base.MetadataAction != nil {
+			return Operation{}, ErrReferenceOnly
+		}
 		if !sameIntent(old, Operation{Request: request}) {
 			return Operation{}, ErrIntentMismatch
 		}
@@ -104,12 +133,21 @@ func (s Service) Receive(ctx context.Context, request Request) (Operation, error
 	if err != nil {
 		return Operation{}, err
 	}
+	if file.Retained != nil {
+		return Operation{}, ErrReferenceOnly
+	}
+	if file.EntryKind != "" || len(request.DirectoryTargets) != 0 {
+		return Operation{}, fmt.Errorf("file receive requires a file entry without directory targets")
+	}
 	if err := validatePath(file.RelativePath); err != nil {
 		return Operation{}, err
 	}
 	base, err := s.Store.Base(ctx, request.BaseID)
 	if err != nil {
 		return Operation{}, err
+	}
+	if base.MetadataAction != nil {
+		return Operation{}, ErrReferenceOnly
 	}
 	if requestKind(request) != KindEdit && !base.Exists {
 		return Operation{}, fmt.Errorf("rename/delete requires exact existing base")
@@ -130,6 +168,24 @@ func (s Service) Apply(ctx context.Context, id string) (out Operation, err error
 	if err != nil {
 		return out, err
 	}
+	if op.State != Accepted && op.State != Conflict {
+		current, err := s.Store.File(ctx, op.File.ID)
+		if err != nil {
+			return out, err
+		}
+		if current.Retained != nil {
+			return out, ErrReferenceOnly
+		}
+	}
+	if requestKind(op.Request) == KindImport {
+		return s.applyImport(ctx, op)
+	}
+	if op.Base.MetadataAction != nil {
+		return s.ApplyMetadataAction(ctx, id)
+	}
+	if op.File.EntryKind == "directory" {
+		return s.ApplyDirectory(ctx, id)
+	}
 	err = s.Store.WithLock(ctx, "collection:"+op.File.CollectionID, func(store Store) error {
 		op, err = store.Operation(ctx, id)
 		if err != nil {
@@ -142,6 +198,9 @@ func (s Service) Apply(ctx context.Context, id string) (out Operation, err error
 		current, e := store.File(ctx, op.File.ID)
 		if e != nil {
 			return e
+		}
+		if current.Retained != nil {
+			return ErrReferenceOnly
 		}
 		if current.Deleted || current.PathVersion != op.Base.PathVersion || current.RelativePath != op.File.RelativePath {
 			op.State, op.Reason = Conflict, ErrStalePath.Error()
@@ -182,7 +241,7 @@ func (s Service) Apply(ctx context.Context, id string) (out Operation, err error
 				}
 				return err
 			}
-			parent, name, err := openSourceParent(src.Path, op.File.RelativePath)
+			parent, name, err := sourceParent(src.Path, op.File.RelativePath, !op.Base.Exists)
 			if err != nil {
 				return err
 			}
@@ -231,7 +290,7 @@ func (s Service) Apply(ctx context.Context, id string) (out Operation, err error
 	return
 }
 func sameIntent(a, b Operation) bool {
-	return requestKind(a.Request) == requestKind(b.Request) && a.Request.DestinationPath == b.Request.DestinationPath && a.Request.OperationID == b.Request.OperationID && a.Request.FileID == b.Request.FileID && a.Request.Generation == b.Request.Generation && a.Request.BaseID == b.Request.BaseID && bytes.Equal(a.Request.Content, b.Request.Content)
+	return a.Request.BoxID == b.Request.BoxID && requestKind(a.Request) == requestKind(b.Request) && a.Request.ImportHash == b.Request.ImportHash && a.Request.ImportSize == b.Request.ImportSize && a.Request.DestinationPath == b.Request.DestinationPath && a.Request.OperationID == b.Request.OperationID && a.Request.FileID == b.Request.FileID && a.Request.Generation == b.Request.Generation && a.Request.BaseID == b.Request.BaseID && bytes.Equal(a.Request.Content, b.Request.Content) && slices.Equal(a.Request.DirectoryTargets, b.Request.DirectoryTargets)
 }
 
 func validateRequest(r Request) error {

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"loom.local/loom/internal/migrations"
 )
 
 func Rollback(ctx context.Context, input RollbackInput) (RollbackResult, error) {
@@ -17,6 +19,14 @@ func Rollback(ctx context.Context, input RollbackInput) (RollbackResult, error) 
 			stateDir = DefaultStateDir("")
 		}
 		manifestPath = ActiveManifestPath(stateDir)
+	}
+	if input.Yes && !input.DryRun && (input.AllowNonProduction || isProductionMain(input.Runtime)) {
+		stateDir := firstNonEmpty(input.StateDir, filepath.Dir(filepath.Clean(manifestPath)))
+		lease, err := acquireActivationLease(stateDir)
+		if err != nil {
+			return refuseRollback(RollbackResult{}, err.Error())
+		}
+		defer lease.Close()
 	}
 	manifest, err := ReadUpdateManifest(manifestPath)
 	if err != nil {
@@ -71,6 +81,8 @@ func Rollback(ctx context.Context, input RollbackInput) (RollbackResult, error) 
 	rollbackManifest.Status = UpdateStatusDryRun
 	rollbackManifest.StartedAt = now
 	rollbackManifest.FinishedAt = nil
+	rollbackManifest.ReadinessTarget = nil
+	rollbackManifest.Readiness = nil
 	rollbackManifest.Active = manifest.Target
 	rollbackManifest.Target = ReleaseState{
 		ReleaseID: releaseID(toPath, manifest.Active.Version, manifest.Active.Commit),
@@ -99,25 +111,54 @@ func Rollback(ctx context.Context, input RollbackInput) (RollbackResult, error) 
 	paths := manifestPaths(firstNonEmpty(input.StateDir, filepath.Dir(filepath.Clean(manifestPath))), rollbackManifest.UpdateID)
 	result.ManifestPath = paths.active
 	result.HistoryPath = paths.history
+	runner := firstRunner(input.Runner)
+	rollbackManifest.Status = UpdateStatusRunning
+	if err := writeAllUpdateManifests(paths, rollbackManifest, false); err != nil {
+		return result, err
+	}
+	if !input.SkipHealthCheck {
+		// An explicit --to can name a different retained release. Read that
+		// release's own package and migrations, rather than borrowing the old
+		// active release's identity or schema head.
+		release, _, err := discoverTargetRelease(UpdateSpec{ReleasePath: toPath})
+		if err != nil {
+			return failRollback(result, paths, rollbackManifest, "target_identity", err)
+		}
+		head, err := migrations.LatestVersion(release.MigrationsDir)
+		if err != nil {
+			return failRollback(result, paths, rollbackManifest, "target_identity", err)
+		}
+		rollbackManifest.Target = release
+		rollbackManifest.Migrations.TargetLatestVersion = head
+		target, err := resolveReadinessTarget(ctx, runner, release, release.FlakeOutput, head)
+		if err != nil {
+			return failRollback(result, paths, rollbackManifest, "target_identity", err)
+		}
+		rollbackManifest.ReadinessTarget = &target
+		if err := writeAllUpdateManifests(paths, rollbackManifest, false); err != nil {
+			return result, err
+		}
+	}
 
 	if err := switchActiveRelease(activePath, toPath); err != nil {
-		return result, err
+		return failRollback(result, paths, rollbackManifest, "switch_release", err)
 	}
 	result.Changed = append(result.Changed, UpdateChange{Step: "switch_release", Status: "changed", Path: activePath})
 
-	runner := firstRunner(input.Runner)
 	if !input.SkipRebuild {
 		if _, err := runner(ctx, "sudo", "nixos-rebuild", "switch", "--flake", flakeArgument(toPath, manifest.NixFlakeOutput()), "--show-trace"); err != nil {
-			return result, err
+			return failRollback(result, paths, rollbackManifest, "nixos_rebuild", err)
 		}
 		result.Changed = append(result.Changed, UpdateChange{Step: "nixos_rebuild", Status: "changed"})
 	} else {
 		result.Changed = append(result.Changed, UpdateChange{Step: "nixos_rebuild", Status: "skipped"})
 	}
 	if !input.SkipHealthCheck {
-		if err := runHealthCheck(ctx, runner); err != nil {
-			return result, err
+		evidence, err := runTargetReadiness(ctx, runner, *rollbackManifest.ReadinessTarget)
+		if err != nil {
+			return failRollback(result, paths, rollbackManifest, "health_check", err)
 		}
+		rollbackManifest.Readiness = &evidence
 		result.Changed = append(result.Changed, UpdateChange{Step: "health_check", Status: "succeeded"})
 	} else {
 		result.Changed = append(result.Changed, UpdateChange{Step: "health_check", Status: "skipped"})
@@ -133,6 +174,14 @@ func Rollback(ctx context.Context, input RollbackInput) (RollbackResult, error) 
 	}
 	result.Changed = append(result.Changed, UpdateChange{Step: "manifest", Status: "written", Path: paths.active})
 	return result, nil
+}
+
+func failRollback(result RollbackResult, paths updateManifestPaths, manifest UpdateManifest, step string, cause error) (RollbackResult, error) {
+	failed, err := failApply(ApplyResult{}, paths, manifest, step, cause)
+	result.Status = failed.Status
+	result.Manifest = &failed.Manifest
+	result.Changed = append(result.Changed, failed.Changed...)
+	return result, err
 }
 
 func refuseRollback(result RollbackResult, reason string) (RollbackResult, error) {

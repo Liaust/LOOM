@@ -176,10 +176,17 @@ func fetchAndRestoreRawBoxFixture(t *testing.T, backend BorgSnapshotBackend, fix
 			if name != "psql" {
 				return nil, fmt.Errorf("unexpected verification command %q", name)
 			}
-			return []byte(`{"migration":61,"nodes":1,"worker_instances":1}`), nil
+			return []byte(`{"nodes":1,"worker_instances":1,"migration":61}`), nil
 		},
 	}
 	if restored, err := backup.RunDirectArchiveRestoreDrill(context.Background(), input); err != nil || restored.Status != SnapshotStatusSucceeded {
+		raw, _ := os.ReadFile(filepath.Join(target, backupstrategy.DirectArchiveEvidenceDir, backupstrategy.DirectArchiveManifestFile))
+		hash, _ := os.ReadFile(filepath.Join(target, backupstrategy.DirectArchiveEvidenceDir, backupstrategy.DirectArchiveManifestHashFile))
+		if prepared, parseErr := backupstrategy.ParseAuthenticatedDirectArchiveManifest(raw, hash); parseErr == nil {
+			prepared.V2UserSymlinkTargets = input.V2UserSymlinkTargets
+			final, verifyErr := backupstrategy.VerifyExtractedDirectArchive(context.Background(), target, prepared)
+			t.Logf("final extraction findings: %v (error %v)", final.Errors, verifyErr)
+		}
 		t.Fatalf("strict raw-root restore: %#v err=%v", restored, err)
 	}
 	return target

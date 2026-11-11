@@ -90,7 +90,7 @@ func ReadDeclarationMigrationProjectTx(ctx context.Context, tx *sql.Tx, req requ
 		if err = validateProjectRepositoryReadModel(model, canonical); err != nil {
 			return out, err
 		}
-	} else if len(out.Members) > 0 || out.Registration.ContractSchemaVersion == ProjectRepositoryProjectSchemaV05 {
+	} else if len(out.Members) > 0 || isDeclarationSchemaVersion(out.Registration.ContractSchemaVersion) {
 		return out, errors.New("migration_repository_source_missing")
 	}
 	// Detect orphaned rows hidden by the existing validated join, with a bounded

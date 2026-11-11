@@ -15,7 +15,7 @@ func TestImageOCRIsSeparateFromVision(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if plan.DefinitionVersion != "notes_image_pipeline.v2" {
+		if plan.DefinitionVersion != "notes_image_pipeline.v3" {
 			t.Fatal("image pipeline revision was not advanced")
 		}
 		var found bool

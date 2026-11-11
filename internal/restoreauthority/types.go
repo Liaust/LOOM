@@ -20,6 +20,7 @@ const (
 	maxProtocolHeaderBytes   = 4096
 	maxProtocolControlBytes  = 4096
 	maxProtocolResponseBytes = 4096
+	PGSearchVersion          = "0.25.11"
 )
 
 type Kind string
@@ -42,19 +43,20 @@ const (
 type FailureStage string
 
 const (
-	FailureStageSocket            FailureStage = "socket"
-	FailureStagePeer              FailureStage = "peer"
-	FailureStageSend              FailureStage = "send"
-	FailureStageReceive           FailureStage = "receive"
-	FailureStageRequest           FailureStage = "request"
-	FailureStagePayload           FailureStage = "payload"
-	FailureStageCancellation      FailureStage = "cancellation"
-	FailureStageDatabaseCreate    FailureStage = "database_create"
-	FailureStageArchiveInspection FailureStage = "archive_inspection"
-	FailureStageArchiveTOC        FailureStage = "archive_toc"
-	FailureStageDatabaseRestore   FailureStage = "database_restore"
-	FailureStageDatabaseCleanup   FailureStage = "database_cleanup"
-	FailureStageDatabaseDrop      FailureStage = "database_drop"
+	FailureStageSocket             FailureStage = "socket"
+	FailureStagePeer               FailureStage = "peer"
+	FailureStageSend               FailureStage = "send"
+	FailureStageReceive            FailureStage = "receive"
+	FailureStageRequest            FailureStage = "request"
+	FailureStagePayload            FailureStage = "payload"
+	FailureStageCancellation       FailureStage = "cancellation"
+	FailureStageDatabaseCreate     FailureStage = "database_create"
+	FailureStageArchiveInspection  FailureStage = "archive_inspection"
+	FailureStageArchiveTOC         FailureStage = "archive_toc"
+	FailureStageExtensionProvision FailureStage = "extension_provision"
+	FailureStageDatabaseRestore    FailureStage = "database_restore"
+	FailureStageDatabaseCleanup    FailureStage = "database_cleanup"
+	FailureStageDatabaseDrop       FailureStage = "database_drop"
 )
 
 const (
@@ -72,6 +74,7 @@ const (
 	ErrorArchiveInspectionFailed         = "archive_inspection_failed"
 	ErrorArchiveTOCRefused               = "archive_toc_refused"
 	ErrorArchiveTOCUnavailable           = "archive_toc_unavailable"
+	ErrorExtensionProvisionFailed        = "extension_provision_failed"
 	ErrorDatabaseRestoreFailed           = "database_restore_failed"
 	ErrorDatabaseRestoreAndCleanupFailed = "database_restore_and_cleanup_failed"
 	ErrorDatabaseDropFailed              = "database_drop_failed"
@@ -105,6 +108,7 @@ var failureDefinitions = map[string]failureDefinition{
 	ErrorArchiveInspectionFailed:         {FailureStageArchiveInspection, "Authenticated restore archive inspection failed."},
 	ErrorArchiveTOCRefused:               {FailureStageArchiveTOC, "Authenticated restore archive table of contents was refused."},
 	ErrorArchiveTOCUnavailable:           {FailureStageArchiveTOC, "Authenticated restore archive table of contents became unavailable."},
+	ErrorExtensionProvisionFailed:        {FailureStageExtensionProvision, "Pinned disposable database extension provisioning failed."},
 	ErrorDatabaseRestoreFailed:           {FailureStageDatabaseRestore, "Disposable database restore failed."},
 	ErrorDatabaseRestoreAndCleanupFailed: {FailureStageDatabaseCleanup, "Disposable database restore and cleanup failed."},
 	ErrorDatabaseDropFailed:              {FailureStageDatabaseDrop, "Disposable database cleanup failed."},
@@ -152,6 +156,25 @@ type RestoreRequest struct {
 	DumpSize   int64
 	DumpSHA256 string
 	Dump       io.Reader
+	Extensions []ExtensionRequirement
+}
+
+// ExtensionRequirement is carried from authenticated package metadata, never
+// inferred from a dump's versionless TOC. Only the fixed operational pin may
+// request privileged provisioning; ordinary extensions keep their existing path.
+type ExtensionRequirement struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+func ValidateExtensionRequirements(kind Kind, extensions []ExtensionRequirement) error {
+	if len(extensions) == 0 {
+		return nil // Historical packages make no privileged extension declaration.
+	}
+	if kind != KindOperational || len(extensions) != 1 || extensions[0].Name != "pg_search" || extensions[0].Version != PGSearchVersion {
+		return fmt.Errorf("unsupported restore extension declaration")
+	}
+	return nil
 }
 
 type DropRequest struct {
@@ -223,6 +246,9 @@ func validateDatabasePolicy(policy DatabasePolicy) error {
 }
 
 func validateRestoreRequest(request RestoreRequest, maxDumpBytes int64) error {
+	if err := ValidateExtensionRequirements(request.Kind, request.Extensions); err != nil {
+		return err
+	}
 	if err := ValidateDisposableDatabase(request.Kind, request.Database); err != nil {
 		return err
 	}

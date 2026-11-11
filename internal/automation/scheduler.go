@@ -49,6 +49,11 @@ func (s Service) RunScheduler(ctx context.Context, req requestctx.Context, input
 
 	result := SchedulerRunResult{ScannedSchedules: int64(len(dueSchedules))}
 	for _, schedule := range dueSchedules {
+		// Lookahead may discover a future deadline, but must not consume its
+		// occurrence or invoke it before scheduled_for.
+		if schedule.NextFireAt != nil && schedule.NextFireAt.After(input.Now) {
+			continue
+		}
 		processed, err := s.processDueScheduleTx(ctx, tx, req, schedule, input)
 		if err != nil {
 			result.FailedSchedules++
@@ -143,11 +148,20 @@ func nextDueScheduleAtTx(ctx context.Context, tx *sql.Tx) (*time.Time, error) {
 	return &out, nil
 }
 
+// NextSchedulerDueAtTx lets the supervisor discover a committed schedule
+// deadline without invoking or consuming an occurrence. The caller owns tx.
+func (s Service) NextSchedulerDueAtTx(ctx context.Context, tx *sql.Tx) (*time.Time, error) {
+	return nextDueScheduleAtTx(ctx, tx)
+}
+
 func (s Service) processDueScheduleTx(ctx context.Context, tx *sql.Tx, req requestctx.Context, schedule Schedule, input SchedulerRunInput) (schedulerProcessResult, error) {
 	if schedule.NextFireAt == nil {
 		return schedulerProcessResult{}, fmt.Errorf("schedule %s has no next_fire_at", schedule.ScheduleID)
 	}
 	scheduledFor := schedule.NextFireAt.UTC()
+	if scheduledFor.After(input.Now) {
+		return schedulerProcessResult{}, fmt.Errorf("schedule %s is not due", schedule.ScheduleID)
+	}
 	latenessSeconds := int(input.Now.Sub(scheduledFor).Seconds())
 	if latenessSeconds < 0 {
 		latenessSeconds = 0
@@ -247,11 +261,14 @@ func (s Service) processDueScheduleTx(ctx context.Context, tx *sql.Tx, req reque
 func schedulerFireDecision(profile MisfireProfile, now, scheduledFor time.Time) (fireStatus, misfireStatus string, shouldInvoke bool) {
 	lateness := now.UTC().Sub(scheduledFor.UTC())
 	if lateness < 0 {
-		lateness = 0
+		return FireStatusCreated, fireMisfireNone, false
 	}
 	switch profile.Policy {
 	case MisfireRunIfLateWithin:
-		if int(lateness.Seconds()) <= profile.LatenessWindowSeconds {
+		// Whole seconds plus the remainder keep the comparison exact without
+		// overflowing a duration for an unusually large configured window.
+		windowSeconds := time.Duration(profile.LatenessWindowSeconds)
+		if lateness/time.Second < windowSeconds || (lateness/time.Second == windowSeconds && lateness%time.Second == 0) {
 			if lateness > 0 {
 				return FireStatusCreated, fireMisfireLateRun, true
 			}
@@ -325,6 +342,18 @@ func (s Service) createInvocationForScheduleFireTx(ctx context.Context, tx *sql.
 	if err != nil {
 		return Invocation{}, err
 	}
+	owner, err := scheduleOwner(ctx, tx, schedule)
+	if err != nil {
+		return Invocation{}, err
+	}
+	metadata := map[string]any{
+		"schema_version": "automation_invocation.metadata.v0.2",
+		"schedule_key":   schedule.ScheduleKey,
+		"schedule_id":    schedule.ScheduleID,
+	}
+	if owner != "" {
+		metadata["home_box_id"] = owner
+	}
 
 	return s.createInvocationTx(ctx, tx, req, CreateInvocationTxInput{
 		AutomationID:        schedule.AutomationID,
@@ -339,11 +368,7 @@ func (s Service) createInvocationForScheduleFireTx(ctx context.Context, tx *sql.
 		InputJSON:           schedule.InputJSON,
 		IdempotencyKey:      "automation-invocation:schedule_fire:" + fire.ScheduleFireID,
 		MaxAttempts:         retry.MaxAttempts,
-		Metadata: mustJSON(map[string]any{
-			"schema_version": "automation_invocation.metadata.v0.2",
-			"schedule_key":   schedule.ScheduleKey,
-			"schedule_id":    schedule.ScheduleID,
-		}),
+		Metadata:            mustJSON(metadata),
 		EventPayload: map[string]any{
 			"schedule_fire_id":     fire.ScheduleFireID,
 			"schedule_fire_status": fire.Status,

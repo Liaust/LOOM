@@ -35,6 +35,9 @@ func (s Service) RegisterLaneCustody(ctx context.Context, input LaneCustodyInput
 	}
 	viewPath := laneViewPath(normalized)
 	existing, existingErr := s.InspectEntry(ctx, viewPath)
+	if isStorageEntryNotFound(existingErr) && normalized.StorageEntryID == "" {
+		existing, existingErr = s.inspectLaneMemberIdentity(ctx, normalized)
+	}
 	switch {
 	case existingErr == nil:
 		normalized.StorageEntryID = existing.Entry.StorageEntryID
@@ -44,7 +47,12 @@ func (s Service) RegisterLaneCustody(ctx context.Context, input LaneCustodyInput
 		if existing.Entry.ChecksumAlgorithm == normalized.ChecksumAlgorithm &&
 			existing.Entry.ChecksumHex == normalized.ChecksumValue &&
 			int64PtrEqual(existing.Entry.SizeBytes, normalized.FileSizeBytes) {
-			return existing, nil
+			for _, ref := range existing.PhysicalRefs {
+				if ref.Status == PhysicalRefStatusAvailable && ref.URI == normalized.FinalCustodyPath {
+					return existing, nil
+				}
+			}
+			return EntryDetail{}, fmt.Errorf("Lane member's current physical reference does not match its verified location")
 		}
 	case existingErr != nil && !isStorageEntryNotFound(existingErr):
 		return EntryDetail{}, existingErr

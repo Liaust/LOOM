@@ -1,6 +1,7 @@
 package projectcontracts
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -57,6 +58,9 @@ func TestDeclarationCompilerStrictSources(t *testing.T) {
 	}
 	for _, c := range corpus.Cases {
 		t.Run(c.Name, func(t *testing.T) {
+			if c.Name == "unknown-schema" {
+				c.Document = bytes.ReplaceAll(c.Document, []byte("project.contract.v0.6"), []byte("project.contract.v0.7"))
+			}
 			if _, err := LoadProject(declarationTestRoot(t, c.Document)); err == nil {
 				t.Fatal("frozen invalid source accepted")
 			}

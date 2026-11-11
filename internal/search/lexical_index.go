@@ -10,11 +10,13 @@ import (
 )
 
 const (
-	LexicalFieldTitle   = "title"
-	LexicalFieldHeading = "heading"
-	LexicalFieldPath    = "path"
-	LexicalFieldTag     = "tag"
-	LexicalFieldBody    = "body"
+	LexicalFieldTitle      = "title"
+	LexicalFieldHeading    = "heading"
+	LexicalFieldPath       = "path"
+	LexicalFieldTag        = "tag"
+	LexicalFieldBody       = "body"
+	lexicalWriteBatchRows  = 256
+	lexicalWriteBatchBytes = 256 * 1024
 )
 
 type LexicalFieldInput struct {
@@ -122,6 +124,77 @@ func UpsertLexicalDocumentTx(ctx context.Context, tx *sql.Tx, input LexicalDocum
 	if err != nil {
 		return LexicalDocument{}, err
 	}
+	return upsertBuiltLexicalDocumentTx(ctx, tx, document)
+}
+
+// EnsureLexicalDocumentTx preserves an unchanged materialization, but repairs
+// missing or stale headers/terms. The parent and header locks fence concurrent
+// publication while the exact term set is compared in this transaction.
+func EnsureLexicalDocumentTx(ctx context.Context, tx *sql.Tx, input LexicalDocumentInput) (LexicalDocument, bool, error) {
+	document, err := BuildLexicalDocument(input)
+	if err != nil {
+		return LexicalDocument{}, false, err
+	}
+	var parentID string
+	if err = tx.QueryRowContext(ctx, `SELECT search_document_id FROM search.search_documents
+		WHERE search_document_id=$1 FOR UPDATE`, document.SearchDocumentID).Scan(&parentID); err != nil {
+		return LexicalDocument{}, false, err
+	}
+	fieldLengths, err := json.Marshal(document.FieldLengths)
+	if err != nil {
+		return LexicalDocument{}, false, err
+	}
+	var same bool
+	err = tx.QueryRowContext(ctx, `SELECT index_version=$2 AND source_kind=$3 AND source_id=$4
+		AND source_version_id IS NOT DISTINCT FROM nullif($5::text,'')
+		AND object_id IS NOT DISTINCT FROM nullif($6::text,'')
+		AND field_lengths=$7::jsonb AND document_length=$8 AND metadata=$9::jsonb
+		FROM search.lexical_documents WHERE search_document_id=$1 FOR UPDATE`,
+		document.SearchDocumentID, document.IndexVersion, document.SourceKind, document.SourceID,
+		document.SourceVersionID, document.ObjectID, fieldLengths, document.DocumentLength, document.Metadata).Scan(&same)
+	if err != nil && err != sql.ErrNoRows {
+		return LexicalDocument{}, false, err
+	}
+	if same {
+		// BuildLexicalDocument sorts by UTF-8 bytes; match that order regardless
+		// of the database locale. One extra row detects surplus materialization.
+		rows, queryErr := tx.QueryContext(ctx, `SELECT field_key,term,term_frequency
+			FROM search.lexical_terms WHERE search_document_id=$1
+			ORDER BY field_key COLLATE "C",term COLLATE "C" LIMIT $2`, document.SearchDocumentID, len(document.Terms)+1)
+		if queryErr != nil {
+			return LexicalDocument{}, false, queryErr
+		}
+		index := 0
+		for rows.Next() {
+			var term LexicalTerm
+			if err = rows.Scan(&term.FieldKey, &term.Term, &term.TermFrequency); err != nil {
+				rows.Close()
+				return LexicalDocument{}, false, err
+			}
+			if index >= len(document.Terms) || term != document.Terms[index] {
+				same = false
+				break
+			}
+			index++
+		}
+		err = rows.Err()
+		closeErr := rows.Close()
+		if err != nil {
+			return LexicalDocument{}, false, err
+		}
+		if closeErr != nil {
+			return LexicalDocument{}, false, closeErr
+		}
+		same = same && index == len(document.Terms)
+	}
+	if same {
+		return document, false, nil
+	}
+	document, err = upsertBuiltLexicalDocumentTx(ctx, tx, document)
+	return document, err == nil, err
+}
+
+func upsertBuiltLexicalDocumentTx(ctx context.Context, tx *sql.Tx, document LexicalDocument) (LexicalDocument, error) {
 	fieldLengths, err := json.Marshal(document.FieldLengths)
 	if err != nil {
 		return LexicalDocument{}, err
@@ -163,17 +236,44 @@ func UpsertLexicalDocumentTx(ctx context.Context, tx *sql.Tx, input LexicalDocum
 	`, document.SearchDocumentID); err != nil {
 		return LexicalDocument{}, err
 	}
-	for _, term := range document.Terms {
+	for start := 0; start < len(document.Terms); {
+		end := lexicalTermBatchEnd(document.Terms, start)
+		fields := make([]string, 0, end-start)
+		terms := make([]string, 0, end-start)
+		frequencies := make([]int64, 0, end-start)
+		for _, term := range document.Terms[start:end] {
+			fields = append(fields, term.FieldKey)
+			terms = append(terms, term.Term)
+			frequencies = append(frequencies, int64(term.TermFrequency))
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO search.lexical_terms (
 				search_document_id, field_key, term, term_frequency
 			)
-			VALUES ($1,$2,$3,$4)
-		`, document.SearchDocumentID, term.FieldKey, term.Term, term.TermFrequency); err != nil {
+			SELECT $1, field_key, term, term_frequency
+			FROM unnest($2::text[], $3::text[], $4::bigint[])
+			AS terms(field_key, term, term_frequency)
+		`, document.SearchDocumentID, fields, terms, frequencies); err != nil {
 			return LexicalDocument{}, err
 		}
+		start = end
 	}
 	return document, nil
+}
+
+// Bound array payload and rows independently. A formerly accepted oversized
+// field key still makes progress in a singleton rather than changing validation.
+func lexicalTermBatchEnd(terms []LexicalTerm, start int) int {
+	end, bytes := start, 0
+	for end < len(terms) && end-start < lexicalWriteBatchRows {
+		size := len(terms[end].FieldKey) + len(terms[end].Term) + 24
+		if end > start && size > lexicalWriteBatchBytes-bytes {
+			break
+		}
+		bytes += size
+		end++
+	}
+	return end
 }
 
 func jsonObjectOrEmpty(raw json.RawMessage) json.RawMessage {

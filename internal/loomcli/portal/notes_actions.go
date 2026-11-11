@@ -49,7 +49,7 @@ func notesSelectableItems(state ScreenState) []SelectableItem {
 			Screen:        ScreenNotes,
 			RowIndex:      len(pipelines) + len(roots) + idx,
 			RecordKind:    "notes_search_result",
-			RecordRef:     firstNonEmpty(result.KnowledgeChunkID, result.SearchDocumentID, result.KnowledgeObjectID),
+			RecordRef:     firstNonEmpty(result.FileID, result.KnowledgeChunkID, result.SearchDocumentID, result.KnowledgeObjectID),
 			RecordLabel:   notesSearchResultTitle(result),
 			PrimaryAction: actionPtr(action),
 		})
@@ -201,7 +201,7 @@ func notesEmbeddingsActionPayload(status knowledge.EmbeddingStatus) map[string]s
 }
 
 func NewNotesSearchResultInspectAction(result knowledge.NotesSearchResult) PortalAction {
-	ref := firstNonEmpty(result.KnowledgeChunkID, result.SearchDocumentID, result.KnowledgeObjectID)
+	ref := firstNonEmpty(result.FileID, result.KnowledgeChunkID, result.SearchDocumentID, result.KnowledgeObjectID)
 	action := NewPortalRecordInspectAction("notes", ScreenNotes, "notes_search_result", ref, notesSearchResultTitle(result), notesSearchResultPayload(result))
 	action.Label = "Inspect Note Result"
 	action.Description = "Inspect this notes search result."
@@ -211,6 +211,10 @@ func NewNotesSearchResultInspectAction(result knowledge.NotesSearchResult) Porta
 	}
 	if result.SourceLifecycle != "" {
 		action.RawCommand = append(action.RawCommand, "--source-lifecycle", string(result.SourceLifecycle))
+	}
+	if result.FileID != "" {
+		action.RawCommand = []string{"loom", "notes", "read", result.FileID}
+		action.Description = "Read the current file."
 	}
 	if ref == "" {
 		action.State = ActionDisabled
@@ -280,6 +284,10 @@ func notesSearchResultDescription(result knowledge.NotesSearchResult) string {
 }
 
 func notesSearchResultPayload(result knowledge.NotesSearchResult) map[string]string {
+	if result.FileID != "" {
+		return map[string]string{"file_id": result.FileID, "path": firstNonEmpty(result.CanonicalPath, result.SourcePath),
+			"project": result.ProjectName, "node": result.SourceNodeKey, "lifecycle": string(result.SourceLifecycle), "excerpt": result.Snippet}
+	}
 	return map[string]string{
 		"source_lifecycle":             string(result.SourceLifecycle),
 		"original_path":                result.OriginalPath,

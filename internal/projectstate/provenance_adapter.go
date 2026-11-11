@@ -3,6 +3,7 @@ package projectstate
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sort"
 
 	"loom.local/loom/internal/projects"
@@ -18,8 +19,9 @@ type ProvenanceProjectSource struct {
 }
 
 type ProvenanceRepositorySource struct {
-	Projection  RepositoryProjection
-	ProjectSlug string
+	ValidateRead func(context.Context) error `json:"-"`
+	Projection   RepositoryProjection
+	ProjectSlug  string
 	// SourceVersion is the accepted membership binding revision. Provenance
 	// combines it with deterministic project/repository output, then allocates
 	// its own monotonic projection revision transactionally.
@@ -47,7 +49,7 @@ func (s Service) ObserveProjectContextForProvenance(ctx context.Context, ref str
 	if err != nil {
 		return ProvenanceProjectSource{}, err
 	}
-	return s.projectSourceForProvenance(projection, model, false)
+	return s.projectSourceForProvenance(ctx, projection, model, false)
 }
 
 // ObserveProjectForProvenance consumes the same bounded registry snapshot as
@@ -58,10 +60,10 @@ func (s Service) ObserveProjectForProvenance(ctx context.Context, ref string) (P
 	if err != nil {
 		return ProvenanceProjectSource{}, err
 	}
-	return s.projectSourceForProvenance(projection, model, true)
+	return s.projectSourceForProvenance(ctx, projection, model, true)
 }
 
-func (s Service) projectSourceForProvenance(projection ProjectProjection, model projects.ProjectRepositoryReadModel, inspectRepositories bool) (ProvenanceProjectSource, error) {
+func (s Service) projectSourceForProvenance(ctx context.Context, projection ProjectProjection, model projects.ProjectRepositoryReadModel, inspectRepositories bool) (ProvenanceProjectSource, error) {
 
 	result := ProvenanceProjectSource{Projection: projection, Repositories: []ProvenanceRepositorySource{}}
 	if model.Source == nil {
@@ -78,6 +80,11 @@ func (s Service) projectSourceForProvenance(projection ProjectProjection, model 
 	projectedByID := make(map[string]RepositoryProjection, len(projection.Members))
 	for _, member := range projection.Members {
 		projectedByID[member.RepositoryID] = member
+	}
+	location := RepositoryReadLocation{Source: model.Source}
+	var locationErr error
+	if inspectRepositories && model.Source.OwnerNode == s.LocalNode {
+		location, locationErr = s.repositoryReadLocation(ctx, model)
 	}
 	for _, member := range model.Members {
 		projected := projectedByID[member.RepositoryID]
@@ -105,11 +112,20 @@ func (s Service) projectSourceForProvenance(projection ProjectProjection, model 
 			result.Repositories = append(result.Repositories, source)
 			continue
 		}
-		navigation, resolveErr := repositorySourceLocation(model.Source, member.Path)
+		if locationErr != nil {
+			source.ReasonCode = "archive_source_unverified"
+			result.Repositories = append(result.Repositories, source)
+			continue
+		}
+		if !reflect.DeepEqual(projected.Archive, location.Archive) {
+			return ProvenanceProjectSource{}, fmt.Errorf("%w: archive_source_changed", ErrProjectStateUnavailable)
+		}
+		source.ValidateRead = location.Revalidate
+		navigation, resolveErr := repositorySourceLocation(location.Source, member.Path)
 		var resolved ResolvedPath
 		if resolveErr == nil {
 			source.NavigationPath = navigation
-			resolved, resolveErr = paths.ResolveWithin(model.Source.ProjectRoot, navigation)
+			resolved, resolveErr = paths.ResolveWithin(location.Source.ProjectRoot, navigation)
 		}
 		if resolveErr != nil {
 			source.ReasonCode = pathObservationReason(resolveErr)
@@ -122,6 +138,11 @@ func (s Service) projectSourceForProvenance(projection ProjectProjection, model 
 			source.Available = true
 		}
 		result.Repositories = append(result.Repositories, source)
+	}
+	if location.Revalidate != nil {
+		if err := location.Revalidate(ctx); err != nil {
+			return ProvenanceProjectSource{}, fmt.Errorf("%w: archive_source_changed", ErrProjectStateUnavailable)
+		}
 	}
 	sort.Slice(result.Repositories, func(i, j int) bool {
 		return result.Repositories[i].Projection.RepositoryID < result.Repositories[j].Projection.RepositoryID

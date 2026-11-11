@@ -105,7 +105,7 @@ func buildLaneStatus(status Status, contract Contract) *lane.Status {
 		return nil
 	}
 	area, ok := contract.Areas[AreaLane]
-	if !ok {
+	if !ok || !area.Enabled {
 		return nil
 	}
 	relPath := area.Path
@@ -125,8 +125,10 @@ func laneState(status *lane.Status, initialized bool, contract Contract) string 
 	if !initialized {
 		return lane.StateNotInitialized
 	}
-	if _, ok := contract.Areas[AreaLane]; !ok {
+	if area, ok := contract.Areas[AreaLane]; !ok {
 		return ""
+	} else if !area.Enabled {
+		return "disabled"
 	}
 	if status == nil {
 		return lane.StateMissing
@@ -205,7 +207,7 @@ func deriveState(status Status) string {
 		return "missing"
 	}
 	for _, item := range append(append([]PathStatus{}, status.Areas...), status.Policies...) {
-		if item.Status != "ok" {
+		if item.Enabled && item.Status != "ok" {
 			return "partial"
 		}
 	}
@@ -235,7 +237,7 @@ func dropzoneState(contract Contract, initialized bool) string {
 func missingPaths(items []PathStatus) []string {
 	paths := []string{}
 	for _, item := range items {
-		if item.Status == "missing" {
+		if item.Enabled && item.Status == "missing" {
 			paths = append(paths, item.Path)
 		}
 	}

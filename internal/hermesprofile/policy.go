@@ -161,7 +161,7 @@ func checkFreshness(ctx context.Context, p Policy, now time.Time, maxAge time.Du
 	if err != nil {
 		return nil, err
 	}
-	if !p.Enabled {
+	if !p.Enabled && (p.Identity == "" || len(p.PublicKey) == 0) {
 		return nil, nil
 	}
 	if len(p.PublicKey) != ed25519.PublicKeySize {
@@ -227,7 +227,7 @@ func checkFreshness(ctx context.Context, p Policy, now time.Time, maxAge time.Du
 	if len(retained) != 0 {
 		return nil, fmt.Errorf("declared retained recovery evidence missing")
 	}
-	if !fresh {
+	if p.Enabled && !fresh {
 		return nil, fmt.Errorf("current Hermes producer lacks fresh authenticated recovery evidence")
 	}
 	if readme != nil {

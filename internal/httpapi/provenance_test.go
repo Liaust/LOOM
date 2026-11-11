@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -26,6 +27,15 @@ import (
 type provenancePolicyStub struct {
 	explanation policy.PolicyExplanation
 	input       policy.DecisionInput
+}
+
+func TestProvenanceProducerHistoryErrorIsActionable(t *testing.T) {
+	for _, err := range []error{provenance.ErrAcceptedProducerHistory, &provenance.FoundationConflictError{Err: provenance.ErrAcceptedProducerHistory}} {
+		status, code, message := provenanceErrorResponse(err)
+		if status != http.StatusBadRequest || code != "provenance.producer_history_invalid" || !strings.Contains(message, "candidate and reviewer contexts") {
+			t.Fatalf("producer history failure lost its safe repair hint: %d %s %s", status, code, message)
+		}
+	}
 }
 
 func (stub *provenancePolicyStub) Explain(_ context.Context, _ requestctx.Context, input policy.DecisionInput) (policy.PolicyExplanation, error) {
@@ -87,6 +97,52 @@ type provenanceTransportStub struct {
 	repoGetResult  provenance.RepositoryCard
 	repoSyncInput  provenance.ProjectProjectionSyncInput
 	repoSyncResult provenance.ProjectProjectionSyncReceipt
+	reviewCalls    int
+	reviewInput    provenance.ReviewRequest
+	reviewResult   provenance.ReviewResponse
+}
+
+func (stub *provenanceTransportStub) ListReview(_ context.Context, request provenance.ReviewRequest) (provenance.ReviewResponse, error) {
+	stub.reviewCalls++
+	stub.reviewInput = request
+	return stub.reviewResult, nil
+}
+
+func TestProvenanceReviewAuthorizedBoundedRead(t *testing.T) {
+	transport := &provenanceTransportStub{reviewResult: provenance.ReviewResponse{SchemaVersion: "1.0", AsOf: time.Date(2026, 10, 12, 0, 0, 0, 0, time.UTC), Items: []provenance.ReviewItem{}}}
+	checkpoint := `[{"object_kind":"case","object_id":"22222222-2222-4222-8222-222222222222","change_token":"0123456789abcdef0123456789abcdef"}]`
+	query := url.Values{"limit": {"10"}, "domain": {"real"}, "visibility": {"private"}, "exclude_domain": {"fixture", "fixture-two"}, "reviewed": {checkpoint}}
+	authorizer := &provenanceAuthorizerStub{execution: provenance.ExecutionAuthority{ActorID: "actor_authenticated", OriginNodeID: "node_authenticated"}}
+	handler := provenanceHTTPTestHandler(transport, authorizer, &provenanceIdempotencyStub{})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/provenance/review?"+query.Encode(), nil))
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"items":[]`) || transport.reviewCalls != 1 || transport.reviewInput.Domain != "real" || len(transport.reviewInput.ExcludeDomains) != 2 || len(transport.reviewInput.Reviewed) != 1 {
+		t.Fatalf("read=%d %s %#v", rec.Code, rec.Body, transport.reviewInput)
+	}
+	if len(authorizer.seen) != 1 || authorizer.seen[0] != capabilities.ProvenanceFoundationReadCapability {
+		t.Fatalf("wrong read authorization: %v", authorizer.seen)
+	}
+	for _, invalid := range []string{"limit=101", "cursor=invalid", "reviewed=" + url.QueryEscape(`[{"unknown":true}]`), "reviewed=" + url.QueryEscape(strings.Repeat(" ", provenance.MaximumReviewCheckpointBytes+1)), "exclude_domain="} {
+		rec = httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/provenance/review?"+invalid, nil))
+		if rec.Code != 400 || !strings.Contains(rec.Body.String(), "provenance.invalid_request") {
+			t.Fatalf("invalid=%s response=%d %s", invalid[:min(len(invalid), 50)], rec.Code, rec.Body)
+		}
+	}
+	if transport.reviewCalls != 1 {
+		t.Fatal("invalid query reached owner")
+	}
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/provenance/review", nil))
+	if rec.Code != 405 {
+		t.Fatal("review accepted mutation method")
+	}
+	authorizer.err = &ProvenanceAuthorizationError{ReasonCode: "denied"}
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/provenance/review", nil))
+	if rec.Code != 403 || transport.reviewCalls != 1 {
+		t.Fatal("denied actor reached review owner")
+	}
 }
 
 func (stub *provenanceTransportStub) Readiness() provenance.RuntimeReadiness { return stub.readiness }

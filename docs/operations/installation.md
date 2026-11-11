@@ -4,7 +4,7 @@ description: "Understand the manual developer-preview installation path and the 
 audience: [operator, developer]
 tags: [loom, installation, nix, configuration]
 status: draft
-verified_at: "2026-09-15"
+verified_at: "2026-11-11"
 source_scope: ["go.mod", "flake.nix", "nix/README.md", "internal/loomcli/setup.go", "internal/loomdapp/root.go"]
 related: ["[[Getting Started]]", "[[Configuration]]", "[[Local Development]]", "[[Updating And Rebuilding]]", "[[Main And Mac Operations]]"]
 ---
@@ -66,6 +66,30 @@ Before activation, supply and review:
 The `loom setup` command family provides existing plan/apply/status/doctor and
 workspace setup surfaces. Inspect release-matched help and the printed plan;
 these are not a substitute for supplying the operator's real machine inputs.
+
+## Build The Desktop Client
+
+Use Node.js 24 or newer, npm and the Go toolchain declared in this release:
+
+```sh
+cd modules/workspace-electron
+npm ci
+npm test
+npm start
+```
+
+Prestart/pretest build the small native filesystem helper. The renderer build
+contains no user files, SSH keys or database. The client forwards a Main Unix
+socket through the operator's existing private SSH identity; it does not expose
+a public listener or authenticate an arbitrary host. Connection variables are
+documented in the client README. Obsidian is not required; retain any old vault
+and plugin state rather than treat this independent client as a migration.
+
+Development builds are unsigned and cannot receive native signed updates.
+Signed/notarized packaging needs the operator's own Apple setup. Select an
+update repository explicitly with `LOOM_WORKSPACE_UPDATE_REPOSITORY=owner/repository`;
+this source release promises no ready signed feed. See [[Desktop Workspace]]
+before selecting large offline working sets.
 
 ## Verify The Installed Context
 

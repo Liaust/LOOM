@@ -1,6 +1,7 @@
 { lib, runCommand, bash, coreutils, cacert, git, gh, basecamp-cli, agentIdentity ? "morathustra", basecampAccountID }:
 
 assert builtins.elem agentIdentity [ "morathustra" "mina" ];
+assert builtins.isInt basecampAccountID && basecampAccountID > 0;
 let
   identity = agentIdentity;
   makeTool = tool: native: runCommand "loom-${identity}-${tool}" { } ''

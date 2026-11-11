@@ -69,6 +69,8 @@ func (s *Service) GetNotesPassage(ctx context.Context, input NotesPassageInput) 
 	var sourcePath string
 	var currentSourcePath, currentBackendRoot, currentLogicalName string
 	var syncedSource bool
+	args := []any{input.KnowledgeObjectID, input.KnowledgeObjectVersionID, input.KnowledgeChunkID, input.SourceHash, MaxNotesPassageTextBytes}
+	selection := notesSelectedRootSQL(notesBoxSelection(ctx), "r", &args)
 	// A single statement sees citation identity and current access evidence in
 	// one database snapshot. No source file, latest body or diagnostic fallback.
 	// Consolidated publication numbers rows across segments, but its chunk hash
@@ -106,7 +108,7 @@ func (s *Service) GetNotesPassage(ctx context.Context, input NotesPassageInput) 
 	 AND octet_length(c.structural_path)<=4096
 	 AND `+visibleNotesCustodyObjectSQL("o", false)+`
 	 AND `+notesLifecycleSelectionSQL("o", input.SourceLifecycle)+`
-	 LIMIT 1`, input.KnowledgeObjectID, input.KnowledgeObjectVersionID, input.KnowledgeChunkID, input.SourceHash, MaxNotesPassageTextBytes).
+	 AND `+selection+` LIMIT 1`, args...).
 		Scan(&out.Text, &out.ChunkHash, &index, &out.StructuralPath, &out.Historical,
 			&relativePath, &metadata, &contextRoot, &sourcePath, &currentSourcePath, &currentBackendRoot, &currentLogicalName, &syncedSource)
 	if err != nil {

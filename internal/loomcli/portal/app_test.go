@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -6406,6 +6407,7 @@ func fakeSnapshot() Snapshot {
 }
 
 type fakePortalClient struct {
+	snapshotCallsMu            sync.Mutex
 	snapshotCalls              []string
 	healthErr                  error
 	statusErr                  error
@@ -6504,6 +6506,8 @@ func newFakePortalClient() *fakePortalClient {
 }
 
 func (c *fakePortalClient) recordSnapshotCall(name string) {
+	c.snapshotCallsMu.Lock()
+	defer c.snapshotCallsMu.Unlock()
 	c.snapshotCalls = append(c.snapshotCalls, name)
 }
 

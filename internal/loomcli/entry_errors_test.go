@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/spf13/cobra"
+	loomerrors "loom.local/loom/internal/errors"
 	"loom.local/loom/internal/localclient"
 	pc "loom.local/loom/internal/projectcontracts"
 	"loom.local/loom/internal/response"
@@ -267,6 +269,105 @@ func entryFailureFixture() *localclient.DeclarationRequestError {
 	return &localclient.DeclarationRequestError{RequestError: &localclient.RequestError{StatusCode: 403, Envelope: response.ErrorEnvelope{Error: response.ErrorBody{Code: "declaration.unauthorized", Summary: "Permission prerequisite", Domain: "projects", Target: "declaration", Hint: "Inspect prerequisites", CorrelationID: "server-correlation"}, Meta: response.Meta{CorrelationID: "server-correlation", IdempotencyKey: "original-key", Source: "fixture", Freshness: "synthetic"}}}, Detail: pc.DeclarationError{Code: pc.DeclarationUnauthorized, CauseCode: "permission_revoked", CompletedEffects: []string{"retained-effect"}}}
 }
 
+func TestCLIEntryPreservesUnrenderedTypedFailures(t *testing.T) {
+	for _, kind := range []string{"request", "declaration", "partial", "local"} {
+		for _, machine := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%t", kind, machine), func(t *testing.T) {
+				opts := &options{correlationID: "client-correlation"}
+				failure := entryFailureFixture()
+				var original error = failure
+				switch kind {
+				case "request":
+					original = failure.RequestError
+				case "partial":
+					failure.Result = &pc.DeclarationResult{SchemaVersion: pc.DeclarationResultSchemaV05, OperationID: "durable-operation", State: pc.DeclarationOperationPartial, Actions: []pc.DeclarationActionResult{{EffectRef: "retained-effect"}}, Errors: []pc.DeclarationError{failure.Detail}}
+				case "local":
+					original = loomerrors.New("knowledge.invalid_selection", "knowledge", "exact-source", "Choose an admitted source.")
+				}
+				root := &cobra.Command{Use: "fixture", SilenceErrors: true, SilenceUsage: true}
+				root.Flags().BoolVar(&opts.jsonOutput, "json", false, "")
+				root.RunE = func(*cobra.Command, []string) error {
+					return fmt.Errorf("private wrapper FAKE_SECRET: %w", errors.Join(original, errors.New("private joined SQL")))
+				}
+				var out, stderr bytes.Buffer
+				var args []string
+				if machine {
+					args = []string{"--json"}
+				}
+				err := executeCLIEntry(root, opts, args, &out, &stderr)
+				if err == nil || !errors.Is(err, original) {
+					t.Fatal("original failure identity or exit status lost")
+				}
+				all := out.String() + stderr.String()
+				if strings.Contains(all, "FAKE_SECRET") || strings.Contains(all, "private joined SQL") || strings.Contains(all, "cli.command_failed") || strings.Contains(all, "Usage:") {
+					t.Fatalf("typed failure replaced or raw wrapper exposed: %s", all)
+				}
+				if machine {
+					d := json.NewDecoder(&out)
+					var payload map[string]any
+					if d.Decode(&payload) != nil || d.Decode(new(any)) != io.EOF || stderr.Len() != 0 {
+						t.Fatalf("expected one JSON result: %s %s", all, stderr.String())
+					}
+					if kind == "partial" {
+						if payload["operation_id"] != "durable-operation" || payload["state"] != string(pc.DeclarationOperationPartial) || payload["actions"] == nil {
+							t.Fatalf("durable result lost: %#v", payload)
+						}
+					} else {
+						body := payload["error"].(map[string]any)
+						if kind == "local" {
+							if body["code"] != "knowledge.invalid_selection" || body["target"] != "exact-source" {
+								t.Fatal(payload)
+							}
+						} else if body["code"] != "declaration.unauthorized" || body["correlation_id"] != "server-correlation" || kind == "declaration" && payload["declaration_error"] == nil {
+							t.Fatal(payload)
+						}
+					}
+				} else if kind == "local" {
+					if !strings.Contains(all, "knowledge.invalid_selection") || !strings.Contains(all, "exact-source") {
+						t.Fatal(all)
+					}
+				} else if !strings.Contains(all, "permission_revoked") && kind != "request" || !strings.Contains(all, "server-correlation") || !strings.Contains(all, "original-key") {
+					t.Fatal(all)
+				}
+			})
+		}
+	}
+}
+
+func TestCLIEntryNotesPipelineFailureProcess(t *testing.T) {
+	env := response.Failure("server-pipeline-correlation", loomerrors.New("knowledge.notes_pipeline_not_found", "knowledge", "missing-pipeline", "Notes pipeline was not found."))
+	socket, shutdown := startStorageCommandServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/knowledge/notes/pipelines/missing-pipeline" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		response.WriteJSON(w, http.StatusNotFound, env)
+	})
+	defer shutdown()
+	for _, mode := range []string{"default", "plain", "json"} {
+		t.Run(mode, func(t *testing.T) {
+			args := []string{"--socket", socket, "notes", "pipelines", "inspect", "missing-pipeline"}
+			if mode != "default" {
+				args = append(args, "--"+mode)
+			}
+			cmd := exec.Command(cliEntryBinary, args...)
+			var out, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &out, &stderr
+			if err := cmd.Run(); err == nil {
+				t.Fatal("missing pipeline succeeded")
+			}
+			if mode == "json" {
+				var want bytes.Buffer
+				_ = json.NewEncoder(&want).Encode(env)
+				if out.String() != want.String() || stderr.Len() != 0 {
+					t.Fatalf("backend envelope changed or duplicated: %s %s", out.String(), stderr.String())
+				}
+			} else if out.Len() != 0 || strings.Count(stderr.String(), "Error:") != 1 || !strings.Contains(stderr.String(), env.Error.Code) || !strings.Contains(stderr.String(), env.Error.Target) || !strings.Contains(stderr.String(), env.Meta.CorrelationID) {
+				t.Fatalf("missing backend cause/identity: %s %s", out.String(), stderr.String())
+			}
+		})
+	}
+}
+
 func TestCLIEntryPreservesRenderedPayloads(t *testing.T) {
 	for _, kind := range []string{"partial", "no-result", "request", "raw", "progress", "joined"} {
 		for _, machine := range []bool{false, true} {
@@ -340,7 +441,9 @@ func TestCLIEntryPreservesRenderedPayloads(t *testing.T) {
 					var expected bytes.Buffer
 					switch kind {
 					case "partial":
-						_ = json.NewEncoder(&expected).Encode(failure.Result)
+						view := &cobra.Command{}
+						view.SetOut(&expected)
+						_ = renderDeclarationResult(view, &options{jsonOutput: true}, *failure.Result, nil)
 					case "request":
 						_ = json.NewEncoder(&expected).Encode(failure.Envelope)
 					default:

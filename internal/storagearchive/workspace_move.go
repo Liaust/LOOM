@@ -79,13 +79,18 @@ const (
 type WorkspaceMoveFailureHook func(WorkspaceMoveBoundary) error
 
 type WorkspaceMoveService struct {
-	Roots         TrustedWorkspaceRoots
-	Catalog       WorkspaceMoveCatalog
-	Journal       WorkspaceMoveJournal
-	ManifestKeyID string
-	ManifestKey   WorkspaceManifestKeyLookup
-	Now           func() time.Time
-	FailureHook   WorkspaceMoveFailureHook
+	Roots           TrustedWorkspaceRoots
+	Catalog         WorkspaceMoveCatalog
+	Journal         WorkspaceMoveJournal
+	ManifestKeyID   string
+	ManifestKey     WorkspaceManifestKeyLookup
+	Now             func() time.Time
+	FailureHook     WorkspaceMoveFailureHook
+	NamedPlacement  bool
+	CurrentLocation func(context.Context, string, string) (string, string, error)
+	// ActiveProjectLocation requires NamedPlacement and supplies owner-accepted
+	// project locations. Nil results keep the historical named v2 plan.
+	ActiveProjectLocation func(context.Context, string) (*WorkspaceActiveLocation, error)
 }
 
 type WorkspaceArchivePlanInput struct {
@@ -112,6 +117,8 @@ type WorkspaceArchiveInspection struct {
 	Custody         WorkspaceCustodyState     `json:"custody"`
 	Manifest        *WorkspaceArchiveManifest `json:"manifest,omitempty"`
 	ActivationState WorkspaceActivationState  `json:"activation_state,omitempty"`
+	CurrentPayload  *WorkspacePathRef         `json:"current_payload,omitempty"`
+	RelocationID    string                    `json:"relocation_id,omitempty"`
 }
 
 type workspaceIntentMarker struct {
@@ -247,6 +254,9 @@ func (g *workspacePublicationGuard) verify() error {
 }
 
 func (s WorkspaceMoveService) PlanArchive(ctx context.Context, input WorkspaceArchivePlanInput) (WorkspaceArchivePlan, error) {
+	if s.NamedPlacement && input.Kind == WorkspaceKindProject {
+		return s.planNamedArchive(ctx, input)
+	}
 	if s.Catalog == nil {
 		return WorkspaceArchivePlan{}, fmt.Errorf("workspace archive catalog is not configured")
 	}
@@ -269,6 +279,7 @@ func (s WorkspaceMoveService) PlanArchive(ctx context.Context, input WorkspaceAr
 		return WorkspaceArchivePlan{}, err
 	}
 	plan := WorkspaceArchivePlan{
+		BoxID:                s.Roots.BoxID,
 		SchemaVersion:        WorkspaceArchivePlanSchemaVersion,
 		EvidenceKind:         PhysicalWorkspaceMoveEvidence,
 		OperationID:          input.OperationID,
@@ -700,20 +711,24 @@ func (s WorkspaceMoveService) inspectJournal(ctx context.Context, record storage
 			return WorkspaceArchiveInspection{}, err
 		}
 	}
-	return WorkspaceArchiveInspection{Operation: operation, Plan: plan, Custody: custody, Manifest: manifest}, nil
+	inspection := WorkspaceArchiveInspection{Operation: operation, Plan: plan, Custody: custody, Manifest: manifest}
+	if custody == CustodyArchived && s.CurrentLocation != nil {
+		return s.qualifyArchiveLocation(ctx, inspection)
+	}
+	return inspection, nil
 }
 
 func (s WorkspaceMoveService) verifyCanonicalManifestFile(ctx context.Context, plan WorkspaceArchivePlan, canonical WorkspaceArchiveManifest) error {
-	paths, err := ResolveWorkspacePaths(s.Roots, plan.Kind, plan.Slug)
+	paths, err := ResolveWorkspacePlanPaths(s.Roots, plan)
 	if err != nil {
 		return err
 	}
-	chain, err := openHeldDirectoryChain(s.Roots.StorageRoot, path.Dir(paths.Mapping.ArchiveContainerPath), plan.DestinationAncestors)
+	chain, err := openHeldDirectoryChain(s.Roots.StorageRoot, path.Dir(paths.Mapping.ArchiveContainerPath), archiveMetadataAncestors(plan))
 	if err != nil {
 		return err
 	}
 	defer chain.Close()
-	containerFD, err := unix.Openat(chain.ParentFD(), plan.Slug, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	containerFD, err := unix.Openat(chain.ParentFD(), path.Base(paths.Mapping.ArchiveContainerPath), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return err
 	}
@@ -729,6 +744,9 @@ func (s WorkspaceMoveService) verifyCanonicalManifestFile(ctx context.Context, p
 }
 
 func (s WorkspaceMoveService) validateExecutablePlan(plan WorkspaceArchivePlan) error {
+	if plan.Placement != nil {
+		return s.validatePlacementExecution(plan)
+	}
 	if plan.OperationKind != WorkspaceOperationArchive {
 		return fmt.Errorf("Slice 2 accepts archive plans only")
 	}
@@ -781,6 +799,9 @@ func (s WorkspaceMoveService) validateExecutablePlan(plan WorkspaceArchivePlan) 
 }
 
 func (s WorkspaceMoveService) compareLivePlanEvidence(ctx context.Context, plan WorkspaceArchivePlan, requireNoContainer bool) ([]WorkspaceArchiveFinding, error) {
+	if plan.Placement != nil {
+		return s.comparePlacementArchive(ctx, plan)
+	}
 	paths, err := ResolveWorkspacePaths(s.Roots, plan.Kind, plan.Slug)
 	if err != nil {
 		return nil, err
@@ -790,10 +811,10 @@ func (s WorkspaceMoveService) compareLivePlanEvidence(ctx context.Context, plan 
 		return nil, err
 	}
 	findings := EvaluatePlanEvidence(plan, source, destination)
-	if !reflect.DeepEqual(sourceAncestors, plan.SourceAncestors) {
+	if !sameStableAncestorEvidence(sourceAncestors, plan.SourceAncestors) {
 		findings = append(findings, newWorkspaceFinding(plan.OperationID, FindingSourceDrift, PhaseArchivePlanned, "source root or ancestor evidence changed after plan review", true))
 	}
-	if !reflect.DeepEqual(destinationAncestors, plan.DestinationAncestors) {
+	if !sameStableAncestorEvidence(destinationAncestors, plan.DestinationAncestors) {
 		findings = append(findings, newWorkspaceFinding(plan.OperationID, FindingDestinationSubstitution, PhaseArchivePlanned, "destination root or ancestor evidence changed after plan review", true))
 	}
 	if inventory.Digest != plan.Inventory.Digest || !reflect.DeepEqual(inventory, plan.Inventory) {
@@ -825,15 +846,15 @@ func (s WorkspaceMoveService) planCatalogRebinds(ctx context.Context, source, de
 	}
 	var result []WorkspaceCatalogRebind
 	for _, detail := range details {
-		original, originalChanged, err := rebaseCatalogPath(detail.Entry.OriginalSourcePath, source, destination)
+		original, _, err := rebaseCatalogPath(detail.Entry.OriginalSourcePath, source, destination)
 		if err != nil {
 			return nil, err
 		}
-		view, viewChanged, err := rebaseCatalogPath(detail.Entry.CurrentViewPath, source, destination)
+		view, _, err := rebaseCatalogPath(detail.Entry.CurrentViewPath, source, destination)
 		if err != nil {
 			return nil, err
 		}
-		if originalChanged || viewChanged {
+		if original != detail.Entry.OriginalSourcePath || view != detail.Entry.CurrentViewPath {
 			result = append(result, WorkspaceCatalogRebind{
 				StorageEntryID:          detail.Entry.StorageEntryID,
 				ExpectedOriginalPath:    detail.Entry.OriginalSourcePath,
@@ -847,7 +868,7 @@ func (s WorkspaceMoveService) planCatalogRebinds(ctx context.Context, source, de
 			if err != nil {
 				return nil, err
 			}
-			if changed {
+			if changed && uri != ref.URI {
 				result = append(result, WorkspaceCatalogRebind{
 					StorageEntryID:       detail.Entry.StorageEntryID,
 					StoragePhysicalRefID: ref.StoragePhysicalRefID,
@@ -993,6 +1014,9 @@ func openHeldDirectoryChain(rootPath, relative string, expected []WorkspaceAnces
 }
 
 func (s WorkspaceMoveService) movePayload(ctx context.Context, plan WorkspaceArchivePlan) error {
+	if plan.Placement != nil {
+		return s.moveNamedPayload(ctx, plan)
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -1087,6 +1111,9 @@ func (s WorkspaceMoveService) ensureIntentContainer(ctx context.Context, categor
 		return -1, err
 	}
 	containerName := plan.Slug
+	if plan.Placement != nil {
+		containerName = path.Base(plan.Placement.Metadata.Path.RelativePath)
+	}
 	if fd, err := unix.Openat(category.ParentFD(), containerName, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0); err == nil {
 		if verifyErr := s.verifyIntentMarker(ctx, fd, plan); verifyErr != nil {
 			_ = unix.Close(fd)
@@ -1158,6 +1185,18 @@ func (s WorkspaceMoveService) ensureIntentContainer(ctx context.Context, categor
 }
 
 func (s WorkspaceMoveService) inspectCustody(ctx context.Context, plan WorkspaceArchivePlan) (WorkspaceCustodyState, *WorkspaceArchiveManifest, *WorkspaceArchiveFinding, error) {
+	if s.CurrentLocation != nil && plan.Placement == nil {
+		current, _, err := s.CurrentLocation(ctx, "workspace:"+plan.OperationID, plan.Destination.Path.AbsolutePath)
+		if err != nil {
+			return CustodyAmbiguous, nil, nil, err
+		}
+		if current != plan.Destination.Path.AbsolutePath {
+			return s.inspectRelocatedArchive(ctx, plan, current)
+		}
+	}
+	if plan.Placement != nil {
+		return s.inspectPlacementArchive(ctx, plan)
+	}
 	paths, err := ResolveWorkspacePaths(s.Roots, plan.Kind, plan.Slug)
 	if err != nil {
 		return CustodyAmbiguous, nil, nil, err
@@ -1268,7 +1307,8 @@ func (s WorkspaceMoveService) inspectCustody(ctx context.Context, plan Workspace
 func (s WorkspaceMoveService) buildArchiveManifest(ctx context.Context, operation WorkspaceArchiveOperation, plan WorkspaceArchivePlan) (WorkspaceArchiveManifest, error) {
 	archivedAt := derefTime(operation.PayloadMovedAt, operation.UpdatedAt)
 	manifest := WorkspaceArchiveManifest{
-		SchemaVersion:         WorkspaceArchiveManifestSchemaVersion,
+		BoxID:                 plan.BoxID,
+		SchemaVersion:         WorkspaceArchiveManifestSchemaForPlan(plan),
 		EvidenceKind:          PhysicalWorkspaceMoveEvidence,
 		ArchiveOperationID:    plan.OperationID,
 		Kind:                  plan.Kind,
@@ -1545,15 +1585,15 @@ func (s WorkspaceMoveService) preflightAuthentication(ctx context.Context) error
 }
 
 func (s WorkspaceMoveService) acquirePublicationGuard(ctx context.Context, plan WorkspaceArchivePlan) (*workspacePublicationGuard, error) {
-	paths, err := ResolveWorkspacePaths(s.Roots, plan.Kind, plan.Slug)
+	paths, err := ResolveWorkspacePlanPaths(s.Roots, plan)
 	if err != nil {
 		return nil, err
 	}
-	chain, err := openHeldDirectoryChain(s.Roots.StorageRoot, path.Dir(paths.Mapping.ArchiveContainerPath), plan.DestinationAncestors)
+	chain, err := openHeldDirectoryChain(s.Roots.StorageRoot, path.Dir(paths.Mapping.ArchiveContainerPath), archiveMetadataAncestors(plan))
 	if err != nil {
 		return nil, err
 	}
-	containerFD, err := unix.Openat(chain.ParentFD(), plan.Slug, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	containerFD, err := unix.Openat(chain.ParentFD(), path.Base(paths.Mapping.ArchiveContainerPath), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		chain.Close()
 		return nil, err
@@ -1614,7 +1654,7 @@ func (s WorkspaceMoveService) acquirePublicationGuard(ctx context.Context, plan 
 	guard := &workspacePublicationGuard{
 		chain:             chain,
 		containerFD:       containerFD,
-		containerName:     plan.Slug,
+		containerName:     path.Base(paths.Mapping.ArchiveContainerPath),
 		containerIdentity: containerIdentity,
 		marker:            marker,
 	}
@@ -1682,7 +1722,7 @@ func journalIntentInput(plan WorkspaceArchivePlan, at time.Time) (storagecatalog
 	destinationParent, _ := json.Marshal(plan.Destination.ParentIdentity)
 	return storagecatalog.WorkspaceArchiveIntentInput{
 		OperationID:                   plan.OperationID,
-		SchemaVersion:                 WorkspaceArchiveOperationSchemaVersion,
+		SchemaVersion:                 workspaceOperationSchema(plan),
 		EvidenceKind:                  plan.EvidenceKind,
 		OperationKind:                 string(plan.OperationKind),
 		WorkspaceKind:                 string(plan.Kind),
@@ -1732,6 +1772,7 @@ func journalProjectionInput(plan WorkspaceArchivePlan, manifest WorkspaceArchive
 		}
 	}
 	return storagecatalog.WorkspaceArchiveProjectionInput{
+		Observations:              catalogObservationInput(plan),
 		OperationID:               plan.OperationID,
 		PlanDigest:                plan.PlanDigest,
 		SourceAbsolutePath:        plan.Source.Path.AbsolutePath,
@@ -1766,7 +1807,8 @@ func journalProjectionInput(plan WorkspaceArchivePlan, manifest WorkspaceArchive
 
 func eventForArchive(operation WorkspaceArchiveOperation, manifest WorkspaceArchiveManifest, at time.Time) WorkspaceLifecycleEvent {
 	return WorkspaceLifecycleEvent{
-		SchemaVersion:   WorkspaceLifecycleEventSchemaVersion,
+		BoxID:           operation.BoxID,
+		SchemaVersion:   workspaceEventSchema(operation),
 		EventID:         manifest.LifecycleEventID,
 		EventKind:       WorkspaceLifecycleEventKind,
 		OperationID:     operation.OperationID,
@@ -1802,7 +1844,9 @@ func operationFromJournal(record storagecatalog.WorkspaceArchiveJournalRecord, p
 		return WorkspaceArchiveOperation{}, fmt.Errorf("durable workspace archive journal contradicts its reviewed plan")
 	}
 	operation := WorkspaceArchiveOperation{
-		SchemaVersion:          WorkspaceArchiveOperationSchemaVersion,
+		BoxID:                  plan.BoxID,
+		SchemaVersion:          workspaceOperationSchema(plan),
+		Placement:              plan.Placement,
 		EvidenceKind:           PhysicalWorkspaceMoveEvidence,
 		OperationID:            plan.OperationID,
 		OperationKind:          plan.OperationKind,
@@ -1989,6 +2033,18 @@ func inspectNamedDirectory(parentFD int, name string, expected PathIdentity) (bo
 
 func sameStableDirectoryIdentity(left, right PathIdentity) bool {
 	return left.Presence == PathPresent && right.Presence == PathPresent && left.ObjectKind == string(InventoryEntryDirectory) && right.ObjectKind == string(InventoryEntryDirectory) && left.DeviceID == right.DeviceID && left.Inode == right.Inode && left.Mode == right.Mode
+}
+
+func sameStableAncestorEvidence(left, right []WorkspaceAncestorBinding) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i].RelativePath != right[i].RelativePath || !sameStableDirectoryIdentity(left[i].Identity, right[i].Identity) {
+			return false
+		}
+	}
+	return true
 }
 
 func sameStablePayloadIdentity(left, right PathIdentity) bool {

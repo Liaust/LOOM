@@ -68,6 +68,25 @@ func TestHumanExportPreservesCustomRootAgents(t *testing.T) {
 	}
 }
 
+func TestProjectExportPreservesSelfContainedGitAndRefusesExternalMetadata(t *testing.T) {
+	root := exportFixture(t, false)
+	writeExportFile(t, filepath.Join(root, "repos/source/.git/HEAD"), "ref: refs/heads/main\n")
+	writeExportFile(t, filepath.Join(root, "repos/source/.git/objects/ab/object"), "owned Git object")
+	plan, err := PlanProject(context.Background(), root, PlanOptions{Mode: ModePortable})
+	if err != nil || !contains(entryNames(plan.Entries), "repos/source/.git/objects/ab/object") {
+		t.Fatalf("self-contained Git was not preserved: %v", err)
+	}
+	for _, entry := range []string{"repos/linked/.git", "repos/source/.git/commondir", "repos/source/.git/objects/info/alternates"} {
+		t.Run(entry, func(t *testing.T) {
+			root := exportFixture(t, false)
+			writeExportFile(t, filepath.Join(root, entry), "../external\n")
+			if _, err := PlanProject(context.Background(), root, PlanOptions{Mode: ModePortable}); err == nil || !strings.Contains(err.Error(), "external Git metadata") {
+				t.Fatalf("external Git accepted: %v", err)
+			}
+		})
+	}
+}
+
 func TestProjectExportIsDeterministic(t *testing.T) {
 	root := exportFixture(t, false)
 	plan, err := PlanProject(context.Background(), root, PlanOptions{Mode: ModePortable})

@@ -396,7 +396,7 @@ func policyTestSeedDescriptor(instance WorkerInstance, tickPolicy json.RawMessag
 	}
 }
 
-func workerPolicyPostgresFixture(t *testing.T) (*sql.DB, requestctx.Context, WorkerInstance, *Registry) {
+func workerPolicyPostgresFixture(t *testing.T, overrideKind ...string) (*sql.DB, requestctx.Context, WorkerInstance, *Registry) {
 	t.Helper()
 	dbURL := os.Getenv("LOOM_TEST_DB_URL")
 	if dbURL == "" {
@@ -417,6 +417,9 @@ func workerPolicyPostgresFixture(t *testing.T) (*sql.DB, requestctx.Context, Wor
 	}
 	suffix := strconv.FormatInt(time.Now().UTC().UnixNano(), 36)
 	kind := "policy_test_" + suffix
+	if len(overrideKind) > 0 {
+		kind = overrideKind[0]
+	}
 	workerKey := "main." + kind
 	instanceID := ids.NewWorkerInstanceID()
 	runtime := newTestRuntime(kind)

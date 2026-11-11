@@ -62,7 +62,7 @@ func (s *Service) conversionAssessment(ctx context.Context, p Principal, req pc.
 	if err != nil {
 		return empty, err
 	}
-	target, err := migrationLocation(first, cfg)
+	target, err := migrationLocationContext(ctx, first, cfg)
 	if err != nil {
 		return empty, err
 	}
@@ -74,7 +74,11 @@ func (s *Service) conversionAssessment(ctx context.Context, p Principal, req pc.
 		return empty, fail(pc.DeclarationTargetUnavailable, "project_source_unavailable")
 	}
 	defer source.Close()
-	external := migrationCaptureExternal(first, cfg.BoxPath, target.ProjectRoot)
+	binding, _, err := selectedProjectBox(ctx, cfg, target.ProjectRoot)
+	if err != nil {
+		return empty, err
+	}
+	external := migrationCaptureExternal(first, binding.RootPath, target.ProjectRoot)
 	defer external.Close()
 	result, input := buildMigrationAssessment(first, source, target, external)
 	if between != nil {
@@ -89,7 +93,7 @@ func (s *Service) conversionAssessment(ctx context.Context, p Principal, req pc.
 	if err != nil {
 		return empty, err
 	}
-	now, err := migrationLocation(current, currentConfig)
+	now, err := migrationLocationContext(ctx, current, currentConfig)
 	if err != nil {
 		return empty, err
 	}
@@ -182,24 +186,23 @@ func (r *LocalResolver) migrationRead(ctx context.Context, p Principal, req pc.D
 }
 
 func migrationLocation(o migrationObservation, cfg config.Config) (pc.DeclarationTarget, error) {
+	return migrationLocationContext(context.Background(), o, cfg)
+}
+
+func migrationLocationContext(ctx context.Context, o migrationObservation, cfg config.Config) (pc.DeclarationTarget, error) {
 	var target pc.DeclarationTarget
 	registered := o.Project.Registration.ProjectRoot
 	if cfg.BoxPath == "" || !filepath.IsAbs(registered) || registered != filepath.Clean(registered) {
 		return target, fail(pc.DeclarationTargetUnavailable, "registered_project_location_required")
 	}
-	trusted, e := filepath.EvalSymlinks(cfg.BoxPath)
+	binding, physical, e := selectedProjectBox(ctx, cfg, registered)
 	if e != nil {
-		return target, fail(pc.DeclarationTargetUnavailable, "configured_box_unavailable")
+		return target, e
 	}
-	physical, e := filepath.EvalSymlinks(registered)
-	if e != nil {
-		return target, fail(pc.DeclarationTargetUnavailable, "project_source_unavailable")
+	if e = validateProjectHomeBox(o.Project.Project.Metadata, binding); e != nil {
+		return target, e
 	}
-	rel, e := filepath.Rel(trusted, physical)
-	if e != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return target, fail(pc.DeclarationUnauthorized, "source_outside_configured_box")
-	}
-	raw, _ := canonicalValue(map[string]string{"node_id": o.NodeID, "box": trusted, "project_root": registered, "physical_root": physical})
+	raw, _ := canonicalValue(map[string]string{"node_id": o.NodeID, "box": binding.RootPath, "box_id": binding.ID, "root_ref": binding.RootRef, "project_root": registered, "physical_root": physical})
 	return pc.DeclarationTarget{ProjectID: o.Project.Project.ProjectID, OwnerNodeID: o.NodeID, ProjectRoot: physical, LocationRevision: hashBytes(raw)}, nil
 }
 
@@ -307,7 +310,7 @@ func buildMigrationAssessment(o migrationObservation, sources *pc.DeclarationMig
 		}
 		for _, m := range o.Project.Members {
 			location := m.Path
-			if r.ProjectContractSchemaVersion != pc.ProjectSchemaV05 {
+			if !pc.IsDeclarationSchemaVersion(r.ProjectContractSchemaVersion) {
 				location = "repos/" + m.Path
 			}
 			in.Membership.Members = append(in.Membership.Members, pc.MigrationMember{ID: m.RepositoryID, Key: m.Key, Path: location, Role: string(m.Role), StateRoot: m.StateRoot, OwnerProjectID: m.RepositoryOwnerProjectID, Lifecycle: string(m.MembershipLifecycle), Revision: migrationValueDigest(m), Source: source.MigrationSourceClaim})
@@ -453,7 +456,8 @@ func migrationBoxConfigBound(b box.WatchRootRegistration, reported watchedroots.
 		return false
 	}
 
-	if b.SafeRootKey != "box" || !filepath.IsAbs(b.BoxRootPath) || b.RootRelativePath == "" || filepath.IsAbs(b.RootRelativePath) || (filepath.ToSlash(filepath.Clean(b.RootRelativePath)) != b.RootRelativePath || b.RootRelativePath == ".." || strings.HasPrefix(b.RootRelativePath, "../")) {
+	boxSafeKey := b.SafeRootKey == "box" || b.SafeRootKey == "loom_box" || b.BoxID != "" && b.SafeRootKey == box.WatchSafeRootKey(b.BoxID, "box:"+b.BoxID)
+	if !boxSafeKey || !filepath.IsAbs(b.BoxRootPath) || b.RootRelativePath == "" || filepath.IsAbs(b.RootRelativePath) || (filepath.ToSlash(filepath.Clean(b.RootRelativePath)) != b.RootRelativePath || b.RootRelativePath == ".." || strings.HasPrefix(b.RootRelativePath, "../")) {
 		return false
 	}
 	if b.DesiredRevision != b.AppliedRevision || b.DesiredConfigHash != b.AppliedConfigHash || b.ActivationStatus == "pending_agent_apply" {

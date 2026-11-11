@@ -27,6 +27,28 @@ type StorageCatalog interface {
 	RegisterLaneCustody(context.Context, storagecatalog.LaneCustodyInput) (storagecatalog.EntryDetail, error)
 }
 
+// LaneCustodyMemberResolver optionally resolves committed members by their
+// original identity, including directories and symlinks. An empty path retains
+// the original batch-relative location. Nonempty paths must be clean, absolute,
+// no-follow paths backed by committed location evidence; errors fail closed.
+// Resolution is not consulted for staging or a newly promoted batch.
+type LaneCustodyMemberResolver interface {
+	ResolveLaneCustodyMember(ctx context.Context, sourceNodeKey, batchID, relativeLanePath string) (string, error)
+}
+
+// LaneCustodyResolutionPreparer scopes immutable batch discovery to one pass.
+// It must preserve cancellation and leave current member locations live.
+type LaneCustodyResolutionPreparer interface {
+	PrepareLaneCustodyResolution(ctx context.Context, sourceNodeKey, batchID string) (context.Context, error)
+}
+
+// LaneCustodyDirectoryMutationVerifier optionally qualifies an exact directory
+// mtime change using completed relocation evidence. It is consulted on the
+// member resolver only when every other committed directory field matches.
+type LaneCustodyDirectoryMutationVerifier interface {
+	VerifyLaneCustodyDirectoryMutation(ctx context.Context, sourceNodeKey, batchID, relativePath string, originalModifiedAt, observedModifiedAt time.Time) error
+}
+
 type filesystemObservationCatalog interface {
 	RegisterFilesystemObservation(context.Context, storagecatalog.RegisterFilesystemObservationInput) (storagecatalog.FilesystemObservation, error)
 }
@@ -67,6 +89,13 @@ type laneCustodyEntry struct {
 	LinkTarget   string    `json:"link_target,omitempty"`
 }
 
+// CommittedCustodyManifest is the original v1 manifest, never rewritten with
+// resolved paths or qualified directory timestamps.
+type CommittedCustodyManifest = laneCustodyManifest
+
+// CommittedCustodyEntry is an original batch-relative v1 inventory member.
+type CommittedCustodyEntry = laneCustodyEntry
+
 type lanePromotion struct {
 	path                    string
 	method                  string
@@ -76,6 +105,8 @@ type lanePromotion struct {
 	stagingPath             string
 	stagingRetained         bool
 	manifest                laneCustodyManifest
+	memberPaths             map[string]string
+	directoryModifiedAt     map[string]time.Time
 }
 
 func Accept(ctx context.Context, catalog StorageCatalog, input AcceptInput) (AcceptResult, error) {
@@ -88,7 +119,8 @@ func Accept(ctx context.Context, catalog StorageCatalog, input AcceptInput) (Acc
 	if err != nil {
 		return AcceptResult{}, err
 	}
-	promotion, err := promoteLaneCustody(ctx, normalized)
+	resolver, _ := catalog.(LaneCustodyMemberResolver)
+	promotion, err := promoteLaneCustody(ctx, normalized, resolver)
 	if err != nil {
 		return AcceptResult{}, &AcceptPhaseError{Phase: "promotion", Err: err}
 	}
@@ -117,7 +149,14 @@ func Accept(ctx context.Context, catalog StorageCatalog, input AcceptInput) (Acc
 	}
 	defer custodyRoot.Close()
 	walkStarted := time.Now()
-	err = forEachAcceptedEntry(promotion.path, normalized.SkipAppleDouble, func(file acceptedFile) error {
+	var committedEntries map[string]laneCustodyEntry
+	if promotion.memberPaths != nil {
+		committedEntries = make(map[string]laneCustodyEntry, len(promotion.manifest.Entries))
+		for _, entry := range promotion.manifest.Entries {
+			committedEntries[entry.RelativePath] = entry
+		}
+	}
+	visit := func(file acceptedFile) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -130,7 +169,19 @@ func Accept(ctx context.Context, catalog StorageCatalog, input AcceptInput) (Acc
 			return nil
 		}
 		stageStarted := time.Now()
-		checksum, size, err := fileSHA256Root(custodyRoot, filepath.FromSlash(file.relativePath))
+		var checksum string
+		var size int64
+		var err error
+		if promotion.memberPaths != nil {
+			var member laneCustodyEntry
+			member, err = inspectLaneCustodyMember(ctx, file.absolutePath, file.relativePath, nil)
+			checksum, size = member.SHA256, member.SizeBytes
+			if err == nil && member != committedEntries[file.relativePath] {
+				err = fmt.Errorf("Lane custody member %q changed before catalog registration", file.relativePath)
+			}
+		} else {
+			checksum, size, err = fileSHA256Root(custodyRoot, filepath.FromSlash(file.relativePath))
+		}
 		metrics.AcceptedHashDurationMS += durationMSSince(stageStarted)
 		metrics.AcceptedHashOperations++
 		if err != nil {
@@ -164,7 +215,12 @@ func Accept(ctx context.Context, catalog StorageCatalog, input AcceptInput) (Acc
 			result.StorageEntryIDsTruncated = true
 		}
 		return nil
-	})
+	}
+	if promotion.memberPaths != nil {
+		err = forEachResolvedAcceptedEntry(promotion.manifest, promotion.memberPaths, promotion.directoryModifiedAt, normalized.SkipAppleDouble, visit)
+	} else {
+		err = forEachAcceptedEntry(promotion.path, normalized.SkipAppleDouble, visit)
+	}
 	walkDuration := durationMSSince(walkStarted)
 	metrics.AcceptedScanDurationMS = walkDuration - metrics.AcceptedHashDurationMS - metrics.AcceptedRegisterDurationMS
 	if metrics.AcceptedScanDurationMS < 0 {
@@ -294,7 +350,7 @@ func normalizeAcceptInput(input AcceptInput) (AcceptInput, error) {
 	return input, nil
 }
 
-func promoteLaneCustody(ctx context.Context, input AcceptInput) (lanePromotion, error) {
+func promoteLaneCustody(ctx context.Context, input AcceptInput, resolver LaneCustodyMemberResolver) (lanePromotion, error) {
 	target := filepath.Join(input.ImportsRoot, input.SourceNodeKey, input.AcceptedDate, input.BatchID)
 	anchor := string(filepath.Separator)
 	if volume := filepath.VolumeName(input.ImportsRoot); volume != "" {
@@ -313,11 +369,11 @@ func promoteLaneCustody(ctx context.Context, input AcceptInput) (lanePromotion, 
 		if !targetInfo.IsDir() || targetInfo.Mode()&os.ModeSymlink != 0 {
 			return lanePromotion{}, fmt.Errorf("canonical imports destination exists and is not a no-follow directory: %s", target)
 		}
-		committed, err := readAndVerifyLaneCustodyManifest(ctx, target, input)
+		committed, memberPaths, directoryModifiedAt, err := readAndVerifyResolvedLaneCustodyManifest(ctx, target, input, resolver)
 		if err != nil {
 			return lanePromotion{}, fmt.Errorf("canonical imports destination conflicts with committed batch: %w", err)
 		}
-		promotion := lanePromotion{path: target, method: "existing_committed", idempotent: true, manifest: committed}
+		promotion := lanePromotion{path: target, method: "existing_committed", idempotent: true, manifest: committed, memberPaths: memberPaths, directoryModifiedAt: directoryModifiedAt}
 		promotion.destinationFilesystemID, err = acceptFilesystemID(input, input.ImportsRoot)
 		if err != nil {
 			return lanePromotion{}, err
@@ -711,8 +767,12 @@ func readLaneCustodyManifest(pathValue string) (laneCustodyManifest, error) {
 		return laneCustodyManifest{}, fmt.Errorf("open Lane custody manifest")
 	}
 	defer file.Close()
+	return decodeLaneCustodyManifest(file)
+}
+
+func decodeLaneCustodyManifest(file *os.File) (laneCustodyManifest, error) {
 	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
 		return laneCustodyManifest{}, err
 	}
 	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Nlink != 1 {
@@ -739,21 +799,288 @@ func readLaneCustodyManifest(pathValue string) (laneCustodyManifest, error) {
 }
 
 func readAndVerifyLaneCustodyManifest(ctx context.Context, root string, input AcceptInput) (laneCustodyManifest, error) {
-	manifest, err := readLaneCustodyManifest(filepath.Join(root, laneCustodyManifestName))
+	manifest, _, _, err := readAndVerifyResolvedLaneCustodyManifest(ctx, root, input, nil)
+	return manifest, err
+}
+
+// VerifyCommittedCustody validates the manifest identity, inventory hash and
+// retained members without changing evidence. A resolver may also implement
+// LaneCustodyDirectoryMutationVerifier. The returned manifest remains original;
+// the path map covers every original member when a resolver is provided, and
+// is nil for strict legacy verification without one. Callers own custody leases.
+func VerifyCommittedCustody(ctx context.Context, root, sourceNode, batch, date string, resolver LaneCustodyMemberResolver) (CommittedCustodyManifest, map[string]string, error) {
+	manifest, memberPaths, _, err := readAndVerifyResolvedLaneCustodyManifest(ctx, root, AcceptInput{
+		SourceNodeKey: sourceNode, BatchID: batch, AcceptedDate: date,
+	}, resolver)
+	return manifest, memberPaths, err
+}
+
+func readAndVerifyResolvedLaneCustodyManifest(ctx context.Context, root string, input AcceptInput, resolver LaneCustodyMemberResolver) (laneCustodyManifest, map[string]string, map[string]time.Time, error) {
+	var manifest laneCustodyManifest
+	var err error
+	if resolver == nil {
+		manifest, err = readLaneCustodyManifest(filepath.Join(root, laneCustodyManifestName))
+	} else {
+		manifest, err = readResolvedLaneCustodyManifest(root)
+	}
 	if err != nil {
-		return laneCustodyManifest{}, err
+		return laneCustodyManifest{}, nil, nil, err
 	}
 	if manifest.SourceNodeKey != input.SourceNodeKey || manifest.BatchID != input.BatchID || manifest.AcceptedDate != input.AcceptedDate {
-		return laneCustodyManifest{}, fmt.Errorf("Lane custody manifest identity mismatch")
+		return laneCustodyManifest{}, nil, nil, fmt.Errorf("Lane custody manifest identity mismatch")
 	}
-	observed, err := buildLaneCustodyManifest(ctx, root, input)
+	var observed laneCustodyManifest
+	var memberPaths map[string]string
+	var directoryModifiedAt map[string]time.Time
+	if resolver == nil {
+		observed, err = buildLaneCustodyManifest(ctx, root, input)
+	} else {
+		observed, memberPaths, directoryModifiedAt, err = verifyResolvedLaneCustodyMembers(ctx, root, manifest, resolver)
+	}
+	if err != nil {
+		return laneCustodyManifest{}, nil, nil, err
+	}
+	if observed.InventoryHash != manifest.InventoryHash || observed.FileCount != manifest.FileCount || observed.DirectoryCount != manifest.DirectoryCount || observed.SymlinkCount != manifest.SymlinkCount || observed.TotalBytes != manifest.TotalBytes {
+		return laneCustodyManifest{}, nil, nil, fmt.Errorf("Lane custody tree no longer matches committed manifest")
+	}
+	return manifest, memberPaths, directoryModifiedAt, nil
+}
+
+func readResolvedLaneCustodyManifest(root string) (laneCustodyManifest, error) {
+	batch, err := openLaneCustodyDirectoryNoFollow(root)
 	if err != nil {
 		return laneCustodyManifest{}, err
 	}
-	if observed.InventoryHash != manifest.InventoryHash || observed.FileCount != manifest.FileCount || observed.DirectoryCount != manifest.DirectoryCount || observed.SymlinkCount != manifest.SymlinkCount || observed.TotalBytes != manifest.TotalBytes {
-		return laneCustodyManifest{}, fmt.Errorf("Lane custody tree no longer matches committed manifest")
+	defer batch.Close()
+	fd, err := unix.Openat(int(batch.Fd()), laneCustodyManifestName, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return laneCustodyManifest{}, err
 	}
-	return manifest, nil
+	file := os.NewFile(uintptr(fd), filepath.Join(root, laneCustodyManifestName))
+	defer file.Close()
+	return decodeLaneCustodyManifest(file)
+}
+
+func verifyResolvedLaneCustodyMembers(ctx context.Context, root string, manifest laneCustodyManifest, resolver LaneCustodyMemberResolver) (laneCustodyManifest, map[string]string, map[string]time.Time, error) {
+	if preparer, ok := resolver.(LaneCustodyResolutionPreparer); ok {
+		prepared, err := preparer.PrepareLaneCustodyResolution(ctx, manifest.SourceNodeKey, manifest.BatchID)
+		if err != nil {
+			return laneCustodyManifest{}, nil, nil, fmt.Errorf("prepare committed Lane resolution: %w", err)
+		}
+		if prepared == nil {
+			return laneCustodyManifest{}, nil, nil, fmt.Errorf("prepared Lane resolution context is unavailable")
+		}
+		ctx = prepared
+	}
+	memberPaths := make(map[string]string, len(manifest.Entries))
+	actualPaths := make(map[string]bool, len(manifest.Entries))
+	var directoryModifiedAt map[string]time.Time
+	verifier, _ := resolver.(LaneCustodyDirectoryMutationVerifier)
+	for _, entry := range manifest.Entries {
+		if err := ctx.Err(); err != nil {
+			return laneCustodyManifest{}, nil, nil, err
+		}
+		if err := validateBundleRelativePath(entry.RelativePath); err != nil {
+			return laneCustodyManifest{}, nil, nil, err
+		}
+		if entry.RelativePath == laneCustodyManifestName || memberPaths[entry.RelativePath] != "" {
+			return laneCustodyManifest{}, nil, nil, fmt.Errorf("reserved or duplicate Lane custody member %q", entry.RelativePath)
+		}
+		actual, err := resolver.ResolveLaneCustodyMember(ctx, manifest.SourceNodeKey, manifest.BatchID, entry.RelativePath)
+		if err != nil {
+			return laneCustodyManifest{}, nil, nil, fmt.Errorf("resolve committed Lane custody member %q: %w", entry.RelativePath, err)
+		}
+		if actual == "" {
+			actual = filepath.Join(root, filepath.FromSlash(entry.RelativePath))
+		}
+		if !filepath.IsAbs(actual) || filepath.Clean(actual) != actual || actual == string(filepath.Separator) || strings.ContainsRune(actual, '\x00') {
+			return laneCustodyManifest{}, nil, nil, fmt.Errorf("unsafe resolved Lane custody member path %q", actual)
+		}
+		if actual == root || actual == filepath.Join(root, laneCustodyManifestName) || actualPaths[actual] {
+			return laneCustodyManifest{}, nil, nil, fmt.Errorf("reserved or duplicate resolved Lane custody member path %q", actual)
+		}
+		memberPaths[entry.RelativePath] = actual
+		actualPaths[actual] = true
+	}
+
+	// The old batch remains the immutable evidence container, not a substitute
+	// inventory for members which now live at separate retained locations.
+	batch, err := openLaneCustodyDirectoryNoFollow(root)
+	if err != nil {
+		return laneCustodyManifest{}, nil, nil, err
+	}
+	err = checkLaneCustodyDirectoryMembers(batch, root, actualPaths, true)
+	_ = batch.Close()
+	if err != nil {
+		return laneCustodyManifest{}, nil, nil, err
+	}
+	observed := laneCustodyManifest{}
+	for _, entry := range manifest.Entries {
+		item, err := inspectLaneCustodyMember(ctx, memberPaths[entry.RelativePath], entry.RelativePath, actualPaths)
+		if err != nil {
+			return laneCustodyManifest{}, nil, nil, fmt.Errorf("verify committed Lane custody member %q: %w", entry.RelativePath, err)
+		}
+		if entry.Kind == filesystemmeta.ObjectKindDirectory && item.Kind == entry.Kind && !item.ModifiedAt.Equal(entry.ModifiedAt) {
+			normalized := item
+			normalized.ModifiedAt = entry.ModifiedAt
+			if normalized != entry {
+				return laneCustodyManifest{}, nil, nil, fmt.Errorf("Lane custody directory %q no longer matches committed manifest", entry.RelativePath)
+			}
+			if verifier == nil {
+				return laneCustodyManifest{}, nil, nil, fmt.Errorf("Lane custody directory %q requires exact mutation verification", entry.RelativePath)
+			}
+			if err := verifier.VerifyLaneCustodyDirectoryMutation(ctx, manifest.SourceNodeKey, manifest.BatchID, entry.RelativePath, entry.ModifiedAt, item.ModifiedAt); err != nil {
+				return laneCustodyManifest{}, nil, nil, fmt.Errorf("verify Lane custody directory mutation %q: %w", entry.RelativePath, err)
+			}
+			if directoryModifiedAt == nil {
+				directoryModifiedAt = make(map[string]time.Time)
+			}
+			directoryModifiedAt[entry.RelativePath] = item.ModifiedAt
+			item = normalized
+		}
+		if item != entry {
+			return laneCustodyManifest{}, nil, nil, fmt.Errorf("Lane custody tree no longer matches committed manifest: member %q has changed metadata or content", entry.RelativePath)
+		}
+		switch item.Kind {
+		case filesystemmeta.ObjectKindDirectory:
+			observed.DirectoryCount++
+		case filesystemmeta.ObjectKindRegularFile:
+			observed.FileCount++
+			if item.SizeBytes > math.MaxInt64-observed.TotalBytes {
+				return laneCustodyManifest{}, nil, nil, fmt.Errorf("Lane custody byte total overflows int64")
+			}
+			observed.TotalBytes += item.SizeBytes
+		case filesystemmeta.ObjectKindSymlink:
+			observed.SymlinkCount++
+		}
+		observed.Entries = append(observed.Entries, item)
+	}
+	observed.InventoryHash, err = hashLaneCustodyEntries(observed.Entries)
+	return observed, memberPaths, directoryModifiedAt, err
+}
+
+func openLaneCustodyDirectoryNoFollow(pathValue string) (*os.File, error) {
+	if !filepath.IsAbs(pathValue) || filepath.Clean(pathValue) != pathValue {
+		return nil, fmt.Errorf("Lane custody directory must be a clean absolute path")
+	}
+	fd, err := unix.Open(string(filepath.Separator), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	for _, component := range strings.Split(strings.TrimPrefix(pathValue, string(filepath.Separator)), string(filepath.Separator)) {
+		if component == "" {
+			continue
+		}
+		next, err := unix.Openat(fd, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		_ = unix.Close(fd)
+		if err != nil {
+			return nil, fmt.Errorf("open Lane custody directory without following links %q: %w", pathValue, err)
+		}
+		fd = next
+	}
+	return os.NewFile(uintptr(fd), pathValue), nil
+}
+
+func checkLaneCustodyDirectoryMembers(directory *os.File, pathValue string, actualPaths map[string]bool, allowManifest bool) error {
+	children, err := directory.ReadDir(-1)
+	if err != nil {
+		return err
+	}
+	for _, child := range children {
+		if allowManifest && child.Name() == laneCustodyManifestName {
+			continue
+		}
+		if !actualPaths[filepath.Join(pathValue, child.Name())] {
+			return fmt.Errorf("Lane custody tree no longer matches committed manifest: unexpected remaining member %q", filepath.Join(pathValue, child.Name()))
+		}
+	}
+	return nil
+}
+
+func inspectLaneCustodyMember(ctx context.Context, actual, relative string, actualPaths map[string]bool) (laneCustodyEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return laneCustodyEntry{}, err
+	}
+	parent, err := openLaneCustodyDirectoryNoFollow(filepath.Dir(actual))
+	if err != nil {
+		return laneCustodyEntry{}, err
+	}
+	defer parent.Close()
+	parentFD, name := int(parent.Fd()), filepath.Base(actual)
+	var before unix.Stat_t
+	if err := unix.Fstatat(parentFD, name, &before, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return laneCustodyEntry{}, err
+	}
+	item := laneCustodyEntry{RelativePath: relative, Mode: uint32(before.Mode & 0o777), ModifiedAt: time.Unix(before.Mtim.Sec, before.Mtim.Nsec).UTC()}
+	if before.Mode&unix.S_IFMT == unix.S_IFLNK {
+		item.Kind = filesystemmeta.ObjectKindSymlink
+		buffer := make([]byte, max(256, int(before.Size)+1))
+		n, err := unix.Readlinkat(parentFD, name, buffer)
+		if err != nil {
+			return laneCustodyEntry{}, err
+		}
+		if n == len(buffer) {
+			return laneCustodyEntry{}, fmt.Errorf("Lane custody symlink changed while reading")
+		}
+		item.LinkTarget = string(buffer[:n])
+	} else {
+		flags := unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_CLOEXEC | unix.O_NONBLOCK
+		switch before.Mode & unix.S_IFMT {
+		case unix.S_IFDIR:
+			item.Kind = filesystemmeta.ObjectKindDirectory
+			flags |= unix.O_DIRECTORY
+		case unix.S_IFREG:
+			item.Kind = filesystemmeta.ObjectKindRegularFile
+		default:
+			return laneCustodyEntry{}, fmt.Errorf("unsupported Lane custody member type")
+		}
+		fd, err := unix.Openat(parentFD, name, flags, 0)
+		if err != nil {
+			return laneCustodyEntry{}, err
+		}
+		file := os.NewFile(uintptr(fd), actual)
+		defer file.Close()
+		var opened unix.Stat_t
+		if err := unix.Fstat(fd, &opened); err != nil {
+			return laneCustodyEntry{}, err
+		}
+		if !sameLaneCustodyMemberStat(before, opened) {
+			return laneCustodyEntry{}, fmt.Errorf("Lane custody member changed while opening")
+		}
+		if item.Kind == filesystemmeta.ObjectKindDirectory {
+			if actualPaths != nil {
+				if err := checkLaneCustodyDirectoryMembers(file, actual, actualPaths, false); err != nil {
+					return laneCustodyEntry{}, err
+				}
+			}
+		} else {
+			digest := sha256.New()
+			item.SizeBytes, err = io.Copy(digest, file)
+			if err != nil {
+				return laneCustodyEntry{}, err
+			}
+			item.SHA256 = hex.EncodeToString(digest.Sum(nil))
+		}
+		var after unix.Stat_t
+		if err := unix.Fstat(fd, &after); err != nil {
+			return laneCustodyEntry{}, err
+		}
+		if !sameLaneCustodyMemberStat(before, after) {
+			return laneCustodyEntry{}, fmt.Errorf("Lane custody member changed while reading")
+		}
+	}
+	var named unix.Stat_t
+	if err := unix.Fstatat(parentFD, name, &named, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return laneCustodyEntry{}, err
+	}
+	if !sameLaneCustodyMemberStat(before, named) {
+		return laneCustodyEntry{}, fmt.Errorf("Lane custody member changed after reading")
+	}
+	return item, nil
+}
+
+func sameLaneCustodyMemberStat(left, right unix.Stat_t) bool {
+	return left.Dev == right.Dev && left.Ino == right.Ino && left.Mode == right.Mode && left.Size == right.Size && left.Mtim == right.Mtim
 }
 
 func copyVerifyRenameLaneCustody(ctx context.Context, input AcceptInput, manifest laneCustodyManifest, target string) error {
@@ -1016,6 +1343,62 @@ type acceptedFile struct {
 	absolutePath string
 	relativePath string
 	observation  filesystemmeta.Observation
+}
+
+func forEachResolvedAcceptedEntry(manifest laneCustodyManifest, memberPaths map[string]string, directoryModifiedAt map[string]time.Time, skipAppleDouble bool, visit func(acceptedFile) error) error {
+	entries := append([]laneCustodyEntry(nil), manifest.Entries...)
+	sort.Slice(entries, func(i, j int) bool { return entries[i].RelativePath < entries[j].RelativePath })
+	skippedDirectories := make(map[string]bool)
+	for _, entry := range entries {
+		skip := false
+		for parent := filepath.Dir(entry.RelativePath); parent != "."; parent = filepath.Dir(parent) {
+			if skippedDirectories[parent] {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+		if ignoredAcceptedEntry(entry.RelativePath, filepath.Base(entry.RelativePath), skipAppleDouble) {
+			if entry.Kind == filesystemmeta.ObjectKindDirectory {
+				skippedDirectories[entry.RelativePath] = true
+			}
+			continue
+		}
+		if _, err := storagecatalog.NormalizeLogicalPath(entry.RelativePath); err != nil {
+			return fmt.Errorf("accepted path %q is unsafe: %w", entry.RelativePath, err)
+		}
+		actual := memberPaths[entry.RelativePath]
+		observation, err := filesystemmeta.DetectPath(actual, filesystemmeta.DetectOptions{
+			RootPath: filepath.Dir(actual), IncludeXattrNames: true,
+		})
+		if err != nil {
+			return err
+		}
+		expectedKind := entry.Kind
+		if entry.Kind == filesystemmeta.ObjectKindDirectory && observation.IsPackage {
+			expectedKind = filesystemmeta.ObjectKindPackage
+		}
+		expectedModifiedAt := entry.ModifiedAt
+		if qualified, ok := directoryModifiedAt[entry.RelativePath]; ok && entry.Kind == filesystemmeta.ObjectKindDirectory {
+			expectedModifiedAt = qualified
+		}
+		if observation.Kind != expectedKind || observation.SourceMode != entry.Mode || observation.SourceModifiedAt == nil || !observation.SourceModifiedAt.Equal(expectedModifiedAt) ||
+			entry.Kind == filesystemmeta.ObjectKindSymlink && observation.SymlinkTarget != entry.LinkTarget ||
+			entry.Kind == filesystemmeta.ObjectKindRegularFile && observation.LogicalSizeBytes != entry.SizeBytes {
+			return fmt.Errorf("Lane custody member %q changed before catalog observation", entry.RelativePath)
+		}
+		observation.Hidden = filesystemmeta.IsHiddenPath(filepath.FromSlash(entry.RelativePath), "")
+		observation = sanitizeAcceptedLaneObservation(observation)
+		if err := visit(acceptedFile{absolutePath: actual, relativePath: entry.RelativePath, observation: observation}); err != nil {
+			return err
+		}
+		if entry.Kind == filesystemmeta.ObjectKindDirectory && observation.IsPackage {
+			skippedDirectories[entry.RelativePath] = true
+		}
+	}
+	return nil
 }
 
 func forEachAcceptedEntry(root string, skipAppleDouble bool, visit func(acceptedFile) error) error {

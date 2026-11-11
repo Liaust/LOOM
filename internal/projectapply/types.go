@@ -131,10 +131,11 @@ func (e *Failure) Error() string { return string(e.Code) + ": " + e.Cause }
 // Service uses an operation journal, not jobs.jobs. Its job_ IDs are opaque D0
 // operation references from ids.NewJobID, never runnable script/workflow jobs.
 type Service struct {
-	db       *sql.DB
-	resolver Resolver
-	auth     Authorizer
-	owners   map[pc.DeclarationOwner]Owner
+	ApplicationBuilds *ApplicationBuildCoordinator
+	db                *sql.DB
+	resolver          Resolver
+	auth              Authorizer
+	owners            map[pc.DeclarationOwner]Owner
 }
 
 func NewService(db *sql.DB, resolver Resolver, auth Authorizer, owners map[pc.DeclarationOwner]Owner) *Service {

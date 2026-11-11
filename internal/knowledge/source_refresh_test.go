@@ -58,6 +58,26 @@ func TestSourceRefreshWaitOnceAndLegacyTiming(t *testing.T) {
 	}
 }
 
+func TestEnrichmentPreviewReportsActualQuietEligibility(t *testing.T) {
+	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	object := KnowledgeObject{FileClass: storagecatalog.FileClassPDF, SourceHash: "first", Metadata: json.RawMessage(`{"source_root":{"knowledge_source":{"policy":{"refresh":{"quiet_for_seconds":60,"max_wait_seconds":180}}}}}`)}
+	object = observeSourceRefresh(nil, object, now)
+	plan, err := CompilePipelinePlan(object, DefaultPipelinePolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := EnrichmentPreviewEntry{}
+	setEnrichmentPreviewWait(&entry, object, plan, now.Add(time.Second))
+	if entry.NextEligibleAt == nil || !entry.NextEligibleAt.Equal(now.Add(time.Minute)) || entry.WaitReason != "source_quiet_window" {
+		t.Fatalf("wait=%+v", entry)
+	}
+	entry = EnrichmentPreviewEntry{}
+	setEnrichmentPreviewWait(&entry, object, plan, now.Add(2*time.Minute))
+	if entry.NextEligibleAt != nil || entry.WaitReason != "" {
+		t.Fatal("elapsed quiet window still reported as waiting")
+	}
+}
+
 func TestSourceRefreshPreservesUnrelatedMetadata(t *testing.T) {
 	object := KnowledgeObject{SourceHash: "first", Metadata: json.RawMessage(`{"inode":9007199254740993,"source_root":{"knowledge_source":{"policy":{"refresh":{"quiet_for_seconds":60,"max_wait_seconds":180}}}}}`)}
 	object = observeSourceRefresh(nil, object, time.Now())

@@ -39,10 +39,12 @@ type Artifact struct {
 }
 
 type ArtifactDetail struct {
-	Artifact Artifact             `json:"artifact"`
-	Object   objects.ObjectDetail `json:"object"`
-	Index    *search.IndexResult  `json:"index,omitempty"`
-	EventIDs []string             `json:"event_ids,omitempty"`
+	Artifact          Artifact             `json:"artifact"`
+	Object            objects.ObjectDetail `json:"object"`
+	Index             *search.IndexResult  `json:"index,omitempty"`
+	EventIDs          []string             `json:"event_ids,omitempty"`
+	ReadCommand       string               `json:"read_command,omitempty"`
+	StorageVisibility string               `json:"storage_visibility,omitempty"`
 }
 
 type CreateFromJobFileInput struct {
@@ -220,7 +222,7 @@ func (s Service) GetArtifact(ctx context.Context, ref string) (ArtifactDetail, e
 	if err != nil {
 		return ArtifactDetail{}, err
 	}
-	return ArtifactDetail{Artifact: artifact, Object: object}, nil
+	return ArtifactDetail{Artifact: artifact, Object: object, ReadCommand: "loom artifact read " + artifact.ArtifactID, StorageVisibility: "service_private"}, nil
 }
 
 func (s Service) ListArtifacts(ctx context.Context, filter ListFilter) ([]Artifact, error) {

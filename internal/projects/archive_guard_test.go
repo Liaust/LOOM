@@ -25,7 +25,7 @@ func TestEnsureRuntimeActiveRejectsArchivedProject(t *testing.T) {
 
 	store.expect("FROM projects.projects p JOIN scopes.scopes", func(args []driver.NamedValue) {
 		requireRuntimeGuardArgs(t, args, "project_archived")
-	}, []driver.Value{"project_archived", "archived-project", "archived", "scope_archived", "active", []byte(`{}`)})
+	}, []driver.Value{"project_archived", "archived-project", "archived", "scope_archived", "active", []byte(`{}`), []byte(`{}`)})
 
 	err := EnsureRuntimeActive(context.Background(), db, RuntimeRef{
 		ProjectID:    "project_archived",
@@ -48,7 +48,7 @@ func TestEnsureRuntimeActiveRejectsArchivedProjectScope(t *testing.T) {
 
 	store.expect("FROM scopes.scopes s LEFT JOIN projects.projects", func(args []driver.NamedValue) {
 		requireRuntimeGuardArgs(t, args, "scope_project")
-	}, []driver.Value{"project_active", "active-project", "active", "scope_project", "archived", []byte(`{}`)})
+	}, []driver.Value{"project_active", "active-project", "active", "scope_project", "archived", []byte(`{}`), []byte(`{}`)})
 
 	err := EnsureRuntimeActive(context.Background(), db, RuntimeRef{ScopeID: "scope_project"})
 	if !errors.Is(err, ErrProjectRuntimeArchived) {
@@ -64,7 +64,7 @@ func TestEnsureRuntimeActiveIgnoresNonProjectScope(t *testing.T) {
 
 	store.expect("FROM scopes.scopes s LEFT JOIN projects.projects", func(args []driver.NamedValue) {
 		requireRuntimeGuardArgs(t, args, "scope_system")
-	}, []driver.Value{nil, nil, "", "scope_system", "archived", []byte(`{}`)})
+	}, []driver.Value{nil, nil, "", "scope_system", "archived", []byte(`{}`), []byte(`{}`)})
 
 	if err := EnsureRuntimeActive(context.Background(), db, RuntimeRef{ScopeID: "scope_system"}); err != nil {
 		t.Fatalf("non-project scope should not be treated as archived project runtime: %v", err)
@@ -79,7 +79,7 @@ func TestEnsureRuntimeActiveAllowsActiveProjectScope(t *testing.T) {
 
 	store.expect("FROM scopes.scopes s LEFT JOIN projects.projects", func(args []driver.NamedValue) {
 		requireRuntimeGuardArgs(t, args, "scope_active")
-	}, []driver.Value{"project_active", "active-project", "active", "scope_active", "active", []byte(`{}`)})
+	}, []driver.Value{"project_active", "active-project", "active", "scope_active", "active", []byte(`{}`), []byte(`{}`)})
 
 	if err := EnsureRuntimeActive(context.Background(), db, RuntimeRef{ScopeID: "scope_active"}); err != nil {
 		t.Fatalf("active project scope should be allowed: %v", err)
@@ -171,7 +171,7 @@ func TestEnsureRuntimeActiveRejectsPhysicalArchiveInProgress(t *testing.T) {
 	payload, _ := json.Marshal(state)
 	store.expect("FROM projects.projects p JOIN scopes.scopes", func(args []driver.NamedValue) {
 		requireRuntimeGuardArgs(t, args, "project_active")
-	}, []driver.Value{"project_active", "active-project", "active", "scope_active", "active", payload})
+	}, []driver.Value{"project_active", "active-project", "active", "scope_active", "active", payload, []byte(`{}`)})
 	err := EnsureRuntimeActive(context.Background(), db, RuntimeRef{ProjectID: "project_active", ResourceKind: "schedule", ResourceRef: "daily"})
 	if !IsProjectArchiveInProgress(err) {
 		t.Fatalf("error = %v, want in-progress archive block", err)
@@ -186,7 +186,7 @@ func TestEnsureRuntimeActiveFailsClosedOnInvalidArchiveState(t *testing.T) {
 
 	store.expect("FROM projects.projects p JOIN scopes.scopes", func(args []driver.NamedValue) {
 		requireRuntimeGuardArgs(t, args, "project_active")
-	}, []driver.Value{"project_active", "active-project", "active", "scope_active", "active", []byte(`{"schema_version":"unknown","status":"in_progress"}`)})
+	}, []driver.Value{"project_active", "active-project", "active", "scope_active", "active", []byte(`{"schema_version":"unknown","status":"in_progress"}`), []byte(`{}`)})
 
 	err := EnsureRuntimeActive(context.Background(), db, RuntimeRef{
 		ProjectRef: "project_active", ResourceKind: "script", ResourceRef: "hello_world",
@@ -525,14 +525,14 @@ func requireRuntimeGuardArgs(t *testing.T, args []driver.NamedValue, want ...any
 }
 
 func TestDeclarationArchiveRepositoryBindingVersions(t *testing.T) {
-	for _, projectVersion := range []string{ProjectRepositoryProjectSchemaV03, ProjectRepositoryProjectSchemaV04, ProjectRepositoryProjectSchemaV05} {
-		for _, repoVersion := range []string{ProjectRepositoryReposSchemaV03, ProjectRepositoryReposSchemaV04, ProjectRepositoryProjectSchemaV05, "repos.contract.v0.5", "unknown"} {
+	for _, projectVersion := range []string{ProjectRepositoryProjectSchemaV03, ProjectRepositoryProjectSchemaV04, ProjectRepositoryProjectSchemaV05, ProjectRepositoryProjectSchemaV06} {
+		for _, repoVersion := range []string{ProjectRepositoryReposSchemaV03, ProjectRepositoryReposSchemaV04, ProjectRepositoryProjectSchemaV05, ProjectRepositoryProjectSchemaV06, "repos.contract.v0.5", "repos.contract.v0.6", "unknown"} {
 			t.Run(projectVersion+"_"+repoVersion, func(t *testing.T) {
 				detail, repository, root := projectArchiveCustodyFixture(t, "main", false, 0)
 				detail.Registration.ContractSchemaVersion = projectVersion
 				repository.Source.ProjectContractSchemaVersion = projectVersion
 				repository.Source.ReposContractSchemaVersion = repoVersion
-				if projectVersion == ProjectRepositoryProjectSchemaV05 {
+				if isDeclarationSchemaVersion(projectVersion) {
 					detail.Registration.ContractPath = filepath.Join(root, ".loom", "project.yaml")
 				}
 				want := isSupportedProjectRepositorySourceVersions(ProjectRepositorySourceVersions{ProjectContract: projectVersion, ReposContract: repoVersion})

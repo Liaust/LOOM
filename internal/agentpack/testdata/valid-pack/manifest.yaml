@@ -7,13 +7,13 @@ catalogue: catalogue.yaml
 hash_policy: {algorithm: sha256, mode: generated-at-release}
 harnesses:
   codex: {mechanism: native-skills}
-  orca: {mechanism: native-skills-or-plugins}
+  hermes: {mechanism: native-skills-and-read-only-external-dirs}
 recommended_skill_sets:
   project:
     visibility: [shared_core]
   morathustra:
     visibility: [shared_core, morathustra_operations]
-compatibility: {worktree_authority: orca, credential_authority: proton-pass}
+compatibility: {worktree_authority: native-harness, credential_authority: proton-pass}
 skills:
   - name: fixture-skill
     version: 1.0.0

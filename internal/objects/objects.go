@@ -67,20 +67,28 @@ type Blob struct {
 }
 
 type FileMetadata struct {
-	ObjectID        string          `json:"object_id"`
-	LogicalName     string          `json:"logical_name"`
-	Extension       *string         `json:"extension,omitempty"`
-	MimeType        *string         `json:"mime_type,omitempty"`
-	SourceNodeID    *string         `json:"source_node_id,omitempty"`
-	SourcePath      *string         `json:"source_path,omitempty"`
-	SourceMtime     *time.Time      `json:"source_mtime,omitempty"`
-	LatestVersionID *string         `json:"latest_version_id,omitempty"`
-	TextExtractable bool            `json:"text_extractable"`
-	RawBackupPolicy string          `json:"raw_backup_policy"`
-	IndexPolicy     string          `json:"index_policy"`
-	CreatedAt       time.Time       `json:"created_at"`
-	UpdatedAt       time.Time       `json:"updated_at"`
-	Metadata        json.RawMessage `json:"metadata"`
+	ObjectID           string          `json:"object_id"`
+	LogicalName        string          `json:"logical_name"`
+	Extension          *string         `json:"extension,omitempty"`
+	MimeType           *string         `json:"mime_type,omitempty"`
+	SourceNodeID       *string         `json:"source_node_id,omitempty"`
+	SourcePath         *string         `json:"source_path,omitempty"`
+	SourceMtime        *time.Time      `json:"source_mtime,omitempty"`
+	LatestVersionID    *string         `json:"latest_version_id,omitempty"`
+	TextExtractable    bool            `json:"text_extractable"`
+	RawBackupPolicy    string          `json:"raw_backup_policy"`
+	IndexPolicy        string          `json:"index_policy"`
+	CreatedAt          time.Time       `json:"created_at"`
+	UpdatedAt          time.Time       `json:"updated_at"`
+	Metadata           json.RawMessage `json:"metadata"`
+	ManagedSourcePath  *string         `json:"managed_source_path,omitempty"`
+	SourceRootKey      string          `json:"source_root_key,omitempty"`
+	SourceRelativePath string          `json:"source_relative_path,omitempty"`
+	SourceGeneration   string          `json:"source_generation,omitempty"`
+	SourceSequence     int64           `json:"source_sequence,omitempty"`
+	SourcePresence     string          `json:"source_presence"`
+	SourceObservedAt   *time.Time      `json:"source_observed_at,omitempty"`
+	SourceObservedSize *int64          `json:"source_observed_size,omitempty"`
 }
 
 type ObjectScopeLink struct {
@@ -939,7 +947,9 @@ func fileMetadataSelectSQL() string {
 	return `
 		SELECT object_id, logical_name, extension, mime_type, source_node_id, source_path,
 		       source_mtime, latest_version_id, text_extractable, raw_backup_policy,
-		       index_policy, created_at, updated_at, metadata
+		       index_policy, created_at, updated_at, metadata, managed_source_path,
+		       source_root_key,source_relative_path,source_generation,source_sequence,
+		       source_presence,source_observed_at,source_observed_size
 		FROM files.file_metadata
 	`
 }
@@ -1072,6 +1082,9 @@ func scanFileMetadata(scanner rowScanner) (FileMetadata, error) {
 	var sourcePath sql.NullString
 	var sourceMtime sql.NullTime
 	var latestVersionID sql.NullString
+	var managedSourcePath sql.NullString
+	var observedAt sql.NullTime
+	var observedSize sql.NullInt64
 	var metadata []byte
 	if err := scanner.Scan(
 		&file.ObjectID,
@@ -1088,6 +1101,14 @@ func scanFileMetadata(scanner rowScanner) (FileMetadata, error) {
 		&file.CreatedAt,
 		&file.UpdatedAt,
 		&metadata,
+		&managedSourcePath,
+		&file.SourceRootKey,
+		&file.SourceRelativePath,
+		&file.SourceGeneration,
+		&file.SourceSequence,
+		&file.SourcePresence,
+		&observedAt,
+		&observedSize,
 	); err != nil {
 		return FileMetadata{}, err
 	}
@@ -1098,6 +1119,11 @@ func scanFileMetadata(scanner rowScanner) (FileMetadata, error) {
 	file.SourceMtime = timePtr(sourceMtime)
 	file.LatestVersionID = stringPtr(latestVersionID)
 	file.Metadata = jsonOrEmpty(metadata)
+	file.ManagedSourcePath = stringPtr(managedSourcePath)
+	file.SourceObservedAt = timePtr(observedAt)
+	if observedSize.Valid {
+		file.SourceObservedSize = &observedSize.Int64
+	}
 	return file, nil
 }
 

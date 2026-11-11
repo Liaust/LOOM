@@ -11,6 +11,7 @@ import (
 	"loom.local/loom/internal/projects"
 	"loom.local/loom/internal/realtime"
 	"loom.local/loom/internal/requestctx"
+	"loom.local/loom/internal/workers"
 )
 
 func (s Service) CancelJob(ctx context.Context, req requestctx.Context, input CancelJobInput) (Job, error) {
@@ -39,8 +40,10 @@ func (s Service) CancelJob(ctx context.Context, req requestctx.Context, input Ca
 	}
 	defer tx.Rollback()
 
+	args := []any{resolved.JobID, req.ActorID}
+	predicate := jobBoxPredicate(ctx, &args)
 	job, err := scanJob(tx.QueryRowContext(ctx, `
-		UPDATE jobs.jobs
+		UPDATE jobs.jobs j
 		SET status = 'cancelled',
 		    lease_owner = NULL,
 		    lease_expires_at = NULL,
@@ -57,8 +60,9 @@ func (s Service) CancelJob(ctx context.Context, req requestctx.Context, input Ca
 		    updated_at = now()
 		WHERE job_id = $1
 		  AND status = 'queued'
+		  AND `+predicate+`
 		RETURNING `+jobReturningColumns()+`
-	`, resolved.JobID, req.ActorID))
+	`, args...))
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return Job{}, fmt.Errorf("job %s is no longer queued", resolved.JobID)
@@ -70,6 +74,11 @@ func (s Service) CancelJob(ctx context.Context, req requestctx.Context, input Ca
 		"cancelled_by": req.ActorID,
 	})); err != nil {
 		return Job{}, err
+	}
+	if job.JobType == TypeApplicationBuild {
+		if err := workers.NotifyQueueTx(ctx, tx, workers.KindApplicationBuilder); err != nil {
+			return Job{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return Job{}, err
@@ -109,8 +118,10 @@ func (s Service) RetryJob(ctx context.Context, req requestctx.Context, input Ret
 	}
 	defer tx.Rollback()
 
+	args := []any{resolved.JobID}
+	predicate := jobBoxPredicate(ctx, &args)
 	job, err := scanJob(tx.QueryRowContext(ctx, `
-		UPDATE jobs.jobs
+		UPDATE jobs.jobs j
 		SET status = 'queued',
 		    output_json = '{}'::jsonb,
 		    progress_json = '{}'::jsonb,
@@ -138,8 +149,9 @@ func (s Service) RetryJob(ctx context.Context, req requestctx.Context, input Ret
 		    updated_at = now()
 		WHERE job_id = $1
 		  AND status IN ('failed', 'timed_out')
+		  AND `+predicate+`
 		RETURNING `+jobReturningColumns()+`
-	`, resolved.JobID))
+	`, args...))
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return Job{}, fmt.Errorf("job %s is no longer failed or timed out", resolved.JobID)
@@ -154,6 +166,14 @@ func (s Service) RetryJob(ctx context.Context, req requestctx.Context, input Ret
 		"previous_attempt": resolved.AttemptCount,
 	})); err != nil {
 		return Job{}, err
+	}
+	if err := workers.NotifyQueueTx(ctx, tx, workers.KindJobRunner); err != nil {
+		return Job{}, err
+	}
+	if job.JobType == TypeApplicationBuild {
+		if err := workers.NotifyQueueTx(ctx, tx, workers.KindApplicationBuilder); err != nil {
+			return Job{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return Job{}, err
@@ -201,16 +221,19 @@ func (s Service) updateJobFailureAttention(ctx context.Context, req requestctx.C
 	}
 	defer tx.Rollback()
 
+	args := []any{resolved.JobID, status, req.ActorID, note}
+	predicate := jobBoxPredicate(ctx, &args)
 	job, err := scanJob(tx.QueryRowContext(ctx, `
-		UPDATE jobs.jobs
+		UPDATE jobs.jobs j
 		SET failure_attention_status = $2,
 		    failure_attention_updated_at = now(),
 		    failure_attention_updated_by_actor_id = nullif($3, ''),
 		    failure_attention_note = $4
 		WHERE job_id = $1
 		  AND (status IN ('failed', 'timed_out') OR manual_action_required = true)
+		  AND `+predicate+`
 		RETURNING `+jobReturningColumns()+`
-	`, resolved.JobID, status, req.ActorID, note))
+	`, args...))
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return Job{}, fmt.Errorf("job %s no longer requires failure attention", resolved.JobID)
@@ -368,7 +391,7 @@ func sweepTimedOutJobs(ctx context.Context, tx *sql.Tx, input SweepInput) ([]Job
 			SELECT j2.job_id
 			FROM jobs.jobs j2
 			LEFT JOIN jobs.runners r2 ON r2.runner_id = j2.lease_owner
-			WHERE j2.status = 'running'
+			WHERE j2.status = 'running' AND j2.job_type IN ('script_run','workflow_run')
 			  AND j2.lease_expires_at IS NOT NULL
 			  AND j2.lease_expires_at < $1
 			  AND (
@@ -429,7 +452,7 @@ func sweepAmbiguousJobs(ctx context.Context, tx *sql.Tx, input SweepInput) ([]Jo
 			SELECT j2.job_id
 			FROM jobs.jobs j2
 			LEFT JOIN jobs.runners r2 ON r2.runner_id = j2.lease_owner
-			WHERE j2.status = 'running'
+			WHERE j2.status = 'running' AND j2.job_type IN ('script_run','workflow_run')
 			  AND j2.lease_expires_at IS NOT NULL
 			  AND j2.lease_expires_at < $1
 			  AND j2.manual_action_required = false

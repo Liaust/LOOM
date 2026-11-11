@@ -589,7 +589,13 @@ func addProjectContractCommands(cmd *cobra.Command, opts *options) {
 				defer cancel()
 				plan, err := projectwatch.NewService(projectwatch.Deps{}).BuildPlan(ctx, ref, watchPlanOpts)
 				if opts.jsonOutput {
-					_ = json.NewEncoder(cmd.OutOrStdout()).Encode(plan)
+					var view any = plan
+					if summary, _ := cmd.Flags().GetBool("summary"); summary {
+						view = projectWatchPlanSummary(plan, ref)
+					}
+					if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(view); encodeErr != nil {
+						return encodeErr
+					}
 				}
 				if err != nil {
 					return err
@@ -611,6 +617,9 @@ func addProjectContractCommands(cmd *cobra.Command, opts *options) {
 				return renderError(cmd, opts, correlationID, loomerrors.Wrap("transport.unavailable", "runtime", cfg.SocketPath, "Could not build project watch plan.", err))
 			}
 			if opts.jsonOutput {
+				if summary, _ := cmd.Flags().GetBool("summary"); summary {
+					return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"ok": envelope.OK, "data": projectWatchPlanSummary(envelope.Data, ref), "meta": envelope.Meta})
+				}
 				return json.NewEncoder(cmd.OutOrStdout()).Encode(envelope)
 			}
 			renderProjectWatchPlan(cmd, envelope.Data)
@@ -619,6 +628,7 @@ func addProjectContractCommands(cmd *cobra.Command, opts *options) {
 		},
 	}
 	watchPlanCmd.Flags().StringVar(&watchPlanOpts.ProjectRoot, "project-root", "", "local project root override")
+	watchPlanCmd.Flags().Bool("summary", false, "with --json, inspect bounded root identities without raw configuration; not an executable plan")
 	watchPlanCmd.Flags().BoolVar(&watchPlanOpts.UseRegisteredSnapshot, "use-registered-snapshot", false, "use the registered contract snapshot if local files cannot be loaded")
 	cmd.AddCommand(watchPlanCmd)
 
@@ -836,6 +846,9 @@ func addProjectContractCommands(cmd *cobra.Command, opts *options) {
 				return renderError(cmd, opts, correlationID, loomerrors.Wrap("transport.unavailable", "runtime", cfg.SocketPath, "Could not inspect project registration status.", err))
 			}
 			if opts.jsonOutput {
+				if summary, _ := cmd.Flags().GetBool("summary"); summary {
+					return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"ok": envelope.OK, "data": projectRegistrationSummary(envelope.Data), "meta": envelope.Meta})
+				}
 				return json.NewEncoder(cmd.OutOrStdout()).Encode(envelope)
 			}
 			renderProjectRegistrationStatus(cmd, envelope.Data)
@@ -1068,7 +1081,7 @@ func addProjectContractCommands(cmd *cobra.Command, opts *options) {
 	archiveCmd.Flags().BoolVar(&archiveOpts.input.DryRun, "dry-run", false, "show what would be archived and disabled without changing backend state")
 	archiveCmd.Flags().StringVar(&archiveOpts.idempotencyKey, "idempotency-key", "", "retry key for this effectful request")
 
-	archiveCmd.AddCommand(&cobra.Command{
+	archiveInspect := &cobra.Command{
 		Use:   "inspect <project-ref>",
 		Short: "Inspect the runtime archive manifest and archive state for a project",
 		Args:  cobra.ExactArgs(1),
@@ -1085,13 +1098,18 @@ func addProjectContractCommands(cmd *cobra.Command, opts *options) {
 				return renderError(cmd, opts, correlationID, loomerrors.Wrap("transport.unavailable", "runtime", cfg.SocketPath, "Could not inspect project archive.", err))
 			}
 			if opts.jsonOutput {
+				if summary, _ := cmd.Flags().GetBool("summary"); summary {
+					return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"ok": envelope.OK, "data": projectArchiveInspectionSummary(envelope.Data), "meta": envelope.Meta})
+				}
 				return json.NewEncoder(cmd.OutOrStdout()).Encode(envelope)
 			}
 			renderProjectArchiveInspect(cmd, envelope.Data)
 			renderResponseMeta(cmd, opts, envelope.Meta)
 			return nil
 		},
-	})
+	}
+	archiveInspect.Flags().Bool("summary", false, "with --json, omit repeated declaration and runtime configuration")
+	archiveCmd.AddCommand(archiveInspect)
 
 	restoreOpts := storagearchive.ProjectArchiveRestoreInput{DryRun: true}
 	restoreCmd := &cobra.Command{
@@ -1731,6 +1749,14 @@ func renderProjectArchiveInspect(cmd *cobra.Command, result storagearchive.Proje
 		if physical.Workspace != nil {
 			fmt.Fprintf(cmd.OutOrStdout(), "Custody: %s\n", physical.Workspace.Custody)
 		}
+		state, valid := projects.ParseProjectPhysicalArchiveState(result.ArchiveState)
+		if valid && state.Restore == nil && state.Phase == projects.ProjectArchivePhaseComplete &&
+			state.ProjectID == physical.ProjectID && state.OperationID == physical.ArchiveOperationID &&
+			physical.EvidenceStatus == "verified" && physical.Workspace != nil && physical.Workspace.Custody == storagearchive.CustodyArchived {
+			fmt.Fprintf(cmd.OutOrStdout(), "Retained root (read-only; verified custody): %s\n", declarationDisplay(state.ArchivePath))
+		} else {
+			fmt.Fprintln(cmd.OutOrStdout(), "Retained root: unavailable in this view (restore, incomplete or unverified custody)")
+		}
 		return
 	}
 	renderProjectRegistrationCore(cmd, result.Project)
@@ -1826,8 +1852,12 @@ func renderProjectRegistrationCore(cmd *cobra.Command, detail projects.ProjectRe
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Registration: %s\n", detail.Registration.RegistrationStatus)
 	fmt.Fprintf(cmd.OutOrStdout(), "Activation: %s\n", detail.Registration.ActivationStatus)
-	fmt.Fprintf(cmd.OutOrStdout(), "Root: %s\n", detail.Registration.ProjectRoot)
-	fmt.Fprintf(cmd.OutOrStdout(), "Contract: %s\n", detail.Registration.ContractPath)
+	qualification := ""
+	if project.Status == "archived" {
+		qualification = " (historical registration)"
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Root%s: %s\n", qualification, declarationDisplay(detail.Registration.ProjectRoot))
+	fmt.Fprintf(cmd.OutOrStdout(), "Contract%s: %s\n", qualification, declarationDisplay(detail.Registration.ContractPath))
 	if layout := projectLayoutFromResolvedPath(detail.Registration.ProjectRoot, detail.Registration.ContractPath); layout != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "Layout: %s\n", layout)
 	}
@@ -2204,6 +2234,7 @@ func renderProjectWatchPlan(cmd *cobra.Command, plan projectwatch.ProjectWatchPl
 		project = plan.Detail.Project.Project.Slug
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Project watch plan: %s\n", dashIfEmpty(project))
+	fmt.Fprintln(cmd.OutOrStdout(), "State basis: compiled intent, not live node ACKs; use project sync-status for observed delivery.")
 	fmt.Fprintf(cmd.OutOrStdout(), "Root: %s\n", dashIfEmpty(plan.ProjectRoot))
 	if plan.ContractHash != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "Contract hash: %s\n", plan.ContractHash)
@@ -2284,6 +2315,12 @@ func renderProjectWatchShell(cmd *cobra.Command, commands []projects.ProjectWatc
 }
 
 func renderProjectSyncStatus(cmd *cobra.Command, status projectwatch.ProjectSyncStatus) {
+	if status.NotesAdmissionState != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "Notes admission: %s (publication/processing tracked separately)\n", status.NotesAdmissionState)
+		for _, root := range status.NotesAdmission {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s: %s; admitted %d, pending bindings %d (%s)\n", root.RootKey, root.State, root.AdmittedObjects, root.PendingBindings, root.Reason)
+		}
+	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Project sync status: %s\n", status.ProjectRef)
 	fmt.Fprintf(cmd.OutOrStdout(), "Sync roots: %d\n", status.SyncRoots)
 	fmt.Fprintf(cmd.OutOrStdout(), "Pending agent apply: %d\n", status.PendingAgentApply)

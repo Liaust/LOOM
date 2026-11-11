@@ -9,11 +9,22 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"loom.local/loom/internal/boxregistry"
 )
 
 const DefaultMainRuntimeStateRoot = "/var/lib/loom/box-state"
 
 func Resolve(input ResolveInput) (Resolved, error) {
+	if input.BoxID != "" && input.RootRef == "" {
+		return Resolved{}, fmt.Errorf("selected Box requires its immutable root reference")
+	}
+	if input.RootRef != "" && (!boxregistry.IsBoxRef(input.RootRef) || input.RootRef != "box" && input.RootRef != "box:"+input.BoxID) {
+		return Resolved{}, fmt.Errorf("Box root reference disagrees with immutable Box identity")
+	}
+	if input.RootRef != "" && input.RootRef != "box" && (input.ConfiguredPath == "" || input.RuntimeStateRoot == "") {
+		return Resolved{}, fmt.Errorf("selected Box requires its configured root and runtime state root")
+	}
 	ownerNode := strings.TrimSpace(input.NodeID)
 	if ownerNode == "" {
 		ownerNode = "unknown"
@@ -22,6 +33,12 @@ func Resolve(input ResolveInput) (Resolved, error) {
 	rootPath, pathSource, err := resolveRootPath(input)
 	if err != nil {
 		return Resolved{}, err
+	}
+	if input.RootRef != "" && input.RootRef != "box" {
+		configured, err := normalizeRootPath(input.ConfiguredPath, input.HomeDir)
+		if err != nil || configured != rootPath {
+			return Resolved{}, fmt.Errorf("explicit path disagrees with selected Box root")
+		}
 	}
 	profile, profileSource, err := resolveProfile(input.ExplicitProfile, input.ConfigProfile, nodeRole)
 	if err != nil {
@@ -32,6 +49,8 @@ func Resolve(input ResolveInput) (Resolved, error) {
 		return Resolved{}, err
 	}
 	return Resolved{
+		BoxID:            input.BoxID,
+		RootRef:          input.RootRef,
 		RootPath:         rootPath,
 		PathSource:       pathSource,
 		Profile:          profile,
@@ -115,6 +134,9 @@ func resolveRuntimeStateRoot(configured, profile, homeDir string) (string, error
 // legacy root so mutations cannot split state across two trees. When both
 // roots exist their complete typed manifests must agree before canonical wins.
 func ResolveRuntimeState(resolved Resolved) (RuntimeStateResolution, error) {
+	if resolved.RootRef != "" && resolved.RootRef != "box" && strings.TrimSpace(resolved.RuntimeStateRoot) == "" {
+		return RuntimeStateResolution{}, fmt.Errorf("selected Box runtime state root is required")
+	}
 	writeRoot := strings.TrimSpace(resolved.RuntimeStateRoot)
 	if writeRoot == "" {
 		if resolved.Profile == ProfileMain {

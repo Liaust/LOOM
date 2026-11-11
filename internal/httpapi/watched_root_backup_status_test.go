@@ -120,6 +120,29 @@ func TestWatchedRootBackupStatusDiagnosticFilterFailure(t *testing.T) {
 	}
 }
 
+func TestBackupBatchSeparatesValidationFromServerFailure(t *testing.T) {
+	for _, tc := range []struct {
+		body   string
+		status int
+		code   string
+	}{
+		{`{}`, 400, "watched_roots.backup_batch_invalid"},
+		{`{"root_key":"fixture","credential_token":"synthetic","items":[{"item_kind":"file","relative_path":"a.md"}]}`, 500, "watched_roots.backup_batch_failed"},
+	} {
+		handler, _ := backupStatusDiagnosticHandler(t, errors.New("private synthetic database failure"))
+		r := httptest.NewRequest(http.MethodPost, "/v1/node-agent/watched-roots/backup-batches", strings.NewReader(tc.body))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		var env response.ErrorEnvelope
+		if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+			t.Fatal(err)
+		}
+		if w.Code != tc.status || env.Error.Code != tc.code || strings.Contains(w.Body.String(), "synthetic") {
+			t.Fatalf("incorrect failure classification: %d %s", w.Code, w.Body.String())
+		}
+	}
+}
+
 func TestBackupStatusDiagnosticDoesNotInterpolateFilters(t *testing.T) {
 	handler, _ := backupStatusDiagnosticHandler(t, nil)
 	server := httptest.NewServer(handler)

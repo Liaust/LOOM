@@ -27,6 +27,8 @@ func (s Service) ScheduleStatus(ctx context.Context) (ScheduleStatus, error) {
 	var status ScheduleStatus
 	status.SchedulerWorkerKey = SchedulerWorkerKey
 	status.DispatcherWorkerKey = DispatcherWorkerKey
+	args := []any{}
+	predicate := scheduleBoxPredicate(ctx, &args)
 
 	if err := s.DB.QueryRowContext(ctx, `
 		SELECT
@@ -38,7 +40,7 @@ func (s Service) ScheduleStatus(ctx context.Context) (ScheduleStatus, error) {
 			min(next_fire_at) FILTER (WHERE status = 'active' AND next_fire_at IS NOT NULL)
 		FROM automation.schedules
 		WHERE true
-	`+archivedProjectByProjectColumnSQL("project_id")).Scan(
+	`+archivedProjectByProjectColumnSQL("schedules.project_id")+` AND `+predicate, args...).Scan(
 		&status.ActiveScheduleCount,
 		&status.PausedScheduleCount,
 		&status.DisabledScheduleCount,
@@ -49,14 +51,19 @@ func (s Service) ScheduleStatus(ctx context.Context) (ScheduleStatus, error) {
 		return ScheduleStatus{}, err
 	}
 
+	args = []any{FireStatusMissed}
+	predicate = fireBoxPredicate(ctx, &args)
 	if err := s.DB.QueryRowContext(ctx, `
 		SELECT count(*)
 		FROM automation.schedule_fires
 		WHERE status = $1
-	`+archivedProjectByAutomationColumnSQL("automation_id"), FireStatusMissed).Scan(&status.MissedFireCount); err != nil {
+	`+archivedProjectByAutomationColumnSQL("schedule_fires.automation_id")+` AND `+predicate, args...).Scan(&status.MissedFireCount); err != nil {
 		return ScheduleStatus{}, err
 	}
 
+	args = []any{InvocationStatusPending, InvocationStatusLeased, InvocationStatusCalling,
+		InvocationStatusFailed, InvocationStatusTimedOut, InvocationStatusRequiresManualAction, InvocationStatusWaitingApproval}
+	predicate = invocationBoxPredicate(ctx, &args)
 	if err := s.DB.QueryRowContext(ctx, `
 		SELECT
 			count(*) FILTER (WHERE status IN ($1, $2, $3)),
@@ -64,10 +71,7 @@ func (s Service) ScheduleStatus(ctx context.Context) (ScheduleStatus, error) {
 			min(created_at) FILTER (WHERE status IN ($1, $2, $3))
 		FROM automation.invocations
 		WHERE true
-	`+archivedProjectByProjectColumnSQL("project_id")+`
-	`, InvocationStatusPending, InvocationStatusLeased, InvocationStatusCalling,
-		InvocationStatusFailed, InvocationStatusTimedOut, InvocationStatusRequiresManualAction, InvocationStatusWaitingApproval,
-	).Scan(
+	`+archivedProjectByProjectColumnSQL("invocations.project_id")+` AND `+predicate, args...).Scan(
 		&status.PendingInvocationCount,
 		&status.FailedInvocationCount,
 		nullableTimeScanner(&status.OldestPendingInvocationAt),
@@ -94,7 +98,7 @@ func (s Service) DirectEventStatus(ctx context.Context) (DirectEventStatus, erro
 			count(*) FILTER (WHERE status = 'disabled')
 		FROM automation.direct_event_endpoints
 		WHERE true
-	`+archivedProjectByAutomationColumnSQL("automation_id")).Scan(
+	`+archivedProjectByAutomationColumnSQL("direct_event_endpoints.automation_id")).Scan(
 		&status.ActiveEndpointCount,
 		&status.PausedEndpointCount,
 		&status.DisabledEndpointCount,
@@ -120,7 +124,7 @@ func (s Service) DirectEventStatus(ctx context.Context) (DirectEventStatus, erro
 			min(received_at) FILTER (WHERE status = $1)
 		FROM automation.direct_events
 		WHERE true
-	`+archivedProjectByAutomationColumnSQL("automation_id")+`
+	`+archivedProjectByAutomationColumnSQL("direct_events.automation_id")+`
 	`, DirectEventStatusAccepted,
 		DirectEventStatusInvocationCreated,
 		DirectEventStatusRejected,
@@ -157,11 +161,11 @@ func (s Service) FireScheduleNow(ctx context.Context, req requestctx.Context, re
 	}
 	defer tx.Rollback()
 
-	schedule, err := scanSchedule(tx.QueryRowContext(ctx, scheduleSelectSQL()+`
-		WHERE schedule_id = $1 OR schedule_key = $1
-		FOR UPDATE
-	`, strings.TrimSpace(ref)))
+	schedule, err := readSchedule(ctx, tx, strings.TrimSpace(ref), true)
 	if err != nil {
+		return FireScheduleResult{}, err
+	}
+	if err := validateScheduleMetadata(ctx, tx, schedule, metadata); err != nil {
 		return FireScheduleResult{}, err
 	}
 	if schedule.Status == ScheduleStatusDisabled {
@@ -259,8 +263,9 @@ func (s Service) ListInvocationFailures(ctx context.Context, filter InvocationFi
 		add("source_kind =", sourceKind)
 	}
 	if !hasExplicitRuntimeRef(filter.AutomationRef, filter.ProjectRef) {
-		query += archivedProjectByProjectColumnSQL("project_id")
+		query += archivedProjectByProjectColumnSQL("invocations.project_id")
 	}
+	query += " AND " + invocationBoxPredicate(ctx, &args)
 	args = append(args, filter.Limit)
 	query += fmt.Sprintf(" ORDER BY updated_at DESC LIMIT $%d", len(args))
 

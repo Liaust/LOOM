@@ -97,20 +97,24 @@ export class NotesConflictsModal extends Modal {
 
 export class NotesStatusModal extends Modal {
     private offset = 0;
-    private kind: "operations" | "holds" = "operations";
+    private kind: "operations" | "holds" | "observations" = "operations";
     constructor(private plugin: ObsidianLiveSyncPlugin, private client: IntentClient) { super(plugin.app); }
     override async onOpen() {
         await this.client.ready;
         this.titleEl.setText("LOOM Notes status"); this.contentEl.empty();
         const view = this.client.statusDetails({ offset: this.offset, kind: this.kind });
         const s = view.summary;
-        this.contentEl.createEl("p", { text: `${s.unfinished} unfinished edits: ${s.pendingPublication} to publish, ` +
-            `${s.pendingAcceptance} awaiting source, ${s.blocked} blocked and ${s.waiting} waiting on dependencies.` });
+        this.contentEl.createEl("p", { text: s.unfinished ? `${s.unfinished} saved changes not yet accepted by Main: ${s.pendingPublication} to send, ` +
+            `${s.pendingAcceptance} awaiting Main, ${s.blocked} need review and ${s.waiting} waiting on dependencies.` :
+            "No saved changes awaiting Main." });
         this.contentEl.createEl("p", { text: `${s.accepted} accepted; ${s.resolved} resolved. ` +
-            `Unresolved safety holds: ${s.captureHolds} capture, ${s.reflectionHolds} reflection, ${s.otherHolds} other.` });
+            `Path checks needing attention: ${s.captureHolds} capture, ${s.reflectionHolds} incoming files, ${s.otherHolds} other.` });
+        if (s.scanObservations) this.contentEl.createEl("p", { text:
+            `Retained information: ${s.excludedObservations} excluded on this device, ${s.managedObservations} source-managed folders, ` +
+            `${s.historicalObservations} historical observations, ${s.localObservations} local-only scans. These are not pending edits; details remain available below.` });
         if (s.failure || s.checkpointFailure) this.contentEl.createEl("p", { text: s.failure ?? s.checkpointFailure });
         const selector = this.contentEl.createEl("select");
-        for (const [value, label] of [["operations", "Unfinished edits"], ["holds", "Unresolved safety holds"]]) {
+        for (const [value, label] of [["operations", "Saved changes"], ["holds", "Path checks"], ["observations", "Scan observations"]]) {
             const option = selector.createEl("option", { text: label }); option.value = value;
         }
         selector.value = this.kind;
@@ -128,6 +132,19 @@ export class NotesStatusModal extends Modal {
         new ButtonComponent(actions).setButtonText("Next").setDisabled(view.groups.nextOffset === undefined)
             .onClick(() => { this.offset = view.groups.nextOffset ?? this.offset; void this.onOpen(); });
         new ButtonComponent(actions).setButtonText("Refresh").onClick(() => { this.offset = 0; void this.onOpen(); });
+        const recheck = new ButtonComponent(actions).setButtonText("Recheck path warnings");
+        recheck.onClick(() => { recheck.setDisabled(true); void (async () => {
+            let after = "", page;
+            do {
+                page = await this.client.reconcileSafetyHolds(after);
+                after = page.next ?? "";
+                await new Promise(resolve => setTimeout(resolve, 0));
+            } while (page.next);
+            this.offset = 0; await this.onOpen();
+        })().catch(error => {
+            recheck.setButtonText("Recheck paused; warnings preserved").setDisabled(false);
+            recheck.buttonEl.title=String(error instanceof Error?error.message:error).slice(0,300);
+        }); });
         new ButtonComponent(actions).setButtonText("Full diagnostics").onClick(() => {
             this.contentEl.empty(); this.contentEl.createEl("pre", { text: this.client.details() });
             new ButtonComponent(this.contentEl).setButtonText("Back").onClick(() => { void this.onOpen(); });
@@ -143,7 +160,7 @@ export class NotesStatusModal extends Modal {
             new ButtonComponent(this.contentEl).setButtonText("Review saved creation").onClick(() => {
                 this.close(); new NotesConflictsModal(this.plugin, this.client, { create: root.intent.id }).open();
             });
-        else if (root && ["held", "conflict"].includes(root.state) && this.client.journal.state.bindings[root.intent.path]?.writable)
+        else if (root && (item.group.kind === "blocked" || ["held", "conflict"].includes(root.state)) && this.client.journal.state.bindings[root.intent.path]?.writable)
             new ButtonComponent(this.contentEl).setButtonText("Review text conflict").onClick(() => {
                 this.close(); new NotesConflictsModal(this.plugin, this.client, { path: root.intent.path }).open();
             });

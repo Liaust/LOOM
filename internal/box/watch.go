@@ -1,8 +1,11 @@
 package box
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -34,12 +37,15 @@ const (
 
 	boxWatchSafeRootKey = "loom_box"
 
-	boxWatchFullRescanInterval = "1m"
+	boxWatchFullRescanInterval = "6h"
 	boxWatchNotesMaxFileBytes  = int64(50 * 1024 * 1024)
 	boxWatchDocsMaxFileBytes   = int64(60 * 1024 * 1024 * 1024)
 )
 
 func BuildWatchPlan(input WatchStatusInput) (WatchPlan, error) {
+	if input.Resolved.BoxID != "" && input.Resolved.RootRef == "" {
+		return WatchPlan{}, fmt.Errorf("selected Box watch plan requires its immutable root reference")
+	}
 	status := Inspect(input.Resolved)
 	plan := WatchPlan{
 		SchemaVersion: SchemaVersion,
@@ -52,6 +58,9 @@ func BuildWatchPlan(input WatchStatusInput) (WatchPlan, error) {
 	}
 	if status.Contract != nil {
 		plan.BoxID = status.Contract.BoxID
+	}
+	if input.Resolved.BoxID != "" && input.Resolved.BoxID != plan.BoxID {
+		return plan, fmt.Errorf("Box descriptor identity changed")
 	}
 	if status.State != "ok" || status.Contract == nil {
 		plan.Diagnostics = append(plan.Diagnostics, Diagnostic{
@@ -103,6 +112,19 @@ func BuildWatchPlan(input WatchStatusInput) (WatchPlan, error) {
 		item.AgentCommands = boxWatchCommands(status.Contract.RootPath, []projectcontracts.ProjectWatchedRootItem{{BackendRootKey: item.BackendRootKey}})
 		plan.WatchedRoots = append(plan.WatchedRoots, item)
 	}
+	if input.Resolved.RootRef != "" && input.Resolved.RootRef != "box" {
+		if input.Resolved.RootRef != "box:"+plan.BoxID {
+			return plan, fmt.Errorf("Box root reference disagrees with descriptor identity")
+		}
+		for i, item := range plan.WatchedRoots {
+			item, err = namespaceBoxWatchItem(item, plan.BoxID)
+			if err != nil {
+				return plan, err
+			}
+			item.AgentCommands = boxWatchCommands(plan.RootPath, []projectcontracts.ProjectWatchedRootItem{item})
+			plan.WatchedRoots[i] = item
+		}
+	}
 	sort.SliceStable(plan.WatchedRoots, func(i, j int) bool {
 		return plan.WatchedRoots[i].BackendRootKey < plan.WatchedRoots[j].BackendRootKey
 	})
@@ -111,6 +133,39 @@ func BuildWatchPlan(input WatchStatusInput) (WatchPlan, error) {
 		return plan, fmt.Errorf("box watch plan has %d error diagnostic(s)", countErrorDiagnostics(plan.Diagnostics))
 	}
 	return plan, nil
+}
+
+// Hash the immutable identity before normalization: case-sensitive Box IDs must
+// not collapse onto the same node-agent root/worker key.
+func WatchSafeRootKey(boxID, rootRef string) string {
+	if rootRef == "" || rootRef == "box" {
+		return boxWatchSafeRootKey
+	}
+	return fmt.Sprintf("loom_box_id_%x", sha256.Sum256([]byte(boxID)))
+}
+
+func namespaceBoxWatchItem(item projectcontracts.ProjectWatchedRootItem, boxID string) (projectcontracts.ProjectWatchedRootItem, error) {
+	var cfg agentwatchedroots.RootConfig
+	if err := json.Unmarshal(item.ConfigJSON, &cfg); err != nil {
+		return item, err
+	}
+	prefix := WatchSafeRootKey(boxID, "box:"+boxID)
+	cfg.RootKey = prefix + "__" + strings.TrimPrefix(cfg.RootKey, "loom_box__")
+	if cfg.SafeRootKey == boxWatchSafeRootKey {
+		cfg.SafeRootKey = prefix
+	} else {
+		cfg.SafeRootKey = prefix + "__" + cfg.SafeRootKey
+	}
+	validated, err := agentwatchedroots.ValidatePortableRootConfig(cfg)
+	if err != nil {
+		return item, err
+	}
+	item.BackendRootKey = validated.RootKey
+	item.WorkerKey = noderuntime.WatchedRootWorkerKey(validated.RootKey)
+	item.SafeRootKey = validated.SafeRootKey
+	item.ConfigJSON, err = json.Marshal(validated)
+	item.ConfigHash = agentwatchedroots.ConfigHash(validated)
+	return item, err
 }
 
 func boxWatchExcludedAreas(contract *Contract) []WatchExcludedArea {
@@ -135,11 +190,30 @@ func watchRootItemForArea(contract Contract, area string) (projectcontracts.Proj
 		}
 	}
 	policyRel := contract.Policies[area]
-	if strings.TrimSpace(policyRel) == "" {
+	inline := contract.Areas[area].Watch
+	if strings.TrimSpace(policyRel) == "" && inline == nil {
 		return projectcontracts.ProjectWatchedRootItem{}, nil
 	}
 	policyPath := filepath.Join(contract.RootPath, filepath.FromSlash(policyRel))
-	policy, diagnostics := loadWatchPolicy(policyPath, area)
+	var policy WatchPolicy
+	var diagnostics []Diagnostic
+	if inline != nil {
+		policyRel = contractRelPath
+		policyPath = ContractPath(contract.RootPath)
+		if contract.SchemaVersion != FolderPolicySchemaVersion || contract.Policies[area] != "" || !isBoxWatchArea(area) {
+			return projectcontracts.ProjectWatchedRootItem{}, []Diagnostic{{Severity: "error", Code: "box.watch.inline_invalid", Message: "inline watch requires v0.5 and exactly one policy source for a watched area", Path: policyPath}}
+		}
+		if !contract.Areas[area].Enabled {
+			return projectcontracts.ProjectWatchedRootItem{}, nil
+		}
+		policy = inlineWatchPolicy(*inline, area)
+		diagnostics = validateWatchPolicy(policy, area, policyPath)
+		if policy.Path != "" && policy.Path != contract.Areas[area].Path {
+			diagnostics = append(diagnostics, Diagnostic{Severity: "error", Code: "box.watch.source_area_escape", Message: "inline watch path must match its declared Box area", Path: policyPath})
+		}
+	} else {
+		policy, diagnostics = loadWatchPolicy(policyPath, area)
+	}
 	if hasErrorDiagnostics(diagnostics) || !policy.Enabled {
 		return projectcontracts.ProjectWatchedRootItem{}, diagnostics
 	}
@@ -207,7 +281,7 @@ func watchRootItemForArea(contract Contract, area string) (projectcontracts.Proj
 			DiscoverUserRules:      true,
 			PolicyRootRelativePath: ".",
 		},
-		Watch: agentwatchedroots.WatchConfig{Enabled: true, Backend: agentwatchedroots.WatchBackendAuto},
+		Watch: agentwatchedroots.WatchConfig{Enabled: true, Backend: agentwatchedroots.WatchBackendAuto, DebounceWindow: "2s"},
 		Scan: agentwatchedroots.ScanConfig{
 			FullRescanInterval: boxWatchFullRescanInterval,
 			MaxHashFileBytes:   boxWatchMaxFileBytes(area),
@@ -225,7 +299,14 @@ func watchRootItemForArea(contract Contract, area string) (projectcontracts.Proj
 	if config.SyncPolicy.Mode != agentwatchedroots.SyncModeNone {
 		config.SyncPolicy.MaxFileBytes = boxWatchSyncMaxFileBytes(area)
 	}
-	config, err := agentwatchedroots.ValidatePortableRootConfig(config)
+	consumerFiles, err := watchConsumerFiles(contract.Files)
+	if err != nil {
+		return projectcontracts.ProjectWatchedRootItem{}, append(diagnostics, Diagnostic{Severity: "error", Code: "box.watch.files_invalid", Message: err.Error(), Path: ContractPath(contract.RootPath)})
+	}
+	if inline != nil || consumerFiles != nil {
+		config = independentBoxConsumers(config, consumerFiles)
+	}
+	config, err = agentwatchedroots.ValidatePortableRootConfig(config)
 	if err != nil {
 		diagnostics = append(diagnostics, Diagnostic{
 			Severity: "error",
@@ -256,6 +337,7 @@ func watchRootItemForArea(contract Contract, area string) (projectcontracts.Proj
 			metadata[key] = value
 		}
 	}
+	metadata["box_id"], metadata["box_root_path"], metadata["box_area"] = contract.BoxID, contract.RootPath, area
 	if area == areaTopics || area == areaLibrary {
 		// Compiler-owned classification cannot be supplied by free-form metadata.
 		metadata["knowledge_source"] = map[string]any{
@@ -266,13 +348,17 @@ func watchRootItemForArea(contract Contract, area string) (projectcontracts.Proj
 			"exclude":            config.Exclude,
 		}
 	}
-	if policy.Processing != nil {
+	folderPolicy := contract.Files
+	if folderPolicy != nil && len(folderPolicy.Rules) == 0 {
+		folderPolicy = nil
+	}
+	if policy.Processing != nil || folderPolicy != nil {
 		source, _ := metadata["knowledge_source"].(map[string]any)
 		if source == nil {
 			source = map[string]any{"include": config.Include, "exclude": config.Exclude}
 			metadata["knowledge_source"] = source
 		}
-		source["policy"] = projectcontracts.KnowledgeSourcePolicy{Processing: policy.Processing}
+		source["policy"] = projectcontracts.KnowledgeSourcePolicy{Processing: policy.Processing, Files: folderPolicy}
 	}
 	return projectcontracts.ProjectWatchedRootItem{
 		Key:              area,
@@ -308,11 +394,41 @@ func loadWatchPolicy(path string, expectedArea string) (WatchPolicy, []Diagnosti
 			Suggestion: "run loom box init again if generated policy files are missing",
 		}}
 	}
-	var policy WatchPolicy
-	if err := yaml.Unmarshal(payload, &policy); err != nil {
+	policy, err := decodeWatchPolicy(payload)
+	if err != nil {
 		return WatchPolicy{}, []Diagnostic{{Severity: "error", Code: "box.watch.policy_invalid_yaml", Message: err.Error(), Path: path}}
 	}
 	policy = normalizeWatchPolicy(policy)
+	return policy, validateWatchPolicy(policy, expectedArea, path)
+}
+
+func decodeWatchPolicy(payload []byte) (WatchPolicy, error) {
+	var policy WatchPolicy
+	decoder := yaml.NewDecoder(bytes.NewReader(payload))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&policy); err != nil {
+		return policy, err
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return policy, fmt.Errorf("watch policy must contain exactly one YAML document")
+	}
+	var fields map[string]any
+	if err := yaml.Unmarshal(payload, &fields); err != nil {
+		return policy, err
+	}
+	raw, err := json.Marshal(fields)
+	if err != nil {
+		return policy, err
+	}
+	strict := json.NewDecoder(bytes.NewReader(raw))
+	strict.DisallowUnknownFields()
+	if err := strict.Decode(&policy); err != nil {
+		return policy, err
+	}
+	return policy, nil
+}
+
+func validateWatchPolicy(policy WatchPolicy, expectedArea, path string) []Diagnostic {
 	diagnostics := []Diagnostic{}
 	if policy.SchemaVersion != WatchPolicySchemaVersion && policy.SchemaVersion != LegacyWatchPolicySchemaVersion {
 		diagnostics = append(diagnostics, Diagnostic{
@@ -352,19 +468,19 @@ func loadWatchPolicy(path string, expectedArea string) (WatchPolicy, []Diagnosti
 	if policy.Index.MaxTextBytes < 0 || policy.Index.MaxTextBytes > 8*1024*1024 {
 		diagnostics = append(diagnostics, Diagnostic{Severity: "error", Code: "box.watch.index_limit_invalid", Message: "index.max_text_bytes must be between 1 and 8388608 when specified", Path: path})
 	}
-	return policy, diagnostics
+	return diagnostics
 }
 
 func boxWatchPlanAreas(contract Contract) []string {
 	areas := []string{AreaNotes}
 	for _, area := range []string{areaTopics, areaLibrary} {
-		if strings.TrimSpace(contract.Policies[area]) != "" {
+		if hasAreaWatchSource(contract, area) {
 			areas = append(areas, area)
 		}
 	}
-	if strings.TrimSpace(contract.Policies[AreaDocuments]) != "" {
+	if hasAreaWatchSource(contract, AreaDocuments) {
 		areas = append(areas, AreaDocuments)
-	} else if strings.TrimSpace(contract.Policies[AreaLaunchpad]) != "" {
+	} else if hasAreaWatchSource(contract, AreaLaunchpad) {
 		areas = append(areas, AreaLaunchpad)
 	}
 	return areas

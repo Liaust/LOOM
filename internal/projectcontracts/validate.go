@@ -86,7 +86,7 @@ var facetFolders = map[string]string{
 }
 
 func Validate(loaded LoadedProject) ValidationReport {
-	if loaded.Contract.SchemaVersion == ProjectSchemaV05 {
+	if IsDeclarationSchemaVersion(loaded.Contract.SchemaVersion) {
 		return validateDeclaration(loaded)
 	}
 	report := emptyReport(loaded.RootPath, loaded.ContractPath, nowUTC())
@@ -182,6 +182,9 @@ func Validate(loaded LoadedProject) ValidationReport {
 			Suggestion: "use draft, active, paused, or archived",
 		})
 	}
+	if invalidProjectWorkState(loaded.Raw, contract.Project.WorkState) {
+		add(Diagnostic{Severity: SeverityError, Code: "project.work_state_invalid", Message: "project.work_state must be working or passive", File: loaded.ContractPath, Field: "project.work_state", Suggestion: "use working or passive, or omit the field for legacy working selection"})
+	}
 
 	report.DerivedProviders = derivedProviders(contract, loaded.ContractPath, add)
 	report.Facets = validateFacets(loaded, contract, add)
@@ -247,6 +250,7 @@ func planProject(contract ProjectContract) PlanProject {
 		Description: contract.Project.Description,
 		OwnerNode:   contract.Project.OwnerNode,
 		Status:      contract.Project.Status,
+		WorkState:   contract.Project.WorkState,
 	}
 }
 

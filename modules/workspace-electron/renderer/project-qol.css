@@ -1,0 +1,36 @@
+.project-prose-disclosure > summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+.project-prose-preview {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+.project-prose-toggle {
+  display: inline-block;
+  margin: 4px 0 8px;
+  color: var(--accent);
+  text-decoration: underline;
+}
+.project-prose-disclosure[open] > summary .project-prose-preview {
+  display: none;
+}
+.project-prose-disclosure > summary:focus-visible {
+  outline: 1px solid var(--focus);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+.project-prose pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+.project-resource .project-prose {
+  min-width: 0;
+  font-size: 13px;
+  color: var(--muted);
+}

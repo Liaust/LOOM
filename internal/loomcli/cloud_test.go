@@ -21,10 +21,52 @@ import (
 	loomerrors "loom.local/loom/internal/errors"
 	"loom.local/loom/internal/ids"
 	"loom.local/loom/internal/localclient"
+	"loom.local/loom/internal/maintenance"
 	"loom.local/loom/internal/response"
 	"loom.local/loom/internal/restoreauthority"
 	"loom.local/loom/internal/workers"
 )
+
+func TestCloudSnapshotStatusSummaryPreservesJSONInventory(t *testing.T) {
+	list := cloudstorage.SnapshotListResult{Status: "discovered", Backend: cloudstorage.SnapshotBackendBorg, Cached: true, CacheAgeSeconds: 120}
+	captured := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 100; i++ {
+		list.Snapshots = append(list.Snapshots, cloudstorage.SnapshotItem{Ref: "archive-" + strconv.Itoa(i), Backend: cloudstorage.SnapshotBackendBorg, ArchiveClass: "user_data", Status: "discovered", RemoteURI: "remote-inventory-" + strconv.Itoa(i), DiscoveredAt: captured})
+	}
+	list.Latest = &list.Snapshots[99]
+	finished := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	observed := finished.Add(24 * time.Hour)
+	producer := maintenance.CloudProtectionStatus{ObservedAt: observed, Available: true, Verification: "succeeded", EvidenceBasis: "upload_operation_result", CurrentProtection: "unknown", CriticalFindings: 1, LatestUpload: &maintenance.CloudUploadEvidence{OperationID: "upload", Result: "succeeded", FinishedAt: &finished, OperationalPackageID: "operational", ArchiveClass: "unknown"}}
+	report := localclient.CloudSnapshotStatusReport{Snapshots: &list, Producer: producer}
+	socket, stop := startStorageCommandServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/cloud/snapshot/status/live" {
+			t.Errorf("route %s", r.URL.Path)
+		}
+		response.WriteJSON(w, http.StatusOK, response.Success("cloud", report))
+	})
+	defer stop()
+	out, stderr, err := executeRootCommand("--socket", socket, "cloud", "snapshot", "status")
+	if err != nil || len(out) > 2000 || strings.Contains(out, "remote-inventory-") {
+		t.Fatalf("inventory dumped: %s %s %v", out, stderr, err)
+	}
+	for _, want := range []string{"count=100", "user_data=100", "archive-99", "archive_time=2026-08-30", "cache_age_seconds=120", "current protection=unknown", "restore/per-project inclusion=unknown", "critical=1", "observed=2026-10-13", "finished=2026-10-12", "payload_captured=unknown", "loom cloud snapshot list"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q: %s", want, out)
+		}
+	}
+	out, _, err = executeRootCommand("--socket", socket, "--json", "cloud", "snapshot", "status")
+	var decoded response.Envelope[localclient.CloudSnapshotStatusReport]
+	if err != nil || json.Unmarshal([]byte(out), &decoded) != nil || len(decoded.Data.Snapshots.Snapshots) != 100 || decoded.Data.Snapshots.Snapshots[0].RemoteURI != "remote-inventory-0" || decoded.Data.Producer.LatestUpload.OperationID != "upload" || decoded.Data.Producer.LatestUpload.CapturedAt != nil || !decoded.Data.Producer.LatestUpload.FinishedAt.Equal(finished) || !decoded.Data.Producer.ObservedAt.Equal(observed) {
+		t.Fatalf("JSON detail lost: %s %v", out, err)
+	}
+	var inventory bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&inventory)
+	renderCloudSnapshotList(cmd, list)
+	if !strings.Contains(inventory.String(), "remote-inventory-0") || !strings.Contains(inventory.String(), "remote-inventory-99") {
+		t.Fatal("explicit list lost detail")
+	}
+}
 
 func TestCloudRestoreDrillContextBoundsAndInheritsCancellation(t *testing.T) {
 	parent, cancel := context.WithCancel(context.Background())
@@ -570,7 +612,7 @@ func TestCloudSnapshotPushCommandContextOutlivesCloudWorkerDeadline(t *testing.T
 		t.Fatal("cloud snapshot push has no bounded client deadline")
 	}
 	remaining := time.Until(deadline)
-	if remaining <= 2*time.Hour || remaining > 3*time.Hour {
+	if remaining <= 3*time.Hour+2*time.Minute || remaining > 3*time.Hour+3*time.Minute {
 		t.Fatalf("cloud snapshot push client deadline remaining = %s, want more than the 2h worker deadline and at most 3h", remaining)
 	}
 }
@@ -727,6 +769,7 @@ func TestCloudSnapshotVerifyProfilesAreExclusiveAndTyped(t *testing.T) {
 		{"cloud", "snapshot", "verify", "latest", "--profile", "archive_data"},
 		{"cloud", "snapshot", "verify", "exact", "--profile", "archive_data", "--max-duration", "1m"},
 		{"cloud", "snapshot", "verify", "exact", "--profile", "full"},
+		{"cloud", "snapshot", "verify", "exact", "--profile", "archive_data", "--root-evidence"},
 	} {
 		if _, _, err := executeRootCommand(args...); err == nil {
 			t.Fatalf("invalid profile args were accepted: %v", args)
@@ -761,6 +804,24 @@ func TestCloudSnapshotVerifyProfilesAreExclusiveAndTyped(t *testing.T) {
 	}
 	if envelope.Data.Profile != cloudstorage.SnapshotVerifyProfileRollingRepository || envelope.Data.Coverage != cloudstorage.SnapshotVerifyCoverageRepositoryTimeBounded {
 		t.Fatalf("rolling response = %#v", envelope.Data)
+	}
+}
+
+func TestCloudSnapshotVerifyRootEvidenceUsesExistingMetadataRoute(t *testing.T) {
+	socket, shutdown := startStorageCommandServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var input cloudstorage.SnapshotVerifyLiveInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Fatal(err)
+		}
+		if !input.RootEvidence || input.Profile != cloudstorage.SnapshotVerifyProfileMetadata || input.Ref != "history-exact" {
+			t.Fatalf("wrong metadata request: %+v", input)
+		}
+		response.WriteJSON(w, http.StatusOK, response.Success("exact", cloudstorage.SnapshotVerifyResult{Status: cloudstorage.SnapshotStatusSucceeded, Profile: input.Profile, SourceManifestSHA256: strings.Repeat("a", 64)}))
+	})
+	defer shutdown()
+	stdout, stderr, err := executeRootCommand("--socket", socket, "--json", "cloud", "snapshot", "verify", "history-exact", "--root-evidence")
+	if err != nil || stderr != "" || !strings.Contains(stdout, "source_manifest_sha256") {
+		t.Fatalf("root evidence route: %s %s %v", stdout, stderr, err)
 	}
 }
 

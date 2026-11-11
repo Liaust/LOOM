@@ -1,5 +1,14 @@
 # Named GitHub Identity And Portable Projection
 
+This portable example provides no live repository, account binding or publication
+authorization. Configure the approved binding separately before account access.
+
+This named account route is Personal. Explicit Company work uses its Box's
+approved native CLI/account context (`loom-box-tool --box <Box ID> gh ...`),
+not `loom-mina-gh` or an ambient Personal login. Keep the same MINA authorship;
+account selection never transfers identity or grants publication authority.
+Missing Company authentication holds that integration, not independent coding.
+
 Read `CREDENTIALS.md` and `../OPERATING-POLICY.md` before GitHub work.
 Use the installed, release-matched GitHub CLI and Git only within the accepted
 task. Missing tooling stops the operation; do not install or authenticate as an
@@ -41,8 +50,9 @@ Do not fall back to bare `gh`, change the wrapper or invoke auth/config/install
 commands to get past a refusal. Use relative `api` endpoints and explicit
 `--repo OWNER/REPO` or `--repo github.com/OWNER/REPO` when selecting a repository.
 
-Read the immutable non-secret operator binding documented in release-matched
-ORCA Main Operations through supported LOOM docs, using its `github.host`, `github.login` and `github.id`. The native
+On Main, read the immutable non-secret operator binding directly at
+`/etc/loom-mina-accounts.json`; no documentation search is needed to locate it.
+Use its `github.host`, `github.login` and `github.id`. The native
 current-user probe is `loom-mina-gh api user`; compare its structured
 reply to the bound host/login/numeric actor before task use. The shared agents
 UID is not per-agent OS isolation; ordinary coding agents receive no automatic
@@ -66,11 +76,10 @@ transport must use the same verified personal actor and isolated grant with no
 inherited credential or transport fallback. Do not assume isolating the CLI
 also isolates Git. If this cannot be proved, stop before any fetch or push.
 
-The intended access covers the operator's complete account, repositories and
-organisations as their actual granted permissions and SSO policies permit.
-Do not impose a example-operator-only or private-only access limit. The private initial
-workspace projection below is one destination, not the boundary of account
-access. Verify the permissions needed for the exact repository and task.
+Configured access is limited by actual granted permissions, SSO policies and
+the authorized task. The optional private workspace projection below is one
+destination, not a grant of account-wide authority. Verify the permissions
+needed for the exact repository and task; this template supplies none.
 
 Account access does not grant blanket action authority. Use only approved
 scopes needed for the operator's authorized work; do not automatically request
@@ -82,7 +91,7 @@ integrator; never widen access to make a command succeed.
 
 ## Private Portable Workspace Repository
 
-The live Hermes workspace remains a non-Git ORCA folder project. Never initialize
+The live MINA workspace remains a non-Git native agent workspace. Never initialize
 Git there, place it inside another worktree, add it as a submodule, or mirror it
 wholesale. A private remote is not permission to copy private runtime state.
 
@@ -100,7 +109,7 @@ Prepare a separate projection directory outside the live workspace. Populate
 it from an exact accepted repository checkpoint, with an explicit reviewed
 file allowlist and source hashes. Initially allow only these source templates:
 
-- `.hermes/SOUL.md`, the sole personality source, as reviewed portable template
+- `SOUL.md`, the sole active personality source, as reviewed portable template
   text from the repository; never copy the live `.hermes` directory.
 - `AGENTS.md`, `WORKFLOW.md`, `OPERATING-POLICY.md`, `WORKSPACE-MAP.md`, `TOOLING.md`.
 - `protocols/README.md`, `protocols/BASECAMP.md`, `protocols/GITHUB.md`,
@@ -108,7 +117,7 @@ file allowlist and source hashes. Initially allow only these source templates:
   `protocols/MAC-COMPUTER-USE.md`, `protocols/EXTERNAL-MESSAGING.md`,
   `protocols/LOOM-ROUTING.md`, `protocols/PROJECT-DELEGATION.md`,
   `protocols/PROVENANCE-AND-MEMORY.md`, `protocols/PROVENANCE-RECONCILIATION.md`,
-  `protocols/SESSION-RETRIEVAL.md`,
+  `protocols/SESSION-RETRIEVAL.md`, `protocols/HERMES-RUNTIME.md`,
   `protocols/SKILL-CREATION-AND-PROMOTION.md`.
 - `handoffs/HANDOFF-TEMPLATE.md`, as an empty handoff form only.
 

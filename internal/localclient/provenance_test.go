@@ -193,6 +193,42 @@ func TestProvenanceClientHonorsCallerCancellation(t *testing.T) {
 	}
 }
 
+func TestProvenanceReviewClientReadContract(t *testing.T) {
+	calls := 0
+	checkpoint := provenance.ReviewCheckpoint{ObjectKind: "case", ObjectID: "22222222-2222-4222-8222-222222222222", ChangeToken: "0123456789abcdef0123456789abcdef"}
+	client := Client{BaseURL: "http://loom", client: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		q := req.URL.Query()
+		if req.Method != "GET" || req.URL.Path != "/v1/provenance/review" || q.Get("limit") != "10" || q.Get("domain") != "real" || q.Get("visibility") != "private" || len(q["exclude_domain"]) != 2 || req.Header.Get(idempotency.Header) != "" {
+			t.Fatalf("read=%s %s", req.Method, req.URL)
+		}
+		var reviewed []provenance.ReviewCheckpoint
+		if json.Unmarshal([]byte(q.Get("reviewed")), &reviewed) != nil || len(reviewed) != 1 || reviewed[0] != checkpoint {
+			t.Fatal("checkpoint changed")
+		}
+		deadline, ok := req.Context().Deadline()
+		if !ok || time.Until(deadline) > provenance.FoundationRequestTimeout {
+			t.Fatal("lost bounded timeout")
+		}
+		return okEnvelope(`{"schema_version":"1.0","as_of":"2026-10-12T00:00:00Z","items":[],"truncated":false}`), nil
+	})}}
+	request := provenance.ReviewRequest{Limit: 10, Domain: "real", Visibility: "private", ExcludeDomains: []string{"fixture", "fixture-two"}, Reviewed: []provenance.ReviewCheckpoint{checkpoint}}
+	result, err := client.WithIdempotencyKey("must-not-send").ListProvenanceReview(context.Background(), "corr_review", request)
+	if err != nil || !result.OK || result.Data.Truncated || result.Data.Items == nil || calls != 1 {
+		t.Fatalf("read=%#v %v", result, err)
+	}
+	request.Limit = 101
+	if _, err := client.ListProvenanceReview(context.Background(), "corr", request); err == nil || calls != 1 {
+		t.Fatal("invalid read reached transport")
+	}
+	for _, malformed := range []string{`{}`, `{"schema_version":"1.0","as_of":"2026-10-12T00:00:00Z","truncated":false}`, `{"schema_version":"1.0","as_of":"2026-10-12T00:00:00Z","items":[],"truncated":true}`} {
+		client.client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) { return okEnvelope(malformed), nil })
+		if _, err := client.ListProvenanceReview(context.Background(), "corr", provenance.ReviewRequest{Limit: 10}); err == nil {
+			t.Fatalf("incomplete response became no-work: %s", malformed)
+		}
+	}
+}
+
 func TestProvenanceExactSourcesClientContract(t *testing.T) {
 	const id provenance.SemanticID = "22222222-2222-4222-8222-222222222222"
 	for _, kind := range []string{"candidate", "record"} {

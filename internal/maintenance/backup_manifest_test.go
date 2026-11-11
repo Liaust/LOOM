@@ -15,9 +15,38 @@ import (
 
 	"loom.local/loom/internal/backupstrategy"
 	"loom.local/loom/internal/ids"
+	"loom.local/loom/internal/restoreauthority"
 	"loom.local/loom/internal/storagearchive"
 	"loom.local/loom/internal/watchedroots"
 )
+
+func TestReadBackupManifestPGSearchMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "manifest.json")
+	manifest := BackupManifest{Schema: BackupManifestSchemaV09, BackupKind: "loom_main_state"}
+	for _, version := range []string{"", restoreauthority.PGSearchVersion, "0.26.0"} {
+		manifest.Database.Extensions = nil
+		if version != "" {
+			manifest.Database.Extensions = []restoreauthority.ExtensionRequirement{{Name: "pg_search", Version: version}}
+		}
+		writeJSON(t, path, manifest)
+		read, err := ReadBackupManifest(path)
+		if version == "0.26.0" {
+			if err == nil {
+				t.Fatal("unsupported extension version accepted")
+			}
+		} else if err != nil || len(read.Database.Extensions) != len(manifest.Database.Extensions) {
+			t.Fatalf("extension metadata read=%#v err=%v", read.Database.Extensions, err)
+		}
+	}
+	manifest.Database.Extensions = nil
+	manifest.Provenance = &BackupManifestProvenance{Database: BackupManifestDatabase{
+		Extensions: []restoreauthority.ExtensionRequirement{{Name: "pg_search", Version: restoreauthority.PGSearchVersion}},
+	}}
+	writeJSON(t, path, manifest)
+	if _, err := ReadBackupManifest(path); err == nil {
+		t.Fatal("Provenance extension provisioning accepted")
+	}
+}
 
 func TestVerifyOperationalBackupPackageAdaptsExactVerifiedPackage(t *testing.T) {
 	packageResult, secret := validOperationalPackageForMaintenance(t, 61)

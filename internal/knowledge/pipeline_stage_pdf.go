@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"loom.local/loom/internal/ids"
 )
@@ -18,18 +20,25 @@ func (s *Service) PreparePDFPageAnalysis(ctx context.Context, item PipelineWorkI
 	if pipelineFileFamily(item.Object) != "pdf" {
 		return nil, fmt.Errorf("%w: PDF page analysis requires a PDF object", ErrInvalid)
 	}
-	object, cleanup, err := s.preparePathBackedExtractionObject(ctx, item.Object, maxBytes)
-	if err != nil {
-		return nil, err
-	}
-	defer cleanup()
-	pages, err := AnalyzePDFPages(ctx, nil, object.SourcePath, 24)
-	if err != nil {
-		return nil, err
-	}
 	version, err := s.store.getKnowledgeObjectVersion(ctx, item.Run.KnowledgeObjectVersionID)
 	if err != nil {
 		return nil, err
+	}
+	artifacts, err := s.store.ListDerivedArtifacts(ctx, item.Run.KnowledgePipelineRunID, true)
+	if err != nil {
+		return nil, err
+	}
+	pages, reused := nativePDFPagesForAnalysis(item, version, artifacts)
+	if !reused {
+		object, cleanup, err := s.preparePathBackedExtractionObject(ctx, item.Object, maxBytes)
+		if err != nil {
+			return nil, err
+		}
+		defer cleanup()
+		pages, err = AnalyzePDFPages(ctx, nil, object.SourcePath, 24)
+		if err != nil {
+			return nil, err
+		}
 	}
 	ocrStage, err := s.store.getCurrentPipelineStage(ctx, item.Run.KnowledgePipelineRunID, FilePipelineStagePDFOCR)
 	if err != nil {
@@ -38,7 +47,7 @@ func (s *Service) PreparePDFPageAnalysis(ctx context.Context, item PipelineWorkI
 	selected := 0
 	for _, page := range pages {
 		if page.UsefulEmbeddedText {
-			if strings.TrimSpace(page.Text) != "" {
+			if !reused && strings.TrimSpace(page.Text) != "" {
 				if _, err := s.createAndActivatePipelineArtifact(ctx, item, version, DerivedArtifactInput{ArtifactKind: ArtifactKindEmbeddedText, SourceLocator: fmt.Sprintf("page:%d", page.Number), Text: page.Text, GeneratorKey: ExtractorKeyPDF, GeneratorVersion: ExtractorVersionPDF, Metadata: map[string]any{"page_number": page.Number, "analysis_version": PDFPageAnalysisVersion}}); err != nil {
 					return nil, err
 				}
@@ -93,6 +102,12 @@ func (s Store) listReadyPDFOCRUnits(ctx context.Context, item PipelineWorkItem, 
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].PageNumber != nil && result[j].PageNumber != nil {
+			return *result[i].PageNumber < *result[j].PageNumber
+		}
+		return result[i].UnitKey < result[j].UnitKey
+	})
 	return result, nil
 }
 
@@ -175,6 +190,8 @@ func (handler PDFOCRStageHandler) Execute(ctx context.Context, item PipelineWork
 	if err != nil {
 		return HeavyStageObservation{}, nil, err
 	}
+	started := handler.Service.currentTime()
+	completed := 0
 	var inputBytes int64
 	for _, unit := range units {
 		recordFailure := func(cause error) error {
@@ -184,7 +201,13 @@ func (handler PDFOCRStageHandler) Execute(ctx context.Context, item PipelineWork
 				status = PipelineStageStatusFailedRetryable
 			}
 			failure, _ := json.Marshal(map[string]any{"code": knowledgeProcessingErrorCode(cause), "retryable": retryable})
-			if cleanupErr := handler.Service.store.cleanupPDFOCRBatch(ctx, item, unit.KnowledgePipelineStageUnitID, status, failure); cleanupErr != nil {
+			cleanupCtx := ctx
+			if ctx.Err() != nil {
+				var cancel context.CancelFunc
+				cleanupCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+				defer cancel()
+			}
+			if cleanupErr := handler.Service.store.cleanupPDFOCRBatch(cleanupCtx, item, unit.KnowledgePipelineStageUnitID, status, failure); cleanupErr != nil {
 				return fmt.Errorf("%w (cleanup PDF OCR batch: %v)", cause, cleanupErr)
 			}
 			return cause
@@ -228,6 +251,10 @@ func (handler PDFOCRStageHandler) Execute(ctx context.Context, item PipelineWork
 		if err = requireOneRow(result, "PDF OCR unit completion fence is stale"); err != nil {
 			return HeavyStageObservation{}, nil, recordFailure(err)
 		}
+		completed++
+		if policy.TurnExpired(started, handler.Service.currentTime(), completed) {
+			break
+		}
 	}
 	var remaining int
 	if err := handler.Service.store.db.QueryRowContext(ctx, `SELECT count(*) FROM knowledge.pipeline_stage_units WHERE knowledge_pipeline_stage_run_id=$1 AND status IN ('planned','ready','failed_retryable','processing')`, item.Stage.KnowledgePipelineStageRunID).Scan(&remaining); err != nil {
@@ -237,7 +264,7 @@ func (handler PDFOCRStageHandler) Execute(ctx context.Context, item PipelineWork
 	if remaining > 0 {
 		warnings = []string{heavyStageMoreUnits}
 	}
-	return observedHeavy(policy, len(units), inputBytes), warnings, nil
+	return observedHeavy(policy, completed, inputBytes), warnings, nil
 }
 
 func observedHeavy(policy HeavyResourcePolicy, units int, bytes int64) HeavyStageObservation {
@@ -276,4 +303,50 @@ func scanPipelineStageUnit(scanner interface{ Scan(...any) error }) (PipelineSta
 	unit.StartedAt = nullTimePtr(started)
 	unit.CompletedAt = nullTimePtr(completed)
 	return unit, nil
+}
+
+// Reuse only complete native artifacts from this exact bounded trajectory.
+// Missing/mismatched provenance falls back to the original parser; no cross-run
+// cache is introduced. Blank pages are known from pdfinfo's saved page count.
+func nativePDFPagesForAnalysis(item PipelineWorkItem, version KnowledgeObjectVersion, artifacts []DerivedArtifact) ([]PDFPage, bool) {
+	if !effectiveCheapPipelinePlan(item.Run.PlanSnapshot) || item.Run.SourceHash == "" || version.SourceHash != item.Run.SourceHash || version.SourceRevision != item.Run.SourceRevision {
+		return nil, false
+	}
+	m := jsonObject(version.Metadata)
+	if m["extractor_key"] != ExtractorKeyPDF || m["extractor_version"] != ExtractorVersionPDFNative || (m["extraction_status"] != ExtractionStatusExtracted && m["extraction_status"] != ExtractionStatusNoEmbeddedText) {
+		return nil, false
+	}
+	extracted, _ := m["extraction_metadata"].(map[string]any)
+	count := intMapValue(extracted, "page_count")
+	if count <= 0 || count > DefaultPDFMaxPages {
+		return nil, false
+	}
+	pages := make([]PDFPage, count)
+	for i := range pages {
+		pages[i].Number = i + 1
+	}
+	seen := map[int]bool{}
+	for _, artifact := range artifacts {
+		if artifact.ArtifactKind != ArtifactKindEmbeddedText {
+			continue
+		}
+		if artifact.KnowledgePipelineRunID != item.Run.KnowledgePipelineRunID || artifact.KnowledgeObjectVersionID != version.KnowledgeObjectVersionID || artifact.Generation != item.Run.Generation || artifact.GeneratorKey != ExtractorKeyPDF || artifact.GeneratorVersion != ExtractorVersionPDFNative || artifact.TextContent == nil || hashArtifactValue(*artifact.TextContent) != artifact.ContentHash {
+			return nil, false
+		}
+		page := intMapValue(jsonObject(artifact.Metadata), "page_number")
+		if page < 1 || page > count || seen[page] || artifact.SourceLocator != fmt.Sprintf("page:%d", page) {
+			return nil, false
+		}
+		seen[page] = true
+		pages[page-1].Text = *artifact.TextContent
+		pages[page-1].UsefulEmbeddedText = AnalyzePDFPageText(*artifact.TextContent, 24)
+	}
+	expected := intMapValue(m, "text_section_count")
+	if m["extraction_status"] == ExtractionStatusNoEmbeddedText {
+		expected = 0
+	}
+	if len(seen) != expected {
+		return nil, false
+	}
+	return pages, true
 }

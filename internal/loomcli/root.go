@@ -22,6 +22,8 @@ import (
 )
 
 type options struct {
+	boxRef        string
+	allBoxes      bool
 	configFile    string
 	socketPath    string
 	correlationID string
@@ -59,6 +61,8 @@ func newRootCommand(opts *options) *cobra.Command {
 	cmd.Flags().BoolVar(&versionFlag, "version", false, "print CLI version")
 	cmd.PersistentFlags().StringVar(&opts.configFile, "config", "", "path to LOOM config file")
 	cmd.PersistentFlags().StringVar(&opts.socketPath, "socket", "", "Unix socket path")
+	cmd.PersistentFlags().StringVar(&opts.boxRef, "box", "", "workspace Box key or ID (otherwise the bound profile default)")
+	cmd.PersistentFlags().BoolVar(&opts.allBoxes, "all-boxes", false, "explicitly include every Box in supported discovery")
 	cmd.PersistentFlags().StringVar(&opts.correlationID, "correlation-id", "", "request correlation id")
 	cmd.PersistentFlags().BoolVar(&opts.jsonOutput, "json", false, "print machine-readable JSON")
 	cmd.PersistentFlags().BoolVar(&opts.plainOutput, "plain", false, "print plain script-friendly output where supported")
@@ -84,6 +88,7 @@ func newRootCommand(opts *options) *cobra.Command {
 	cmd.AddCommand(newObjectCommand(opts))
 	cmd.AddCommand(newSearchCommand(opts))
 	cmd.AddCommand(newStorageCommand(opts))
+	cmd.AddCommand(newFilesCommand(opts))
 	cmd.AddCommand(newNotesCommand(opts))
 	cmd.AddCommand(newProvenanceCommand(opts))
 	cmd.AddCommand(newIndexCommand(opts))
@@ -270,6 +275,11 @@ func renderError(cmd *cobra.Command, opts *options, correlationID string, err er
 			correlationID = requestErr.CorrelationID(correlationID)
 			err = requestErr.LoomError()
 			envelope = requestErr.Envelope
+		} else {
+			var failure *loomerrors.Error
+			if errors.As(err, &failure) {
+				err = failure
+			}
 		}
 		if opts.jsonOutput {
 			if envelope.Error.Code == "" {

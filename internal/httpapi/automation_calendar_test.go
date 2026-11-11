@@ -17,3 +17,14 @@ func TestCalendarScheduleHTTPRejectsUnknownOrMalformedInput(t *testing.T) {
 		}
 	}
 }
+
+func TestScheduleTimingHTTPRejectsUnknownAndTrailingInput(t *testing.T) {
+	for _, body := range []string{`{"cron":"0 5 * * 1","run_as_actor":"another"}`, `{"cron":42}`, `{} {}`, `{"cron":`} {
+		req := httptest.NewRequest("POST", "/v1/schedules/existing/timing", strings.NewReader(body))
+		out := httptest.NewRecorder()
+		NewServer(Services{}, slog.Default()).handleSchedule(out, req)
+		if out.Code != 400 || !strings.Contains(out.Body.String(), "request.invalid_json") {
+			t.Fatalf("invalid contract got %d %s", out.Code, out.Body.String())
+		}
+	}
+}

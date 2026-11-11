@@ -2,6 +2,7 @@ package knowledge
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -11,6 +12,27 @@ import (
 
 	"loom.local/loom/internal/notesprojection"
 )
+
+func TestProjectionDeclaredPathExcluded(t *testing.T) {
+	for _, tc := range []struct {
+		name, metadata string
+		want           bool
+	}{
+		{"included", `{"registration_metadata":{"knowledge_source":{"include":["**/*.md"],"exclude":[]}}}`, false},
+		{"explicit_exclude", `{"registration_metadata":{"knowledge_source":{"include":["**/*.md"],"exclude":["historical/**"]}}}`, true},
+		{"outside_include", `{"registration_metadata":{"knowledge_source":{"include":["current/**"],"exclude":[]}}}`, true},
+		{"absent", `{}`, false},
+		{"empty_include", `{"registration_metadata":{"knowledge_source":{"include":[],"exclude":["**"]}}}`, false},
+		{"malformed_include", `{"registration_metadata":{"knowledge_source":{"include":true,"exclude":["**"]}}}`, false},
+		{"malformed_exclude", `{"registration_metadata":{"knowledge_source":{"include":["**"],"exclude":[17]}}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := projectionDeclaredPathExcluded(json.RawMessage(tc.metadata), "historical/source.md"); got != tc.want {
+				t.Fatalf("excluded=%t want=%t", got, tc.want)
+			}
+		})
+	}
+}
 
 func projectionTestSources(n int) []notesprojection.SourceObject {
 	sources := make([]notesprojection.SourceObject, n)

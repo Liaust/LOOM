@@ -1063,7 +1063,7 @@ func applicationSystemEndpointRequiresNodeDispatch(target plannedTarget) bool {
 		return false
 	}
 	valid := false
-	for _, op := range []string{"inspect", "apply", "retire", "prerequisites"} {
+	for _, op := range []string{"inspect", "apply", "retire", "prerequisites", "browse", "action"} {
 		valid = valid || target.EndpointName == "project.application."+op
 	}
 	if !valid {

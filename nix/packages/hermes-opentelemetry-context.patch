@@ -1,0 +1,28 @@
+--- a/opentelemetry/util/_importlib_metadata.py
++++ b/opentelemetry/util/_importlib_metadata.py
+@@ -13,6 +13,7 @@
+ # limitations under the License.
+ 
+ from functools import cache
++from importlib.metadata import entry_points as current_entry_points
+ 
+ # FIXME: Use importlib.metadata (not importlib_metadata)
+ # when support for 3.11 is dropped if the rest of
+@@ -40,7 +41,16 @@
+     """Replacement for importlib_metadata.entry_points that caches getting all the entry points.
+ 
+     That part can be very slow, and OTel uses this function many times."""
+-    return _original_entry_points_cached().select(**params)
++    selected = _original_entry_points_cached().select(**params)
++    if selected:
++        return selected
++    # A long-lived host may have cached a partial/empty discovery snapshot.
++    # Re-read real installed metadata on misses, including custom providers.
++    # Do not fabricate registrations or replace a valid cached provider.
++    selected = current_entry_points(**params)
++    if selected:
++        _original_entry_points_cached.cache_clear()
++    return selected
+ 
+ 
+ __all__ = [

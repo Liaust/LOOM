@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -628,6 +629,8 @@ func newProjectCommand(opts *options) *cobra.Command {
 		Use:     "project",
 		Aliases: []string{"projects"},
 		Short:   "Create and inspect LOOM projects",
+		Long: "Use create for a minimal project, context for orientation, and plan/apply/status " +
+			"when asking LOOM to manage declared resources. Ordinary source edits need no LOOM operation.",
 	}
 
 	createOpts := struct {
@@ -750,8 +753,27 @@ func newProjectCommand(opts *options) *cobra.Command {
 
 	addProjectContractCommands(cmd, opts)
 	addProjectRepositoryCommands(cmd, opts)
+	groupProjectCommands(cmd)
 
 	return cmd
+}
+
+func groupProjectCommands(cmd *cobra.Command) {
+	cmd.AddGroup(
+		&cobra.Group{ID: "routine", Title: "Routine Project Work:"},
+		&cobra.Group{ID: "details", Title: "Details And Recovery:"},
+		&cobra.Group{ID: "compatibility", Title: "Administration And Compatibility:"},
+	)
+	for _, child := range cmd.Commands() {
+		switch child.Name() {
+		case "create", "list", "context", "plan", "apply", "status", "archive", "restore":
+			child.GroupID = "routine"
+		case "inspect", "validate", "diff", "doctor", "operation", "repo", "workflows", "sync-status", "backup-status", "export":
+			child.GroupID = "details"
+		default:
+			child.GroupID = "compatibility"
+		}
+	}
 }
 
 func newObjectCommand(opts *options) *cobra.Command {
@@ -1289,7 +1311,8 @@ func newJobCommand(opts *options) *cobra.Command {
 		Use:   "job",
 		Short: "Inspect LOOM jobs",
 	}
-	cmd.AddCommand(&cobra.Command{
+	var summary bool
+	inspectCmd := &cobra.Command{
 		Use:   "inspect <job-id>",
 		Short: "Inspect a job and its attempts, outputs, logs, and artifacts",
 		Args:  cobra.ExactArgs(1),
@@ -1308,13 +1331,22 @@ func newJobCommand(opts *options) *cobra.Command {
 				return renderError(cmd, opts, correlationID, loomerrors.Wrap("transport.unavailable", "runtime", cfg.SocketPath, "Could not inspect job.", err))
 			}
 			if opts.jsonOutput {
+				if summary {
+					return json.NewEncoder(cmd.OutOrStdout()).Encode(response.Envelope[jobSummary]{OK: envelope.OK, Data: summarizeJob(envelope.Data), Meta: envelope.Meta})
+				}
 				return json.NewEncoder(cmd.OutOrStdout()).Encode(envelope)
 			}
-			renderJobDetail(cmd, envelope.Data)
+			if summary {
+				renderJobSummary(cmd, summarizeJob(envelope.Data))
+			} else {
+				renderJobDetail(cmd, envelope.Data)
+			}
 			renderResponseMeta(cmd, opts, envelope.Meta)
 			return nil
 		},
-	})
+	}
+	inspectCmd.Flags().BoolVar(&summary, "summary", false, "show current result, question and exact read commands without retained history")
+	cmd.AddCommand(inspectCmd)
 
 	logOpts := struct {
 		stream string
@@ -1323,9 +1355,19 @@ func newJobCommand(opts *options) *cobra.Command {
 	logCmd := &cobra.Command{
 		Use:   "logs <job-id>",
 		Short: "Show captured job logs",
+		Long:  "Show captured log tails, not necessarily the complete stored logs. Byte counts describe the original captured streams, not the displayed tail. JSON returns all captured streams unless --stream is explicit; --tail limits only the displayed text.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			correlationID := correlation.Normalize(opts.correlationID)
+			logOpts.stream = strings.TrimSpace(logOpts.stream)
+			switch logOpts.stream {
+			case "stdout", "stderr", "runner", "all":
+			default:
+				return renderError(cmd, opts, correlationID, loomerrors.Wrap("job.logs_invalid", "jobs", args[0], "Log stream must be stdout, stderr, runner, or all.", nil))
+			}
+			if logOpts.tail < 0 {
+				return renderError(cmd, opts, correlationID, loomerrors.Wrap("job.logs_invalid", "jobs", args[0], "Log tail must be zero (all captured text) or a positive line count.", nil))
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 
@@ -1339,15 +1381,25 @@ func newJobCommand(opts *options) *cobra.Command {
 				return renderError(cmd, opts, correlationID, loomerrors.Wrap("transport.unavailable", "runtime", cfg.SocketPath, "Could not read job logs.", err))
 			}
 			if opts.jsonOutput {
+				stream := "all"
+				if cmd.Flags().Changed("stream") {
+					stream = logOpts.stream
+				}
+				if cmd.Flags().Changed("stream") || cmd.Flags().Changed("tail") {
+					envelope.Data = selectJobLogText(envelope.Data, stream, logOpts.tail)
+				}
 				return json.NewEncoder(cmd.OutOrStdout()).Encode(envelope)
 			}
 			renderJobLogs(cmd, envelope.Data, logOpts.stream, logOpts.tail)
+			if !cmd.Flags().Changed("stream") {
+				renderAvailableJobLogStreams(cmd, args[0], envelope.Data)
+			}
 			renderResponseMeta(cmd, opts, envelope.Meta)
 			return nil
 		},
 	}
 	logCmd.Flags().StringVar(&logOpts.stream, "stream", "stdout", "log stream to print: stdout, stderr, runner, or all")
-	logCmd.Flags().IntVar(&logOpts.tail, "tail", 0, "only print the last N lines from each selected stream")
+	logCmd.Flags().IntVar(&logOpts.tail, "tail", 0, "last N lines of each captured tail; zero keeps captured text, byte_count remains the captured total")
 	cmd.AddCommand(logCmd)
 
 	cmd.AddCommand(&cobra.Command{
@@ -1857,6 +1909,55 @@ func newArtifactCommand(opts *options) *cobra.Command {
 			return nil
 		},
 	})
+	var maxBytes int
+	var output string
+	read := &cobra.Command{Use: "read <artifact-id>", Short: "Read verified retained content; --output downloads exact bytes", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		cid := correlation.Normalize(opts.correlationID)
+		ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+		defer cancel()
+		cfg, client, err := commandClient(opts)
+		if err != nil {
+			return renderError(cmd, opts, cid, loomerrors.Wrap("config.invalid", "runtime", "config", "Configuration is invalid.", err))
+		}
+		env, err := client.ReadArtifact(ctx, cid, args[0], maxBytes, output != "")
+		if err != nil {
+			return renderError(cmd, opts, cid, loomerrors.Wrap("artifact.read_failed", "artifacts", cfg.SocketPath, "Could not read artifact.", err))
+		}
+		if output != "" {
+			file, err := os.OpenFile(output, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+			if err != nil {
+				return err
+			}
+			_, writeErr := file.Write(env.Data.Payload)
+			closeErr := file.Close()
+			if writeErr != nil {
+				return writeErr
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+			if opts.jsonOutput {
+				env.Data.Payload = nil
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(struct {
+					artifacts.ReadResult
+					Output string `json:"output"`
+				}{env.Data, output})
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Downloaded %d bytes to %s\n", len(env.Data.Payload), output)
+			return nil
+		}
+		if opts.jsonOutput {
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(env.Data)
+		}
+		fmt.Fprint(cmd.OutOrStdout(), env.Data.Content)
+		if env.Data.Truncated {
+			fmt.Fprintln(cmd.ErrOrStderr(), "\nContent truncated; use --max-bytes or --output for the complete artifact.")
+		}
+		return nil
+	}}
+	read.Flags().IntVar(&maxBytes, "max-bytes", artifacts.DefaultTextBytes, "maximum text bytes returned")
+	read.Flags().StringVar(&output, "output", "", "download exact bytes to a new local file")
+	cmd.AddCommand(read)
 	return cmd
 }
 
@@ -2143,7 +2244,18 @@ func renderObjectDetail(cmd *cobra.Command, detail objects.ObjectDetail) {
 	}
 	if detail.File != nil {
 		fmt.Fprintf(cmd.OutOrStdout(), "File: %s\n", detail.File.LogicalName)
-		fmt.Fprintf(cmd.OutOrStdout(), "Text extractable: %t\n", detail.File.TextExtractable)
+		fmt.Fprintf(cmd.OutOrStdout(), "Direct text-ingest support: %t (Objects; not Notes extraction availability)\n", detail.File.TextExtractable)
+		if strings.EqualFold(ptrOrDash(detail.File.MimeType), "application/pdf") || strings.EqualFold(ptrOrDash(detail.File.Extension), ".pdf") || strings.EqualFold(ptrOrDash(detail.File.Extension), "pdf") {
+			ref := ptrOrDash(detail.File.ManagedSourcePath)
+			if ref == "-" {
+				ref = ptrOrDash(detail.File.SourcePath)
+			}
+			command := "loom notes read --help"
+			if ref != "-" && declarationSelector(ref) && declarationSafeCommand("loom notes read "+quoteDeclarationArg(ref)) {
+				command = "loom notes read " + quoteDeclarationArg(ref)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Notes published extraction (availability not checked): %s\n", command)
+		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Index policy: %s\n", detail.File.IndexPolicy)
 	}
 	for _, link := range detail.ScopeLinks {
@@ -2431,6 +2543,9 @@ func renderJobDetail(cmd *cobra.Command, detail jobs.JobDetail) {
 	fmt.Fprintf(cmd.OutOrStdout(), "Source object: %s\n", ptrOrDash(job.SourceObjectID))
 	fmt.Fprintf(cmd.OutOrStdout(), "Workdir: %s\n", ptrOrDash(job.WorkdirPath))
 	fmt.Fprintf(cmd.OutOrStdout(), "Attempts: %d/%d\n", job.AttemptCount, job.MaxAttempts)
+	if job.MaxAttempts > 0 && job.AttemptCount > job.MaxAttempts {
+		fmt.Fprintln(cmd.OutOrStdout(), "Attempt budget: executed attempts exceed the automatic limit; this does not permit further automatic retries.")
+	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Created: %s\n", job.CreatedAt.UTC().Format(time.RFC3339))
 	fmt.Fprintf(cmd.OutOrStdout(), "Started: %s\n", timePtrOrDash(job.StartedAt))
 	fmt.Fprintf(cmd.OutOrStdout(), "Completed: %s\n", timePtrOrDash(job.CompletedAt))
@@ -2527,19 +2642,45 @@ func renderJobLogs(cmd *cobra.Command, logs []jobs.JobLog, stream string, tail i
 	if stream == "" {
 		stream = "stdout"
 	}
-	for _, log := range logs {
-		if stream != "all" && log.Stream != stream {
-			continue
-		}
+	for _, log := range selectJobLogText(logs, stream, tail) {
 		fmt.Fprintf(cmd.OutOrStdout(), "== %s (%d bytes) ==\n", log.Stream, log.ByteCount)
 		text := log.TailText
-		if tail > 0 {
-			text = lastLines(text, tail)
-		}
 		if !strings.HasSuffix(text, "\n") && text != "" {
 			text += "\n"
 		}
 		fmt.Fprint(cmd.OutOrStdout(), text)
+	}
+}
+
+func selectJobLogText(logs []jobs.JobLog, stream string, tail int) []jobs.JobLog {
+	selected := make([]jobs.JobLog, 0, len(logs))
+	for _, log := range logs {
+		if stream != "all" && log.Stream != stream {
+			continue
+		}
+		if tail > 0 {
+			log.TailText = lastLines(log.TailText, tail)
+		}
+		selected = append(selected, log)
+	}
+	return selected
+}
+
+func renderAvailableJobLogStreams(cmd *cobra.Command, jobID string, logs []jobs.JobLog) {
+	available := map[string]bool{}
+	for _, log := range logs {
+		if log.TailText != "" {
+			available[log.Stream] = true
+		}
+	}
+	if available["stdout"] || !declarationSelector(jobID) {
+		return
+	}
+	for _, stream := range []string{"runner", "stderr"} {
+		command := "loom job logs " + quoteDeclarationArg(jobID) + " --stream " + stream + " --tail 40"
+		if available[stream] && declarationSafeCommand(command) {
+			fmt.Fprintf(cmd.OutOrStdout(), "stdout has no captured text; %s text available: %s\n", stream, command)
+		}
 	}
 }
 
@@ -2611,6 +2752,7 @@ func renderArtifactDetail(cmd *cobra.Command, detail artifacts.ArtifactDetail) {
 	fmt.Fprintf(cmd.OutOrStdout(), "MIME: %s\n", ptrOrDash(artifact.MimeType))
 	fmt.Fprintf(cmd.OutOrStdout(), "Size: %s\n", int64PtrOrDash(artifact.SizeBytes))
 	fmt.Fprintf(cmd.OutOrStdout(), "Created: %s\n", artifact.CreatedAt.UTC().Format(time.RFC3339))
+	fmt.Fprintf(cmd.OutOrStdout(), "Read content: loom artifact read %s\nStorage paths are service-private.\n", artifact.ArtifactID)
 	if detail.Object.Object.ObjectID != "" {
 		fmt.Fprintln(cmd.OutOrStdout(), "")
 		renderObjectDetail(cmd, detail.Object)

@@ -25,6 +25,8 @@ type ProjectPhysicalArchiveInspection struct {
 	EvidenceStatus     string                          `json:"evidence_status"`
 	NextAction         string                          `json:"next_action"`
 	Workspace          *WorkspaceMoveInspectionSummary `json:"workspace,omitempty"`
+	CurrentPayload     *WorkspacePathRef               `json:"current_payload,omitempty"`
+	RelocationID       string                          `json:"relocation_id,omitempty"`
 }
 
 type projectWorkspaceInspector interface {
@@ -128,6 +130,9 @@ func (s ProjectRuntimeService) inspectProjectPhysicalArchive(ctx context.Context
 	wantActor, wantSource, wantDestination := state.ActorID, state.ActivePath, state.ArchivePath
 	if state.Restore != nil {
 		wantActor, wantSource, wantDestination = state.Restore.Request.ActorID, state.ArchivePath, state.ActivePath
+		if inspection.Plan.Placement != nil {
+			wantSource = inspection.Plan.Source.Path.AbsolutePath
+		}
 	}
 	if ValidateWorkspaceArchiveOperation(op) != nil || op.OperationID != wantOperation || op.OperationKind != wantKind ||
 		op.PlanDigest != wantPlan || op.ObjectID != state.ProjectID || op.Kind != WorkspaceKindProject || op.Slug != state.ProjectSlug ||
@@ -141,6 +146,8 @@ func (s ProjectRuntimeService) inspectProjectPhysicalArchive(ctx context.Context
 	}
 	summary := NewWorkspaceMoveInspectionSummary(inspection)
 	result.Workspace = &summary
+	result.CurrentPayload = inspection.CurrentPayload
+	result.RelocationID = inspection.RelocationID
 	result.EvidenceStatus = "pending"
 	if completedAt == nil {
 		return result

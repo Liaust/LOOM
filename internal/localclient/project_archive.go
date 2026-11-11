@@ -10,9 +10,18 @@ import (
 	"net/url"
 
 	"loom.local/loom/internal/correlation"
+	"loom.local/loom/internal/projects"
 	"loom.local/loom/internal/response"
 	"loom.local/loom/internal/storagearchive"
 )
+
+func (c Client) ReviewProjectRegistrationRetirement(ctx context.Context, corr, ref string, input storagearchive.ProjectRetirementInput) (response.Envelope[storagearchive.ProjectRetirementPlan], error) {
+	return projectArchiveJSON[storagearchive.ProjectRetirementPlan](c, ctx, corr, ref, "retire-plan", input)
+}
+
+func (c Client) ApplyProjectRegistrationRetirement(ctx context.Context, corr, ref string, input storagearchive.ProjectRetirementApply) (response.Envelope[projects.Project], error) {
+	return projectArchiveJSON[projects.Project](c, ctx, corr, ref, "retire-apply", input)
+}
 
 func (c Client) ReviewProjectPhysicalArchive(ctx context.Context, corr, ref, reason string) (response.Envelope[storagearchive.ProjectPhysicalPlanReview], error) {
 	return projectArchiveJSON[storagearchive.ProjectPhysicalPlanReview](c, ctx, corr, ref, "plan", map[string]string{"reason": reason})
@@ -50,6 +59,7 @@ func projectArchiveJSON[T any](c Client, ctx context.Context, corr, ref, action 
 	if err != nil {
 		return envelope, errors.New("project archive transport unavailable")
 	}
+	c.applyBoxContext(req)
 	req.Header.Set(correlation.Header, correlation.Normalize(corr))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.client.Do(req)

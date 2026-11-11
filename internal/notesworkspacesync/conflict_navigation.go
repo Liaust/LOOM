@@ -300,9 +300,13 @@ func (r *Runtime) conflictService(ctx context.Context) (*Service, error) {
 	if r.Config.Validate() != nil || r.DB == nil || r.Knowledge == nil || r.NodeKey == "" {
 		return nil, ErrHeld
 	}
+	selections, _, err := r.enrollmentSelections(ctx)
+	if err != nil {
+		return nil, err
+	}
 	resolver := notesworkspace.KnowledgeResolver{Knowledge: r.Knowledge, NodeKey: r.NodeKey,
 		WithSelection: func(_ context.Context, id string, fn func(string) error) error {
-			for _, scope := range r.Config.Scopes {
+			for _, scope := range selections {
 				if scope.SourceCollection == id {
 					generation := scope.Generation
 					if scope.PathPrefix != "" {
@@ -313,14 +317,14 @@ func (r *Runtime) conflictService(ctx context.Context) (*Service, error) {
 			}
 			return notesworkspace.ErrMembership
 		}}
-	source := notesworkspace.Service{Store: notesworkspace.SQLStore{DB: r.DB}, Sources: selectedSources{PathResolver: resolver, Selections: r.Config.Scopes}}
+	source := notesworkspace.Service{Store: notesworkspace.SQLStore{DB: r.DB}, Sources: selectedSources{PathResolver: resolver, Selections: selections}}
 	s := &Service{Replica: r.Config.Replica, Store: SQLStore{DB: r.DB}, Source: NotesSource{Service: source}}
 	if err := r.DB.QueryRowContext(ctx, `SELECT native_epoch FROM notes_workspace.sync_replicas WHERE replica_id=$1`, s.Replica).Scan(&s.Epoch); err != nil {
 		return nil, err
 	}
-	for _, selection := range r.Config.Scopes {
+	for _, selection := range selections {
 		scope := selection.Scope
-		if err := source.Sources.WithSource(ctx, scope.SourceCollection, selection.AdmissionPath, func(src notesworkspace.Source) error { scope.Generation = src.Generation; return nil }); err == nil {
+		if err := resolver.WithDirectoryPaths(ctx, scope.SourceCollection, nil, func(src notesworkspace.Source) error { scope.Generation = src.Generation; return nil }); err == nil {
 			s.Scopes = append(s.Scopes, scope)
 		}
 	}

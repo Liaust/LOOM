@@ -111,7 +111,6 @@ class Endpoint:
         self.peer = Peer()
         self.deadline = time.monotonic() + HANDSHAKE
         self.generation = uuid.uuid4().hex
-        self.session = 'loom-' + uuid.uuid4().hex
         self.target = None
         self.tokens = {}
         self.epoch = None
@@ -148,7 +147,6 @@ class Endpoint:
         await self.peer.close()
         self.peer = Peer()
         self.generation = uuid.uuid4().hex
-        self.session = 'loom-' + uuid.uuid4().hex
         self.clear_target()
         self.declared, self.ready = False, False
         self.schemas = {}
@@ -190,10 +188,9 @@ class Endpoint:
         if not isinstance(args, dict):
             raise Fault('mac_policy_refused')
         properties = self.schemas.get(name, {}).get('properties', {})
-        # Hermes attaches a public label even to Cua's stateless window list.
-        # It is not authority and must not leak into that tool's strict schema.
-        stateless_listing = name == 'list_windows' and 'session' not in properties
-        if stateless_listing and 'session' in args:
+        # One MCP transport owns one implicit driver session. Public labels must
+        # not split stateful calls from strict sessionless tools such as listing.
+        if 'session' in args:
             if not isinstance(args['session'], str) or len(args['session']) > 65536:
                 raise Fault('mac_policy_refused')
             args = {key: value for key, value in args.items() if key != 'session'}
@@ -215,11 +212,39 @@ class Endpoint:
                 raise Fault('mac_policy_refused')
             if 'enum' in schema and value not in schema['enum']:
                 raise Fault('mac_policy_refused')
-        # Never accept a caller's session label as endpoint/agent authority.
-        out = dict(args)
-        if not stateless_listing:
-            out['session'] = self.session
-        return out
+        return dict(args)
+
+    async def session_call(self, name, request_id, deadline):
+        self.clear_target()
+        self.generation = uuid.uuid4().hex
+        result = await self.peer.exchange({'jsonrpc': '2.0', 'id': request_id,
+            'method': 'tools/call', 'params': {'name': name, 'arguments': {}}}, deadline)
+        value = result.get('result')
+        if not isinstance(value, dict) or value.get('isError') is True:
+            self.declared = False
+            raise Fault('mac_driver_unavailable')
+        structured = value.get('structuredContent') or {}
+        if not isinstance(structured, dict):
+            self.declared = False
+            raise Fault('mac_protocol_error', 'response', 'observed')
+        self.declared = name == 'start_session'
+        value['structuredContent'] = dict(structured, **metadata('mac_ok', 'driver', 'observed', self.generation))
+        return result
+
+    @staticmethod
+    def session_ended(result, name):
+        value = result.get('result', {})
+        if not isinstance(value, dict) or value.get('isError') is not True:
+            return False
+        structured = value.get('structuredContent') or {}
+        if isinstance(structured, dict) and structured.get('code') == 'session_ended':
+            return True
+        # Cua 0.26.1's daemon guard returns this exact rejection as text, not a
+        # structured session code. Never parse or reuse its private lease ID.
+        return any(isinstance(c, dict) and c.get('type') == 'text' and isinstance(c.get('text'), str)
+            and c['text'].startswith("session '")
+            and f"' has ended; tool call '{name}' was rejected." in c['text']
+            for c in value.get('content', []))
 
     async def handle(self, request):
         self.peer.sent = False
@@ -261,17 +286,9 @@ class Endpoint:
             raise Fault('mac_policy_refused')
         args = self.args(name, arguments)
         if name in {'start_session', 'end_session'}:
-            result = await self.peer.exchange(dict(request, params={'name': name, 'arguments': {'session': self.session}}), deadline)
-            if not isinstance(result.get('result'), dict) or result['result'].get('isError') is True:
-                raise Fault('mac_driver_unavailable')
-            self.declared = name == 'start_session'
-            return result
+            return await self.session_call(name, request['id'], deadline)
         if not self.declared:
-            declared = await self.peer.exchange({'jsonrpc': '2.0', 'id': 'loom-session-' + uuid.uuid4().hex,
-                'method': 'tools/call', 'params': {'name': 'start_session', 'arguments': {'session': self.session}}}, deadline)
-            if not isinstance(declared.get('result'), dict) or declared['result'].get('isError') is True:
-                raise Fault('mac_driver_unavailable')
-            self.declared = True
+            await self.session_call('start_session', 'loom-session-' + uuid.uuid4().hex, deadline)
         locked = False
         mutation = name in INPUTS
         try:
@@ -299,6 +316,13 @@ class Endpoint:
                 self.target, self.tokens, self.epoch = None, {}, None
             clean = dict(request, params={'name': name, 'arguments': args})
             result = await self.peer.exchange(clean, deadline)
+            if self.session_ended(result, name):
+                self.clear_target()
+                self.declared = False
+                if mutation:
+                    raise Fault('mac_target_stale', 'response', 'not_sent')
+                await self.session_call('start_session', 'loom-revive-' + uuid.uuid4().hex, deadline)
+                result = await self.peer.exchange(clean, deadline)
             try:
                 self.require_same_runtime()
             except Fault:

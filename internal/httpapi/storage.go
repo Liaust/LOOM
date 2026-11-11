@@ -295,6 +295,14 @@ func (s Server) handleLaneAccept(w http.ResponseWriter, r *http.Request) {
 	}
 	// Final custody is an installation contract, never a caller-selected path.
 	input = trustedLaneAcceptInput(input, s.services.RuntimeConfig.ImportsRoot, s.services.RuntimeConfig.DataDir)
+	if s.services.StorageCatalog.DB != nil {
+		release, err := storagecatalog.AcquireWorkspaceCustodyReader(ctx, s.services.StorageCatalog.DB)
+		if err != nil {
+			s.writeError(w, correlationID, http.StatusConflict, "storage.custody_busy", "storage", "lane", "Retained custody is being moved; keep this batch and inspect the exact move before retrying.", err)
+			return
+		}
+		defer release()
+	}
 	result, err := lane.Accept(ctx, s.services.StorageCatalog, input)
 	if err != nil {
 		code := laneAcceptErrorCode(err)

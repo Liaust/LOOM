@@ -14,6 +14,7 @@ import (
 
 	"loom.local/loom/internal/backupcontracts"
 	"loom.local/loom/internal/filesystemconnector"
+	"loom.local/loom/internal/ids"
 	noderuntime "loom.local/loom/internal/nodeagent/runtime"
 	"loom.local/loom/internal/nodeagent/watchedroots"
 	"loom.local/loom/internal/projectcontracts"
@@ -769,7 +770,7 @@ func TestWatchedRootsRunQueuesSelectedFileSyncOutputs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LocalSyncStatus failed: %v", err)
 	}
-	if status.Counts.Objects != 1 || status.Counts.Pending != 1 {
+	if status.Counts.Objects != 1 || status.Counts.Pending != 2 {
 		t.Fatalf("expected one pending local sync object, got %#v", status.Counts)
 	}
 	pathState, err := watchedroots.NewStore(store.DataDir).LoadPathState("notes", "Project.md")
@@ -799,11 +800,18 @@ func TestWatchedRootsRunQueuesSelectedFileSyncOutputs(t *testing.T) {
 		runEnvelope.Data.OutputPlan.Counts.AlreadyCurrent != 1 {
 		t.Fatalf("expected already-current output plan, got %#v", runEnvelope.Data.OutputPlan)
 	}
+	var idleEnvelope response.Envelope[watchedroots.ScanResult]
+	if err := json.Unmarshal(runOut.Bytes(), &idleEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if idleEnvelope.Data.Persistence != nil {
+		t.Fatal("unchanged root decoded mutable queue state instead of using detached status")
+	}
 	status, err = store.LocalSyncStatus(config, state)
 	if err != nil {
 		t.Fatalf("LocalSyncStatus second failed: %v", err)
 	}
-	if status.Counts.Objects != 1 || status.Counts.Pending != 1 {
+	if status.Counts.Objects != 1 || status.Counts.Pending != 2 {
 		t.Fatalf("expected no duplicate local sync object, got %#v", status.Counts)
 	}
 	previousObjectID := pathState.LocalObjectID
@@ -824,15 +832,15 @@ func TestWatchedRootsRunQueuesSelectedFileSyncOutputs(t *testing.T) {
 	}
 	if runEnvelope.Data.OutputPlan == nil ||
 		runEnvelope.Data.OutputPlan.Counts.SyncObjects != 1 ||
-		runEnvelope.Data.OutputPlan.Actions[0].LocalObjectID != previousObjectID ||
-		runEnvelope.Data.OutputPlan.Actions[0].LocalVersionID == previousVersionID {
+		runEnvelope.Data.OutputPlan.Actions[1].LocalObjectID != previousObjectID ||
+		runEnvelope.Data.OutputPlan.Actions[1].LocalVersionID == previousVersionID {
 		t.Fatalf("expected changed file to reuse object and create a new version, got %#v", runEnvelope.Data.OutputPlan)
 	}
 	status, err = store.LocalSyncStatus(config, state)
 	if err != nil {
 		t.Fatalf("LocalSyncStatus changed failed: %v", err)
 	}
-	if status.Counts.Objects != 2 || status.Counts.Pending != 2 {
+	if status.Counts.Objects != 2 || status.Counts.Pending != 4 {
 		t.Fatalf("expected second pending local sync version, got %#v", status.Counts)
 	}
 	pathState, err = watchedroots.NewStore(store.DataDir).LoadPathState("notes", "Project.md")
@@ -860,14 +868,14 @@ func TestWatchedRootsRunQueuesSelectedFileSyncOutputs(t *testing.T) {
 	}
 	if runEnvelope.Data.OutputPlan == nil ||
 		runEnvelope.Data.OutputPlan.Counts.DeletionRequests != 1 ||
-		runEnvelope.Data.OutputPlan.Actions[0].ActionKind != watchedroots.OutputActionDeletionRequest {
+		runEnvelope.Data.OutputPlan.Actions[1].ActionKind != watchedroots.OutputActionDeletionRequest {
 		t.Fatalf("expected deletion request output, got %#v", runEnvelope.Data.OutputPlan)
 	}
 	status, err = store.LocalSyncStatus(config, state)
 	if err != nil {
 		t.Fatalf("LocalSyncStatus delete failed: %v", err)
 	}
-	if status.Counts.Deletions != 1 || status.Counts.Pending != 3 {
+	if status.Counts.Deletions != 1 || status.Counts.Pending != 6 {
 		t.Fatalf("expected pending deletion request, got %#v", status.Counts)
 	}
 	pathState, err = watchedroots.NewStore(store.DataDir).LoadPathState("notes", "Project.md")
@@ -1022,6 +1030,12 @@ func TestWatchedRootsRunQueuesBackupOutputsAndStatusCLI(t *testing.T) {
 }
 
 func TestWatchedRootsRunFlushesObjectsAndDeletionRequests(t *testing.T) {
+	testWatchedRootsRunFlushesObjectsAndDeletionRequests(t, false)
+}
+func TestQueueRecordsWatchedRootsFlushAndDelete(t *testing.T) {
+	testWatchedRootsRunFlushesObjectsAndDeletionRequests(t, true)
+}
+func testWatchedRootsRunFlushesObjectsAndDeletionRequests(t *testing.T, records bool) {
 	t.Parallel()
 	dir := t.TempDir()
 	vault := filepath.Join(dir, "vault")
@@ -1035,9 +1049,26 @@ func TestWatchedRootsRunFlushesObjectsAndDeletionRequests(t *testing.T) {
 	var uploads []loomsync.SyncedObjectInput
 	var deletions []loomsync.DeletionRequestInput
 	var reports []map[string]any
+	mainObjectID := ids.NewObjectID()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		now := time.Now().UTC()
 		switch r.URL.Path {
+		case "/v1/node-agent/sync/batches":
+			var input loomsync.PushBatchInput
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Fatal(err)
+			}
+			if len(reports) == 0 {
+				t.Error("metadata sent before the first root report")
+			}
+			result := loomsync.PushBatchResult{}
+			for _, item := range input.Items {
+				result.Items = append(result.Items, loomsync.SyncItemResult{LocalRef: item.LocalRef,
+					ItemKind: item.ItemKind, StreamName: item.StreamName, LocalSequence: item.LocalSequence,
+					Status: loomsync.ItemStatusAccepted, GlobalRef: mainObjectID,
+					PayloadHash: "sha256:" + rawJSONHash(item.PayloadJSON), Metadata: item.Metadata})
+			}
+			response.WriteJSON(w, http.StatusCreated, response.Success("corr_test", result))
 		case "/v1/node-agent/sync/object-upload":
 			var input loomsync.SyncedObjectInput
 			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -1067,12 +1098,12 @@ func TestWatchedRootsRunFlushesObjectsAndDeletionRequests(t *testing.T) {
 					StreamName:      loomsync.StreamObjectBlobs,
 					LocalSequence:   input.LocalSequence,
 					Status:          loomsync.ItemStatusAccepted,
-					GlobalRef:       "object_main",
+					GlobalRef:       mainObjectID,
 					PayloadHash:     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 					Metadata: objectJSON(map[string]any{
 						"local_outbox_id":   metadataString(input.Metadata, "local_outbox_id"),
 						"local_version_ref": input.LocalVersionRef,
-						"object_id":         "object_main",
+						"object_id":         mainObjectID,
 						"object_version_id": versionID,
 						"blob_id":           "blob_main",
 						"hash_uri":          input.HashURI,
@@ -1087,7 +1118,7 @@ func TestWatchedRootsRunFlushesObjectsAndDeletionRequests(t *testing.T) {
 					UpdatedAt:            now,
 					Metadata:             json.RawMessage(`{}`),
 				},
-				ObjectID:    "object_main",
+				ObjectID:    mainObjectID,
 				VersionID:   versionID,
 				BlobID:      "blob_main",
 				HashURI:     input.HashURI,
@@ -1155,12 +1186,18 @@ func TestWatchedRootsRunFlushesObjectsAndDeletionRequests(t *testing.T) {
 		t.Fatalf("SaveState failed: %v", err)
 	}
 	opts := rootOptions{
+		// The same source/replay/delete scenario exercises both storage owners.
 		configPath: store.ConfigPath,
 		statePath:  store.StatePath,
 		dataDir:    store.DataDir,
 		jsonOutput: true,
 		out:        io.Discard,
 		errOut:     io.Discard,
+	}
+	if records {
+		if _, err := store.MigrateQueueRecords(t.Context()); err != nil {
+			t.Fatal(err)
+		}
 	}
 	addCmd := newWatchedRootsCommand(&opts)
 	addCmd.SetArgs([]string{
@@ -1191,14 +1228,14 @@ func TestWatchedRootsRunFlushesObjectsAndDeletionRequests(t *testing.T) {
 	if len(uploads) != 1 || runEnvelope.Data.OutputFlush == nil || runEnvelope.Data.OutputFlush.Status != watchedroots.OutputStatusRecorded {
 		t.Fatalf("expected one flushed upload, uploads=%d flush=%#v", len(uploads), runEnvelope.Data.OutputFlush)
 	}
-	if runEnvelope.Data.MainReport == nil || runEnvelope.Data.MainReport.Status != watchedroots.OutputStatusRecorded || len(reports) != 1 {
+	if runEnvelope.Data.MainReport == nil || runEnvelope.Data.MainReport.Status != watchedroots.OutputStatusRecorded || len(reports) != 2 {
 		t.Fatalf("expected recorded main report, reports=%d report=%#v", len(reports), runEnvelope.Data.MainReport)
 	}
 	pathState, err := watchedroots.NewStore(store.DataDir).LoadPathState("notes", "Project.md")
 	if err != nil {
 		t.Fatalf("LoadPathState failed: %v", err)
 	}
-	if pathState.MainObjectID != "object_main" ||
+	if pathState.MainObjectID != mainObjectID ||
 		pathState.MainVersionID != "version_first" ||
 		pathState.LastSyncedHashURI != pathState.ContentHashURI ||
 		pathState.IndexStatus != "queued" {
@@ -1222,6 +1259,9 @@ func TestWatchedRootsRunFlushesObjectsAndDeletionRequests(t *testing.T) {
 		uploads[1].LocalVersionRef == firstVersionID {
 		t.Fatalf("expected changed flush to reuse local object with new version, uploads=%#v", uploads)
 	}
+	if len(reports) != 3 {
+		t.Fatalf("unchanged generation should need only the normal report: %d", len(reports))
+	}
 
 	if err := os.Remove(projectPath); err != nil {
 		t.Fatalf("remove project: %v", err)
@@ -1236,7 +1276,7 @@ func TestWatchedRootsRunFlushesObjectsAndDeletionRequests(t *testing.T) {
 	if len(deletions) != 1 {
 		t.Fatalf("expected one deletion request, got %#v", deletions)
 	}
-	if deletions[0].TargetRef != "object_main" ||
+	if deletions[0].TargetRef != mainObjectID ||
 		!strings.HasPrefix(deletions[0].IdempotencyKey, "node-agent.watched-root.delete.node_test.notes.") {
 		t.Fatalf("unexpected deletion request input %#v", deletions[0])
 	}
@@ -1252,7 +1292,7 @@ func TestWatchedRootsRunFlushesObjectsAndDeletionRequests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LocalSyncStatus failed: %v", err)
 	}
-	if status.Counts.Pending != 0 || status.Counts.Accepted != 3 {
+	if status.Counts.Pending != 0 || status.Counts.Accepted != 6 {
 		t.Fatalf("expected all flushed items accepted, got %#v", status.Counts)
 	}
 	runOut.Reset()

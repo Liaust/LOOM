@@ -405,6 +405,18 @@ func TestEnrichmentReembedsNewOCRPublicationPostgres(t *testing.T) {
 	if _, err = db.Exec(`UPDATE knowledge.knowledge_objects SET lexical_version_id=$2 WHERE knowledge_object_id=$1`, object.KnowledgeObjectID, ocr.KnowledgeObjectVersionID); err != nil {
 		t.Fatal(err)
 	}
+	preview, err := service.PreviewEnrichment(t.Context(), EnrichmentSelection{Ref: object.KnowledgeObjectID, Stages: EnrichmentStages{Embeddings: true}})
+	if err != nil || len(preview.Entries) != 1 {
+		t.Fatalf("read-only reuse preview: %+v %v", preview, err)
+	}
+	entry := preview.Entries[0]
+	if entry.BlockedReason != "" || entry.EffectivePlan == nil || entry.EffectivePlan.Enrichment == nil || !entry.EffectivePlan.Enrichment.Retained.OCR || !entry.EffectivePlan.Enrichment.Preserved.OCR || entry.Reuse == nil || entry.Reuse.Mode != "compatible_prefix" || entry.Reuse.SourceRunID != ocr.KnowledgePipelineRunID {
+		t.Fatalf("preview lost actual OCR reuse: %+v", entry)
+	}
+	latest, err := service.store.GetPipelineRun(t.Context(), object.KnowledgeObjectID)
+	if err != nil || latest.KnowledgePipelineRunID != ocr.KnowledgePipelineRunID {
+		t.Fatal("preview created a processing run")
+	}
 	next, err := service.EnrichPipelineObject(t.Context(), binding, EnrichmentStages{Embeddings: true}, "actor")
 	if err != nil {
 		t.Fatal(err)
@@ -434,5 +446,9 @@ func TestEnrichmentReembedsNewOCRPublicationPostgres(t *testing.T) {
 	replay, err = service.EnrichPipelineObject(t.Context(), binding, EnrichmentStages{Embeddings: true}, "actor")
 	if err != nil || replay.KnowledgePipelineRunID != next.KnowledgePipelineRunID {
 		t.Fatalf("completed replay run=%s want=%s: %v", replay.KnowledgePipelineRunID, next.KnowledgePipelineRunID, err)
+	}
+	preview, err = service.PreviewEnrichment(t.Context(), EnrichmentSelection{Ref: object.KnowledgeObjectID, Stages: EnrichmentStages{Embeddings: true}})
+	if err != nil || len(preview.Entries) != 1 || preview.Entries[0].Reuse == nil || preview.Entries[0].Reuse.Mode != "existing_run" || preview.Entries[0].Reuse.SourceRunID != next.KnowledgePipelineRunID || preview.Entries[0].NextEligibleAt != nil || !preview.Entries[0].EffectivePlan.Enrichment.Retained.OCR {
+		t.Fatalf("completed replay preview falsely waits or loses OCR: %+v %v", preview, err)
 	}
 }

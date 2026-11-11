@@ -2,9 +2,9 @@
 import { main } from '../main';
 import { NO_INTERACTION } from '@vrtmrz/livesync-commonlib/replication';
 import { createAdapter } from './adapter.mjs';
-import { readFileSync } from 'node:fs';
+import { readFileSync, createWriteStream } from 'node:fs';
 import { resolve } from 'node:path';
-import { MAX_BYTES, MAX_REFERENCE_BYTES } from './protocol';
+import { MAX_BYTES, MAX_INLINE_REFERENCE_BYTES } from './protocol';
 
 // Deliberately no stock CLI passthrough: daemon, mirror, reset, resolve,
 // settings mutation and remote administration are outside this boundary.
@@ -37,6 +37,18 @@ const reply = (id: unknown, result: unknown) => new Promise<void>((resolve, reje
 });
 
 main(nativeIo, async (_options, context) => {
+	// A separate payload-free pipe never interferes with request/reply framing.
+	// Subscribe before replication/catch-up; durable changes remain authoritative.
+	const wake = process.env.LOOM_NOTES_WAKE_FD === '3' ? createWriteStream('', { fd: 3, autoClose: false }) : null;
+	let waiting = false;
+	const feed = wake ? context.core.services.database.localDatabase.localDatabase.changes({ since: 'now', live: true, include_docs: false }) : null;
+	const hint = () => {
+		if (!wake || waiting) return;
+		waiting = true;
+		wake.write('.', () => { waiting = false; });
+	};
+	wake?.on('error', () => { feed?.cancel(); });
+	feed?.on('change', hint).on('error', hint);
     const dispatch = createAdapter(context.core, async (mode = 'sync') => {
         const replication = context.core.services.replication;
         const outcome = mode === 'start' ? await replication.startContinuous({
@@ -48,13 +60,14 @@ main(nativeIo, async (_options, context) => {
         // may contain endpoint credentials and must stay private.
         return { status: 'replication', outcome: outcome.status,
             ...(outcome.status === 'blocked' ? { reason: outcome.reason } : {}) };
-    });
+    }, resolve(args[0], 'reference-spool'));
     let pending = Buffer.alloc(0);
+    try {
     for await (const chunk of process.stdin) {
         pending = Buffer.concat([pending, chunk]);
         let newline: number;
         while ((newline = pending.indexOf(10)) >= 0) {
-            if (newline > 2 * MAX_REFERENCE_BYTES) throw new Error('request_limit');
+            if (newline > 2 * MAX_INLINE_REFERENCE_BYTES) throw new Error('request_limit');
             const line = pending.subarray(0, newline).toString('utf8');
             pending = pending.subarray(newline + 1);
             let request;
@@ -65,8 +78,9 @@ main(nativeIo, async (_options, context) => {
             // Correlation lives outside the native document id namespace.
             await reply(id, await dispatch(request?.request));
         }
-        if (pending.length > 2 * MAX_REFERENCE_BYTES) throw new Error('request_limit');
+        if (pending.length > 2 * MAX_INLINE_REFERENCE_BYTES) throw new Error('request_limit');
     }
     if (pending.length) await reply(null, { status: 'error', code: 'incomplete_request' });
+    } finally { feed?.cancel(); wake?.end(); }
     return true;
 }).catch(() => { process.stderr.write('Native adapter failed.\n'); process.exit(1); });

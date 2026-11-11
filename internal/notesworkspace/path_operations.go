@@ -49,7 +49,7 @@ func applyPath(ctx context.Context, store Store, src Source, op Operation) (out 
 		if pathKey(op.Request.DestinationPath) == op.File.PathKey {
 			return op, fmt.Errorf("rename requires a distinct non-alias destination")
 		}
-		destination, destinationName, err = openSourceParent(src.Path, op.Request.DestinationPath)
+		destination, destinationName, err = sourceParent(src.Path, op.Request.DestinationPath, true)
 		if err != nil {
 			return op, err
 		}

@@ -14,10 +14,17 @@ import (
 )
 
 const (
-	NativeRevision       = "29112bef099274229cadff79cdff7bf7b99c4b77"
-	MaxBytes       int64 = 4 << 20
-	ReadTimeout          = 5 * time.Second
+	NativeRevision         = "29112bef099274229cadff79cdff7bf7b99c4b77"
+	PlatformRevision       = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"
+	MaxBytes         int64 = 4 << 20
+	ReadTimeout            = 5 * time.Second
 )
+
+// SupportedRevision retains historical inventory support while explicitly
+// admitting the separately packaged native platform, never arbitrary revisions.
+func SupportedRevision(revision string) bool {
+	return revision == NativeRevision || revision == PlatformRevision
+}
 
 var (
 	ErrUnavailable = errors.New("Hermes schedule source unavailable")
@@ -113,6 +120,8 @@ type ProjectOwnership struct {
 }
 
 type Job struct {
+	Box         *BoxOwnership     `json:"box,omitempty"`
+	Profile     string            `json:"profile,omitempty"`
 	Project     *ProjectOwnership `json:"project,omitempty"`
 	ID          string            `json:"id"`
 	Enabled     *bool             `json:"enabled"`
@@ -141,7 +150,7 @@ func (o Observer) Observe(ctx context.Context) (Observation, error) {
 	if err := ctx.Err(); err != nil {
 		return out, err
 	}
-	if o.Source.Revision != NativeRevision {
+	if !SupportedRevision(o.Source.Revision) {
 		out.Availability = Unsupported
 		return out, ErrRevision
 	}
@@ -198,11 +207,16 @@ func (o Observer) Observe(ctx context.Context) (Observation, error) {
 	if ctx.Err() != nil {
 		return out, ctx.Err()
 	}
-	for _, job := range jobs {
+	for i, job := range jobs {
 		if job.Project != nil && job.Project.Profile != o.Source.Profile {
 			out.Availability = Malformed
 			return out, ErrMalformed
 		}
+		if job.Box != nil && !validBoxOwnership(job.Box, o.Source.Profile) {
+			out.Availability = Malformed
+			return out, ErrMalformed
+		}
+		jobs[i].Profile = o.Source.Profile
 	}
 	now := time.Now().UTC()
 	out.Availability, out.ObservedAt, out.StoreUpdatedAt, out.Jobs = Available, &now, updated, jobs
@@ -214,7 +228,21 @@ func (o Observer) Observe(ctx context.Context) (Observation, error) {
 // context_from, and all execution/conversation payloads.
 type nativeJob struct {
 	Origin *struct {
+		Box *struct {
+			BoxOwnership
+			ProjectID string `json:"project_id"`
+			Resource  string `json:"resource"`
+		} `json:"loom_box_schedule"`
+		Context *BoxOwnership     `json:"loom_box_context"`
 		Project *ProjectOwnership `json:"loom_project_declaration"`
+		Events  *struct {
+			BoxID           string `json:"box_id"`
+			Workdir         string `json:"workdir"`
+			ContextRevision string `json:"context_revision"`
+			ProjectID       string `json:"project_id"`
+			Profile         string `json:"profile"`
+			Retired         bool   `json:"retired"`
+		} `json:"loom_internal_events"`
 	} `json:"origin"`
 	ID       string  `json:"id"`
 	Enabled  *bool   `json:"enabled"`
@@ -281,9 +309,40 @@ func parse(ctx context.Context, data []byte) ([]Job, *time.Time, error) {
 
 func project(row nativeJob) (Job, error) {
 	job := Job{ID: row.ID, Enabled: row.Enabled, NativeState: StateUnknown, LastResult: ResultUnknown, Schedule: Schedule{Kind: ScheduleUnknown}}
+	if row.Origin != nil && row.Origin.Context != nil {
+		job.Box = row.Origin.Context
+	}
+	if row.Origin != nil && row.Origin.Box != nil {
+		box := row.Origin.Box
+		if !validBoxOwnership(&box.BoxOwnership, box.Profile) || row.Origin.Project != nil {
+			return Job{}, ErrMalformed
+		}
+		if job.Box != nil && (job.Box.BoxID != box.BoxID || job.Box.Profile != box.Profile || job.Box.Workdir != box.Workdir || job.Box.ContextRevision != box.ContextRevision) {
+			return Job{}, ErrMalformed
+		}
+		job.Box = &box.BoxOwnership
+		if box.ProjectID != "" {
+			if !projectID.MatchString(box.ProjectID) || !projectKey.MatchString(box.Resource) {
+				return Job{}, ErrMalformed
+			}
+			job.Project = &ProjectOwnership{ProjectID: box.ProjectID, Resource: box.Resource, Profile: box.Profile, Retired: box.Retired}
+		}
+	}
+	if row.Origin != nil && row.Origin.Events != nil && row.Origin.Project == nil {
+		e := row.Origin.Events
+		if e.BoxID != "" {
+			job.Box = &BoxOwnership{BoxID: e.BoxID, Profile: e.Profile, Workdir: e.Workdir, ContextRevision: e.ContextRevision, Retired: e.Retired}
+			if !validBoxOwnership(job.Box, e.Profile) {
+				return Job{}, ErrMalformed
+			}
+		}
+		if e.ProjectID != "" {
+			row.Origin.Project = &ProjectOwnership{ProjectID: e.ProjectID, Resource: "events", Profile: e.Profile, Retired: e.Retired}
+		}
+	}
 	if row.Origin != nil && row.Origin.Project != nil {
 		p := row.Origin.Project
-		if !projectID.MatchString(p.ProjectID) || !projectKey.MatchString(p.Resource) || p.Profile != "mina" {
+		if !projectID.MatchString(p.ProjectID) || !projectKey.MatchString(p.Resource) || (p.Profile != "mina" && !declaredProfile.MatchString(p.Profile) && !validBoxOwnership(job.Box, p.Profile)) {
 			return Job{}, ErrMalformed
 		}
 		job.Project = p

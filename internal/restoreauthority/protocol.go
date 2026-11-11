@@ -9,12 +9,13 @@ import (
 )
 
 type requestHeader struct {
-	Schema     string    `json:"schema"`
-	Operation  Operation `json:"operation"`
-	Kind       Kind      `json:"kind"`
-	Database   string    `json:"database"`
-	DumpSize   int64     `json:"dump_size"`
-	DumpSHA256 string    `json:"dump_sha256"`
+	Schema     string                 `json:"schema"`
+	Operation  Operation              `json:"operation"`
+	Kind       Kind                   `json:"kind"`
+	Database   string                 `json:"database"`
+	DumpSize   int64                  `json:"dump_size"`
+	DumpSHA256 string                 `json:"dump_sha256"`
+	Extensions []ExtensionRequirement `json:"extensions,omitempty"`
 }
 
 type requestTrailer struct {
@@ -115,7 +116,7 @@ func validateRequestHeader(header requestHeader, maxDumpBytes int64) error {
 			return fmt.Errorf("restore operation and kind do not match")
 		}
 	case OperationDropDisposable:
-		if header.DumpSize != 0 || header.DumpSHA256 != "" {
+		if header.DumpSize != 0 || header.DumpSHA256 != "" || len(header.Extensions) != 0 {
 			return fmt.Errorf("drop request contains restore payload metadata")
 		}
 		return nil
@@ -125,7 +126,7 @@ func validateRequestHeader(header requestHeader, maxDumpBytes int64) error {
 	if header.DumpSize <= 0 || header.DumpSize > maxDumpBytes || !digestPattern.MatchString(header.DumpSHA256) {
 		return fmt.Errorf("restore payload declaration is invalid")
 	}
-	return nil
+	return ValidateExtensionRequirements(header.Kind, header.Extensions)
 }
 
 func validateResponseHeader(response responseHeader, expected requestHeader) error {

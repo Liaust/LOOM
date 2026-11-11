@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/stdlib"
+
 	"loom.local/loom/internal/bootstrap"
 	"loom.local/loom/internal/ids"
 	"loom.local/loom/internal/migrations"
@@ -25,6 +27,7 @@ import (
 	"loom.local/loom/internal/requestctx"
 	"loom.local/loom/internal/search"
 	loomsync "loom.local/loom/internal/sync"
+	"loom.local/loom/internal/workers"
 )
 
 func metadataDatabase(t *testing.T) (*sql.DB, requestctx.Context) {
@@ -38,7 +41,7 @@ func metadataDatabase(t *testing.T) (*sql.DB, requestctx.Context) {
 		t.Fatal(err)
 	}
 	host, socket := u.Hostname(), u.Query().Get("host")
-	if !((socket == "" && (host == "localhost" || host == "127.0.0.1" || host == "::1")) || (host == "" && strings.HasPrefix(socket, "/tmp/"))) {
+	if !((socket == "" && (host == "localhost" || host == "127.0.0.1" || host == "::1")) || (host == "" && (strings.HasPrefix(socket, "/tmp/") || socket == "/run/postgresql"))) {
 		t.Fatal("local disposable endpoint required")
 	}
 	admin, err := sql.Open("pgx", raw)
@@ -99,8 +102,34 @@ func TestSourceMetadataPostgres(t *testing.T) {
 	input := loomsync.SyncedObjectInput{NodeRef: node.NodeID, CredentialToken: cred.CredentialToken, LocalObjectRef: ids.NewObjectID(), LocalVersionRef: ids.NewObjectVersionID(), LocalSequence: 1,
 		LogicalName: "cadence.md", SourcePath: "watched-root://notes/cadence.md", SourceMtime: &old, ScopeRef: req.ScopeID, SizeBytes: 3, MimeType: "text/markdown",
 		HashURI: "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", ContentBase64: base64.StdEncoding.EncodeToString([]byte("abc")), IndexPolicy: loomsync.IndexPolicyNone}
+	listener, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if _, err := listener.ExecContext(ctx, "LISTEN loom_worker_wake"); err != nil {
+		t.Fatal(err)
+	}
 	upload, err := s.IngestSyncedObject(ctx, req, objs, finder, input)
 	if err != nil {
+		t.Fatal(err)
+	}
+	var pending int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM knowledge.pending_source_admissions WHERE object_version_id=$1`, upload.VersionID).Scan(&pending); err != nil || pending != 1 {
+		t.Fatalf("usable blob did not retain exact admission work: %d %v", pending, err)
+	}
+	if err := listener.Raw(func(driver any) error {
+		wait, cancel := context.WithTimeout(ctx, time.Second)
+		defer cancel()
+		notice, err := driver.(*stdlib.Conn).Conn().WaitForNotification(wait)
+		if err != nil {
+			return err
+		}
+		if notice.Payload != workers.KindKnowledgeIndexer || upload.Replica == nil || upload.Replica.FreshnessState != "fresh" {
+			return fmt.Errorf("blob acceptance did not wake its committed fresh replica: %+v %+v", notice, upload.Replica)
+		}
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	p := loomsync.MetadataObservation{SchemaVersion: loomsync.MetadataObservationSchema, LocalObjectRef: input.LocalObjectRef, LocalVersionRef: input.LocalVersionRef,
@@ -129,6 +158,10 @@ func TestSourceMetadataPostgres(t *testing.T) {
 	}
 	r, err := push(p, item)
 	assertStatus(r, err, loomsync.ItemStatusAccepted)
+	var pendingRevision int64
+	if err := db.QueryRowContext(ctx, `SELECT revision FROM knowledge.pending_source_admissions WHERE object_version_id=$1`, p.VersionID).Scan(&pendingRevision); err != nil || pendingRevision <= 1 {
+		t.Fatalf("metadata-only refresh did not advance exact work: %d %v", pendingRevision, err)
+	}
 	assertTime(p.SourceMtime)
 	// Consume the real receiver receipt with the owner implementation. A fake
 	// transport must not mask different local/remote digest encodings.

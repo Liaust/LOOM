@@ -112,7 +112,7 @@ func newInitCommand(opts *rootOptions) *cobra.Command {
 			if err := store.SaveConfig(config); err != nil {
 				return err
 			}
-			runtimeStore := noderuntime.NewStore(store.DataDir)
+			runtimeStore := store.runtimeStore()
 			if err := runtimeStore.EnsureDefaultInstances(noderuntime.DefaultInstanceInput{
 				HeartbeatIntervalSeconds: config.HeartbeatIntervalSeconds,
 				PollIntervalSeconds:      config.PollIntervalSeconds,
@@ -383,6 +383,53 @@ func newRuntimeWorkersCommand(opts *rootOptions) *cobra.Command {
 	cmd.AddCommand(newRuntimeWorkersListCommand(opts))
 	cmd.AddCommand(newRuntimeWorkersStatusCommand(opts))
 	cmd.AddCommand(newRuntimeWorkersRunCommand(opts))
+	cmd.AddCommand(newRuntimeWorkerHistoryCommand(opts))
+	return cmd
+}
+
+func newRuntimeWorkerHistoryCommand(opts *rootOptions) *cobra.Command {
+	cmd := &cobra.Command{Use: "history", Short: "Maintain bounded local diagnostic run history"}
+	var apply, yes bool
+	prune := &cobra.Command{
+		Use: "prune [worker-key]", Short: "Preview or remove excess completed worker run records",
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if apply && !yes {
+				return errors.New("history pruning requires --apply --yes")
+			}
+			store, _, err := opts.runtimeStoreAndEnv()
+			if err != nil {
+				return err
+			}
+			keys := args
+			if len(keys) == 0 {
+				keys, err = store.RunHistoryWorkers()
+				if err != nil {
+					return err
+				}
+			}
+			receipts := []noderuntime.RunHistoryReceipt{}
+			for _, key := range keys {
+				receipt, err := store.PruneRunHistory(cmd.Context(), key, apply)
+				if err != nil {
+					return err
+				}
+				receipts = append(receipts, receipt)
+				if !opts.jsonOutput {
+					if _, err := fmt.Fprintf(opts.out, "worker=%s candidates=%d deleted=%d kept=%d held=%d moved=%d\n", key, receipt.Candidates, receipt.Deleted, receipt.Kept, receipt.Held, receipt.Moved); err != nil {
+						return err
+					}
+				}
+			}
+			if opts.jsonOutput {
+				return renderJSON(opts.out, localSuccess(correlation.Normalize(opts.correlationID), receipts))
+			}
+			return nil
+		},
+	}
+	prune.Flags().BoolVar(&apply, "apply", false, "Remove only excess completed run records; preserve references and unknown state")
+	prune.Flags().BoolVar(&yes, "yes", false, "Confirm diagnostic history removal")
+	cmd.AddCommand(prune)
 	return cmd
 }
 
@@ -433,13 +480,14 @@ func newRuntimeWorkersStatusCommand(opts *rootOptions) *cobra.Command {
 			if opts.jsonOutput {
 				return renderJSON(opts.out, localSuccess(correlation.Normalize(opts.correlationID), status))
 			}
-			_, err = fmt.Fprintf(opts.out, "workers=%d healthy=%d degraded=%d blocked=%d manual_action=%d outbox_pending=%d\n",
+			_, err = fmt.Fprintf(opts.out, "workers=%d healthy=%d degraded=%d blocked=%d manual_action=%d outbox_pending=%d summary=%s\n",
 				status.Summary.Workers.Total,
 				status.Summary.Workers.Healthy,
 				status.Summary.Workers.Degraded,
 				status.Summary.Workers.Blocked,
 				status.Summary.Workers.ManualAction,
 				status.Summary.Queues.OutboxPending,
+				status.Summary.Availability,
 			)
 			return err
 		},
@@ -639,7 +687,7 @@ func newServeCommand(opts *rootOptions) *cobra.Command {
 			if err := store.EnsureDataDirs(); err != nil {
 				return err
 			}
-			runtimeStore := noderuntime.NewStore(store.DataDir)
+			runtimeStore := store.runtimeStore()
 			if err := runtimeStore.EnsureDefaultInstances(noderuntime.DefaultInstanceInput{
 				HeartbeatIntervalSeconds: config.HeartbeatIntervalSeconds,
 				PollIntervalSeconds:      config.PollIntervalSeconds,
@@ -653,6 +701,8 @@ func newServeCommand(opts *rootOptions) *cobra.Command {
 				Registry:      nodeAgentRuntimeRegistry(),
 				CorrelationID: correlation.Normalize(opts.correlationID),
 				ErrOut:        opts.errOut,
+				WakeFiles:     store.runtimeWakeFiles(),
+				WakeWorkers:   map[string]string{runtimeStore.PollWakePath(): noderuntime.WorkerKeyPoll},
 				EnvProvider: func() (noderuntime.Env, error) {
 					_, env, err := opts.runtimeStoreAndEnv()
 					return env, err
@@ -661,6 +711,11 @@ func newServeCommand(opts *rootOptions) *cobra.Command {
 			return supervisor.Run(ctx)
 		},
 	}
+}
+
+func (s Store) runtimeWakeFiles() []string {
+	// State contains routine heartbeat/poll receipts, not new queue authority.
+	return []string{s.ConfigPath, s.syncOutboxPath(), s.watchedRootBackupOutboxPath(), s.queueRecordsPath()}
 }
 
 type heartbeatRequestOptions struct {
@@ -708,7 +763,7 @@ func (opts *rootOptions) runtimeStoreAndEnv() (noderuntime.Store, noderuntime.En
 	if err != nil {
 		return noderuntime.Store{}, noderuntime.Env{}, err
 	}
-	runtimeStore := noderuntime.NewStore(store.DataDir)
+	runtimeStore := store.runtimeStore()
 	if err := runtimeStore.EnsureDefaultInstances(noderuntime.DefaultInstanceInput{
 		HeartbeatIntervalSeconds: config.HeartbeatIntervalSeconds,
 		PollIntervalSeconds:      config.PollIntervalSeconds,
@@ -754,7 +809,7 @@ func (opts *rootOptions) status() (Status, error) {
 }
 
 func (opts *rootOptions) runtimeStatus(store Store, config Config) (noderuntime.Status, error) {
-	runtimeStore := noderuntime.NewStore(store.DataDir)
+	runtimeStore := store.runtimeStore()
 	if err := runtimeStore.EnsureDefaultInstances(noderuntime.DefaultInstanceInput{
 		HeartbeatIntervalSeconds: config.HeartbeatIntervalSeconds,
 		PollIntervalSeconds:      config.PollIntervalSeconds,
@@ -769,7 +824,7 @@ func (opts *rootOptions) sendHeartbeat(ctx context.Context, heartbeatOpts heartb
 	if err != nil {
 		return response.Envelope[nodes.Heartbeat]{}, err
 	}
-	runtimeStore := noderuntime.NewStore(store.DataDir)
+	runtimeStore := store.runtimeStore()
 	if err := runtimeStore.EnsureDefaultInstances(noderuntime.DefaultInstanceInput{
 		HeartbeatIntervalSeconds: config.HeartbeatIntervalSeconds,
 		PollIntervalSeconds:      config.PollIntervalSeconds,

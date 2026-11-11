@@ -13,8 +13,8 @@ import (
 	"testing"
 )
 
-func TestNixOrcaPreservesNotesRecoveryJournals(t *testing.T) {
-	module := readRepoFile(t, "nix/modules/loom-orca.nix")
+func TestNixAgentsPreservesNotesRecoveryJournals(t *testing.T) {
+	module := readRepoFile(t, "nix/modules/loom-agents.nix")
 	start := strings.Index(module, "grant_agent_read_write()")
 	if start < 0 {
 		t.Fatal("missing agent access function")
@@ -118,7 +118,7 @@ func TestNixServiceRendersSetupIdentityAndScopedBoxAccess(t *testing.T) {
 		"LOOM_WORKSPACE_ARCHIVE_MANIFEST_KEY_ID=${workspaceArchiveCfg.manifestKeyId}",
 		`LoadCredential = lib.optional workspaceArchiveCfg.enable "workspace-archive-manifest-key:${workspaceArchiveCfg.manifestKeySource}";`,
 		`!lib.hasPrefix "/nix/store/" workspaceArchiveCfg.manifestKeySource`,
-		`workspaceArchiveMoveRoots = [ "${cfg.storageRoot}/archive" ]`,
+		`workspaceArchiveMoveRoots = [ "${cfg.storageRoot}/archive" cfg.importsRoot ]`,
 		`[ "Topics" "Projects" "Library" ]`,
 		"loomRuntimeWritePaths",
 		"NoNewPrivileges = lib.mkDefault true",
@@ -193,7 +193,10 @@ func TestNixNodeAgentReconcilesManagedBoxPaths(t *testing.T) {
 		`lib.optionalString (cfg.boxPath != null)`,
 		`--arg box ${lib.escapeShellArg cfg.boxPath}`,
 		`--arg state ${lib.escapeShellArg cfg.boxStateRoot}`,
-		`'.box_root_path = $box | .box_state_root = $state'`,
+		`--arg boxes ${lib.escapeShellArg (if boxesEnabled then "/etc/loom-boxes.json" else "")}`,
+		`--arg catalogData ${lib.escapeShellArg cfg.dataDir}`,
+		`--arg catalogStorage ${lib.escapeShellArg cfg.storageRoot}`,
+		`'.box_root_path = $box | .box_state_root = $state | .boxes_file = $boxes | .box_catalog_data_root = $catalogData | .box_catalog_storage_root = $catalogStorage'`,
 		`chmod --reference="$config_path" "$pending"`,
 		`mv -f "$pending" "$config_path"`,
 	} {
@@ -286,7 +289,8 @@ func TestNixStorageManagesOnlyScopedBoxPaths(t *testing.T) {
 		"${cfg.storageRetentionRoot}/main-documents/by-sha256",
 		"systemdPath = path:",
 		"boxParent = if cfg.boxPath == null then null else builtins.dirOf cfg.boxPath;",
-		`a+ ${systemdPath boxParent} - - - - u:${cfg.user}:--x,m::r-x`,
+		`a+ ${systemdPath boxParent} - - - - u:${cfg.user}:r-x,m::r-x`,
+		`setfacl -m u:${cfg.user}:r-x,g:${cfg.group}:--x,m::r-x ${shellArg boxParent}`,
 		"0770 ${boxOwner} ${boxServiceGroup}",
 		`loom.notesProjectionRoot = lib.mkDefault cfg.canonicalNotesProjectionRoot;`,
 		`systemd.tmpfiles.rules = lib.optionals (cfg.storageRoot != cfg.dataDir)`,
@@ -511,20 +515,26 @@ func TestNixMiniDashboardDeclaresHardenedLoopbackCompanion(t *testing.T) {
 	}
 }
 
-func TestNixHardwareMainEnablesMiniDashboardWithoutDesktopPolicyDrift(t *testing.T) {
+func TestNixHardwareMainDisablesMiniDashboardWithoutDesktopPolicyDrift(t *testing.T) {
 	profile := readRepoFile(t, "nix/profiles/main-hardware-desktop.nix")
 	host := readRepoFile(t, "nix/hosts/hardware-main/configuration.nix")
 	requireContains(t, profile, "../modules/loom-mini-dashboard.nix")
-	requireContains(t, host, "loom.miniDashboard = {")
-	requireContains(t, host, "kiosk.enable = true;")
+	requireContains(t, host, "loom.miniDashboard = {\n    enable = false;\n    kiosk.enable = false;\n  };")
+	requireContains(t, host, `lib.optional config.loom.miniDashboard.enable "loom-mini-dashboard"`)
 	requireContains(t, profile, "services.displayManager.autoLogin.enable = lib.mkDefault false;")
 	requireContains(t, profile, "services.gnome.gnome-remote-desktop.enable = lib.mkDefault true;")
 }
 
-func TestNixHardwareMainDeclaresPinnedPrivateOrcaService(t *testing.T) {
+func TestNixSharedAgentsIndependentOfRetainedOrcaService(t *testing.T) {
 	packageFile := readRepoFile(t, "nix/packages/orca-headless.nix")
 	protonPassPackage := readRepoFile(t, "nix/packages/proton-pass-cli.nix")
-	module := readRepoFile(t, "nix/modules/loom-orca.nix")
+	orcaModule := readRepoFile(t, "nix/modules/loom-orca.nix")
+	agentsModule := readRepoFile(t, "nix/modules/loom-agents.nix")
+	module := orcaModule + agentsModule
+	if strings.Contains(orcaModule, "users.users.agents") || strings.Contains(agentsModule, `systemd.services."orca-serve"`) {
+		t.Fatal("shared account and optional retired runtime must have separate owners")
+	}
+	requireContains(t, agentsModule, `options.loom.agents`)
 	bashProfile := readRepoFile(t, "nix/files/agents.bash_profile")
 	bashrc := readRepoFile(t, "nix/files/agents.bashrc")
 	passSessionEnsure := readRepoFile(t, "nix/files/agents-pass-session-ensure.sh")
@@ -576,13 +586,13 @@ func TestNixHardwareMainDeclaresPinnedPrivateOrcaService(t *testing.T) {
 		`agentPassSessionEnsure = pkgs.writeShellApplication`,
 		`name = "pass-session-ensure";`,
 		`text = builtins.readFile ../files/agents-pass-session-ensure.sh;`,
-		`systemd.tmpfiles.settings."00-loom-orca"`,
+		`systemd.tmpfiles.settings."00-loom-agents"`,
 		`"/srv/loom/agents".d`,
 		`mode = "0770";`,
 		`"/srv/loom"."a+".argument = "u:agents:r-x,m::r-x";`,
 		`"u:agents:rwx,d:u:agents:rwx,m::rwx,d:m::rwx"`,
-		`system.activationScripts.loomOrcaAccess`,
-		`system.activationScripts.loomOrcaShell`,
+		`system.activationScripts.loomAgentsAccess`,
+		`system.activationScripts.loomAgentsShell`,
 		`${accountHome}/.config/proton-pass-cli`,
 		`${accountHome}/.local/state/proton-pass-cli`,
 		`token_file=${accountHome}/.config/proton-pass-cli/agent.pat`,
@@ -601,7 +611,7 @@ func TestNixHardwareMainDeclaresPinnedPrivateOrcaService(t *testing.T) {
 		`pkgs.xorg.xorgserver`,
 		`networking.firewall.interfaces.${cfg.allowedInterface}.allowedTCPPorts`,
 		`systemd.services."orca-serve"`,
-		`config.system.path`,
+		`"/run/current-system/sw"`,
 		`StartLimitIntervalSec = 300;`,
 		`StartLimitBurst = 5;`,
 		`"wireguard-wg0.service"`,
@@ -622,7 +632,7 @@ func TestNixHardwareMainDeclaresPinnedPrivateOrcaService(t *testing.T) {
 	requireContains(t, bashProfile, `source "$HOME/.bashrc"`)
 
 	for _, want := range []string{
-		`export PATH="$HOME/.local/bin:$PATH"`,
+		`export PATH="$HOME/.local/bin:/etc/profiles/per-user/agents/bin:$PATH"`,
 		`export PROTON_PASS_KEY_PROVIDER=fs`,
 		`export PASS_LOG_LEVEL=warn`,
 		`VIRA_TEAL=$'\e[38;2;128;203;196m'`,
@@ -667,24 +677,99 @@ func TestNixHardwareMainDeclaresPinnedPrivateOrcaService(t *testing.T) {
 		`networking.firewall.allowedTCPPorts`,
 		`caddy`,
 		`codex`,
-		`virtualisation.oci-containers`,
-		`containers.enable`,
+		`boot.isContainer`,
+		`containers =`,
+		`containers.`,
 		`ExecStartPost`,
 	} {
-		if strings.Contains(module, forbidden) {
+		if strings.Contains(orcaModule, forbidden) {
 			t.Fatalf("ORCA module contains forbidden first-deployment contract %q", forbidden)
 		}
 	}
 
 	requireContains(t, profile, `../modules/loom-orca.nix`)
-	requireContains(t, profile, `orca.enable = true;`)
+	requireContains(t, profile, `agents.enable = true;`)
+	requireContains(t, profile, `orca.enable = false;`)
 	requireContains(t, flake, `orca-headless = pkgs.callPackage ./nix/packages/orca-headless.nix { };`)
 	requireContains(t, flake, `proton-pass-cli = pkgs.callPackage ./nix/packages/proton-pass-cli.nix { };`)
 	requireContains(t, flake, `nixosModules.loom-orca = import ./nix/modules/loom-orca.nix;`)
+	requireContains(t, flake, `nixosModules.loom-agents = import ./nix/modules/loom-agents.nix;`)
 }
 
-func TestNixOrcaGrantsLoomServiceReadOnlyAgentWorkspaceAccess(t *testing.T) {
-	module := readRepoFile(t, "nix/modules/loom-orca.nix")
+func TestNixOrcaUnitPreservesSessionsAcrossUnrelatedPackageUpdates(t *testing.T) {
+	nix, err := exec.LookPath("nix")
+	if err != nil {
+		nix = "/nix/var/nix/profiles/default/bin/nix"
+		if _, err := os.Stat(nix); err != nil {
+			t.Skip("nix is unavailable; source contract remains covered")
+		}
+	}
+	apply := `actual: let system = (import ./tests/nix/legacy_agent_host.nix) actual; in
+let
+  unrelated = system.extendModules {
+    modules = [ ({ lib, pkgs, ... }: {
+      environment.systemPackages = lib.mkAfter [
+        (pkgs.writeShellScriptBin "orca-continuity-proof" "exit 0")
+      ];
+    }) ];
+  };
+  upgraded = system.extendModules {
+    modules = [ ({ lib, pkgs, ... }: {
+      loom.orca.enable = lib.mkForce true;
+      loom.orca.package = lib.mkForce (pkgs.writeShellScriptBin "orca" "exit 0");
+    }) ];
+  };
+in {
+  unit = system.config.systemd.units."orca-serve.service".text;
+  systemPath = builtins.toString system.config.system.path;
+  unrelatedUnit = unrelated.config.systemd.units."orca-serve.service".text;
+  unrelatedSystemPath = builtins.toString unrelated.config.system.path;
+  upgradedUnit = upgraded.config.systemd.units."orca-serve.service".text;
+}`
+	cmd := exec.Command(nix, "--extra-experimental-features", "nix-command flakes",
+		"eval", "--impure", "--json", ".#nixosConfigurations.hardware-main", "--apply", apply)
+	cmd.Dir = repoRoot(t)
+	payload, err := cmd.Output()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			t.Fatalf("render ORCA package transitions: %v\n%s", err, exitErr.Stderr)
+		}
+		t.Fatal(err)
+	}
+	var rendered struct {
+		Unit                string `json:"unit"`
+		SystemPath          string `json:"systemPath"`
+		UnrelatedUnit       string `json:"unrelatedUnit"`
+		UnrelatedSystemPath string `json:"unrelatedSystemPath"`
+		UpgradedUnit        string `json:"upgradedUnit"`
+	}
+	if err := json.Unmarshal(payload, &rendered); err != nil {
+		t.Fatal(err)
+	}
+	if rendered.SystemPath == rendered.UnrelatedSystemPath {
+		t.Fatal("fixture did not change the system package generation")
+	}
+	if rendered.Unit != rendered.UnrelatedUnit {
+		t.Fatal("unrelated package update would change the ORCA unit and interrupt sessions")
+	}
+	if rendered.Unit == rendered.UpgradedUnit {
+		t.Fatal("actual ORCA package update must still change the service unit")
+	}
+	for _, want := range []string{
+		`Environment="PATH=/run/current-system/sw/bin:`,
+		`/run/current-system/sw/sbin:`,
+		"User=agents", "Group=agents", "KillMode=control-group",
+		"NoNewPrivileges=true", "Restart=on-failure",
+	} {
+		requireContains(t, rendered.Unit, want)
+	}
+	if strings.Contains(rendered.Unit, rendered.SystemPath) {
+		t.Fatal("ORCA unit is still coupled to the system package store path")
+	}
+}
+
+func TestNixAgentsGrantsLoomServiceReadOnlyAgentWorkspaceAccess(t *testing.T) {
+	module := readRepoFile(t, "nix/modules/loom-agents.nix")
 
 	for _, want := range []string{
 		`agentWorkspaceRoot = "/srv/loom/agents";`,
@@ -699,7 +784,7 @@ func TestNixOrcaGrantsLoomServiceReadOnlyAgentWorkspaceAccess(t *testing.T) {
 		`${pkgs.coreutils}/bin/readlink -e -- "$root"`,
 		`if [ "$resolved" != "$root" ]; then`,
 		`if [ "$owner_group_mode" != "root:agents:770" ]; then`,
-		`\( -path ${lib.escapeShellArg morathustraHermesHome} -o -path ${lib.escapeShellArg morathustraWorkspaceRecoveryRoot} -o -path ${lib.escapeShellArg minaHermesHome} -o -path ${lib.escapeShellArg minaWorkspaceRecoveryRoot} \)`,
+		`\( -path ${lib.escapeShellArg morathustraHermesHome} -o -path ${lib.escapeShellArg morathustraWorkspaceRecoveryRoot} -o -path ${lib.escapeShellArg minaHermesHome} -o -path ${lib.escapeShellArg minaWorkspaceRecoveryRoot} -o -path ${lib.escapeShellArg codexWorkspaceRecoveryRoot} \)`,
 		`-prune -o -type d`,
 		`-prune -o -type f`,
 		`-exec ${pkgs.acl}/bin/setfacl -m u:${loomServiceUser}:r-x,d:u:${loomServiceUser}:r-x '{}' +`,
@@ -710,11 +795,11 @@ func TestNixOrcaGrantsLoomServiceReadOnlyAgentWorkspaceAccess(t *testing.T) {
 	}
 
 	start := strings.Index(module, "grant_loom_service_agent_workspace_read_only()")
-	end := strings.Index(module[start:], "grant_agent_read_write /srv/loom/box")
-	if start < 0 || end < 0 {
+	end := strings.Index(module, "grant_agent_read_write /srv/loom/box")
+	if start < 0 || end <= start {
 		t.Fatal("could not isolate the LOOM service agent-workspace ACL contract")
 	}
-	permissionContract := module[start : start+end]
+	permissionContract := module[start:end]
 	for _, forbidden := range []string{
 		`u:${loomServiceUser}:rwx`,
 		`u:${loomServiceUser}:rw-`,
@@ -727,15 +812,15 @@ func TestNixOrcaGrantsLoomServiceReadOnlyAgentWorkspaceAccess(t *testing.T) {
 	if strings.Contains(module, `extraGroups = [ "agents" ];`) {
 		t.Fatal("LOOM service must not receive broad agents group membership")
 	}
-	prune := strings.Index(permissionContract, `\( -path ${lib.escapeShellArg morathustraHermesHome} -o -path ${lib.escapeShellArg morathustraWorkspaceRecoveryRoot} -o -path ${lib.escapeShellArg minaHermesHome} -o -path ${lib.escapeShellArg minaWorkspaceRecoveryRoot} \)`)
+	prune := strings.Index(permissionContract, `\( -path ${lib.escapeShellArg morathustraHermesHome} -o -path ${lib.escapeShellArg morathustraWorkspaceRecoveryRoot} -o -path ${lib.escapeShellArg minaHermesHome} -o -path ${lib.escapeShellArg minaWorkspaceRecoveryRoot} -o -path ${lib.escapeShellArg codexWorkspaceRecoveryRoot} \)`)
 	mutation := strings.Index(permissionContract, `-exec ${pkgs.acl}/bin/setfacl -m u:${loomServiceUser}:r-x,d:u:${loomServiceUser}:r-x '{}' +`)
 	if prune < 0 || mutation < 0 || prune >= mutation {
 		t.Fatal("the live Hermes profile must be pruned before the broad LOOM service ACL mutation")
 	}
 }
 
-func TestNixOrcaPreservesMorathustraRecoveryEvidenceModes(t *testing.T) {
-	module := readRepoFile(t, "nix/modules/loom-orca.nix")
+func TestNixAgentsPreservesMorathustraRecoveryEvidenceModes(t *testing.T) {
+	module := readRepoFile(t, "nix/modules/loom-agents.nix")
 
 	for _, want := range []string{
 		`grant_loom_service_selected_recovery_read_only()`,
@@ -754,11 +839,11 @@ func TestNixOrcaPreservesMorathustraRecoveryEvidenceModes(t *testing.T) {
 	}
 
 	start := strings.Index(module, "grant_loom_service_selected_recovery_read_only()")
-	end := strings.Index(module[start:], "protect_cloud_private_keys()")
-	if start < 0 || end < 0 {
+	end := strings.Index(module, "protect_cloud_private_keys()")
+	if start < 0 || end <= start {
 		t.Fatal("could not isolate the Morathustra recovery evidence ACL contract")
 	}
-	contract := module[start : start+end]
+	contract := module[start:end]
 	for _, forbidden := range []string{
 		`${pkgs.coreutils}/bin/cat`, `${pkgs.coreutils}/bin/cp`,
 		`${pkgs.coreutils}/bin/mv`, `${pkgs.coreutils}/bin/chown`,
@@ -817,13 +902,23 @@ func TestNixMorathustraRestoresOwnerOnlyProfileCustodyBeforeGateway(t *testing.T
 	}
 }
 
-func TestNixOrcaExcludesCloudKeysFromBroadAgentReadOnlyGrant(t *testing.T) {
-	module := readRepoFile(t, "nix/modules/loom-orca.nix")
-	prunedRoots := `\( -path ${lib.escapeShellArg cloudKeysRoot} -o -path ${lib.escapeShellArg backupEvidenceRoot} -o -path ${lib.escapeShellArg morathustraRecoveryRoot} -o -path ${lib.escapeShellArg minaRecoveryRoot} -o -path ${lib.escapeShellArg nodeAgentQuiescenceRoot} -o -path ${lib.escapeShellArg nodeAgentApplicationResultsRoot} -o -path ${lib.escapeShellArg "${workspaceArchiveRoot}/topics"} -o -path ${lib.escapeShellArg "${workspaceArchiveRoot}/projects"} -o -path ${lib.escapeShellArg "${workspaceArchiveRoot}/library"} \)`
+func TestNixAgentsExcludesCloudKeysFromBroadAgentReadOnlyGrant(t *testing.T) {
+	module := readRepoFile(t, "nix/modules/loom-agents.nix")
+	prunedRoots := `\( -path ${lib.escapeShellArg cloudKeysRoot} -o -path ${lib.escapeShellArg backupEvidenceRoot} -o ${privateExecutionPrune} -o -path ${lib.escapeShellArg morathustraRecoveryRoot} -o -path ${lib.escapeShellArg minaRecoveryRoot} -o -path ${lib.escapeShellArg nodeAgentQuiescenceRoot} -o -path ${lib.escapeShellArg nodeAgentApplicationResultsRoot} -o -path ${lib.escapeShellArg "${workspaceArchiveRoot}/topics"} -o -path ${lib.escapeShellArg "${workspaceArchiveRoot}/projects"} -o -path ${lib.escapeShellArg "${workspaceArchiveRoot}/library"} -o ${retainedContentPrune} \)`
 
 	for _, want := range []string{
 		`cloudKeysRoot = "${config.loom.cloud.stateDir}/keys";`,
 		`backupEvidenceRoot = "${config.loom.dataDir}/backups";`,
+		`privateExecutionPrune = lib.concatMapStringsSep " -o "`,
+		`[ "${config.loom.dataDir}/operator-evidence" "/var/lib/loom/application-builds"`,
+		`"/var/lib/loom/mina-hermes"`,
+		`retainedContentPrune = lib.concatMapStringsSep " -o "`,
+		`namedStorageRoots = map (name: "${config.loom.storageRoot}/${name}") [ "Projects" "Library" "Records" ];`,
+		`boxArchiveRoots = lib.mapAttrsToList (key: _: "${config.loom.storageRoot}/Boxes/${key}") config.loom.boxes;`,
+		`(namedStorageRoots ++ boxArchiveRoots ++ [`,
+		`"${config.loom.storageRoot}/.loom"`,
+		`config.loom.importsRoot`,
+		`"${config.loom.dataDir}/lane"`,
 		`nodeAgentQuiescenceRoot = "${config.loom.nodeAgent.dataDir}/project-archive-quiescence";`,
 		`nodeAgentApplicationResultsRoot = "${config.loom.nodeAgent.dataDir}/application-results";`,
 		`loomServiceGroup = config.loom.group;`,
@@ -892,8 +987,8 @@ func TestNixOrcaExcludesCloudKeysFromBroadAgentReadOnlyGrant(t *testing.T) {
 	}
 }
 
-func TestNixOrcaExcludesBackupEvidenceFromBroadAgentReadOnlyGrant(t *testing.T) {
-	module := readRepoFile(t, "nix/modules/loom-orca.nix")
+func TestNixAgentsExcludesBackupEvidenceFromBroadAgentReadOnlyGrant(t *testing.T) {
+	module := readRepoFile(t, "nix/modules/loom-agents.nix")
 
 	for _, want := range []string{
 		`backupEvidenceRoot = "${config.loom.dataDir}/backups";`,
@@ -904,16 +999,11 @@ func TestNixOrcaExcludesBackupEvidenceFromBroadAgentReadOnlyGrant(t *testing.T) 
 		`if [ "$resolved" != "$root" ]; then`,
 		`${pkgs.coreutils}/bin/stat -c '%U:%G' -- "$root"`,
 		`if [ "$owner_group" != "${loomServiceUser}:${loomServiceGroup}" ]; then`,
-		`! -type d ! -type f ! -type l -print -quit`,
-		`mode_digest_before=`,
-		`mode_digest_after=`,
-		`\( -type d -o -type f -o -type l \) -printf '%p\t%y\t%m\t%l\0'`,
-		`${pkgs.coreutils}/bin/sort -z`,
-		`${pkgs.coreutils}/bin/sha256sum`,
-		`setfacl --no-mask`,
-		`-m u:agents:---,d:u:agents:--- -- '{}' +`,
-		`-m u:agents:--- -- '{}' +`,
-		`getfacl -cp -- '{}' +`,
+		`mode_before=`,
+		`mode_after=`,
+		`setfacl --physical --no-mask`,
+		`-m u:agents:---,d:u:agents:--- -- "$root"`,
+		`getfacl -cp -- "$root"`,
 		`$0 == "user:agents:---"`,
 		`$0 == "default:user:agents:---"`,
 		`protect_backup_evidence ${backupEvidenceRoot}`,
@@ -934,15 +1024,18 @@ func TestNixOrcaExcludesBackupEvidenceFromBroadAgentReadOnlyGrant(t *testing.T) 
 	}
 	contract := module[start:end]
 	for _, want := range []string{
-		`${pkgs.findutils}/bin/find -P "$root" -xdev`,
-		`! -type d ! -type f ! -type l -print -quit`,
-		`\( -type d -o -type f -o -type l \) -printf '%p\t%y\t%m\t%l\0'`,
+		`setfacl --physical --no-mask`,
+		`if [ "$mode_after" != "$mode_before" ]; then`,
+		`exit access == 1 && inherited == 1 ? 0 : 1`,
 	} {
 		if !strings.Contains(contract, want) {
-			t.Fatalf("backup evidence protection is missing no-follow inventory contract %q", want)
+			t.Fatalf("backup evidence protection is missing bounded root contract %q", want)
 		}
 	}
 	for _, forbidden := range []string{
+		`${pkgs.findutils}`,
+		`getfacl -cpR`,
+		`'{}'`,
 		`${pkgs.coreutils}/bin/chmod`,
 		`${pkgs.coreutils}/bin/chown`,
 		`${pkgs.coreutils}/bin/cat`,
@@ -959,8 +1052,8 @@ func TestNixOrcaExcludesBackupEvidenceFromBroadAgentReadOnlyGrant(t *testing.T) 
 	}
 }
 
-func TestNixOrcaPreservesMorathustraRecoveryKeyCustody(t *testing.T) {
-	module := readRepoFile(t, "nix/modules/loom-orca.nix")
+func TestNixAgentsPreservesMorathustraRecoveryKeyCustody(t *testing.T) {
+	module := readRepoFile(t, "nix/modules/loom-agents.nix")
 
 	for _, want := range []string{
 		`morathustraRecoveryRoot = "/var/lib/loom/morathustra-recovery";`,
@@ -985,11 +1078,11 @@ func TestNixOrcaPreservesMorathustraRecoveryKeyCustody(t *testing.T) {
 	}
 
 	grantStart := strings.Index(module, "grant_agent_read_only()")
-	grantEnd := strings.Index(module[grantStart:], "protect_selected_recovery_key()")
-	if grantStart < 0 || grantEnd < 0 {
+	grantEnd := strings.Index(module, "protect_selected_recovery_key()")
+	if grantStart < 0 || grantEnd <= grantStart {
 		t.Fatal("could not isolate the broad agent read-only ACL contract")
 	}
-	grantContract := module[grantStart : grantStart+grantEnd]
+	grantContract := module[grantStart:grantEnd]
 	prune := strings.Index(grantContract, `-path ${lib.escapeShellArg morathustraRecoveryRoot}`)
 	mutation := strings.Index(grantContract, `-exec ${pkgs.acl}/bin/setfacl -m u:agents:r-x,d:u:agents:r-x '{}' +`)
 	if prune < 0 || mutation < 0 || prune >= mutation {
@@ -1003,11 +1096,11 @@ func TestNixOrcaPreservesMorathustraRecoveryKeyCustody(t *testing.T) {
 	}
 
 	start := strings.Index(module, "protect_selected_recovery_key()")
-	end := strings.Index(module[start:], "grant_loom_service_agent_workspace_read_only()")
-	if start < 0 || end < 0 {
+	end := strings.Index(module, "grant_loom_service_agent_workspace_read_only()")
+	if start < 0 || end <= start {
 		t.Fatal("could not isolate the Morathustra recovery key custody contract")
 	}
-	contract := module[start : start+end]
+	contract := module[start:end]
 	for _, forbidden := range []string{
 		`cat "$key"`, `${pkgs.coreutils}/bin/cp`, `${pkgs.coreutils}/bin/mv`,
 		`${pkgs.coreutils}/bin/chown`, `ssh-keygen`, `openssl`,
@@ -1303,14 +1396,23 @@ func TestNixWorkspaceArchivePreservesMountTopologyAndPayloadACLs(t *testing.T) {
 			t.Skip("nix unavailable")
 		}
 	}
-	apply := `system: let
+	apply := `actual: let
+  system = actual.extendModules {
+    modules = [ {
+      loom.boxes.example = {
+        label = "Example";
+        rootPath = "/srv/loom/boxes/example";
+      };
+    } ];
+  };
   disabled = system.extendModules { modules = [ ({ lib, ... }: { loom.workspaceArchive.enable = lib.mkForce false; }) ]; };
   strict = system.extendModules { modules = [ ({ lib, ... }: { systemd.services.loomd.serviceConfig.ProtectSystem = lib.mkForce "strict"; }) ]; };
 in {
   service = system.config.systemd.services.loomd.serviceConfig;
   disabledWrites = disabled.config.systemd.services.loomd.serviceConfig.ReadWritePaths;
   strictRejected = builtins.any (x: !x.assertion && builtins.match ".*Workspace archive requires writable.*" x.message != null) strict.config.assertions;
-  access = system.config.system.activationScripts.loomOrcaAccess.text;
+  access = system.config.system.activationScripts.loomAgentsAccess.text;
+  additionalArchiveAccess = system.config.system.activationScripts.loomAdditionalBoxAccess.text;
   storageShare = system.config.services.samba.settings.loom-storage;
 }`
 	cmd := exec.Command(nix, "--extra-experimental-features", "nix-command flakes", "eval", "--json", ".#nixosConfigurations.hardware-main", "--apply", apply)
@@ -1328,10 +1430,11 @@ in {
 			NoNewPrivileges                         bool
 			ReadWritePaths                          []string
 		}
-		DisabledWrites []string
-		StrictRejected bool
-		Access         string
-		StorageShare   map[string]any
+		DisabledWrites          []string
+		StrictRejected          bool
+		Access                  string
+		AdditionalArchiveAccess string
+		StorageShare            map[string]any
 	}
 	if err := json.Unmarshal(payload, &got); err != nil {
 		t.Fatal(err)
@@ -1341,11 +1444,11 @@ in {
 	}
 	for _, p := range got.Service.ReadWritePaths {
 		switch strings.Trim(p, `"`) {
-		case "/srv", "/srv/loom", "/srv/loom/box", "/srv/loom/storage", "/srv/loom/box/Topics", "/srv/loom/box/Projects", "/srv/loom/box/Library", "/srv/loom/storage/archive":
+		case "/srv", "/srv/loom", "/srv/loom/box", "/srv/loom/storage", "/srv/loom/box/Topics", "/srv/loom/box/Projects", "/srv/loom/box/Library", "/srv/loom/storage/archive", "/srv/loom/storage/imports":
 			t.Fatalf("archive move root/parent became a separate writable bind: %s", p)
 		}
 	}
-	if !slices.Contains(got.DisabledWrites, `"/srv/loom/storage/archive"`) || !slices.Contains(got.DisabledWrites, `"/srv/loom/box/Projects"`) {
+	if !slices.Contains(got.DisabledWrites, `"/srv/loom/storage/archive"`) || !slices.Contains(got.DisabledWrites, `"/srv/loom/box/Projects"`) || !slices.Contains(got.DisabledWrites, `"/srv/loom/storage/imports"`) {
 		t.Fatal("disabled archive changed pre-existing write roots")
 	}
 	for _, root := range []string{"Topics", "Projects", "Library"} {
@@ -1356,6 +1459,27 @@ in {
 	for _, root := range []string{"topics", "projects", "library"} {
 		if strings.Count(got.Access, "-path /srv/loom/storage/archive/"+root) != 2 {
 			t.Fatalf("archive category %s is not pruned from recursive reader grants", root)
+		}
+	}
+	for _, path := range []string{
+		"/srv/loom/storage/Boxes/example",
+		"/srv/loom/storage/Projects",
+		"/srv/loom/storage/Library",
+		"/srv/loom/storage/Records",
+		"/srv/loom/storage/.loom",
+		"/srv/loom/storage/imports",
+		"/var/lib/loom/lane",
+		"/var/lib/loom/operator-evidence",
+		"/var/lib/loom/application-builds",
+		"/var/lib/loom/mina-hermes",
+	} {
+		if strings.Count(got.Access, "-path "+path) != 2 {
+			t.Fatalf("retained/private root %s must be pruned from both recursive reader grants", path)
+		}
+	}
+	for _, want := range []string{`if [ ! -d "$path" ]; then`, `stat -c '%U:%G'`, `additional Box archive root owner is invalid`} {
+		if !strings.Contains(got.AdditionalArchiveAccess, want) {
+			t.Fatalf("additional Box archive provisioning lost create-only preservation: %s", want)
 		}
 	}
 	for _, want := range []string{
@@ -1385,16 +1509,30 @@ func TestNixHardwareMainStorageExpansion(t *testing.T) {
 			t.Skip("nix unavailable")
 		}
 	}
-	apply := `system: {
-   filesystem = system.config.fileSystems."/srv/loom";
-   rootDevice = system.config.fileSystems."/".device;
-   services = builtins.map (name: system.config.systemd.units."${name}.service".text) [
-     "loomd" "loom-node-agent" "loom-box-layout-preflight" "orca-serve"
-     "loom-mina" "loom-mina-recovery-publish" "loom-mini-dashboard"
-     "samba-smbd" "samba-nmbd" "samba-winbindd" "systemd-tmpfiles-setup"
-     "systemd-tmpfiles-resetup"
-   ];
- }`
+	// Read the actual dependency options without realizing unrelated native
+	// runtime packages merely to render a Linux unit on the test runner.
+	apply := `system: let
+  c = system.config;
+  optional = enabled: name: if enabled then [ name ] else [];
+  services = [
+    "loomd" "loom-node-agent" "loom-box-layout-preflight"
+    "loom-project-applications-restore"
+    "samba-smbd" "samba-nmbd" "samba-winbindd"
+    "systemd-tmpfiles-setup" "systemd-tmpfiles-resetup"
+  ] ++ optional c.loom.orca.enable "orca-serve"
+    ++ optional c.loom.miniDashboard.enable "loom-mini-dashboard"
+    ++ optional c.loom.mina.enable "loom-mina"
+    ++ optional c.loom.mina.recoveryEnabled "loom-mina-recovery-publish"
+    ++ (if c.loom.hermesPlatform.enable then [ "loom-hermes-platform" "loom-hermes-scheduler" ] else [])
+    ++ optional c.loom.codexRuntime.recoveryEnable "loom-codex-recovery";
+in {
+  filesystem = c.fileSystems."/srv/loom";
+  rootDevice = c.fileSystems."/".device;
+  services = builtins.map (name: {
+    inherit name;
+    inherit (c.systemd.services.${name}) requires after bindsTo;
+  }) services;
+}`
 	cmd := exec.Command(nix, "--extra-experimental-features", "nix-command flakes", "eval", "--json", ".#nixosConfigurations.hardware-main", "--apply", apply)
 	cmd.Dir = root
 	payload, err := cmd.Output()
@@ -1411,7 +1549,10 @@ func TestNixHardwareMainStorageExpansion(t *testing.T) {
 			Options        []string
 		}
 		RootDevice string
-		Services   []string
+		Services   []struct {
+			Name                     string
+			Requires, After, BindsTo []string
+		}
 	}
 	if err := json.Unmarshal(payload, &got); err != nil {
 		t.Fatal(err)
@@ -1420,27 +1561,21 @@ func TestNixHardwareMainStorageExpansion(t *testing.T) {
 		t.Fatalf("unsafe service filesystem: %+v", got.Filesystem)
 	}
 	if got.RootDevice != "/dev/disk/by-label/nixos" {
-		t.Fatal("original root device changed")
+		t.Fatal("example root device changed")
 	}
 	for _, option := range got.Filesystem.Options {
 		if option == "nofail" || option == "noauto" {
 			t.Fatalf("unsafe mount option %q", option)
 		}
 	}
-	for _, unit := range got.Services {
-		for _, key := range []string{"Requires=", "After=", "BindsTo="} {
-			found := false
-			for _, line := range strings.Split(unit, "\n") {
-				if strings.HasPrefix(line, key) {
-					for _, dependency := range strings.Fields(strings.TrimPrefix(line, key)) {
-						if dependency == "srv-loom.mount" {
-							found = true
-						}
-					}
-				}
-			}
-			if !found {
-				t.Fatalf("missing %s mount dependency: %s", key, unit)
+	for _, service := range got.Services {
+		for key, dependencies := range map[string][]string{
+			"Requires": service.Requires,
+			"After":    service.After,
+			"BindsTo":  service.BindsTo,
+		} {
+			if !slices.Contains(dependencies, "srv-loom.mount") {
+				t.Fatalf("missing %s mount dependency for %s: %v", key, service.Name, dependencies)
 			}
 		}
 	}
@@ -1457,7 +1592,13 @@ func TestNixHardwareMainRendersRestoreAuthoritySocketActivationReconcile(t *test
 		nix = profileNix
 	}
 
-	apply := `system:
+	apply := `actual:
+let
+  # This checks restore-authority units, not the unrelated Linux agent build.
+  system = actual.extendModules { modules = [ ({ lib, ... }: {
+    loom.hermesPlatform.enable = lib.mkForce false;
+  }) ]; };
+in
 let
   changed = system.extendModules {
     modules = [
@@ -1605,8 +1746,8 @@ func TestNixHermesReleasePin(t *testing.T) {
 	if err := json.Unmarshal(lock.Nodes[lock.Root].Inputs["nixpkgs"], &loomNixpkgs); err != nil {
 		t.Fatal(err)
 	}
-	if lock.Nodes[loomNixpkgs].Locked.Rev != "26ef669cffa904b6f6832ab57b77892a37c1a671" {
-		t.Fatal("Hermes packaging must not update LOOM's nixpkgs")
+	if lock.Nodes[loomNixpkgs].Locked.Rev != "cd4ea8d57de16f4810bc5f14207bac45fbf19f67" {
+		t.Fatal("LOOM's independently pinned nixpkgs changed")
 	}
 	packageFile := readRepoFile(t, "nix/packages/hermes-agent.nix")
 	for _, want := range []string{
@@ -1895,7 +2036,7 @@ in {
 		t.Fatal(err)
 	}
 	if !got.DeployedRuntime || !got.DeployedRecovery || len(got.Cases) != 24 {
-		t.Fatal("hardware-main must deploy the accepted runtime and recovery policy")
+		t.Fatal("legacy evaluation fixture must enable runtime and recovery for the matrix")
 	}
 	for _, c := range got.Cases {
 		if c.FlagsPresent != (c.Runtime || c.Recovery) || c.PublicKeyPresent != c.Recovery || c.RuntimeEnv != strconv.FormatBool(c.Runtime) || c.RecoveryEnv != strconv.FormatBool(c.Recovery) || c.Gateway != c.Runtime || c.RecoveryPublisher != c.Recovery || c.RecoveryTimer != c.Recovery || c.RuntimeInstalled != c.Runtime || c.ProducerInstalled != c.Recovery || c.ProducerGlobal {
@@ -1962,7 +2103,7 @@ func TestNixMorathustraHasNoProfileProvisioningOrGlobalEnvironment(t *testing.T)
 	} {
 		requireContains(t, module, want)
 	}
-	orca := readRepoFile(t, "nix/modules/loom-orca.nix")
+	agents := readRepoFile(t, "nix/modules/loom-agents.nix")
 	for _, want := range []string{
 		`agentBashrc = if runtime.enable then`,
 		`export HERMES_HOME=${lib.escapeShellArg runtime.hermesHome}`,
@@ -1971,7 +2112,7 @@ func TestNixMorathustraHasNoProfileProvisioningOrGlobalEnvironment(t *testing.T)
 		`export PATH="/etc/profiles/per-user/agents/bin:$PATH"`,
 		`packages = lib.optionals runtime.enable [ runtime.package ];`,
 	} {
-		requireContains(t, orca, want)
+		requireContains(t, agents, want)
 	}
 }
 

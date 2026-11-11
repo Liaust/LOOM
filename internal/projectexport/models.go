@@ -2,6 +2,7 @@ package projectexport
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"loom.local/loom/internal/filepolicy"
@@ -44,6 +45,7 @@ type Entry struct {
 	Size         int64               `json:"size"`
 	LinkTarget   string              `json:"link_target,omitempty"`
 	ContentHash  string              `json:"content_hash,omitempty"`
+	Revision     string              `json:"source_revision,omitempty"`
 	Decision     filepolicy.Decision `json:"decision"`
 	Generated    []byte              `json:"-"`
 }
@@ -60,6 +62,9 @@ type Summary struct {
 	ArchiveBytes      int64                   `json:"archive_bytes,omitempty"`
 	ArchiveChecksum   string                  `json:"archive_checksum,omitempty"`
 	OutputPath        string                  `json:"output_path,omitempty"`
+	SourceRoot        string                  `json:"source_root,omitempty"`
+	SourcePath        string                  `json:"source_path,omitempty"`
+	SourceRevision    string                  `json:"source_revision,omitempty"`
 }
 
 type Plan struct {
@@ -69,6 +74,15 @@ type Plan struct {
 	Ignored         []Entry `json:"ignored,omitempty"`
 	Summary         Summary `json:"summary"`
 	MaxArchiveBytes int64   `json:"-"`
+	boundRoot       *os.Root
+	profile         filepolicy.Profile
+}
+
+func (p Plan) Close() error {
+	if p.boundRoot != nil {
+		return p.boundRoot.Close()
+	}
+	return nil
 }
 
 func ParseMode(value string) (Mode, error) {

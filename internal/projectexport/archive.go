@@ -24,7 +24,11 @@ func WriteArchive(ctx context.Context, writer io.Writer, plan Plan) (Summary, er
 	if err := validateUniqueArchivePaths(plan.Entries); err != nil {
 		return Summary{}, err
 	}
-	resolver, err := filepolicy.NewResolver(plan.ProjectRoot, filepolicy.ProfileFaithful, resolverOptionsForMode(mode))
+	profile, options := filepolicy.ProfileFaithful, resolverOptionsForMode(mode)
+	if plan.profile != "" {
+		profile, options = plan.profile, directoryResolverOptions()
+	}
+	resolver, err := filepolicy.NewResolver(plan.ProjectRoot, profile, options)
 	if err != nil {
 		return Summary{}, fmt.Errorf("re-resolve project export policy: %w", err)
 	}
@@ -101,7 +105,12 @@ func WriteArchive(ctx context.Context, writer io.Writer, plan Plan) (Summary, er
 			_ = tarWriter.Close()
 			return Summary{}, err
 		}
-		file, err := os.Open(resolvedPath)
+		var file *os.File
+		if plan.boundRoot != nil {
+			file, err = plan.boundRoot.Open(entry.RelativePath)
+		} else {
+			file, err = os.Open(resolvedPath)
+		}
 		if err != nil {
 			_ = tarWriter.Close()
 			return Summary{}, fmt.Errorf("open export entry %q: %w", name, err)

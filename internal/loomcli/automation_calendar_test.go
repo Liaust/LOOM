@@ -59,3 +59,40 @@ func TestCalendarScheduleCLIPreviewWireAndConflicts(t *testing.T) {
 		t.Fatalf("invalid flags reached server: %d calls", calls)
 	}
 }
+
+func TestScheduleTimingCLIRequiresConfirmationAndPreservesWire(t *testing.T) {
+	calls := 0
+	socket, stop := startStorageCommandServer(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != "POST" || r.URL.Path != "/v1/schedules/reconciliation/timing" || r.Header.Get(idempotency.Header) != "weekly-timing" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var input automation.ScheduleTimingInput
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Fatal(err)
+		}
+		if input.Cron != "0 5 * * 1" || input.Timezone != "Europe/Amsterdam" || input.MisfirePolicy != automation.MisfireRunIfLateWithin || input.LatenessWindowSeconds != 120 {
+			t.Errorf("input=%+v", input)
+		}
+		response.WriteJSON(w, http.StatusOK, response.Success("corr_timing", automation.ScheduleDetail{Schedule: automation.Schedule{ScheduleID: "same-id", Status: "paused"}}))
+	})
+	defer stop()
+	base := []string{"--socket", socket, "--json", "schedule", "timing", "reconciliation", "--cron", "0 5 * * 1", "--timezone", "Europe/Amsterdam", "--misfire", "run_if_late_within", "--lateness-window", "120s", "--idempotency-key", "weekly-timing"}
+	if _, _, err := executeRootCommand(base...); err == nil {
+		t.Fatal("accepted without --yes")
+	}
+	if calls != 0 {
+		t.Fatal("unconfirmed change reached backend")
+	}
+	out, stderr, err := executeRootCommand(append(base, "--yes")...)
+	if err != nil {
+		t.Fatalf("%v %s", err, stderr)
+	}
+	var envelope response.Envelope[automation.ScheduleDetail]
+	if err := json.Unmarshal([]byte(out), &envelope); err != nil || envelope.Data.Schedule.ScheduleID != "same-id" || envelope.Data.Schedule.Status != "paused" {
+		t.Fatalf("%s err=%v", out, err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls=%d", calls)
+	}
+}

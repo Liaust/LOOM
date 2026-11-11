@@ -36,6 +36,11 @@ set -euo pipefail
 if [[ " $* " == *" sudo -n true "* && "${LOOM_WRAPPER_SMOKE_REQUIRE_PASSWORD:-0}" == "1" ]]; then
   exit 1
 fi
+remote_command="${!#}"
+if [[ "${LOOM_WRAPPER_SMOKE_EXEC_SUDO:-0}" == "1" && "$remote_command" == 'sudo -n -- '* ]]; then
+  bash -c "${remote_command#sudo -n -- }"
+  exit $?
+fi
 if [[ " $* " == *" update apply --help "* ]]; then
   printf '%s\n' "${LOOM_WRAPPER_SMOKE_HELP_OUTPUT:-remote apply help}"
   exit "${LOOM_WRAPPER_SMOKE_HELP_STATUS:-0}"
@@ -43,8 +48,18 @@ fi
 if [[ " $* " == *" -tt "* && "${LOOM_WRAPPER_SMOKE_REFUSE_APPLY:-0}" == "1" ]]; then
   exit 77
 fi
+if [[ " $* " == *" systemctl show --property=ActiveState --value loom-notes-recovery.service "* ]]; then
+  if [[ -n "${LOOM_WRAPPER_SMOKE_NOTES_SECOND_STATE:-}" && "$(grep -c 'loom-notes-recovery.service' "$LOOM_WRAPPER_SMOKE_SSH_LOG")" -gt 1 ]]; then
+    printf '%s\n' "$LOOM_WRAPPER_SMOKE_NOTES_SECOND_STATE"
+  else
+    printf '%s\n' "${LOOM_WRAPPER_SMOKE_NOTES_STATE:-inactive}"
+  fi
+  exit 0
+fi
 if [[ " $* " == *" backup create "* ]]; then
-  if [[ "${LOOM_WRAPPER_SMOKE_OMIT_BACKUP_PATH:-0}" == "1" ]]; then
+  if [[ "${LOOM_WRAPPER_SMOKE_FAILED_BACKUP:-0}" == "1" ]]; then
+    printf '%s\n' '{"ok":true,"data":{"run":{"run_status":"failed","result_summary_json":{"status":"failed","backup_dir":"/not-committed","backup_operation_id":"failed-operation"},"error_json":{"message":"operational capture deferred before staging: local budget exceeded"}}}}'
+  elif [[ "${LOOM_WRAPPER_SMOKE_OMIT_BACKUP_PATH:-0}" == "1" ]]; then
     printf '{"data":{"run":{"result_summary_json":{"backup_operation_id":"%s"}}}}\n' \
       "${LOOM_WRAPPER_SMOKE_AUTO_BACKUP_REF:-maintenance_operation_fake}"
   elif [[ "${LOOM_WRAPPER_SMOKE_OMIT_BACKUP_REF:-0}" == "1" ]]; then
@@ -54,6 +69,18 @@ if [[ " $* " == *" backup create "* ]]; then
     printf '{"data":{"run":{"result_summary_json":{"backup_dir":"%s","backup_operation_id":"%s"}}}}\n' \
       "${LOOM_WRAPPER_SMOKE_AUTO_BACKUP:-/var/lib/loom/backups/main/fake}" \
       "${LOOM_WRAPPER_SMOKE_AUTO_BACKUP_REF:-maintenance_operation_fake}"
+  fi
+fi
+if [[ " $* " == *" worker inspect "* ]]; then
+  worker="main.main_backup"
+  [[ " $* " != *" main.cloud_snapshot_upload "* ]] || worker="main.cloud_snapshot_upload"
+  if [[ "${LOOM_WRAPPER_SMOKE_BAD_WORKER_STATUS:-0}" == "1" ]]; then
+    printf '{}\n'
+  elif [[ "${LOOM_WRAPPER_SMOKE_BUSY_WORKER:-}" == "$worker" ]] || \
+    [[ "${LOOM_WRAPPER_SMOKE_LATE_BUSY_WORKER:-}" == "$worker" && "$(grep -c "<$worker>" "$LOOM_WRAPPER_SMOKE_SSH_LOG")" -gt 1 ]]; then
+    printf '{"ok":true,"data":{"instance":{"worker_key":"%s","current_run_id":"running"},"current_run":{"run_status":"running"}}}\n' "$worker"
+  else
+    printf '{"ok":true,"data":{"instance":{"worker_key":"%s"}}}\n' "$worker"
   fi
 fi
 SH
@@ -126,7 +153,16 @@ fi
 "$REPO_ROOT/scripts/loom-main" sudo systemctl status loomd >/dev/null
 [[ "$(wc -l <"$SSH_LOG" | tr -d ' ')" == "2" ]] || fail "sudo command should check passwordless sudo before running"
 assert_contains "$SSH_LOG" '<-o> <BatchMode=yes> <acceptance-main> <sudo> <-n> <true>'
-assert_contains "$SSH_LOG" '<-o> <BatchMode=yes> <acceptance-main> <sudo> <-n> <--> <systemctl> <status> <loomd>'
+assert_contains "$SSH_LOG" '<-o> <BatchMode=yes> <acceptance-main> <sudo -n -- systemctl status loomd>'
+
+: >"$SSH_LOG"
+QUOTED_SENTINEL="$TMP_DIR/should-not-be-created-by-ssh"
+QUOTED_OUTPUT="$(LOOM_WRAPPER_SMOKE_EXEC_SUDO=1 "$REPO_ROOT/scripts/loom-main" sudo \
+  sh -c 'printf "%s\n" "$1" "$2" "$3"' sh \
+  'argument with spaces' 'semi;colon' "\$(touch $QUOTED_SENTINEL)")"
+EXPECTED_QUOTED_OUTPUT="$(printf '%s\n' 'argument with spaces' 'semi;colon' "\$(touch $QUOTED_SENTINEL)")"
+[[ "$QUOTED_OUTPUT" == "$EXPECTED_QUOTED_OUTPUT" ]] || fail "passwordless sudo lost literal argument boundaries"
+[[ ! -e "$QUOTED_SENTINEL" ]] || fail "passwordless sudo evaluated a literal argument"
 
 : >"$SSH_LOG"
 export LOOM_WRAPPER_SMOKE_REQUIRE_PASSWORD=1
@@ -147,7 +183,7 @@ assert_contains "$SSH_LOG" "<-o> <BatchMode=yes> <acceptance-main> <sudo -S -p '
   --no-pause-direct-events \
   --no-pause-workers >/dev/null
 
-[[ "$(wc -l <"$SSH_LOG" | tr -d ' ')" == "3" ]] || fail "apply should plan once, check passwordless sudo once, and invoke one transaction"
+[[ "$(wc -l <"$SSH_LOG" | tr -d ' ')" == "9" ]] || fail "apply should inspect capture/backup/cloud twice, plan once, check sudo once and invoke one transaction"
 assert_contains "$SSH_LOG" '<-o> <BatchMode=yes> <acceptance-main> <sudo> <-n> <true>'
 assert_contains "$SSH_LOG" '<-tt> <acceptance-main> <loom> <--config> </etc/loom/loom.env> <update> <apply>'
 assert_contains "$SSH_LOG" "<--release-path> <$RELEASE_PATH>"
@@ -158,6 +194,47 @@ assert_contains "$SSH_LOG" '<--yes>'
 assert_contains "$SSH_LOG" '<--no-pause-schedules>'
 assert_contains "$SSH_LOG" '<--no-pause-direct-events>'
 assert_contains "$SSH_LOG" '<--no-pause-workers>'
+
+for capture_state in active activating deactivating unknown; do
+  : >"$SSH_LOG"
+  if LOOM_WRAPPER_SMOKE_NOTES_STATE="$capture_state" "$REPO_ROOT/scripts/loom-main" update apply \
+    --release-path "$RELEASE_PATH" --backup-path "$BACKUP_PATH" --backup-ref "$BACKUP_REF" \
+    --current-migration 61 --yes >"$TMP_DIR/capture-refusal.log" 2>&1; then
+    fail "capture state $capture_state reached apply"
+  fi
+  if grep -F -e '<update> <apply>' -e '<backup> <create>' "$SSH_LOG" >/dev/null; then
+    fail "capture refusal started a transaction or backup"
+  fi
+done
+: >"$SSH_LOG"
+if LOOM_WRAPPER_SMOKE_NOTES_SECOND_STATE=activating "$REPO_ROOT/scripts/loom-main" update apply \
+  --release-path "$RELEASE_PATH" --backup-path "$BACKUP_PATH" --backup-ref "$BACKUP_REF" \
+  --current-migration 61 --yes >"$TMP_DIR/capture-race.log" 2>&1; then
+  fail "capture starting after planning reached apply"
+fi
+if grep -F '<update> <apply>' "$SSH_LOG" >/dev/null; then
+  fail "late capture reached the update transaction"
+fi
+
+for worker in main.main_backup main.cloud_snapshot_upload; do
+  for timing in BUSY LATE_BUSY; do
+    : >"$SSH_LOG"
+    if env "LOOM_WRAPPER_SMOKE_${timing}_WORKER=$worker" "$REPO_ROOT/scripts/loom-main" update apply \
+      --release-path "$RELEASE_PATH" --backup-path "$BACKUP_PATH" --backup-ref "$BACKUP_REF" \
+      --current-migration 61 --yes >"$TMP_DIR/worker-refusal.log" 2>&1; then
+      fail "$timing $worker reached apply"
+    fi
+    if grep -F -e '<update> <apply>' -e '<backup> <create>' "$SSH_LOG" >/dev/null; then
+      fail "internal worker refusal started a transaction or backup"
+    fi
+  done
+done
+: >"$SSH_LOG"
+if LOOM_WRAPPER_SMOKE_BAD_WORKER_STATUS=1 "$REPO_ROOT/scripts/loom-main" update apply \
+  --release-path "$RELEASE_PATH" --backup-path "$BACKUP_PATH" --backup-ref "$BACKUP_REF" \
+  --current-migration 61 --yes >"$TMP_DIR/worker-invalid.log" 2>&1; then
+  fail "invalid internal worker status reached apply"
+fi
 
 SOURCE_ROOT="$TMP_DIR/release source"
 mkdir -p "$SOURCE_ROOT"
@@ -189,11 +266,22 @@ export LOOM_WRAPPER_SMOKE_AUTO_BACKUP_REF="$AUTO_BACKUP_REF"
   --flake .#hardware-main \
   --current-migration 61 \
   --yes >/dev/null
-[[ "$(wc -l <"$SSH_LOG" | tr -d ' ')" == "4" ]] || fail "automatic backup apply should plan, back up, check passwordless sudo, and apply once"
+[[ "$(wc -l <"$SSH_LOG" | tr -d ' ')" == "10" ]] || fail "automatic backup apply should inspect capture/backup/cloud twice, plan, back up, check sudo and apply once"
 assert_contains "$SSH_LOG" '<loom> <--config> </etc/loom/loom.env> <--json> <backup> <create> <--production>'
 assert_contains "$SSH_LOG" "<--reason> <pre-update-backup-for:$RELEASE_PATH>"
 assert_contains "$SSH_LOG" "<--backup-path> <$AUTO_BACKUP>"
 assert_contains "$SSH_LOG" "<--backup-ref> <$AUTO_BACKUP_REF>"
+
+: >"$SSH_LOG"
+if LOOM_WRAPPER_SMOKE_FAILED_BACKUP=1 "$REPO_ROOT/scripts/loom-main" update apply \
+  --release-path "$RELEASE_PATH" --current-migration 61 --yes \
+  >"$TMP_DIR/failed-backup.log" 2>&1; then
+  fail "failed backup was accepted as update evidence"
+fi
+assert_contains "$TMP_DIR/failed-backup.log" 'production backup did not succeed: operational capture deferred before staging: local budget exceeded'
+if grep -F '<update> <apply>' "$SSH_LOG" >/dev/null; then
+  fail "failed backup reached update apply"
+fi
 
 for missing_field in PATH REF; do
   before_apply_calls="$(grep -c '<update> <apply>' "$SSH_LOG" || true)"

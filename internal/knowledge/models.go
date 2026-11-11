@@ -179,6 +179,7 @@ type AbsoluteTime struct {
 }
 
 type SourceRoot struct {
+	RecoveryMissingDeferred int `json:"-"`
 	SourceContext
 	LifecycleCounts                  *NotesLifecycleCounts `json:"lifecycle_counts,omitempty"`
 	NotesSourceRootID                string                `json:"notes_source_root_id"`
@@ -194,16 +195,22 @@ type SourceRoot struct {
 	RootRelativePath                 string                `json:"root_relative_path,omitempty"`
 	Status                           string                `json:"status"`
 	AuthorizationMetadata            json.RawMessage       `json:"authorization_metadata"`
+	WorkspaceAuthority               json.RawMessage       `json:"-"`
+	SourceIntakeStage                string                `json:"source_intake_stage,omitempty"`
 	Metadata                         json.RawMessage       `json:"metadata"`
 	CreatedAt                        time.Time             `json:"created_at"`
 	UpdatedAt                        time.Time             `json:"updated_at"`
 }
 
 type KnowledgeObject struct {
-	pipelineSource *pipelineSourceSnapshot
+	BoxMembershipDigest string `json:"box_membership_digest,omitempty"`
+	pipelineSource      *pipelineSourceSnapshot
 	SourceContext
 	*NotesCustodyContext
 	KnowledgeObjectID    string          `json:"knowledge_object_id"`
+	CanonicalFileID      string          `json:"canonical_file_id,omitempty"`
+	LexicalVersionID     string          `json:"lexical_version_id,omitempty"`
+	SemanticVersionID    string          `json:"semantic_version_id,omitempty"`
 	NotesSourceRootID    string          `json:"notes_source_root_id"`
 	StorageEntryID       *string         `json:"storage_entry_id,omitempty"`
 	SourceNodeID         *string         `json:"source_node_id,omitempty"`

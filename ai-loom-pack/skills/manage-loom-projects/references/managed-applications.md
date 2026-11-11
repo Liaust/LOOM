@@ -1,36 +1,48 @@
 # Managed Applications
 
-Build the project normally on its target node and produce the typed artifact
-descriptor. In the application resource, set `manifest` and `artifact_descriptor`
-to project-relative files, then use normal project plan/apply/status. The plan
-captures both. Apply obtains the node-managed grant, registers the service,
-independently verifies/publishes the realized artifact, allocates persistent data
-and installs it. No per-application host edit or separate operator request is
-needed within node policy. The project agent owns its manifest, descriptor, build
-and requested rollout, not the LOOM integrator.
+Ordinary application code/builds/tests need no managed runtime declaration.
+Implement authorized work directly; another agent or integrator is not a
+prerequisite. Declare only requested managed effects in `.loom/project.yaml`.
+Keep member repos portable; a missing adapter must not dictate their language.
 
-Use logical `binding_ref` names for allocated data; optional `backup: cloud_history`
-enrolls it in the node's existing backup. Do not chmod private app data to make
-backups work. Status stays pending until a fresh matching archive succeeds;
-file history does not prove database consistency or client acceptance.
+## Select The Existing Owner
 
-`credentials` lists logical names and `credential_sources` maps each name to
-`pass://SHARE_ID/ITEM_ID/FIELD` (preserve trailing `=` padding). the operator creates
-or registers missing credentials manually in the approved Proton vault. Tell him
-the required account/item and fields; use the resulting reference, without asking
-him to paste a password or token into chat. The project agent owns binding that
-reference and continuing the requested rollout. Credentials never belong in
-project files.
+Source-first Python, Cargo and locked Nix packages use the existing application
+build/job owner. Use the real project, including non-Git source; never fabricate
+a repository, build metadata, second service or scheduler. Inspect compatibility
+with `loom project deploy <ref> --resource <key> --check`; authorized deployment
+uses `--yes`. Select `--node main` for a Main path, not the Mac filesystem.
 
-Automatic generation is deferred by the operator's current decision. Keep the
-working Viewer token; do not use `pass+generate://` or request broader Proton
-access as a prerequisite for deployment. Existing generation code is retained,
-not a claim of live availability. If a historical operation reports
-`credential.generation_pending`, reconcile it with the operator rather than
-deleting its journal or using a new source name to retry creation.
+Prepared artifacts still use project-relative `manifest` and `artifact_descriptor`
+through normal plan/apply/status. Do not mix prepared and source modes.
 
-For an explicitly requested public application on Main, add this to its
-application declaration, beside `manifest` and `artifact_descriptor`:
+Load only the applicable [Python/action](managed-application-recipes.md#source-first-workers),
+[Cargo/Nix](managed-application-recipes.md#cargo-and-native-packages) or
+[prepared-artifact](managed-application-recipes.md#prepared-applications) recipe.
+No mandatory all-recipes read before ordinary work. Recipes preserve supported
+build limits, typed argv/config delivery and exact operation recovery.
+
+## Data, Credentials And Actions
+
+Keep existing private state in place. Do not copy a live SQLite main file without
+its WAL, start an empty replacement, chown project data or loosen permissions.
+Applications consume resolved config/credential paths, not profile fallbacks.
+Optional `backup: cloud_history` selects normal protection; pending evidence
+does not prove application consistency, authenticated readiness or client delivery.
+
+Use exact `pass://SHARE_ID/ITEM_ID/FIELD` references. the operator creates or registers
+missing credentials; request the reference, never a secret in chat. Automatic
+generation is deferred: no `pass+generate://`, broader grants or token upgrade.
+Already-authorized Google imports use the supported protected importer, not a
+new consent or exposed private profile path; see [credentials](managed-application-recipes.md#existing-credentials).
+
+Actions run once per installed generation. Inspect the original operation before
+retrying. Failed/uncertain work must not be bypassed with another run label or
+deleted journals. An explicitly reviewed failed-hold release never reruns it.
+
+## Explicit Public Exposure
+
+For an authorized Main endpoint, the prepared recipe supports:
 
 ```yaml
 endpoint:
@@ -38,28 +50,14 @@ endpoint:
   hostname: webdav.apps.example.com
 ```
 
-Choose one unused name beneath `apps.example.com`. Wildcard DNS and the shared
-VPS-to-Main ingress are node infrastructure; no per-app DNS edit, certificate,
-endpoint registration or host grant is needed. Do not use `endpoint_ref` with
-`hostname`. Other domains and legacy private endpoint adapters are not enabled
-by this path. Omit the endpoint (or select loopback) to keep the app private.
+Use an unused name under `apps.example.com`, a manifest listener on `127.0.0.1`
+and the declared HTTP health check. No per-app DNS edit, TLS setup or host grant
+is needed; never hand-edit Caddy. DNS, trusted TLS, route and observed HTTP status
+are separate evidence, not established by installation alone. Public exposure
+requires task authority. It grants no outbound network access, authenticated
+client acceptance, old-backlog intake or immediate cloud protection.
 
-The manifest must bind `127.0.0.1` on an unused high port and declare an HTTP
-health check, including its expected status (401 is valid for an authenticated
-service). LOOM verifies the listener belongs to the installed process before
-publishing it. Caddy terminates HTTPS on Main; app authentication stays in the app.
-Public exposure must be part of the requested, reviewed project plan.
-
-`project status` reports the desired URL, DNS, trusted TLS, route and observed
-HTTP status separately. A successful installation/reload may precede certificate
-issuance; pending endpoint evidence is not a healthy public service. Authenticated
-client acceptance and backup coverage are separate. The simple VPS TCP proxy
-does not preserve the original client IP; do not rely on it for per-client logs
-or rate limiting. Application data and Caddy state enter the ordinary cloud file
-history; no immediate archive or application-consistent recovery is implied.
-
-A hostname collision leaves the other app unchanged. Removing the public
-endpoint withdraws only this app's route. Renames retain the old hostname until
-the replacement answers through trusted HTTPS; a pending replacement is reported
-for retry through the existing operation. Archive withdraws the route without
-deleting application data. Never edit Caddy fragments or host grants yourself.
+Read the [endpoint recipe](managed-application-recipes.md#public-https-endpoints)
+before exposure, replacement or removal; it
+preserves hostname-collision refusal, old-route retention during replacement,
+archive/data history and the proxy's client-IP limitation.

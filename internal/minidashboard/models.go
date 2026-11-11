@@ -54,13 +54,23 @@ type Freshness struct {
 }
 
 type Metric struct {
-	Available         bool        `json:"available"`
-	Value             *float64    `json:"value,omitempty"`
-	Unit              string      `json:"unit,omitempty"`
-	SampledAt         time.Time   `json:"sampled_at,omitempty"`
-	StaleAfterSeconds int64       `json:"stale_after_seconds"`
-	SourceState       SourceState `json:"source_state"`
-	Severity          Severity    `json:"severity"`
+	Available         bool          `json:"available"`
+	Value             *float64      `json:"value,omitempty"`
+	Unit              string        `json:"unit,omitempty"`
+	SampledAt         time.Time     `json:"sampled_at,omitempty"`
+	StaleAfterSeconds int64         `json:"stale_after_seconds"`
+	SourceState       SourceState   `json:"source_state"`
+	Severity          Severity      `json:"severity"`
+	Capacity          *DiskCapacity `json:"capacity,omitempty"`
+}
+
+type DiskCapacity struct {
+	Filesystem     string `json:"filesystem"`
+	Path           string `json:"path"`
+	TotalBytes     uint64 `json:"total_bytes"`
+	UsedBytes      uint64 `json:"used_bytes"`
+	FreeBytes      uint64 `json:"free_bytes"`
+	AvailableBytes uint64 `json:"available_bytes"`
 }
 
 type HostSnapshot struct {

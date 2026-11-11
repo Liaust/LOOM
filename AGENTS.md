@@ -14,8 +14,9 @@ take precedence over historical examples or plans.
   named agent identity is part of this public checkout.
 - Keep secrets, personal context, generated backups, and acceptance outputs out
   of Git. Use an owned .loom-acceptance directory for local test artifacts.
-- LOOM owns coordination and durable system services; Hermes/ORCA/Codex own
-  their respective agent and workspace runtimes. Preserve that distinction.
+- LOOM owns the desktop workspace, coordination and durable system services;
+  Hermes and Codex own their native agent runtimes. ORCA is historical, not a
+  required dependency. Preserve harness and system ownership boundaries.
 - Write human-readable docs with YAML frontmatter and existing wikilink titles.
   Public navigation also needs ordinary Markdown links for GitHub readers.
   Mark unverified/deferred behavior honestly; do not claim installed services

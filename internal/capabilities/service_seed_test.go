@@ -1,9 +1,45 @@
 package capabilities
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"loom.local/loom/internal/jobs"
+	"loom.local/loom/internal/scripts"
 )
+
+func TestScriptRunnerSeedUsageMatchesTypedInputAndBundledPackage(t *testing.T) {
+	body := scriptRunUsageDocumentBody()
+	parts := strings.SplitN(body, "```json\n", 2)
+	if len(parts) != 2 {
+		t.Fatal("missing concrete input example")
+	}
+	example := strings.SplitN(parts[1], "\n```", 2)[0]
+	var input jobs.CreateScriptRunInput
+	decoder := json.NewDecoder(strings.NewReader(example))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := scripts.LoadManifest("../../examples/projects/everything-template/scripts/hello_world/loom.script.yaml")
+	if err != nil || input.ScriptRef != manifest.ID || len(manifest.Inputs) != 0 || string(input.Input) != "{}" || input.ExecutionMode != jobs.ScriptRunEnqueueOnly || len(input.CredentialBindings) != 0 {
+		t.Fatalf("invalid bundled example: %+v %v", input, err)
+	}
+	for _, field := range []string{"script_ref", "object_ref", "project_ref", "scope_ref", "input", "execution_mode", "wait_timeout_seconds", "credential_bindings"} {
+		if !strings.Contains(body, "| "+field+" |") {
+			t.Fatalf("missing typed field %s", field)
+		}
+	}
+	for _, term := range []string{"after it is registered", "not assert", "actor authorization still apply", "independently installed account CLI, SSH connection or device tool", "loom job logs <job-id> --stream runner --tail 40"} {
+		if !strings.Contains(body, term) {
+			t.Fatalf("missing qualification %q", term)
+		}
+	}
+	if strings.Contains(statusReadUsageDocumentBody(), "hello_world") || strings.Contains(objectIngestUsageDocumentBody(), "hello_world") || string(endpointInput(Provider{CompactAddress: "main@object-store"}, CapabilityClass{}, "object.ingest", CapabilityFormCommand, RiskLevelMedium, 3).InputSchemaJSON) != `{"type":"object"}` {
+		t.Fatal("script-specific shape leaked into generic seeds")
+	}
+}
 
 func TestServiceCapabilityClassInputs(t *testing.T) {
 	inputs := ServiceCapabilityClassInputs()

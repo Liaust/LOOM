@@ -25,6 +25,7 @@ func scaffoldJSON(c Client, ctx context.Context, cid string, input pc.ScaffoldOp
 	if err != nil {
 		return result, err
 	}
+	c.applyBoxContext(req)
 	req.Header.Set(correlation.Header, correlation.Normalize(cid))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.client.Do(req)

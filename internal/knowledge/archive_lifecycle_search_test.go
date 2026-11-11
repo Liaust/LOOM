@@ -1,10 +1,83 @@
 package knowledge
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
+
+type notesCancellableQueryRuntime struct {
+	started chan struct{}
+	release chan struct{}
+	stopped chan struct{}
+	failure error
+	calls   int
+}
+
+func (r *notesCancellableQueryRuntime) Health(context.Context) EmbeddingRuntimeHealth {
+	return EmbeddingRuntimeHealth{Available: true}
+}
+
+func (r *notesCancellableQueryRuntime) Embed(ctx context.Context, _ EmbeddingRuntimeRequest) (EmbeddingRuntimeResponse, error) {
+	r.calls++
+	close(r.started)
+	defer close(r.stopped)
+	select {
+	case <-ctx.Done():
+		return EmbeddingRuntimeResponse{}, ctx.Err()
+	case <-r.release:
+		return EmbeddingRuntimeResponse{Embeddings: [][]float32{{1, 2, 3}}}, r.failure
+	}
+}
+
+func TestNotesQueryEmbeddingOverlapsAndJoinsOnce(t *testing.T) {
+	for _, failure := range []error{nil, &EmbeddingRuntimeError{Kind: EmbeddingRuntimeErrorUnavailable}, errors.New("invalid response")} {
+		runtime := &notesCancellableQueryRuntime{started: make(chan struct{}), release: make(chan struct{}), stopped: make(chan struct{}), failure: failure}
+		s := &Service{embeddingRuntime: runtime}
+		settings := EmbeddingSettings{Dimensions: 3}
+		query, finish := s.startNotesQueryEmbedding(t.Context(), "thermal question", settings)
+		t.Cleanup(finish)
+		select {
+		case <-runtime.started:
+		case <-time.After(time.Second):
+			t.Fatal("embedding did not start independently of the SQL phase")
+		}
+		select {
+		case <-query.done:
+			t.Fatal("embedding unexpectedly completed before release")
+		default:
+		}
+		close(runtime.release)
+		for range 3 {
+			vector, err := s.notesSearchQueryVector(t.Context(), NotesSearchInput{queryEmbedding: query}, settings)
+			if err != failure || (failure == nil && len(vector) != 3) {
+				t.Fatalf("joined result changed: %v %v", vector, err)
+			}
+		}
+		finish()
+		if runtime.calls != 1 {
+			t.Fatal("refill or partitions repeated query embedding")
+		}
+	}
+}
+
+func TestNotesQueryEmbeddingEarlyReturnCancelsAndJoins(t *testing.T) {
+	runtime := &notesCancellableQueryRuntime{started: make(chan struct{}), release: make(chan struct{}), stopped: make(chan struct{})}
+	s := &Service{embeddingRuntime: runtime}
+	query, finish := s.startNotesQueryEmbedding(t.Context(), "thermal question", EmbeddingSettings{Dimensions: 3})
+	finish()
+	select {
+	case <-runtime.stopped:
+	default:
+		t.Fatal("request returned before cancelled embedding stopped")
+	}
+	if !errors.Is(query.err, context.Canceled) || !query.loaded || runtime.calls != 1 {
+		t.Fatalf("early exit did not cancel the sole embedding operation: %+v", query)
+	}
+}
 
 func TestNotesArchiveSearchLifecycleQueryContracts(t *testing.T) {
 	stop := notesProjectArchiveStopSQL("r", "o", "archive_id")

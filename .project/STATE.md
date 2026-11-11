@@ -1,69 +1,66 @@
-# LOOM Public Beta State
+# LOOM Public Source State
 
-Snapshot: 2026-10-02. This describes the reusable source and observed development
-workflows, not the health of a reader's installation. Version 0.9.0 is a public
-beta, not a stable API, supported appliance or universal recovery guarantee.
+Source review: November 11, 2026. This is a reusable-source snapshot, not live
+installation health, a signed desktop release or a stable 1.0 guarantee. The
+published 0.9.0 beta and historical client releases retain their original meaning;
+this source refresh does not rewrite their tags or compatibility contracts.
 
-## Implemented
+## Implemented Source
 
-- Core daemon, PostgreSQL migrations through 00083, CLI/Portal, node agent,
-  typed capability routing, jobs, policies, durable events, schedules and workers.
-- Minimal ordinary projects with `.loom` declarations, portable `.project`
-  context, optional legacy `.repo` compatibility, repository discovery and
-  source-qualified development-state projection.
-- Resumable project plan/apply/status, managed application prerequisites,
-  credential delivery, storage grants, startup readiness and optional HTTPS.
-- Physical archive/restore with explicit inactive runtime state, Box/storage
-  catalogs, Borg cloud history, database recovery packages and historical
-  Provenance schema compatibility.
-- Notes intake with refresh/processing policies, text/PDF/image stages,
-  selective enrichment, exact citations, indexed lexical and semantic search,
-  and independent technical object inspection.
-- A writable unified Notes workspace: native encrypted transport, durable
-  source-checked intent, offline editing, event-driven reflection, explicit text
-  conflict review and citation navigation. Mac and iPhone workflows have been
-  used in development; stock LiveSync is not a compatible replacement client.
-- Qualified Provenance candidates, accepted records, reconciliation,
-  supersession, source-backed projection and Archivist execution.
-- Optional Hermes/MINA and Discord sessions, native Hermes schedule observation
-  and project declarations, project-scoped coding-agent capabilities, portable
-  skills, Mac SSH and paired computer use, and ORCA remote development.
+- Go daemon, CLI/terminal Portal, node agent and typed private APIs; PostgreSQL
+  migrations through 00115. Existing migration bytes remain unchanged.
+- Standalone Electron desktop: actual filesystem explorer, direct editing,
+  Markdown/properties/wikilinks/tags, source highlighting, file operations,
+  attachments, project focus, CSV, Canvas and supported Bases views.
+- Application-owned local text copies, durable draft/outbox records, offline
+  edits, exact-base source acceptance and Main-first recoverable path operations.
+  Directory subscriptions and reconnect checks are bounded and event-driven.
+- Local/cache/remote availability distinct from metadata/index/enrichment status;
+  on-demand binary reads and explicitly selected offline working sets.
+- Box contexts, project registration/resource declarations, active/passive/
+  archived lifecycle, managed application preparation/build/start and supported
+  archive/restore with explicit runtime reactivation.
+- Metadata/categories/backlinks, bounded graph views and recorded-operation
+  timelines; indexed lexical/semantic source search and selective enrichment.
+- Qualified Provenance candidates/records, evidence, reconciliation, supersession
+  and project context. Retrieval is not an authorization or truth service.
+- Native Hermes conversational runtime/profile integration, agent-owned native
+  schedules and LOOM-owned system jobs; independent native coding-agent dispatch.
+  ORCA compatibility remains historical, not a current required interaction path.
+- Storage custody, operational/native recovery, content-reference protection,
+  bounded retention and Borg cloud history with exact selected-state evidence.
 
-## Ownership
+## What This Does Not Establish
 
-LOOM owns coordination, declarations, source custody, knowledge/provenance and
-recovery integrations. Hermes owns its model loop, sessions, conversational
-memory, gateway and native schedules. MINA is optional persona/configuration.
-ORCA owns its desktop/remote coding experience. Neither harness is LOOM's core.
-Native Hermes jobs need no dummy project; project declarations reconcile only
-their own marked jobs. LOOM does not duplicate their timer.
+- Fresh-machine installation is not a finished wizard. No maintainer accounts,
+  actual host bindings, private agent memories or user corpus are included.
+- The Electron app is available as source, not a signed/notarized downloadable
+  product. Native updates need an explicitly configured signed channel; no
+  operator credential or private repository is selected by default.
+- The reference desktop is macOS and Main is NixOS. Package evaluation on another
+  platform is not end-to-end platform acceptance. Mobile is planning, not a
+  standalone shipping client. Old Obsidian plugins are legacy integrations.
+- Editor support is bounded: writable text/structured files up to 512 KiB; larger
+  originals remain browsable/read-only. Bases does not implement all Obsidian
+  expressions. CSV does not execute formulas. Graph and timeline are bounded
+  derived views, not complete knowledge or historical truth.
+- A file can exist without indexing or enrichment. Source access, local save,
+  Main acceptance, processing, device delivery and protection are distinct.
+- Separate Boxes/native profiles establish context and workflow defaults, not
+  operating-system isolation. External-service credentials and authority must be
+  configured independently, and source templates grant no standing permissions.
+- Native browser/desktop tooling requires its actual provider/session/permissions.
+  No universal site-login, always-on microphone or wake-word reliability claim.
+- Backup inclusion protects a specific selected capture. It does not prove
+  unsent offline edits, all-Mac coverage or application-consistent recovery for
+  every live service. Old recovery history and unknowns must be preserved.
 
-## Limits
+## Verification Scope
 
-- Installation remains manual, with explicit hardware, network, identity and
-  credential configuration. Public examples are not a ready host installation.
-- Interfaces/configuration can evolve before 1.0. Keep migration/deployment
-  receipts; arbitrary database downgrade is not supported.
-- Notes clients must use compatible pinned overlays and preserve encryption,
-  device-local state and Obsidian identity. Binary references are not writable
-  source documents; the current reference snapshot bound is 64 MiB.
-- Handwriting/equation recognition is optional. Automatic PDF/image enrichment
-  can be disabled and requested selectively later. Canvas/audio can be retained
-  without a claim of comprehensive semantic extraction.
-- Large imports, queue processing and retrieval have no latency SLA. Resource
-  pressure, throughput and diagnostics remain optimisation work.
-- Exact cloud inclusion is not proof of application-consistent recovery for
-  every service. Notes cohorts protect matching sources/bindings/transport;
-  optional vault captures protect files and intent exports, not a live native
-  browser database. Offline unsent phone edits are not protected on Main.
-- Project restore does not automatically restart services or timers. Semantic
-  projections and searchable candidates are not accepted truth or authority.
-- Legacy Portal forms lack complete parity with file-first project workflows.
-  Mobile computer control and a one-command installer remain deferred.
+Use the release/commit's checks and the operator's own installed diagnostics.
+Public source tests do not certify a reader's machine or its cloud protection.
+The candidate preparation preserves the existing public ancestry and excludes
+private configuration/history rather than merging an operator repository.
 
-## Public Boundary
-
-This clean-history repository excludes private operator configuration, account
-bindings, vault contents and operational receipts. Source checks and CI do not
-certify the health or backup coverage of an arbitrary installation. See the
-[README](../README.md), [changelog](../CHANGELOG.md) and [roadmap](ROADMAP.md).
+See [README](../README.md), [desktop guide](../docs/user-guide/workspace.md),
+[installation](../docs/operations/installation.md) and [roadmap](ROADMAP.md).

@@ -108,3 +108,22 @@ func TestKnowledgePoliciesRemainPerFolder(t *testing.T) {
 		}
 	}
 }
+
+func TestFolderPolicyNormalizedEvidenceIsExact(t *testing.T) {
+	for _, raw := range []string{
+		`{"Files":null}`,
+		`{"Files":{"rules":[]}}`,
+		`{"files":{"Rules":[]}}`,
+		`{"files":{"rules":[{"path":"Notes","Enrichment":null}]}}`,
+		`{"files":{"rules":[{"path":"Notes","enrichment":null}]}}`,
+		`{"files":{"rules":[]},"files":{"rules":[]}}`,
+	} {
+		if _, err := DecodeKnowledgeSourcePolicy([]byte(raw)); err == nil {
+			t.Errorf("accepted invalid normalized files evidence: %s", raw)
+		}
+	}
+	p, err := DecodeKnowledgeSourcePolicy([]byte(`{"files":{"rules":[{"path":"Notes","enrichment":[]}]}}`))
+	if err != nil || p.Files == nil || p.Files.Rules[0].Enrichment == nil || len(*p.Files.Rules[0].Enrichment) != 0 {
+		t.Fatalf("lost explicit empty allowlist: %+v %v", p, err)
+	}
+}

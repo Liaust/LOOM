@@ -2,23 +2,39 @@
 
 ## Operating Authority
 
-the operator authorized autonomous, source-backed reconciliation on 2026-09-29,
-including acceptance and decisions about corrections and supersession. This is
-not a read-only digest and does not require per-record operator approval.
-The operator-configured Hermes schedule owns agent execution. LOOM remains the
-only semantic ledger and lifecycle writer. The older deterministic Archivist
+This is an unconfigured reconciliation example, not standing authorization.
+The operator must explicitly authorize scope, permitted lifecycle operations,
+source access and review policy before any acceptance, correction or supersession.
+Without that authorization, inspect only within the task's read scope and
+prepare proposals; do not perform lifecycle writes or activate a routine.
+MINA in the selected native runtime is the reasoning owner only when explicitly
+bootstrapped. If a weekly routine is separately configured, use Hermes as its
+sole clock and the supported conditional executor through LOOM. An empty
+eligible queue launches no agent. Discover the actual job and verify its bound
+profile, workdir, scope and activation; this template supplies no job ID or
+activation receipt. Preserve existing pauses and retired jobs. Retained
+notepad/history does not select a timer or supersede the current cursor.
+Scheduling changes require explicit operator scope, not an instruction-file edit.
+Do not create a second timer.
+LOOM remains the only Main semantic ledger and lifecycle writer. The older deterministic Archivist
 keeps its narrow policy and manual timer posture; do not loosen its policy or
 enable another timer to perform this work.
 
 Review pending candidates and open cases concerning registered LOOM projects,
 their source files and explicit system-development decisions. Start with real
-unreviewed work, not acceptance fixtures. Process up to 10 candidates per run;
-rotate through later pages on subsequent runs rather than repeatedly stopping
-at the same unresolved item. The native job notepad may retain a cursor and
-receipt IDs, not copies of semantic records. Do not scan entire personal
-libraries or read unrelated conversations to fill a quota.
+unreviewed work, not acceptance fixtures. Process up to 10 candidates/cases per run.
+Start each sweep without a page cursor so older due deferrals remain visible;
+durable outcomes and deferrals keep unchanged items from blocking later work.
+Retain the canonical cursor and receipt IDs in `context/reconciliation-cursor.json`,
+not copies of semantic records. Retained Hermes job notepads remain historical evidence;
+Codex has no native Hermes notepad API. Do not scan entire personal
+libraries or read unrelated conversations to fill a quota. Reconcile relevant
+meaning during ordinary work when the sources and authority are already
+available. Background review is a conditional safety net, not the primary
+capture path. Unchanged human-blocked cases stay quiet until new durable
+evidence, clarification or an explicit due-review time makes them useful.
 
-You may accept, consolidate duplicates, reject unsupported assertions, append
+Within the explicitly authorized lifecycle scope, you may accept, consolidate duplicates, reject unsupported assertions, append
 qualifications, correct/refine/supersede records, and resolve associated cases
 through the supported lifecycle API. Read the exact sources and related state
 first. This authority decides the interpretation and lifecycle of evidence;
@@ -50,9 +66,16 @@ rewriting evidence, spending, deployment, data deletion or external contact.
 Use `loom project list --json` for project identity, `loom provenance search
 --include-pending` and exact candidate/record/case reads. Load
 `use-loom-provenance` for source capture and exact registration contracts.
-Prefer `loom provenance candidate list --limit 10 --json`: it returns all
-lifecycle states, so exact-get and skip already resolved candidates. Continue
-with both `--after-time` and `--after-id` from `next_time` and `next_id`.
+Use `loom provenance review list --limit 10 --json` for effective review work,
+then read the selected candidates/cases with `--details --json` when preparing
+lifecycle input. Routine views are useful for discovery, not a substitute for
+the exact operation's required fields. Add `--sources` for stored receipts when
+needed; their completeness is separate from the parent. Respect change tokens,
+pagination and truncation; a failed/incomplete read is not an empty queue. If an invoked job
+provides selected-work metadata in its prompt, review that bounded set instead of independently
+scanning every candidate. A legacy `candidate list` is an audit inventory, not
+the review queue: immutable registration state can still say pending after
+acceptance. Do not re-review an item another agent already resolved.
 
 Lifecycle writes use `POST /v1/provenance/operations` on the configured LOOM Unix
 socket. Read the actual candidate envelope and preserve its fields. Request shape:
@@ -101,20 +124,21 @@ bounded retry. Use current review times, never backdate a review to registration
 
 Submit through `loom provenance operations apply --file review.json
 --idempotency-key <stable-batch-key> --yes --json`. The CLI uses the same local
-authorized API. Do not use raw HTTP commands in unattended jobs or disable
-Hermes command safeguards. The `--yes` confirms this authorized review; it does
+authorized API. Do not use raw HTTP commands in unattended jobs.
+The `--yes` confirms this authorized review; it does
 not establish human authorship of its underlying source.
 
-Require both HTTP success and `ok: true`; exact-get the resulting candidate,
+Require command success and `ok: true`; exact-get the resulting candidate,
 record, relationship and case as applicable. Uncertain delivery needs same-key
 replay, not a fresh mutation. Never switch identity, database, or ledger on error.
 
 ## Results
 
-Do the actual reconciliation, not merely propose it in a digest. Finish with a
+When lifecycle work is authorized, do the actual reconciliation and verify it;
+otherwise report the local proposal and missing authority. Finish with a
 short receipt of affected IDs, evidence, outcomes and remaining questions in the
 native job output. Update the existing relevant Basecamp task only when useful,
-using MINA's named profile protocol; do not create duplicate nightly tasks or
+using MINA's named profile protocol; do not create duplicate review tasks or
 send repeated no-change messages. Source files, their author, and supersession
 history remain inspectable. Real human ambiguity is the exception requiring
 the operator, not the default for every record.

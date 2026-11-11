@@ -126,7 +126,7 @@ func (s ProjectRuntimeService) ReviewProjectPhysicalArchive(ctx context.Context,
 	if err := SealProjectPhysicalArchivePlan(&plan); err != nil {
 		return ProjectPhysicalPlanReview{}, projectSurfaceError("invalid_plan")
 	}
-	if _, err := projectPlanEvidence(plan); err != nil {
+	if err := s.saveReviewedProjectPlan(ctx, plan); err != nil {
 		return ProjectPhysicalPlanReview{}, err
 	}
 	return s.projectArchiveReview(plan)
@@ -148,10 +148,28 @@ func (s ProjectRuntimeService) ReviewProjectPhysicalRestore(ctx context.Context,
 	if err := SealProjectPhysicalRestorePlan(&plan); err != nil {
 		return ProjectPhysicalPlanReview{}, projectSurfaceError("invalid_plan")
 	}
-	if _, err := projectPlanEvidence(plan); err != nil {
+	if err := s.saveReviewedProjectPlan(ctx, plan); err != nil {
 		return ProjectPhysicalPlanReview{}, err
 	}
 	return s.projectRestoreReview(plan)
+}
+
+// Store the exact reviewed choices, not a second plan regenerated against
+// shared parents whose timestamps change when unrelated siblings are moved.
+// Execution still revalidates custody, inventory, runtime and configuration.
+func (s ProjectRuntimeService) saveReviewedProjectPlan(ctx context.Context, plan any) error {
+	e, err := projectPlanEvidence(plan)
+	if err != nil {
+		return err
+	}
+	if err := s.PlanEvidence.SaveProjectPlanEvidence(ctx, e); err != nil {
+		return projectSurfaceError("evidence_unavailable")
+	}
+	stored, found, err := s.loadProjectPlan(ctx, e.ProjectID, e.OperationID)
+	if err != nil || !found || !reflect.DeepEqual(stored, e) {
+		return projectSurfaceError("evidence_conflict")
+	}
+	return nil
 }
 
 func projectExplicitWorkspaceRequest(plan WorkspaceArchivePlan) ProjectArchiveWorkspaceRequest {

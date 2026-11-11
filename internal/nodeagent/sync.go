@@ -30,11 +30,13 @@ import (
 )
 
 const (
-	localSyncStatusPending    = "pending"
-	localSyncStatusAccepted   = "accepted"
-	localSyncStatusDuplicate  = "duplicate"
-	localSyncStatusConflicted = "conflicted"
-	localSyncStatusFailed     = "failed"
+	localSyncStatusPending            = "pending"
+	localSyncStatusAccepted           = "accepted"
+	localSyncStatusDuplicate          = "duplicate"
+	localSyncStatusConflicted         = "conflicted"
+	localSyncStatusFailed             = "failed"
+	localSyncStatusRetainedInternal   = "retained_internal"
+	localSyncStatusRetainedSuperseded = "retained_superseded"
 
 	localSyncEventsFile    = "events.json"
 	localSyncOutboxFile    = "outbox.json"
@@ -54,25 +56,28 @@ type LocalSyncStatus struct {
 }
 
 type LocalSyncPaths struct {
-	Root      string `json:"root"`
-	Events    string `json:"events"`
-	Objects   string `json:"objects"`
-	Deletions string `json:"deletions"`
-	Outbox    string `json:"outbox"`
-	Cursors   string `json:"cursors"`
-	Conflicts string `json:"conflicts"`
+	RecordStore string `json:"record_store,omitempty"`
+	Root        string `json:"root"`
+	Events      string `json:"events"`
+	Objects     string `json:"objects"`
+	Deletions   string `json:"deletions"`
+	Outbox      string `json:"outbox"`
+	Cursors     string `json:"cursors"`
+	Conflicts   string `json:"conflicts"`
 }
 
 type LocalSyncCounts struct {
-	Events     int `json:"events"`
-	Objects    int `json:"objects"`
-	Deletions  int `json:"deletions"`
-	Pending    int `json:"pending"`
-	Accepted   int `json:"accepted"`
-	Duplicates int `json:"duplicates"`
-	Conflicted int `json:"conflicted"`
-	Failed     int `json:"failed"`
-	Conflicts  int `json:"conflicts"`
+	RetainedInternal   int `json:"retained_internal,omitempty"`
+	RetainedSuperseded int `json:"retained_superseded,omitempty"`
+	Events             int `json:"events"`
+	Objects            int `json:"objects"`
+	Deletions          int `json:"deletions"`
+	Pending            int `json:"pending"`
+	Accepted           int `json:"accepted"`
+	Duplicates         int `json:"duplicates"`
+	Conflicted         int `json:"conflicted"`
+	Failed             int `json:"failed"`
+	Conflicts          int `json:"conflicts"`
 }
 
 type LocalSyncObject struct {
@@ -198,6 +203,7 @@ type LocalSyncPushRun struct {
 	DeletionRequests []loomsync.DeletionRequestResult `json:"deletion_requests,omitempty"`
 	LocalStatus      LocalSyncStatus                  `json:"local_status"`
 	SubmittedItems   int                              `json:"submitted_items"`
+	Persistence      QueuePersistenceStats            `json:"persistence"`
 }
 
 func newSyncCommand(opts *rootOptions) *cobra.Command {
@@ -213,6 +219,7 @@ func newSyncCommand(opts *rootOptions) *cobra.Command {
 	cmd.AddCommand(newSyncStatusCommand(opts))
 	cmd.AddCommand(newSyncRepairCommand(opts))
 	cmd.AddCommand(newSyncRetryObjectCommand(opts))
+	cmd.AddCommand(newQueueRecordsCommand(opts))
 	return cmd
 }
 
@@ -469,7 +476,7 @@ func pushLocalSyncOnce(ctx context.Context, store Store, config Config, state St
 	return pushLocalSyncRootOnce(ctx, store, config, state, correlationID, maxItems, includeSynced, "")
 }
 
-func pushLocalSyncRootOnce(ctx context.Context, store Store, config Config, state State, correlationID string, maxItems int, includeSynced bool, rootKey string) (LocalSyncPushRun, error) {
+func pushLocalSyncRootOnce(ctx context.Context, store Store, config Config, state State, correlationID string, maxItems int, includeSynced bool, rootKey string) (run LocalSyncPushRun, runErr error) {
 	store, unlock, err := store.lockLocalSync(ctx)
 	if err != nil {
 		return LocalSyncPushRun{}, err
@@ -481,6 +488,22 @@ func pushLocalSyncRootOnce(ctx context.Context, store Store, config Config, stat
 	if strings.TrimSpace(state.CredentialToken) == "" {
 		return LocalSyncPushRun{}, errors.New("node credential is not imported: missing credential_token")
 	}
+	lockStarted := time.Now()
+	if store.queueDB != nil && store.syncBatch == nil && rootKey != "" && !includeSynced {
+		store, err = store.selectRecordTurn(rootKey, nil)
+		if err != nil {
+			return LocalSyncPushRun{}, err
+		}
+	}
+	store, commit, err := store.joinSyncBatch()
+	if err != nil {
+		return LocalSyncPushRun{}, err
+	}
+	defer func() {
+		runErr = errors.Join(runErr, commit())
+		store.syncBatch.stats.LockHeldMillis = time.Since(lockStarted).Milliseconds()
+		run.Persistence = store.syncBatch.stats
+	}()
 	items, err := store.LoadSyncOutbox()
 	if err != nil {
 		return LocalSyncPushRun{}, err
@@ -501,11 +524,26 @@ func pushLocalSyncRootOnce(ctx context.Context, store Store, config Config, stat
 	if err != nil {
 		return LocalSyncPushRun{}, err
 	}
-	pending := eligibleOutboxItems(syncOutboxForRoot(items, objectsByRef, objectsByVersion, rootKey), includeSynced)
-	if maxItems <= 0 || maxItems > len(pending) {
+	pending := syncOutboxForRoot(eligibleOutboxItems(items, includeSynced), objectsByRef, objectsByVersion, rootKey)
+	if maxItems <= 0 || maxItems > localQueueCommitPageSize {
+		maxItems = localQueueCommitPageSize
+	}
+	if maxItems > len(pending) {
 		maxItems = len(pending)
 	}
 	pending = pending[:maxItems]
+	selectedCount := len(pending)
+	pending, err = store.retainInternalSyncItems(pending, items, objectsByRef, objectsByVersion)
+	if err != nil {
+		return LocalSyncPushRun{}, err
+	}
+	// The retained dispositions are durable before any remaining network action.
+	if len(pending) != selectedCount {
+		items, err = store.LoadSyncOutbox()
+		if err != nil {
+			return LocalSyncPushRun{}, err
+		}
+	}
 	if len(pending) == 0 {
 		status, statusErr := store.localSyncRootStatus(config, state, rootKey)
 		if statusErr != nil {
@@ -594,7 +632,9 @@ func pushLocalSyncRootOnce(ctx context.Context, store Store, config Config, stat
 				"slice":    "12_part_1",
 			}),
 		}
+		deliveryStarted := time.Now()
 		envelope, err := client.PushSyncBatch(ctx, correlationID, input.IdempotencyKey, input)
+		store.syncBatch.stats.DeliveryMillis += time.Since(deliveryStarted).Milliseconds()
 		if err != nil {
 			return LocalSyncPushRun{}, err
 		}
@@ -614,8 +654,15 @@ func pushLocalSyncRootOnce(ctx context.Context, store Store, config Config, stat
 			objectUploadErrors = append(objectUploadErrors, err)
 			continue
 		}
+		deliveryStarted := time.Now()
 		envelope, err := uploadQueuedSyncObject(ctx, client, correlationID, state, outboxItem, object)
+		store.syncBatch.stats.DeliveryMillis += time.Since(deliveryStarted).Milliseconds()
 		if err != nil {
+			if retained, retainErr := store.retainSupersededSyncUpload(outboxItem, object, objectsByVersion, err); retainErr != nil {
+				return LocalSyncPushRun{}, retainErr
+			} else if retained {
+				continue
+			}
 			if recordErr := store.recordSyncUploadError(outboxItem, err); recordErr != nil {
 				return LocalSyncPushRun{}, recordErr
 			}
@@ -634,7 +681,9 @@ func pushLocalSyncRootOnce(ctx context.Context, store Store, config Config, stat
 			return LocalSyncPushRun{}, fmt.Errorf("local sync deletion request not found for outbox item %s", outboxItem.LocalRef)
 		}
 		input := buildDeletionRequestInput(state, outboxItem, deletion)
+		deliveryStarted := time.Now()
 		envelope, err := client.CreateDeletionRequest(ctx, correlationID, input.IdempotencyKey, input)
+		store.syncBatch.stats.DeliveryMillis += time.Since(deliveryStarted).Milliseconds()
 		if err != nil {
 			return LocalSyncPushRun{}, err
 		}
@@ -647,7 +696,7 @@ func pushLocalSyncRootOnce(ctx context.Context, store Store, config Config, stat
 	if err != nil {
 		return LocalSyncPushRun{}, err
 	}
-	run := LocalSyncPushRun{
+	run = LocalSyncPushRun{
 		Batch:            batchResult,
 		ObjectUploads:    objectUploads,
 		DeletionRequests: deletionRequests,
@@ -673,11 +722,23 @@ func (s Store) lockLocalSync(ctx context.Context) (Store, func() error, error) {
 		return s, nil, err
 	}
 	s.syncLocked = true
-	if err := s.recoverSyncBatch(); err != nil {
+	s, err = s.openQueueRecords()
+	if err != nil {
 		_ = unlock()
 		return s, nil, err
 	}
-	return s, unlock, nil
+	release := func() error {
+		var closeErr error
+		if s.queueDB != nil {
+			closeErr = s.queueDB.Close()
+		}
+		return errors.Join(closeErr, unlock())
+	}
+	if err := s.recoverSyncBatch(); err != nil {
+		_ = release()
+		return s, nil, err
+	}
+	return s, release, nil
 }
 
 func (s Store) EnsureSyncDataDirs() error {
@@ -1195,12 +1256,21 @@ func mapWatchedRootIndexPolicy(mode string) string {
 	}
 }
 
-func (s Store) ApplySyncPushResult(result loomsync.PushBatchResult) error {
+func (s Store) ApplySyncPushResult(result loomsync.PushBatchResult) (err error) {
 	s, unlock, err := s.lockLocalSync(context.Background())
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	s, commit, err := s.joinSyncBatch()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err == nil {
+			err = commit()
+		}
+	}()
 	if err := s.EnsureSyncDataDirs(); err != nil {
 		return err
 	}
@@ -1217,11 +1287,15 @@ func (s Store) ApplySyncPushResult(result loomsync.PushBatchResult) error {
 		return err
 	}
 	now := time.Now().UTC()
+	if err := s.applyFileObservationAcknowledgements(outbox, result.Items); err != nil {
+		return err
+	}
 	if err := s.applyMetadataAcknowledgements(outbox, result.Items); err != nil {
 		return err
 	}
 	for _, item := range result.Items {
 		localOutboxID := metadataString(item.Metadata, "local_outbox_id")
+		transitioned := false
 		for idx := range events {
 			if events[idx].LocalEventID != item.LocalRef {
 				continue
@@ -1229,6 +1303,7 @@ func (s Store) ApplySyncPushResult(result loomsync.PushBatchResult) error {
 			if events[idx].SyncStatus != localSyncStatusPending && events[idx].SyncStatus != loomsync.ItemStatusFailed {
 				continue
 			}
+			transitioned = true
 			events[idx].SyncStatus = item.Status
 			if item.Status == loomsync.ItemStatusAccepted || item.Status == loomsync.ItemStatusDuplicate {
 				events[idx].GlobalEventID = item.GlobalRef
@@ -1248,6 +1323,10 @@ func (s Store) ApplySyncPushResult(result loomsync.PushBatchResult) error {
 			} else if outbox[idx].LocalRef != item.LocalRef || outbox[idx].Status != localSyncStatusPending {
 				continue
 			}
+			if outbox[idx].Status != localSyncStatusPending && outbox[idx].Status != loomsync.ItemStatusFailed {
+				continue
+			}
+			transitioned = true
 			outbox[idx].Status = item.Status
 			if item.Status == loomsync.ItemStatusAccepted || item.Status == loomsync.ItemStatusDuplicate {
 				outbox[idx].GlobalRef = item.GlobalRef
@@ -1259,7 +1338,7 @@ func (s Store) ApplySyncPushResult(result loomsync.PushBatchResult) error {
 				outbox[idx].LastErrorMessage = item.ErrorMessage
 			}
 		}
-		if item.Status == loomsync.ItemStatusConflicted {
+		if transitioned && item.Status == loomsync.ItemStatusConflicted {
 			conflicts = append(conflicts, LocalSyncConflict{
 				LocalConflictID:  ids.NewLocalConflictID(),
 				LocalRef:         item.LocalRef,
@@ -1289,12 +1368,21 @@ func (s Store) ApplySyncPushResult(result loomsync.PushBatchResult) error {
 	return nil
 }
 
-func (s Store) ApplySyncedObjectResult(result loomsync.SyncedObjectResult) error {
+func (s Store) ApplySyncedObjectResult(result loomsync.SyncedObjectResult) (err error) {
 	s, unlock, err := s.lockLocalSync(context.Background())
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	s, commit, err := s.joinSyncBatch()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err == nil {
+			err = commit()
+		}
+	}()
 	if err := s.EnsureSyncDataDirs(); err != nil {
 		return err
 	}
@@ -1313,13 +1401,31 @@ func (s Store) ApplySyncedObjectResult(result loomsync.SyncedObjectResult) error
 	now := time.Now().UTC()
 	localOutboxID := metadataString(result.Item.Metadata, "local_outbox_id")
 	localVersionID := ""
-	if localOutboxID != "" {
-		for _, item := range outbox {
-			if item.LocalOutboxID == localOutboxID {
+	eligible := false
+	for _, item := range outbox {
+		if localOutboxID != "" {
+			if item.LocalOutboxID != localOutboxID {
+				continue
+			}
+		} else if item.LocalRef != result.Item.LocalRef || item.ItemKind != loomsync.ItemKindObjectBlob {
+			continue
+		}
+		if item.Status == localSyncStatusPending || item.Status == loomsync.ItemStatusFailed {
+			eligible = true
+			if localOutboxID != "" {
 				localVersionID = metadataString(item.PayloadJSON, "local_version_ref")
-				break
 			}
 		}
+	}
+	if !eligible {
+		return nil
+	}
+	if localVersionID != "" {
+		// Local upload errors also arrive through this seam. Bind the path-state
+		// update to the exact outbox revision, not every revision of the object.
+		metadata := rawJSONObject(result.Item.Metadata)
+		metadata["local_version_ref"] = localVersionID
+		result.Item.Metadata = marshalRaw(metadata)
 	}
 	for idx := range objects {
 		if objects[idx].LocalObjectID != result.Item.LocalRef {
@@ -1395,12 +1501,21 @@ func (s Store) ApplySyncedObjectResult(result loomsync.SyncedObjectResult) error
 	return nil
 }
 
-func (s Store) ApplyDeletionRequestResult(outboxItem LocalSyncOutboxItem, result loomsync.DeletionRequestResult) error {
+func (s Store) ApplyDeletionRequestResult(outboxItem LocalSyncOutboxItem, result loomsync.DeletionRequestResult) (err error) {
 	s, unlock, err := s.lockLocalSync(context.Background())
 	if err != nil {
 		return err
 	}
 	defer unlock()
+	s, commit, err := s.joinSyncBatch()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err == nil {
+			err = commit()
+		}
+	}()
 	if err := s.EnsureSyncDataDirs(); err != nil {
 		return err
 	}
@@ -1411,6 +1526,16 @@ func (s Store) ApplyDeletionRequestResult(outboxItem LocalSyncOutboxItem, result
 	outbox, err := s.LoadSyncOutbox()
 	if err != nil {
 		return err
+	}
+	eligible := false
+	for _, item := range outbox {
+		if item.LocalOutboxID == outboxItem.LocalOutboxID && item.LocalRef == outboxItem.LocalRef &&
+			(item.Status == localSyncStatusPending || item.Status == loomsync.ItemStatusFailed) {
+			eligible = true
+		}
+	}
+	if !eligible {
+		return nil
 	}
 	now := time.Now().UTC()
 	var matched *LocalSyncDeletionRequest
@@ -1459,7 +1584,7 @@ func (s Store) LocalSyncStatus(config Config, state State) (LocalSyncStatus, err
 		return s.localSyncStatusUncached(config, state)
 	}
 	return cachedLocalStatus("sync:"+state.NodeID+":"+config.NodeKey,
-		[]string{s.syncEventsPath(), s.syncOutboxPath(), s.syncObjectsPath(), s.syncDeletionsPath(), s.syncCursorsPath(), s.syncConflictsPath()},
+		s.queueStatusPaths([]string{s.syncEventsPath(), s.syncOutboxPath(), s.syncObjectsPath(), s.syncDeletionsPath(), s.syncCursorsPath(), s.syncConflictsPath()}),
 		func() (LocalSyncStatus, error) { return s.localSyncStatusUncached(config, state) })
 }
 
@@ -1512,6 +1637,10 @@ func (s Store) localSyncStatusUncached(config Config, state State) (LocalSyncSta
 			counts.Conflicted++
 		case loomsync.ItemStatusFailed:
 			counts.Failed++
+		case localSyncStatusRetainedInternal:
+			counts.RetainedInternal++
+		case localSyncStatusRetainedSuperseded:
+			counts.RetainedSuperseded++
 		default:
 			counts.Pending++
 		}
@@ -1620,6 +1749,9 @@ func (s Store) SaveSyncConflicts(conflicts []LocalSyncConflict) error {
 }
 
 func (s Store) nextLocalSequence(streamName string) (int64, error) {
+	if s.queueDB != nil {
+		return s.nextRecordSequence(streamName)
+	}
 	var maxSequence int64
 	events, err := s.LoadSyncEvents()
 	if err != nil {
@@ -1691,6 +1823,10 @@ func (s Store) applyRemoteCursor(cursor loomsync.SyncCursor, now time.Time) erro
 	for idx := range cursors {
 		if cursors[idx].StreamName != cursor.StreamName {
 			continue
+		}
+		if cursor.LastAcceptedSequence <= cursors[idx].LastPushedSequence &&
+			cursor.LastAcceptedSequence <= cursors[idx].LastAcceptedSequence && cursors[idx].LastSuccessAt != nil {
+			return nil
 		}
 		if cursor.LastAcceptedSequence > cursors[idx].LastPushedSequence {
 			cursors[idx].LastPushedSequence = cursor.LastAcceptedSequence
@@ -1800,7 +1936,7 @@ func eligibleOutboxItems(items []LocalSyncOutboxItem, includeSynced bool) []Loca
 			if includeSynced {
 				result = append(result, item)
 			}
-		case loomsync.ItemStatusConflicted, loomsync.ItemStatusFailed:
+		case loomsync.ItemStatusConflicted, loomsync.ItemStatusFailed, localSyncStatusRetainedInternal, localSyncStatusRetainedSuperseded:
 			continue
 		default:
 			result = append(result, item)
@@ -1849,7 +1985,7 @@ func buildSyncedObjectInput(state State, outboxItem LocalSyncOutboxItem, object 
 	}
 	hashURI := "sha256:" + rawBytesHashHex(content)
 	if hashURI != object.HashURI {
-		return loomsync.SyncedObjectInput{}, fmt.Errorf("local file hash changed for %s: expected %s got %s", contentPath, object.HashURI, hashURI)
+		return loomsync.SyncedObjectInput{}, syncSourceContentChanged{Path: contentPath, Expected: object.HashURI, Actual: hashURI}
 	}
 	input := syncedObjectMetadata(state, outboxItem, object, contentPath, content, finalInfo)
 	input.ContentBase64 = base64.StdEncoding.EncodeToString(content)
@@ -1981,8 +2117,7 @@ func (s Store) updateWatchedRootStateFromSyncedObject(objects []LocalSyncObject,
 		if rootKey == "" || relativePath == "" {
 			continue
 		}
-		watchedStore := watchedroots.NewStore(s.DataDir)
-		pathState, err := watchedStore.LoadPathState(rootKey, relativePath)
+		pathState, err := s.loadQueuePathState(rootKey, relativePath)
 		if err != nil {
 			if watchedroots.IsNotExist(err) {
 				continue
@@ -2018,7 +2153,7 @@ func (s Store) updateWatchedRootStateFromSyncedObject(objects []LocalSyncObject,
 			pathState.LastOutputErrorCode = result.Item.ErrorCode
 			pathState.LastOutputErrorMessage = result.Item.ErrorMessage
 		}
-		if err := watchedStore.SavePathState(pathState); err != nil {
+		if err := s.saveQueuePathState(pathState); err != nil {
 			return err
 		}
 	}
@@ -2037,8 +2172,7 @@ func (s Store) updateWatchedRootStateFromDeletion(deletion LocalSyncDeletionRequ
 	if rootKey == "" || relativePath == "" {
 		return nil
 	}
-	watchedStore := watchedroots.NewStore(s.DataDir)
-	pathState, err := watchedStore.LoadPathState(rootKey, relativePath)
+	pathState, err := s.loadQueuePathState(rootKey, relativePath)
 	if err != nil {
 		if watchedroots.IsNotExist(err) {
 			return nil
@@ -2050,7 +2184,7 @@ func (s Store) updateWatchedRootStateFromDeletion(deletion LocalSyncDeletionRequ
 	pathState.LastOutputAppliedAt = &now
 	pathState.LastOutputErrorCode = ""
 	pathState.LastOutputErrorMessage = ""
-	return watchedStore.SavePathState(pathState)
+	return s.saveQueuePathState(pathState)
 }
 
 func detectLocalMIME(path string, content []byte) string {
@@ -2275,7 +2409,7 @@ func (s Store) syncConflictsPath() string {
 }
 
 func (s Store) syncPaths() LocalSyncPaths {
-	return LocalSyncPaths{
+	paths := LocalSyncPaths{
 		Root:      s.syncRoot(),
 		Events:    s.syncEventsPath(),
 		Objects:   s.syncObjectsPath(),
@@ -2284,4 +2418,8 @@ func (s Store) syncPaths() LocalSyncPaths {
 		Cursors:   s.syncCursorsPath(),
 		Conflicts: s.syncConflictsPath(),
 	}
+	if s.recordsExist() {
+		paths.RecordStore = s.queueRecordsPath()
+	}
+	return paths
 }

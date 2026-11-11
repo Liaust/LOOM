@@ -110,6 +110,65 @@ func (c Client) RegisterProvenanceCandidates(ctx context.Context, correlationID 
 	return doProvenanceJSON[provenance.AuthorizedCandidateRegistration](c, ctx, http.MethodPost, "/v1/provenance/candidates", correlationID, input, true)
 }
 
+func (c Client) ListProvenanceReview(ctx context.Context, correlationID string, request provenance.ReviewRequest) (response.Envelope[provenance.ReviewResponse], error) {
+	if err := provenance.ValidateReviewRequest(request); err != nil {
+		return response.Envelope[provenance.ReviewResponse]{}, err
+	}
+	values := url.Values{}
+	if request.Limit > 0 {
+		values.Set("limit", strconv.Itoa(request.Limit))
+	}
+	if request.Cursor != "" {
+		values.Set("cursor", request.Cursor)
+	}
+	if request.Domain != "" {
+		values.Set("domain", request.Domain)
+	}
+	if request.Visibility != "" {
+		values.Set("visibility", request.Visibility)
+	}
+	for _, domain := range request.ExcludeDomains {
+		values.Add("exclude_domain", domain)
+	}
+	if len(request.Reviewed) > 0 {
+		encoded, err := json.Marshal(request.Reviewed)
+		if err != nil {
+			return response.Envelope[provenance.ReviewResponse]{}, err
+		}
+		if len(encoded) > provenance.MaximumReviewCheckpointBytes {
+			return response.Envelope[provenance.ReviewResponse]{}, errors.New("review checkpoints exceed their byte bound")
+		}
+		values.Set("reviewed", string(encoded))
+	}
+	result, err := doProvenanceJSON[provenance.ReviewResponse](c, ctx, http.MethodGet, "/v1/provenance/review?"+values.Encode(), correlationID, nil, false)
+	if err == nil {
+		page := result.Data
+		limit := request.Limit
+		if limit == 0 {
+			limit = provenance.DefaultReviewLimit
+		}
+		invalid := !result.OK || page.SchemaVersion != provenance.SchemaVersion || page.AsOf.IsZero() || page.Items == nil || len(page.Items) > limit || page.Truncated != (page.NextCursor != "") || (page.Truncated && len(page.Items) != limit)
+		if page.NextCursor != "" && provenance.ValidateReviewRequest(provenance.ReviewRequest{Cursor: page.NextCursor}) != nil {
+			invalid = true
+		}
+		for _, item := range page.Items {
+			checkpoint := provenance.ReviewCheckpoint{ObjectKind: item.ObjectKind, ObjectID: item.ObjectID, ChangeToken: item.ChangeToken}
+			if provenance.ValidateReviewRequest(provenance.ReviewRequest{Reviewed: []provenance.ReviewCheckpoint{checkpoint}}) != nil || item.ChangedAt.IsZero() || item.ChangedAt.After(page.AsOf) || item.Domain == "" || item.Visibility == "" || item.EffectiveState == "" {
+				invalid = true
+			}
+			switch item.ReviewReason {
+			case "unreviewed_pending", "unresolved_case", "changed_evidence", "deferral_due":
+			default:
+				invalid = true
+			}
+		}
+		if invalid {
+			err = errors.New("provenance effective review response is missing or incomplete; do not treat it as no work")
+		}
+	}
+	return result, err
+}
+
 func (c Client) ApplyProvenanceOperations(ctx context.Context, correlationID string, input provenance.ManualOperationsRequest) (response.Envelope[provenance.AuthorizedManualOperations], error) {
 	return doProvenanceJSON[provenance.AuthorizedManualOperations](c, ctx, http.MethodPost, "/v1/provenance/operations", correlationID, input, true)
 }
@@ -170,6 +229,7 @@ func doProvenanceJSON[T any](c Client, parent context.Context, method, path, cor
 	if err != nil {
 		return response.Envelope[T]{}, err
 	}
+	c.applyBoxContext(req)
 	req.Header.Set(correlation.Header, correlation.Normalize(correlationID))
 	if mutation {
 		req.Header.Set(idempotency.Header, strings.TrimSpace(c.idempotencyKey))

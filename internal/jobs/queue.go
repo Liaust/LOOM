@@ -10,6 +10,26 @@ import (
 	"loom.local/loom/internal/artifacts"
 )
 
+// Readiness mirrors the local runner's claim fences without registering a
+// runner, claiming a job, or writing an idle worker run.
+func (s Service) NextLocalJobAt(ctx context.Context, nodeID string, now time.Time) (*time.Time, error) {
+	if s.DB == nil || nodeID == "" {
+		return nil, fmt.Errorf("local job readiness is not configured")
+	}
+	var due sql.NullTime
+	err := s.DB.QueryRowContext(ctx, `SELECT min(GREATEST($2,
+		COALESCE(j.next_attempt_at,$2),COALESCE(j.lease_expires_at + interval '1 microsecond',$2)))
+		FROM jobs.jobs j WHERE j.status='queued' AND j.execution_node_id=$1
+		AND j.job_type IN ('script_run','workflow_run') AND NOT j.manual_action_required
+		AND j.cancel_requested_at IS NULL AND j.cancelled_at IS NULL
+		AND NOT EXISTS (SELECT 1 FROM projects.projects p JOIN scopes.scopes scope ON scope.scope_id=p.project_scope_id
+		WHERE p.project_scope_id=j.scope_id AND (p.status='archived' OR scope.status='archived'))`, nodeID, now.UTC()).Scan(&due)
+	if err != nil || !due.Valid {
+		return nil, err
+	}
+	return &due.Time, nil
+}
+
 func (s Service) ListQueuedJobs(ctx context.Context, filter ListFilter) ([]Job, error) {
 	filter.Status = StatusQueued
 	return s.listJobsWithFilter(ctx, filter, true)
@@ -65,6 +85,7 @@ func (s Service) ListFailedJobs(ctx context.Context, filter ListFilter) ([]Job, 
 		}
 		add("j.scope_id =", scopeID)
 	}
+	query += " AND " + jobBoxPredicate(ctx, &args)
 	args = append(args, filter.Limit)
 	query += fmt.Sprintf(" ORDER BY COALESCE(j.failed_at, j.updated_at) DESC, j.updated_at DESC LIMIT $%d", len(args))
 	return s.queryJobs(ctx, query, args...)
@@ -74,6 +95,8 @@ func (s Service) JobQueueSummary(ctx context.Context) (QueueSummary, error) {
 	now := time.Now().UTC()
 	summary := QueueSummary{GeneratedAt: now}
 	var oldestQueued sql.NullTime
+	args := []any{}
+	predicate := jobBoxPredicate(ctx, &args)
 	err := s.DB.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*) FILTER (WHERE status = 'queued')::int,
@@ -83,8 +106,7 @@ func (s Service) JobQueueSummary(ctx context.Context) (QueueSummary, error) {
 			COUNT(*) FILTER (WHERE status = 'cancelled')::int,
 			COUNT(*) FILTER (WHERE manual_action_required = true AND failure_attention_status = 'active')::int,
 			MIN(queued_at) FILTER (WHERE status = 'queued')
-		FROM jobs.jobs
-	`).Scan(
+		FROM jobs.jobs j WHERE `+predicate, args...).Scan(
 		&summary.QueuedCount,
 		&summary.RunningCount,
 		&summary.FailedCount,
@@ -304,6 +326,7 @@ func (s Service) listJobsWithFilter(ctx context.Context, filter ListFilter, queu
 	if filter.ManualOnly {
 		query += " AND j.manual_action_required = true"
 	}
+	query += " AND " + jobBoxPredicate(ctx, &args)
 	args = append(args, filter.Limit)
 	if queueOnly {
 		query += fmt.Sprintf(" ORDER BY j.priority ASC, COALESCE(j.next_attempt_at, j.queued_at, j.created_at) ASC, j.created_at ASC LIMIT $%d", len(args))

@@ -164,6 +164,8 @@ type InboxItem struct {
 }
 
 type OutboxSummary struct {
+	Availability      string         `json:"availability,omitempty"`
+	UnavailableReason string         `json:"unavailable_reason,omitempty"`
 	Counts            map[string]int `json:"counts"`
 	OldestPendingAt   *time.Time     `json:"oldest_pending_at,omitempty"`
 	NextDueAt         *time.Time     `json:"next_due_at,omitempty"`
@@ -171,8 +173,10 @@ type OutboxSummary struct {
 }
 
 type InboxSummary struct {
-	Counts        map[string]int `json:"counts"`
-	LegacyRecords int            `json:"legacy_records"`
+	Availability      string         `json:"availability,omitempty"`
+	UnavailableReason string         `json:"unavailable_reason,omitempty"`
+	Counts            map[string]int `json:"counts"`
+	LegacyRecords     int            `json:"legacy_records"`
 }
 
 type WorkerCounts struct {
@@ -211,11 +215,28 @@ type OldestPending struct {
 }
 
 type LocalSummary struct {
-	GeneratedAt   time.Time     `json:"generated_at"`
-	Workers       WorkerCounts  `json:"workers"`
-	Queues        QueueCounts   `json:"queues"`
-	OldestPending OldestPending `json:"oldest_pending"`
-	HighestStatus string        `json:"highest_status"`
+	GeneratedAt            time.Time     `json:"generated_at"`
+	CheckedAt              time.Time     `json:"checked_at"`
+	Availability           string        `json:"availability"`
+	UnavailableReason      string        `json:"unavailable_reason,omitempty"`
+	RetryAt                *time.Time    `json:"retry_at,omitempty"`
+	QueueRevision          uint64        `json:"queue_revision"`
+	QueueObservedAt        time.Time     `json:"queue_observed_at"`
+	QueueUnavailableReason string        `json:"queue_unavailable_reason,omitempty"`
+	FileRevision           uint64        `json:"file_revision"`
+	Workers                WorkerCounts  `json:"workers"`
+	Queues                 QueueCounts   `json:"queues"`
+	OldestPending          OldestPending `json:"oldest_pending"`
+	HighestStatus          string        `json:"highest_status"`
+}
+
+// QueueSnapshot is supplied by the sync queue owner in one transaction. Runtime
+// must not acquire an independent bbolt handle or interpret retired markers.
+type QueueSnapshot struct {
+	Revision                                                         uint64 `json:"revision"`
+	SyncPending, SyncFailed, SyncConflicted                          int
+	BackupPending, BackupRetryable, BackupFailed, BackupManualAction int
+	BackupPendingBytes                                               int64
 }
 
 type WorkerStatus struct {

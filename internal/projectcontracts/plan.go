@@ -84,12 +84,16 @@ func unsupportedFeatures(facets []PlanFacet, workflows []WorkflowFacetItem) []Pl
 func planActions(plan ProjectPlan) []PlanAction {
 	actions := []PlanAction{}
 	if plan.Project.Slug != "" {
+		description := "Slice 04 will create or update the backend project."
+		if plan.Project.WorkState != "" {
+			description += " Record project.work_state=" + plan.Project.WorkState + " as metadata only; runtime status and owners are unchanged."
+		}
 		actions = append(actions, PlanAction{
 			Action:      "would_create_or_update_project",
 			Status:      "ready",
 			TargetKind:  "project",
 			TargetRef:   plan.Project.Slug,
-			Description: "Slice 04 will create or update the backend project.",
+			Description: description,
 		})
 		actions = append(actions, PlanAction{
 			Action:      "would_register_project_contract",

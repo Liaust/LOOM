@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"loom.local/loom/internal/events"
+	"loom.local/loom/internal/jobs"
 	"loom.local/loom/internal/requestctx"
 	"loom.local/loom/internal/routing"
 )
@@ -96,6 +97,9 @@ func (s Service) DispatchInvocationNow(ctx context.Context, req requestctx.Conte
 	if invocationRef == "" {
 		return DispatcherRunResult{}, fmt.Errorf("invocation ref is required")
 	}
+	if _, err := s.GetInvocation(ctx, invocationRef); err != nil {
+		return DispatcherRunResult{}, err
+	}
 	input.InvocationRef = invocationRef
 	input.BatchSize = 1
 	return s.RunDispatcher(ctx, req, input)
@@ -121,6 +125,15 @@ func normalizeDispatcherRunInput(input DispatcherRunInput) DispatcherRunInput {
 	return input
 }
 
+func (s Service) NextInvocationAt(ctx context.Context, now time.Time) (*time.Time, error) {
+	var at sql.NullTime
+	err := s.DB.QueryRowContext(ctx, `SELECT min(COALESCE(next_attempt_at,$2)) FROM automation.invocations WHERE status=$1`, InvocationStatusPending, now.UTC()).Scan(&at)
+	if err != nil || !at.Valid {
+		return nil, err
+	}
+	return &at.Time, nil
+}
+
 func (s Service) claimPendingInvocations(ctx context.Context, req requestctx.Context, input DispatcherRunInput) ([]Invocation, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -137,6 +150,7 @@ func (s Service) claimPendingInvocations(ctx context.Context, req requestctx.Con
 		args = append(args, input.InvocationRef)
 		query += fmt.Sprintf(" AND invocation_id = $%d", len(args))
 	}
+	query += " AND " + invocationBoxPredicate(ctx, &args)
 	args = append(args, input.BatchSize)
 	query += fmt.Sprintf(`
 		ORDER BY created_at ASC
@@ -226,6 +240,13 @@ func (s Service) dispatchScheduleInvocation(ctx context.Context, req requestctx.
 	if err != nil {
 		return s.markInvocationRoutingError(ctx, req, invocation, input.Now, "schedule.resolve_failed", err.Error())
 	}
+	// Retained invocation ownership wins over the operator's current selection.
+	// Older invocations derive membership from the persisted schedule on read.
+	owner, err := scheduleInvocationOwner(ctx, s.DB, schedule, invocation)
+	if err != nil {
+		return s.markInvocationRoutingError(ctx, req, invocation, input.Now, "schedule.owner_unavailable", err.Error())
+	}
+	ctx = jobs.WithBoxOwner(ctx, owner)
 
 	scopeRef := defaultDispatcherCapabilityScope
 	if invocation.ScopeID != nil && strings.TrimSpace(*invocation.ScopeID) != "" {
@@ -249,6 +270,19 @@ func (s Service) dispatchScheduleInvocation(ctx context.Context, req requestctx.
 	defer cancel()
 
 	approvalProfile, _ := NormalizeApprovalProfile(schedule.ApprovalProfileJSON)
+	dispatchMetadata := map[string]any{
+		"schema_version":   "automation_dispatch.metadata.v0.2",
+		"automation_id":    invocation.AutomationID,
+		"invocation_id":    invocation.InvocationID,
+		"schedule_id":      schedule.ScheduleID,
+		"schedule_key":     schedule.ScheduleKey,
+		"schedule_fire_id": invocation.SourceOccurrenceRef,
+		"worker_run_id":    input.WorkerRunID,
+		"attempt_count":    invocation.AttemptCount,
+	}
+	if owner != "" {
+		dispatchMetadata["home_box_id"] = owner
+	}
 	outcome, callErr := s.Routing.Call(callCtx, schedulerReq, routing.CapabilityCallInput{
 		Target:          invocation.TargetCapability,
 		ActorRef:        invocation.ActorID,
@@ -257,16 +291,7 @@ func (s Service) dispatchScheduleInvocation(ctx context.Context, req requestctx.
 		Input:           invocation.InputJSON,
 		RequestApproval: approvalProfile.Mode == ApprovalCreateAndWait,
 		ApprovalReason:  "automation schedule " + schedule.ScheduleKey,
-		Metadata: mustJSON(map[string]any{
-			"schema_version":   "automation_dispatch.metadata.v0.2",
-			"automation_id":    invocation.AutomationID,
-			"invocation_id":    invocation.InvocationID,
-			"schedule_id":      schedule.ScheduleID,
-			"schedule_key":     schedule.ScheduleKey,
-			"schedule_fire_id": invocation.SourceOccurrenceRef,
-			"worker_run_id":    input.WorkerRunID,
-			"attempt_count":    invocation.AttemptCount,
-		}),
+		Metadata:        mustJSON(dispatchMetadata),
 	}, dispatcherIdempotencyKey(invocation))
 	if callErr != nil {
 		if errors.Is(callCtx.Err(), context.DeadlineExceeded) {

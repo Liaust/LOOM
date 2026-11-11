@@ -1,13 +1,17 @@
 package box
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+	"loom.local/loom/internal/filepolicy"
 )
 
 const (
@@ -33,9 +37,66 @@ func LoadContract(path string) (Contract, error) {
 }
 
 func ParseContract(payload []byte) (Contract, error) {
-	var contract Contract
-	if err := yaml.Unmarshal(payload, &contract); err != nil {
+	var fields map[string]any
+	if err := yaml.Unmarshal(payload, &fields); err != nil {
 		return Contract{}, fmt.Errorf("parse box contract yaml: %w", err)
+	}
+	var contract Contract
+	version, _ := fields["schema_version"].(string)
+	if strings.TrimSpace(version) == FolderPolicySchemaVersion {
+		if areas, ok := fields["areas"].(map[string]any); ok {
+			for key, raw := range areas {
+				if area, ok := raw.(map[string]any); ok {
+					if watch, exists := area["watch"]; exists && watch == nil {
+						return Contract{}, fmt.Errorf("box contract areas.%s.watch must be an object, not null", key)
+					}
+				}
+			}
+		}
+		// Versioned readers precede new default writers. JSON decoding preserves
+		// YAML value types instead of coercing strings/bools in new descriptors.
+		decoder := yaml.NewDecoder(bytes.NewReader(payload))
+		decoder.KnownFields(true)
+		var document any
+		if err := decoder.Decode(&contract); err != nil {
+			return Contract{}, fmt.Errorf("parse box contract yaml: %w", err)
+		}
+		if err := decoder.Decode(&document); err != io.EOF {
+			return Contract{}, fmt.Errorf("box contract must contain exactly one YAML document")
+		}
+		raw, err := json.Marshal(fields)
+		if err != nil {
+			return Contract{}, fmt.Errorf("parse box contract fields: %w", err)
+		}
+		strict := json.NewDecoder(bytes.NewReader(raw))
+		strict.DisallowUnknownFields()
+		if err := strict.Decode(&contract); err != nil {
+			return Contract{}, fmt.Errorf("parse box contract: %w", err)
+		}
+		if files, exists := fields["files"]; exists {
+			raw, _ := json.Marshal(files)
+			policy, err := filepolicy.DecodeFolderPolicy(raw)
+			if err != nil {
+				return Contract{}, fmt.Errorf("box contract %s: %w", contractRelPath, err)
+			}
+			contract.Files = &policy
+		}
+	} else {
+		if _, exists := fields["files"]; exists {
+			return Contract{}, fmt.Errorf("box contract files requires schema_version %q", FolderPolicySchemaVersion)
+		}
+		if areas, ok := fields["areas"].(map[string]any); ok {
+			for key, raw := range areas {
+				if area, ok := raw.(map[string]any); ok {
+					if _, exists := area["watch"]; exists {
+						return Contract{}, fmt.Errorf("box contract areas.%s.watch requires schema_version %q", key, FolderPolicySchemaVersion)
+					}
+				}
+			}
+		}
+		if err := yaml.Unmarshal(payload, &contract); err != nil {
+			return Contract{}, fmt.Errorf("parse box contract yaml: %w", err)
+		}
 	}
 	contract = NormalizeContract(contract)
 	if err := ValidateContract(contract); err != nil {
@@ -75,8 +136,16 @@ func NormalizeContract(contract Contract) Contract {
 }
 
 func ValidateContract(contract Contract) error {
-	if contract.SchemaVersion != SchemaVersion {
-		return fmt.Errorf("box contract schema_version must be %q", SchemaVersion)
+	if contract.SchemaVersion != SchemaVersion && contract.SchemaVersion != FolderPolicySchemaVersion {
+		return fmt.Errorf("box contract schema_version must be %q or %q", SchemaVersion, FolderPolicySchemaVersion)
+	}
+	if contract.Files != nil {
+		if contract.SchemaVersion != FolderPolicySchemaVersion {
+			return fmt.Errorf("box contract files requires schema_version %q", FolderPolicySchemaVersion)
+		}
+		if _, err := filepolicy.NormalizeFolderPolicy(*contract.Files); err != nil {
+			return fmt.Errorf("box contract %s: %w", contractRelPath, err)
+		}
 	}
 	if strings.TrimSpace(contract.BoxID) == "" {
 		return fmt.Errorf("box contract box_id is required")
@@ -120,6 +189,26 @@ func ValidateContract(contract Contract) error {
 		if err := validateRelativePath(area.Path); err != nil {
 			return fmt.Errorf("box contract area %q path is invalid: %w", key, err)
 		}
+		if area.Watch != nil {
+			if contract.SchemaVersion != FolderPolicySchemaVersion {
+				return fmt.Errorf("box contract areas.%s.watch requires schema_version %q", key, FolderPolicySchemaVersion)
+			}
+			if !isBoxWatchArea(key) {
+				return fmt.Errorf("box contract areas.%s.watch: area does not own a watched root", key)
+			}
+			if contract.Policies[key] != "" {
+				return fmt.Errorf("box contract areas.%s.watch and policies.%s are mutually exclusive", key, key)
+			}
+			policy := inlineWatchPolicy(*area.Watch, key)
+			for _, diagnostic := range validateWatchPolicy(policy, key, contractRelPath) {
+				if diagnostic.Severity == "error" {
+					return fmt.Errorf("box contract areas.%s.watch: %s", key, diagnostic.Message)
+				}
+			}
+			if policy.Path != "" && policy.Path != area.Path {
+				return fmt.Errorf("box contract areas.%s.watch.path must match its area path (or be omitted)", key)
+			}
+		}
 	}
 	for key, value := range contract.Policies {
 		if key == "" {
@@ -130,14 +219,14 @@ func ValidateContract(contract Contract) error {
 		}
 	}
 	for _, key := range []string{AreaNotes} {
-		if strings.TrimSpace(contract.Policies[key]) == "" {
+		if !hasAreaWatchSource(contract, key) {
 			return fmt.Errorf("box contract missing policy %q", key)
 		}
 	}
 	if _, hasLane := contract.Areas[AreaLane]; hasLane && strings.TrimSpace(contract.Policies[AreaLane]) == "" {
 		return fmt.Errorf("box contract missing policy %q", AreaLane)
 	}
-	if strings.TrimSpace(contract.Policies[AreaDocuments]) == "" && strings.TrimSpace(contract.Policies[AreaLaunchpad]) == "" {
+	if !hasAreaWatchSource(contract, AreaDocuments) && !hasAreaWatchSource(contract, AreaLaunchpad) {
 		return fmt.Errorf("box contract missing policy %q", AreaDocuments)
 	}
 	return nil
@@ -150,12 +239,10 @@ func DefaultContract(resolved Resolved) Contract {
 	}
 	areas := map[string]Area{
 		AreaProjects:  {Path: "Projects", Enabled: true},
-		AreaNotes:     {Path: "Notes", Enabled: true},
-		AreaDocuments: {Path: "Documents", Enabled: true},
+		AreaNotes:     {Path: "Notes", Enabled: true, Watch: defaultAreaWatch(AreaNotes)},
+		AreaDocuments: {Path: "Documents", Enabled: true, Watch: defaultAreaWatch(AreaDocuments)},
 	}
 	policies := map[string]string{
-		AreaNotes:             ".loom/policies/notes.watch.yaml",
-		AreaDocuments:         ".loom/policies/documents.watch.yaml",
 		PolicyBackupContracts: DefaultBackupContractsRelDir,
 	}
 	if profile == ProfileMain {
@@ -166,7 +253,7 @@ func DefaultContract(resolved Resolved) Contract {
 		policies[AreaLane] = ".loom/policies/lane.transfer.yaml"
 	}
 	return Contract{
-		SchemaVersion:      SchemaVersion,
+		SchemaVersion:      FolderPolicySchemaVersion,
 		BoxID:              "box_pending",
 		OwnerNode:          resolved.OwnerNode,
 		Profile:            profile,
@@ -180,7 +267,12 @@ func DefaultContract(resolved Resolved) Contract {
 func ExpectedDirectories(contract Contract) []PathStatus {
 	statuses := []PathStatus{
 		expectedDirectory("metadata", contract.RootPath, metadataDir, true),
-		expectedDirectory("policies", contract.RootPath, policiesRelDir, true),
+	}
+	for key := range contract.Policies {
+		if key != PolicyBackupContracts {
+			statuses = append(statuses, expectedDirectory("policies", contract.RootPath, policiesRelDir, true))
+			break
+		}
 	}
 	if strings.TrimSpace(contract.Policies[PolicyBackupContracts]) != "" {
 		statuses = append(statuses,
@@ -212,7 +304,11 @@ func ExpectedPolicyFiles(contract Contract) []PathStatus {
 		if key == PolicyBackupContracts {
 			continue
 		}
-		statuses = append(statuses, expectedFile(key, contract.RootPath, contract.Policies[key], true))
+		enabled := true
+		if area, ok := contract.Areas[key]; ok {
+			enabled = area.Enabled
+		}
+		statuses = append(statuses, expectedFile(key, contract.RootPath, contract.Policies[key], enabled))
 	}
 	return statuses
 }

@@ -87,7 +87,7 @@ func PlanWorkspace(pack *Pack, options WorkspaceOptions) (WorkspacePlan, error) 
 	}
 	parent.Close()
 	if isNamedPersonaTemplate(templateName) {
-		if err := inspectMorathustraDestination(destination); err != nil {
+		if err := inspectMorathustraDestination(destination, templateName); err != nil {
 			return WorkspacePlan{}, err
 		}
 	}
@@ -180,8 +180,8 @@ func PlanWorkspace(pack *Pack, options WorkspaceOptions) (WorkspacePlan, error) 
 			if readErr != nil {
 				return WorkspacePlan{}, readErr
 			}
-			if isNamedPersonaTemplate(templateName) && relative == ".hermes/SOUL.md" && !substantiveSoul(currentPayload) {
-				return WorkspacePlan{}, fmt.Errorf("existing .hermes/SOUL.md is not substantive; operator review required")
+			if isNamedPersonaTemplate(templateName) && relative == personaSoulPath(templateName) && !substantiveSoul(currentPayload) {
+				return WorkspacePlan{}, fmt.Errorf("existing %s is not substantive; operator review required", relative)
 			}
 			if bytes.Equal(sourcePayload, currentPayload) {
 				action.Kind = WorkspaceUnchangedFile
@@ -242,7 +242,7 @@ func ApplyWorkspace(plan WorkspacePlan, confirmed bool) (WorkspaceResult, error)
 			}
 			mode := os.FileMode(0o644)
 			if isNamedPersonaTemplate(plan.Template) {
-				if action.RelativePath == ".hermes/SOUL.md" {
+				if action.RelativePath == personaSoulPath(plan.Template) {
 					mode = 0o600
 				} else if strings.HasPrefix(action.RelativePath, "skills/installed/") {
 					mode = 0o444

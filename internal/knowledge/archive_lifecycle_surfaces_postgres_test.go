@@ -173,3 +173,47 @@ func TestNotesArchiveSurfacesProjectInactiveRestorePostgres(t *testing.T) {
 		})
 	}
 }
+
+func TestSourceRootReadableCountsPrivacyAndEmptyPostgres(t *testing.T) {
+	f := notesArchiveTestFixture(t)
+	empty := f.root
+	empty.NotesSourceRootID = ""
+	empty.BackendRootKey += "_empty"
+	empty.SourcePath = t.TempDir()
+	var err error
+	empty, err = f.s.PrepareSourceRoot(empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.s.store.UpsertSourceRoot(t.Context(), empty); err != nil {
+		t.Fatal(err)
+	}
+	check := func(rootID string, lifecycle SourceLifecycleFilter, want *NotesLifecycleCounts) {
+		t.Helper()
+		roots, err := f.s.store.ListReadableSourceRoots(t.Context(), SourceRootFilter{NotesSourceRootID: rootID, SourceLifecycle: lifecycle, NodeKey: f.root.NodeKey, RootKind: f.root.RootKind, SourceCategory: sourceCategory(f.root.RootKind)})
+		if want == nil {
+			if err != nil || len(roots) != 0 {
+				t.Fatalf("excluded roots: %+v %v", roots, err)
+			}
+		} else if err != nil || len(roots) != 1 || roots[0].LifecycleCounts == nil || *roots[0].LifecycleCounts != *want {
+			t.Fatalf("root counts %s/%s: %+v %v", rootID, lifecycle, roots, err)
+		}
+	}
+	check(empty.NotesSourceRootID, SourceLifecycleFilterAll, &NotesLifecycleCounts{})
+	check(empty.NotesSourceRootID, SourceLifecycleFilterArchived, nil)
+	check(f.root.NotesSourceRootID, SourceLifecycleFilterAll, &NotesLifecycleCounts{Active: 3})
+	f.archive(t)
+	if _, err = f.p.ProjectOperation(t.Context(), f.plan.OperationID); err != nil {
+		t.Fatal(err)
+	}
+	for _, lifecycle := range []SourceLifecycleFilter{SourceLifecycleFilterActive, SourceLifecycleFilterArchived, SourceLifecycleFilterAll} {
+		check(f.root.NotesSourceRootID, lifecycle, &NotesLifecycleCounts{Active: 1, Archived: 2})
+	}
+	if _, err = f.s.store.db.Exec(`UPDATE files.file_metadata SET index_policy='private_no_index'
+	 WHERE object_id=(SELECT metadata#>>'{synced_object,object_id}' FROM knowledge.knowledge_objects
+	 WHERE notes_source_root_id=$1 AND relative_path='topic-one/source.md')`, f.root.NotesSourceRootID); err != nil {
+		t.Fatal(err)
+	}
+	check(f.root.NotesSourceRootID, SourceLifecycleFilterAll, &NotesLifecycleCounts{Active: 1, Archived: 1})
+	check("unknown", SourceLifecycleFilterAll, nil)
+}

@@ -1,0 +1,21 @@
+/* LOOM semantic palette only: retain native libadwaita widgets and geometry. */
+:root {
+  --window-bg-color: #111416;
+  --window-fg-color: #eceff1;
+  --view-bg-color: #0b0e10;
+  --view-fg-color: #eceff1;
+  --headerbar-bg-color: #15191c;
+  --headerbar-backdrop-color: #111416;
+  --headerbar-fg-color: #eceff1;
+  --sidebar-bg-color: #15191c;
+  --sidebar-backdrop-color: #111416;
+  --sidebar-fg-color: #eceff1;
+  --dialog-bg-color: #171b1e;
+  --dialog-fg-color: #eceff1;
+  --popover-bg-color: #1b2023;
+  --popover-fg-color: #eceff1;
+  --card-bg-color: #1b2023;
+  --card-fg-color: #eceff1;
+  --accent-bg-color: #268579;
+  --accent-fg-color: #ffffff;
+}

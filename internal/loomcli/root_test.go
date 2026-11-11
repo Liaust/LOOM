@@ -25,6 +25,40 @@ func TestRootCommandSilencesCobraErrors(t *testing.T) {
 	}
 }
 
+func TestProjectHelpGroupsRoutineAndCompatibilityCommands(t *testing.T) {
+	root := NewRootCommand()
+	project, _, err := root.Find([]string{"project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, group := range map[string]string{
+		"create": "routine", "context": "routine", "apply": "routine",
+		"status": "routine", "create-scope": "compatibility", "facet": "compatibility",
+		"operation": "details", "inspect": "details",
+	} {
+		command, _, err := root.Find([]string{"project", name})
+		if err != nil || command.GroupID != group {
+			t.Errorf("%s: group=%q want=%q error=%v", name, command.GroupID, group, err)
+		}
+	}
+	for _, command := range project.Commands() {
+		if command.GroupID == "" {
+			t.Errorf("ungrouped command %s", command.Name())
+		}
+	}
+	var output bytes.Buffer
+	root.SetOut(&output)
+	root.SetArgs([]string{"project", "--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	for _, section := range []string{"Routine Project Work:", "Details And Recovery:", "Administration And Compatibility:", "Ordinary source edits need no LOOM operation."} {
+		if !strings.Contains(output.String(), section) {
+			t.Errorf("help lacks %q", section)
+		}
+	}
+}
+
 func TestRootCommandIncludesCapabilityCommands(t *testing.T) {
 	cmd := NewRootCommand()
 	for _, args := range [][]string{

@@ -13,7 +13,8 @@ Use `--json` when stable fields are more useful than prose. In repository
 development, `--docs-dir <path>` may select an explicit corpus. Normal release
 use should rely on packaged resolution.
 
-Verify an operational command separately:
+Verify unfamiliar or conflicting command syntax separately; known supported
+commands need no repeated lookup:
 
 ```bash
 loom <command> --help

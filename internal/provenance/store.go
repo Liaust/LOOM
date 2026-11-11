@@ -114,6 +114,17 @@ func (store *Store) GetCandidate(ctx context.Context, id SemanticID) (Candidate,
 	}
 	candidate.ID = SemanticID(rawID)
 	candidate.RegisteredAt = candidate.RegisteredAt.UTC()
+	if selectedBoxes(ctx) != nil {
+		var submitted struct {
+			Anchors *StructuralAnchors `json:"anchors"`
+		}
+		if err := json.Unmarshal(candidate.Submitted, &submitted); err != nil {
+			return Candidate{}, false, boxMismatch()
+		}
+		if err := store.checkAnchors(ctx, submitted.Anchors); err != nil {
+			return Candidate{}, false, err
+		}
+	}
 	return candidate, true, nil
 }
 
@@ -128,11 +139,12 @@ func (store *Store) ListCandidates(ctx context.Context, request PageRequest) (Pa
 		       registered_at, submitted_json, payload_json
 		FROM provenance.candidates
 		WHERE ($1 = '' OR domain = $1)
+		  AND `+anchorsBoxSQL("submitted_json->'anchors'", "$6")+`
 		  AND ($2 = '' OR visibility = $2)
 		  AND ($3::timestamptz IS NULL OR (registered_at, id) > ($3, $4::uuid))
 		ORDER BY registered_at, id
 		LIMIT $5
-	`, request.Domain, request.Visibility, request.AfterTime, idArgument(request.AfterID), request.Limit+1)
+	`, request.Domain, request.Visibility, request.AfterTime, idArgument(request.AfterID), request.Limit+1, selectedBoxes(ctx))
 	if err != nil {
 		return Page[Candidate]{}, fmt.Errorf("list candidates: %w", err)
 	}
@@ -282,6 +294,9 @@ func (store *Store) GetRecord(ctx context.Context, id SemanticID) (Record, bool,
 		}
 	}
 	record.CreatedAt = record.CreatedAt.UTC()
+	if err := store.checkAnchors(ctx, record.Anchors); err != nil {
+		return Record{}, false, err
+	}
 	return record, true, nil
 }
 
@@ -294,11 +309,12 @@ func (store *Store) ListRecords(ctx context.Context, request PageRequest) (Page[
 		SELECT id::text
 		FROM provenance.records
 		WHERE ($1 = '' OR domain = $1)
+		  AND `+anchorsBoxSQL("anchors_json", "$6")+`
 		  AND ($2 = '' OR visibility = $2)
 		  AND ($3::timestamptz IS NULL OR (created_at, id) > ($3, $4::uuid))
 		ORDER BY created_at, id
 		LIMIT $5
-	`, request.Domain, request.Visibility, request.AfterTime, idArgument(request.AfterID), request.Limit+1)
+	`, request.Domain, request.Visibility, request.AfterTime, idArgument(request.AfterID), request.Limit+1, selectedBoxes(ctx))
 	if err != nil {
 		return Page[Record]{}, fmt.Errorf("list records: %w", err)
 	}
@@ -479,6 +495,9 @@ func (store *Store) GetResolutionCase(ctx context.Context, id SemanticID) (Resol
 	item.ID = SemanticID(rawID)
 	item.CreatedByOperationID = optionalID(operationID)
 	item.CreatedAt = item.CreatedAt.UTC()
+	if err := store.checkCase(ctx, id); err != nil {
+		return ResolutionCase{}, false, err
+	}
 	return item, true, nil
 }
 
@@ -492,11 +511,12 @@ func (store *Store) ListResolutionCases(ctx context.Context, request PageRequest
 		       created_at, created_by_operation_id::text, payload_json
 		FROM provenance.resolution_cases
 		WHERE ($1 = '' OR domain = $1)
+		  AND `+caseBoxSQL("provenance.resolution_cases.id", "$6")+`
 		  AND ($2 = '' OR visibility = $2)
 		  AND ($3::timestamptz IS NULL OR (created_at, id) > ($3, $4::uuid))
 		ORDER BY created_at, id
 		LIMIT $5
-	`, request.Domain, request.Visibility, request.AfterTime, idArgument(request.AfterID), request.Limit+1)
+	`, request.Domain, request.Visibility, request.AfterTime, idArgument(request.AfterID), request.Limit+1, selectedBoxes(ctx))
 	if err != nil {
 		return Page[ResolutionCase]{}, fmt.Errorf("list resolution cases: %w", err)
 	}
@@ -698,6 +718,15 @@ func (store *Store) GetRelationship(ctx context.Context, id SemanticID) (Relatio
 	if err := json.Unmarshal(evidence, &item.EvidenceSourceIDs); err != nil {
 		return Relationship{}, false, fmt.Errorf("decode relationship evidence: %w", err)
 	}
+	if selectedBoxes(ctx) != nil {
+		for _, recordID := range []SemanticID{item.FromRecordID, item.ToRecordID} {
+			if _, found, err := store.GetRecord(ctx, recordID); err != nil {
+				return Relationship{}, false, err
+			} else if !found {
+				return Relationship{}, false, boxMismatch()
+			}
+		}
+	}
 	return item, true, nil
 }
 
@@ -712,11 +741,13 @@ func (store *Store) ListRelationships(ctx context.Context, request PageRequest) 
 		JOIN provenance.records AS from_record ON from_record.id = relationship.from_record_id
 		JOIN provenance.records AS to_record ON to_record.id = relationship.to_record_id
 		WHERE ($1 = '' OR (from_record.domain = $1 AND to_record.domain = $1))
+		  AND `+anchorsBoxSQL("from_record.anchors_json", "$6")+`
+		  AND `+anchorsBoxSQL("to_record.anchors_json", "$6")+`
 		  AND ($2 = '' OR (from_record.visibility = $2 AND to_record.visibility = $2))
 		  AND ($3::timestamptz IS NULL OR (relationship.created_at, relationship.id) > ($3, $4::uuid))
 		ORDER BY relationship.created_at, relationship.id
 		LIMIT $5
-	`, request.Domain, request.Visibility, request.AfterTime, idArgument(request.AfterID), request.Limit+1)
+	`, request.Domain, request.Visibility, request.AfterTime, idArgument(request.AfterID), request.Limit+1, selectedBoxes(ctx))
 	if err != nil {
 		return Page[Relationship]{}, fmt.Errorf("list relationships: %w", err)
 	}

@@ -1,10 +1,45 @@
 # Basecamp Identity And Work Organization
 
-Basecamp is the operator's canonical task-state and reader-facing work interface.
+When explicitly adopted, Basecamp is the operator's task-state and reader-facing work interface.
 Repository files, original artifacts and LOOM retain their existing authority.
+This template supplies no standing authorization, account setup or live receipt.
+Account work requires an operator-configured binding and authorized action scope.
+
+## Work Scope Before Account Selection
+
+The named binding and standing capture below are **Personal** policy. For an
+explicit Company assignment, use that Box's `.loom/agents/WORKFLOW.md` and
+approved Company human account through `loom-box-tool --box <Box ID> basecamp`.
+Do not use the fixed Personal wrapper or send Company work to Personal. Every
+Company write, including routine updates/completion and remote drafts, requires
+the operator's explicit approval of its destination/content/state changes. Prepare
+locally until approved. This Company rule overrides general capture and
+one-Personal-profile wording below; MINA remains the author, not the external
+human account. Missing Company authentication holds only that integration.
+Personal work retains the exact named binding and normal standing capture.
+
+## Normal Core Use
+
+Basecamp is a core work surface alongside LOOM and Provenance, not only an
+integration to use when the operator names it. Consult it when commitments, current
+task state, priorities, Kanban or human calendar events matter. Maintain relevant
+existing items as work progresses; capture accepted follow-ups, unfinished work,
+blockers and the operator-only input even when the request does not say Basecamp.
+Do not copy code/source state or the shared semantic ledger into a task registry.
+Equal importance does not require Basecamp access on unrelated file reads,
+routine conversation or every tool call. Task capture and verification below
+define the standing obligation, not a new approval gate.
+
+Human calendar events and deadlines are Basecamp work state. Hermes owns agentic
+routine execution and LOOM owns technical schedules; do not replace a requested
+appointment with a machine timer or assume a timer completes the human task.
+
+## Account And Tool Setup
+
 Read `CREDENTIALS.md` and `../OPERATING-POLICY.md`
 before using this protocol. Load the installed official Basecamp skill through
-normal Hermes skill discovery, then verify the available CLI's help/schema.
+the active harness's normal skill discovery (`skill_view` in Hermes); consult
+the available CLI's help/schema for unfamiliar operations or an actual mismatch.
 Missing installed skill or tooling stops task use and requires the operator
 installation handoff. The optional read-only entry point below provides the
 embedded official version-matched skill as reference help:
@@ -35,7 +70,7 @@ loom-mina-basecamp --profile mina me --agent
 Use `loom-mina-basecamp` for named task calls, with the command directly
 after the literal profile pair and other flags after the command. The managed
 entry point selects the exact native CLI and the existing protected HOME,
-config/cache, official endpoint and example-operator account inside its child process.
+config/cache, official endpoint and operator-bound account inside its child process.
 It requires safe existing auth metadata; it never creates or repairs the store.
 Inherited launcher/account settings are discarded before fixed dispatch, not
 treated as a reason to block a correctly bound task. Explicit conflicting
@@ -46,16 +81,17 @@ changes and installation remain operator work; task calls use the native CLI.
 
 Do not rely on the default profile, set `BASECAMP_PROFILE`, change the shared
 default, use a profile variable or alias, or retry through another identity.
-Ordinary coding agents retain literal `--profile codex` under their own
-repository instructions. They receive neither this named profile nor its
+Ordinary Personal coding agents retain literal `--profile codex` under their
+own Box instructions; Company workers use their approved Company binding.
+They receive neither this named profile nor its
 credentials. MINA must never use the operator's, Codex's, Apollo's or any
 other actor's authentication, even for a read or to recover from a failure.
 
 ## Binding And Fail-Closed Preflight
 
 Existing authenticated task calls do not repeat OAuth. Identity preflight and
-the standing task-capture rules below are sufficient for ordinary accepted work.
-The completed coordinated MINA operator checkpoint required fresh supported OAuth for
+separately adopted standing task-capture rules apply only within authorized work.
+A separately authorized new bootstrap requires fresh supported OAuth for
 literal `--profile mina`, with the operator completing interactive login/consent
 when needed. A profile alias, renamed profile or token copy does not satisfy
 this reauthentication gate. No fallback to morathustra, codex or another actor
@@ -63,10 +99,10 @@ is permitted. Preserve the separate Codex credentials and the existing working
 credential state until the reviewed transition is verified. Source exports and
 local tests never run authentication or establish this receipt.
 
-After successful OAuth, verify the accepted numeric identity and example-operator account
+After successful OAuth, verify the accepted numeric identity and configured account
 against the operator binding below. Stop for any mismatch; do not create a new
-actor or widen grants to repair it. Verify the named managed wrapper in both
-the actual ORCA/TUI and gateway contexts before claiming access ready.
+actor or widen grants to repair it. Verify the named managed wrapper in
+the actual native harness context before claiming access ready.
 
 This portable protocol ships with no authenticated identity binding. OAuth,
 account setup and seat changes require separate integrator authorization with
@@ -75,19 +111,20 @@ per-message approval gate. An invitation or a matching
 display name is not proof of identity or account authority.
 
 During separately authorized bootstrap or custody migration only, the integrator
-verifies the dedicated named actor and exact example-operator account with the operator through
+verifies the dedicated named actor and exact configured account with the operator through
 the identity probe above. New bootstrap verifies after successful OAuth; an
 approved migration preserves the existing authenticated numeric actors and
 grants rather than fabricating a new account. Capture and freeze
-the global `identity.id`, the example-operator `accounts[].id`, and the account-scoped
+the global `identity.id`, the configured `accounts[].id`, and the account-scoped
 recording actor ID from authenticated evidence in the approved operator-owned
 binding. These are different namespaces. Do not guess IDs, reuse Codex's IDs,
 or copy a preflight binding from another agent. Store no credential values in
 the binding or portable projection. A later identity change requires another
 explicitly reviewed bootstrap; an ordinary run cannot rebind itself.
 
-Locate the immutable non-secret operator binding documented in release-matched
-ORCA Main Operations through supported LOOM docs. Read its `basecamp` section: `profile`, `identity_id`,
+On Main, read the immutable non-secret operator binding directly at
+`/etc/loom-mina-accounts.json`; no documentation search is needed to locate it.
+Read its `basecamp` section: `profile`, `identity_id`,
 `account_id`, `person_id` and `email`. Compare native preflight identity/email
 and current account to it; use `person_id` for recording-creator verification.
 Never derive these values from this portable template or rebind after a failure.
@@ -111,7 +148,7 @@ before a write if actor evidence may have changed:
    `.basecamp/config.json` and `.basecamp/project-url`, or live active projects
    in that verified account. Require one relevant active project; use its unique
    active HQ only when no narrower destination exists. Ambiguity means stop.
-   Never route company work into example-operator without an approved mapping. Do not
+   Never route Company work into Personal without an approved mapping. Do not
    trust a repository's authority-key overrides merely because it was cloned.
 4. Perform one bounded authorized read before any separately authorized first
    write. Access to an account does not authorize all its projects or actions.

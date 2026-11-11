@@ -112,7 +112,57 @@ func TestBridgeSQLSourceRestartAndConflictPostgres(t *testing.T) {
 	if err := db.QueryRowContext(t.Context(), `SELECT count(*) FROM notes_workspace.operations`).Scan(&count); err != nil || count != 2 {
 		t.Fatalf("source receipts duplicated or lost: %d %v", count, err)
 	}
+	defer verifyCommittedDependencyHints(t, db, read.File.ID)
+	if err := s.Store.WithReplica(t.Context(), s.Replica, s.Epoch, func(r Records) error {
+		scope := s.Scopes[0]
+		scope.PreviousGeneration, scope.Generation = scope.Generation, "next"
+		ids, err := r.(enrollmentFileRecords).ListEnrollmentFiles(t.Context(), "", 32, []Scope{scope})
+		if err != nil || len(ids) != 1 {
+			t.Fatalf("scoped enrollment lost predecessor: %v %v", ids, err)
+		}
+		files, err := r.(collectionFileRecords).ListCollectionFiles(t.Context(), scope.Collection, "", 32)
+		if err != nil || len(files) != 1 {
+			t.Fatalf("scoped layout lost mapping: %v %v", files, err)
+		}
+		scope.Collection = "unrelated"
+		ids, err = r.(enrollmentFileRecords).ListEnrollmentFiles(t.Context(), "", 32, []Scope{scope})
+		if err != nil || len(ids) != 0 {
+			t.Fatalf("unrelated mapping selected: %v %v", ids, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.Store.WithReplica(t.Context(), s.Replica, "replacement-epoch", func(Records) error { t.Fatal("epoch replacement admitted"); return nil }); !errors.Is(err, ErrHeld) {
 		t.Fatalf("epoch mismatch: %v", err)
+	}
+	if err := s.Store.WithReplica(t.Context(), s.Replica, s.Epoch, func(r Records) error {
+		for _, reason := range []string{"control_pending", "accepted", "source_excluded"} {
+			if err := r.Put(t.Context(), "observation", reason, Observation{Reason: reason}); err != nil {
+				return err
+			}
+		}
+		ids, err := r.ListPending(t.Context(), "observation", "", 128)
+		if err != nil || len(ids) != 1 || ids[0] != "control_pending" {
+			t.Fatalf("pending observation lookup included retained history: %v %v", ids, err)
+		}
+		if ids, err := r.ListPending(t.Context(), "observation", "control_pending", 128); err != nil || len(ids) != 0 {
+			t.Fatalf("pending observation cursor ignored: %v %v", ids, err)
+		}
+		future := time.Now().Add(time.Hour).UnixMilli()
+		for id, move := range map[string]sourceMoveRecord{
+			"ready": {}, "future": {RetryAtMS: future}, "published": {Published: true}, "terminal": {Terminal: true},
+		} {
+			if err := r.Put(t.Context(), "export", sourceMovePrefix+id, move); err != nil {
+				return err
+			}
+		}
+		ids, next, err := r.(sqlRecords).PendingSourceMoves(t.Context(), 128)
+		if err != nil || len(ids) != 1 || ids[0] != sourceMovePrefix+"ready" || next == nil || next.UnixMilli() != future {
+			t.Fatalf("move eligibility or retry deadline changed: %v %v %v", ids, next, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
