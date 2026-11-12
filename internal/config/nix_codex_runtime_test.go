@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"encoding/json"
+	"os"
 	"os/exec"
 	"slices"
 	"strings"
@@ -12,6 +13,8 @@ func TestNixCodexRuntimeAndIndependentMinaTools(t *testing.T) {
 	nix := "/nix/var/nix/profiles/default/bin/nix"
 	if path, err := exec.LookPath("nix"); err == nil {
 		nix = path
+	} else if _, err := os.Stat(nix); err != nil {
+		t.Skip("Codex runtime render requires Nix; run the rendered gate before deployment")
 	}
 	expression := `let
  source = (import ./tests/nix/source-flake.nix {}).nixosConfigurations.hardware-main;
